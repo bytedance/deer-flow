@@ -463,3 +463,91 @@ def test_import_memory_scopes_overwrite_to_bound_owner() -> None:
         with patch("app.gateway.routers.memory.get_effective_user_id", return_value="real-user"):
             asyncio.run(memory.import_memory(payload, _browser_request_with_spoofed_owner_header()))
         assert seen["user_id"] == "real-user"
+
+
+# ── unsupported-backend 501s ────────────────────────────────────────────────
+# A minimal backend (only add + get_context) inherits the tier-2/tier-3 default
+# raise for get_memory / clear_memory / import_memory / reload_memory. Before
+# the contract change these were @abstractmethod (every backend implemented
+# them, so the endpoints could never raise); now the endpoints catch
+# NotImplementedError -> 501 so an unsupported backend gets a clean "not
+# supported" instead of a raw 500 (there is no global NotImplementedError
+# handler, so an uncaught raise is a 500).
+
+
+def _unsupported_manager() -> MagicMock:
+    """Mock a minimal backend: read/manage ops raise NotImplementedError."""
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.side_effect = NotImplementedError("get_memory not supported")
+    mock_mgr.clear_memory.side_effect = NotImplementedError("clear_memory not supported")
+    mock_mgr.import_memory.side_effect = NotImplementedError("import_memory not supported")
+    mock_mgr.reload_memory.side_effect = NotImplementedError("reload_memory not supported")
+    return mock_mgr
+
+
+def test_get_memory_route_returns_501_for_unsupported_backend() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()):
+        with TestClient(app) as client:
+            response = client.get("/api/memory")
+    assert response.status_code == 501
+    assert "not supported" in response.json()["detail"]
+
+
+def test_export_memory_route_returns_501_for_unsupported_backend() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/export")
+    assert response.status_code == 501
+
+
+def test_memory_status_route_returns_501_for_unsupported_backend() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    cfg = SimpleNamespace(
+        enabled=True,
+        mode="middleware",
+        injection_enabled=True,
+        shutdown_flush_timeout_seconds=30.0,
+        manager_class="minimal",
+        backend_config={},
+    )
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()),
+        patch("app.gateway.routers.memory.get_memory_config", return_value=cfg),
+    ):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/status")
+    assert response.status_code == 501
+
+
+def test_clear_memory_route_returns_501_for_unsupported_backend() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()):
+        with TestClient(app) as client:
+            response = client.delete("/api/memory")
+    assert response.status_code == 501
+
+
+def test_import_memory_route_returns_501_for_unsupported_backend() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/import", json=_sample_memory())
+    assert response.status_code == 501
+
+
+def test_reload_memory_route_returns_501_when_read_also_unsupported() -> None:
+    """reload falls back to get_memory; if both raise (minimal backend), the
+    fallback surfaces 501 instead of a raw 500 from the uncaught raise."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=_unsupported_manager()):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/reload")
+    assert response.status_code == 501

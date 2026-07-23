@@ -27,6 +27,26 @@ function encodeArtifactPath(filepath: string) {
     .join("/");
 }
 
+export function buildWriteFileArtifactURL({
+  filepath,
+  messageId,
+  toolCallId,
+}: {
+  filepath: string;
+  messageId?: string;
+  toolCallId?: string;
+}) {
+  const url = new URL("write-file:/");
+  url.pathname = filepath.replaceAll("%", "%25");
+  if (messageId) {
+    url.searchParams.set("message_id", messageId);
+  }
+  if (toolCallId) {
+    url.searchParams.set("tool_call_id", toolCallId);
+  }
+  return url.toString();
+}
+
 function decodeRelativeArtifactPath(filepath: string) {
   return filepath.split("/").map(decodePathSegment).join("/");
 }

@@ -14,6 +14,7 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
+- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches when clients also subscribe to `values`; messages-only consumers retain the original per-chunk contract, while `values` preserves the complete tool call.
 - Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack.
 
 **Project Structure**:
@@ -111,8 +112,83 @@ detect-blocking-io` resolve to the same repo-root path). JSON findings include
 `code` for model-assisted or manual review. `priority` is a deterministic
 review ordering from operation type, not proof of a bug. Bare-name same-file
 calls are resolved by function name, so duplicate helper names in one file can
-conservatively over-report async reachability. It is intentionally
-informational and is not run from CI in this round.
+conservatively over-report async reachability. The call graph also resolves
+multi-hop `self.`/`cls.` attribute chains (`self.store.flush()`) and local
+variables or parameters traced back — within the same function only — to a
+`self.`/`cls.` attribute (`store = self.store; store.flush()`); both fall back
+to the same bare-method-name resolution as an unresolvable receiver, so they
+share its over-report risk rather than adding a new kind. Deeper cross-function
+or cross-module aliasing is out of scope and stays an unreported false
+negative.
+
+That same-function alias tracing is deliberately narrower than the symbolic
+names `dotted_name()` builds for blocking-call pattern matching elsewhere in
+this module: receiver/alias extraction uses a restricted extractor that only
+recognizes `Name`/`Attribute` chains, so a `Call` or `Subscript` result (e.g.
+`factory().flush()`, or `client = factory(); client.flush()` /
+`client = clients[0]; client.flush()`) is never treated as inheriting its
+base's alias-worthiness — including when the unsupported node is buried
+deeper in the chain (`factory().client.flush()`, `clients[0].client.flush()`):
+an unrecognized shape anywhere in the chain makes the whole receiver
+unresolved, it never falls back to just the chain's trailing attribute name,
+or that name alone could still collide with an unrelated traced parameter or
+local alias. Reassigning a traced name to a non-traceable value (anything
+other than a `self.`/`cls.` attribute or an already-traced name) kills its
+alias instead of leaving it traceable, so a stale alias from an earlier
+assignment cannot keep exposing an unrelated same-named method after the
+variable is reassigned to something else; the assignment's right-hand side is
+always analyzed against the alias state as it stood *before* this kill-or-add
+update, matching Python's own evaluate-then-bind order, so
+`client = client.flush()` still resolves that call against `client`'s prior
+(pre-reassignment) alias instead of the state after it's gone. `if`/`else`
+branches get isolated alias state — an alias added in one branch cannot leak
+into the other — and the state after the whole `if` is the union of what each
+branch produced (a conservative may-alias join), so the result no longer
+depends on which branch is textually `body` vs. `orelse`. This branch
+isolation is deliberately scoped to `ast.If` only; `ast.Try`/`ast.Match` have
+different, more complex control-flow semantics and keep the older unisolated
+traversal. Finally, a function's decorators and parameter defaults are
+analyzed in the *enclosing* scope rather than the new function's own, and
+parameter/return annotations get the same enclosing-scope treatment unless
+the module postpones annotation evaluation (`from __future__ import
+annotations`), in which case they are skipped entirely, in either scope —
+those expressions run at definition time, before the function has ever been
+called (or, when postponed, never run at all), so a call there is never
+attributed to the function being defined (it moves to whatever scope actually
+contains the `def`, e.g. the enclosing function, or disappears if that scope
+is module/class level and therefore never async-reachable). PEP 695
+type-parameter bounds are not visited in either scope: CPython evaluates each
+one lazily, in its own hidden function, only if something like `T.__bound__`
+is actually accessed, never as part of running the `def` statement itself.
+A `lambda`'s body and a bare generator expression's element/filters/later
+`for` clauses are excluded from traversal ONLY while walking another
+function's own definition-time expressions (decorators, parameter defaults/
+annotations, return annotation): there, we know structurally that the
+enclosing `def` statement is executing right now, and neither a lambda body
+nor a generator's element runs just because the lambda/generator object is
+created — only a lambda's own parameter defaults and a generator's
+outermost iterable are genuinely eager at that moment. This exclusion is
+absolute and has no exceptions: even a lambda that is immediately invoked at
+its own definition site (`(lambda: ...)()`), or a generator passed directly
+to an eager-consuming builtin, is still excluded when it appears inside
+another function's decorator/default/annotation — a narrow, intentional
+limitation given how rarely a definition-time expression contains an
+executed call at all, preferred over special-casing specific shapes there.
+
+Everywhere else — module level, class bodies, and ordinary function-body
+statements — a lambda body or generator expression's element is scanned
+unconditionally, the same conservative, over-report-rather-than-infer stance
+this file already takes for reachability elsewhere (the `ast.If` may-alias
+union, the bare-name call-graph resolution). This file does not attempt to
+distinguish a lambda that is invoked immediately, invoked later through a
+stored variable, passed as a callback, or never called at all, nor a
+generator that is consumed by an eager builtin (`list`, `sum`, `any`, etc.),
+wrapped in another lazy iterator (`map`, `filter`), or never consumed —
+telling these apart in the general case would mean inferring evaluation
+order and consumption across arbitrary code rather than reading a fixed,
+structural fact, so none of them are special-cased; all are scanned the
+same way. This is intentionally informational and is not run from CI in
+this round.
 
 For a diff-scoped view of the same findings, `scripts/scan_changed_blocking_io.py`
 (repo root) reports findings on the added lines of `git diff <base>...HEAD`
@@ -379,6 +455,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 **Implementations**:
 - `LocalSandboxProvider` - Local filesystem execution. `acquire(thread_id)` returns a per-thread `LocalSandbox` (id `local:{thread_id}`) whose `path_mappings` resolve `/mnt/user-data/{workspace,uploads,outputs}` and `/mnt/acp-workspace` to that thread's host directories, so the public `Sandbox` API honours the `/mnt/user-data` contract uniformly with AIO. `acquire()` / `acquire(None)` keeps the legacy generic singleton (id `local`) for callers without a thread context. Per-thread sandboxes are held in an LRU cache (default 256 entries) guarded by a `threading.Lock`. Legacy global-custom mounts are gated by the same user-scoped skill discovery rule used for prompt/list visibility; providers must not infer visibility from raw directory presence alone.
 - `AioSandboxProvider` (`packages/harness/deerflow/community/`) - Docker-based isolation. Active-cache and warm-pool entries are checked with the backend during acquire/reuse; definitively dead containers are dropped from all in-process maps so the thread can discover or create a fresh sandbox instead of reusing a stale client. Backend health-check failures are treated as unknown, not dead; local discovery likewise treats an unverifiable container as not adoptable and falls through to create rather than failing acquire. `get()` remains an in-memory lookup for event-loop-safe tool paths — it never touches the ownership store (that would be blocking IO on the event loop); ownership is published on acquire/reclaim and refreshed off the event loop by the dedicated renewal thread (`_renew_owned_leases`). Legacy global-custom mounts follow the same shared visibility helper as local and remote providers.
+- `E2BSandboxProvider` (`packages/harness/deerflow/community/e2b_sandbox/`) - E2B-backed remote isolation. Acquire and the complete release transition (output sync, timeout refresh, client close, and warm-pool publication) share a per-user/thread lock, so a same-process acquire cannot discover or create a replacement while release is between active and warm states. The provider-wide registry lock is not held across remote IO.
   - **Cross-instance ownership store** (`aio_sandbox/ownership/`, #4206): gateway instances sharing a container backend coordinate container ownership through a pluggable lease store, selected by `sandbox.ownership.type` (`memory` | `redis`) and resolved like `stream_bridge` (`factory.py`, lazy per-branch import, `redis` optional extra, `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL` env escape hatch; a set `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` implies a multi-instance deployment and infers `redis`). `memory` is single-instance only and declares `supports_cross_process = False`.
     - **A lease answers "who reaps this container", not "who may use it".** That splits the interface in two: `take()` transfers ownership on the **acquire** path (a container is deterministic per user/thread, so consecutive turns legitimately land on different instances — a conditional claim there would strand the thread until the previous lease expired), while `claim()` succeeds only if the container is unowned or already ours and gates every **adopt/reap** path. `release()` never clears a peer's lease.
     - **A lease carries a state, and that is what makes the destroy window safe.** `own:` = responsible for this container; `del:` = tearing it down (`claim(..., for_destroy=True)`). `take()` is refused against a `del:` lease, so a container cannot be re-acquired between a destroy path's claim and its container stop. Without the two states an unconditional `take()` would silently overwrite the destroyer's claim and the peer's stop would land on a container the new owner had already handed to an agent — i.e. #4206 again. That pairing is what replaced the previous same-host `flock` guard, which is gone; Redis makes the scope genuinely multi-instance instead of same-host. A destroyer that dies mid-stop leaves a `del:` marker that lapses with the TTL. On the acquire path a refused take raises `SandboxBeingDestroyedError`: the reuse/reclaim paths drop the container and cold-start, and the discover path propagates (falling through to create would collide with the not-yet-removed container name).
@@ -424,6 +501,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
+**User-scoped Skills**: Subagents resolve their configured skills through `get_or_new_user_skill_storage(user_id)` using the parent runtime identity, with `DEFAULT_USER_ID` only when no identity is available. This keeps custom-skill shadowing and visibility aligned with the lead agent instead of reading the global-only catalog.
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency and total delegation cap**: `MAX_CONCURRENT_SUBAGENTS = 3` is enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`; runtime `max_concurrent_subagents` is clamped to 2-4). The same middleware also enforces `subagents.max_total_per_run` (default 6, config schema 1-50, runtime override `max_total_subagents` clamped to the same range) against current-run entries in the durable delegation ledger, so a long lead-agent run cannot bypass concurrency limits by launching repeated legal-sized batches at each planning checkpoint, but historical delegations from previous runs in the same thread do not consume the new run's budget. The lead-agent prompt uses the same clamped values, so model-visible limits match enforcement. Gateway `run_agent()` and embedded `DeerFlowClient.stream()` both provide a per-invocation `run_id` in runtime context; `DeerFlowClient.stream()` also tags its input `HumanMessage` with that same id so durable-context capture can identify the current request boundary. Gateway resume paths may not append a new `HumanMessage`, so the worker also exposes the pre-run checkpoint's message ids in runtime context; durable-context capture uses that as the current-run boundary and never re-tags older task calls as the resumed run. When no delegation slots remain, task calls are stripped, provider raw tool-call metadata is synced, `finish_reason` is forced to `stop`, and a visible "subagent delegation limit" note is appended so the agent can synthesize already-collected results. Default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result. `task_started` carries the resolved effective model name. The per-subagent `SubagentTokenCollector` publishes a cumulative usage snapshot to the shared `SubagentResult` after every completed LLM response; the next `task_running` event carries that snapshot, so collapsed workspace cards can update without re-accounting parent-run totals. Terminal ToolMessage metadata (`subagent_model_name`, `subagent_token_usage`) and the persisted `subagent.end` event retain the model/usage after reload; absent provider usage stays absent rather than being estimated as zero.
@@ -464,7 +542,7 @@ Scheduled-task runtime note:
 
 Additional providers also live here (`boxlite`, `brave`, `browserless`, `crawl4ai`, `ddg_search`, `e2b_sandbox`, `exa`, `fastcrw`, `groundroute`, `infoquest`, `searxng`, `serper`); see each subpackage for specifics. E2B bootstrap is required. If it fails, the provider kills and closes the unusable remote sandbox. New sandbox creation raises an error. Warm-pool reclaim and remote discovery discard the sandbox and continue acquisition. E2B mounts remain optional.
 
-E2B output sync records remote file versions and actual host file metadata in a thread-local manifest. The manifest binds to the remote sandbox ID. A complete output listing removes entries for deleted files. This avoids repeat downloads when the host filesystem rounds modification times.
+E2B output sync records remote file versions and actual host file metadata in a thread-local manifest. The manifest binds to the remote sandbox ID. A complete output listing removes entries for deleted files. This avoids repeat downloads when the host filesystem rounds modification times. A single release-time sync pass is bounded by aggregate ceilings (`_MAX_SYNC_TOTAL_BYTES`, `_MAX_SYNC_FILES`, `_SYNC_DEADLINE_SECONDS`) on top of the per-file `_MAX_DOWNLOAD_SIZE` cap, so a pathological outputs tree cannot make release download unboundedly; a truncated pass logs what it dropped and leaves the manifest un-pruned (only entries observed in that pass are reconciled), so files it never reached are retried on the next release rather than being forgotten.
 
 **ACP agent tools**:
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`

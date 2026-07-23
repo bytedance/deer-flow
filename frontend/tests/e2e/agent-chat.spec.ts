@@ -31,7 +31,9 @@ test.describe("Agent chat", () => {
     });
   });
 
-  test("agent chat page loads with input box", async ({ page }) => {
+  test("agent chat page loads with input box and AI disclaimer", async ({
+    page,
+  }) => {
     mockLangGraphAPI(page, { agents: MOCK_AGENTS });
 
     await page.goto("/workspace/agents/test-agent/chats/new");
@@ -39,6 +41,9 @@ test.describe("Agent chat", () => {
     // The prompt input textarea should be visible
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByText("Deerflow is AI and can make mistakes", { exact: true }),
+    ).toBeVisible();
   });
 
   test("keeps new-chat drafts isolated between agents", async ({ page }) => {

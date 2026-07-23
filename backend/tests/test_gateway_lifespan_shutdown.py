@@ -189,3 +189,70 @@ def test_lifespan_skips_memory_flush_when_disabled() -> None:
     """memory.enabled=False skips the drain entirely."""
     manager = asyncio.run(_run_lifespan_with_memory_flush(enabled=False, flush_return=True))
     manager.shutdown_flush.assert_not_called()
+
+
+# ── startup warm-up log accuracy ────────────────────────────────────────────
+
+
+async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
+    """Drive lifespan with a spied ``manager.warm`` returning ``warm_return``.
+
+    The startup warm block reads the tri-state return: None = nothing to warm
+    (logs "skipping"), True = warmed, False = failed (logs WARNING). Returns the
+    manager mock so the caller can assert warm was reached.
+    """
+    from app.gateway.app import lifespan
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=False,
+            shutdown_flush_timeout_seconds=5.0,
+        ),
+    )
+    fake_service = MagicMock()
+    fake_service.get_status = MagicMock(return_value={})
+    close_oidc_service = AsyncMock()
+    stop_channel_service = AsyncMock()
+
+    async def fake_start(_startup_config):
+        return fake_service
+
+    manager = MagicMock()
+    manager.warm.return_value = warm_return
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", stop_channel_service),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=manager),
+    ):
+        async with lifespan(app):
+            pass
+
+    return manager
+
+
+def test_lifespan_logs_skipping_when_backend_has_nothing_to_warm(caplog) -> None:
+    """A backend whose warm() returns None (base default -- nothing to warm,
+    e.g. noop) logs "skipping" at INFO, not the misleading "warmed successfully"
+    (a non-DeerMem backend never touched the tiktoken cache)."""
+    caplog.set_level(logging.INFO, logger="app.gateway.app")
+    manager = asyncio.run(_run_lifespan_with_warm_return(None))
+    manager.warm.assert_called_once_with()
+    assert any(r.levelno == logging.INFO and "nothing to warm" in r.message for r in caplog.records)
+    assert not any("warmed successfully" in r.message for r in caplog.records)
+
+
+def test_lifespan_warns_when_warm_returns_false(caplog) -> None:
+    """warm()=False means warming was attempted and failed; the host logs a
+    WARNING so the operator sees the character-based-fallback degradation."""
+    caplog.set_level(logging.WARNING, logger="app.gateway.app")
+    manager = asyncio.run(_run_lifespan_with_warm_return(False))
+    manager.warm.assert_called_once_with()
+    assert any(r.levelno == logging.WARNING and "warm-up failed" in r.message for r in caplog.records)

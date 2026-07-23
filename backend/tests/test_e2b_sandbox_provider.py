@@ -803,6 +803,54 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     assert client.timeouts_set
 
 
+def test_acquire_waits_for_same_thread_release_transition(monkeypatch):
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient(sandbox_id="sb-release-race")
+    sandbox = _make_sandbox(client)
+    provider._sandboxes[sandbox.id] = sandbox
+    provider._thread_sandboxes[("user-1", "thread-1")] = sandbox.id
+
+    sync_started = threading.Event()
+    allow_sync_to_finish = threading.Event()
+
+    def blocking_sync(*_args, **_kwargs) -> None:
+        sync_started.set()
+        assert allow_sync_to_finish.wait(timeout=2)
+
+    monkeypatch.setattr(provider, "_sync_outputs_to_host", blocking_sync)
+    early_discovery = MagicMock(return_value="discovered-too-early")
+    early_create = MagicMock(return_value="created-too-early")
+    monkeypatch.setattr(provider, "_discover_remote_sandbox", early_discovery)
+    monkeypatch.setattr(provider, "_create_sandbox", early_create)
+
+    release_thread = threading.Thread(target=provider.release, args=(sandbox.id,))
+    acquired: list[str] = []
+    acquire_done = threading.Event()
+
+    def acquire() -> None:
+        acquired.append(provider.acquire("thread-1", user_id="user-1"))
+        acquire_done.set()
+
+    acquire_thread = threading.Thread(target=acquire)
+    release_thread.start()
+    assert sync_started.wait(timeout=1)
+    acquire_thread.start()
+
+    try:
+        assert not acquire_done.wait(timeout=0.1), "acquire must wait while release is syncing outputs"
+    finally:
+        allow_sync_to_finish.set()
+        release_thread.join(timeout=2)
+        acquire_thread.join(timeout=2)
+
+    assert not release_thread.is_alive()
+    assert not acquire_thread.is_alive()
+    assert acquired == [sandbox.id]
+    early_discovery.assert_not_called()
+    early_create.assert_not_called()
+
+
 def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
@@ -1115,6 +1163,149 @@ def test_sync_outputs_to_host_is_noop_when_client_closed():
     sb = _make_sandbox(FakeClient(), sandbox_id="sb-x")
     sb.close()
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+
+def _outputs_dir(tmp_path):
+    return Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs"
+
+
+def test_sync_outputs_to_host_stops_at_file_count_cap(monkeypatch, tmp_path):
+    """A pass downloads at most ``_MAX_SYNC_FILES`` artefacts, deferring the rest."""
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 2
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-files")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    written = sorted(f.name for f in out_dir.iterdir()) if out_dir.exists() else []
+    assert written == ["a.txt", "b.txt"]
+    assert len(files.read_calls) == 2
+
+
+def test_sync_outputs_to_host_stops_at_total_byte_budget(monkeypatch, tmp_path):
+    """A pass stops before the cumulative download exceeds ``_MAX_SYNC_TOTAL_BYTES``."""
+    p = _make_provider()
+    p._MAX_SYNC_TOTAL_BYTES = 25  # fits two 10-byte files, not a third
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt"]
+    listing = "".join(f"10\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"0123456789" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-bytes")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    written = sorted(f.name for f in out_dir.iterdir()) if out_dir.exists() else []
+    assert written == ["a.txt", "b.txt"]
+    assert len(files.read_calls) == 2
+
+
+def test_sync_outputs_to_host_stops_at_deadline(monkeypatch, tmp_path):
+    """A zero wall-clock budget aborts the pass before any download."""
+    p = _make_provider()
+    p._SYNC_DEADLINE_SECONDS = 0  # monotonic() >= deadline on the first entry
+    _setup_paths(monkeypatch, tmp_path)
+
+    listing = "5\t2.000000000\t/home/user/outputs/a.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/a.txt": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-cap-deadline")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    out_dir = _outputs_dir(tmp_path)
+    assert not out_dir.exists() or list(out_dir.iterdir()) == []
+    assert files.read_calls == []
+
+
+def test_sync_outputs_to_host_truncated_pass_preserves_stale_manifest(monkeypatch, tmp_path):
+    """A capped pass must not prune manifest entries it never got to inspect."""
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 1
+    _setup_paths(monkeypatch, tmp_path)
+    thread_dir = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    thread_dir.mkdir(parents=True, exist_ok=True)
+    # A prior-sync entry for a file absent from this listing. A complete pass
+    # would prune it as deleted; a truncated pass must leave it for next time.
+    (thread_dir / ".e2b-output-sync.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": "sb-trunc",
+                "files": {"outputs/kept.txt": {"remote_size": 3, "remote_mtime_ns": 1, "host_size": 3, "host_mtime_ns": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    names = ["a.txt", "b.txt", "c.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    sb = _make_sandbox(FakeClient(sandbox_id="sb-trunc", commands=cmds, files=files), sandbox_id="sb-trunc")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert "outputs/kept.txt" in manifest["files"]  # un-reached entry survives
+    assert "outputs/a.txt" in manifest["files"]  # the one download is recorded
+    assert len(files.read_calls) == 1
+
+
+def test_sync_outputs_to_host_converges_across_passes(monkeypatch, tmp_path):
+    """The deferred tail drains over successive passes without re-downloading
+    already-synced files.
+
+    The budget check sits *below* the manifest-skip path, so a file synced in
+    an earlier pass is skipped before it can consume the cap on later passes.
+    That is what lets ``c``/``d`` finish instead of ``a``/``b`` being re-fetched
+    every release forever. A refactor that moved the budget check above the skip
+    would still pass the single-pass truncation tests but fail this one.
+    """
+    p = _make_provider()
+    p._MAX_SYNC_FILES = 2
+    _setup_paths(monkeypatch, tmp_path)
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt"]
+    listing = "".join(f"5\t2.000000000\t/home/user/outputs/{n}\x00" for n in names)
+    files = FakeFilesAPI(store={f"/home/user/outputs/{n}": b"hello" for n in names})
+    # One listing per pass; both passes share the same host tree, manifest and
+    # files API (so downloads accumulate and the manifest carries over).
+    cmds = FakeCommandsAPI(
+        [
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+            SimpleNamespace(stdout=listing, stderr="", exit_code=0),
+        ]
+    )
+    sb = _make_sandbox(FakeClient(commands=cmds, files=files), sandbox_id="sb-converge")
+    out_dir = _outputs_dir(tmp_path)
+
+    # Pass 1: the file cap stops the pass after a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+    ]
+
+    # Pass 2: a, b are manifest hits skipped before the budget check, so the cap
+    # is spent draining the deferred tail c, d rather than re-downloading a, b.
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+    assert sorted(f.name for f in out_dir.iterdir()) == ["a.txt", "b.txt", "c.txt", "d.txt"]
+    assert [r[0] for r in files.read_calls] == [
+        "/home/user/outputs/a.txt",
+        "/home/user/outputs/b.txt",
+        "/home/user/outputs/c.txt",
+        "/home/user/outputs/d.txt",
+    ]
 
 
 def test_download_file_uses_streaming_read_and_returns_full_bytes():

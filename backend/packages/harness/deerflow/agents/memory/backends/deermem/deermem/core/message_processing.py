@@ -13,7 +13,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_UPLOAD_BLOCK_RE = re.compile(r"<uploaded_files>[\s\S]*?</uploaded_files>\n*", re.IGNORECASE)
+_UPLOAD_BLOCK_RE = re.compile(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*", re.IGNORECASE)
 
 _PATTERN_CACHE: dict[tuple[str, str | None], list[re.Pattern[str]]] = {}
 
@@ -186,7 +186,7 @@ def filter_messages_for_memory(messages: list[Any], *, should_keep_hidden_messag
                 if not keep:
                     continue
             content_str = extract_message_text(msg)
-            if "<uploaded_files>" in content_str:
+            if "<uploaded_files>" in content_str.lower() or "<current_uploads>" in content_str.lower():
                 stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()
                 if not stripped:
                     skip_next_ai = True

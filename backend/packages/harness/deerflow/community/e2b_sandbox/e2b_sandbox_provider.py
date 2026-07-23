@@ -84,7 +84,8 @@ class E2BSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        # Per-(user,thread) lock to serialise acquire() against itself.
+        # Per-(user,thread) lock to serialise acquire() and release() state
+        # transitions without holding the provider-wide lock across remote IO.
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
@@ -720,6 +721,18 @@ class E2BSandboxProvider(SandboxProvider):
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
     _SYNC_MANIFEST_NAME = ".e2b-output-sync.json"
 
+    # Aggregate ceilings for a single release-time output-sync pass, layered on
+    # top of the per-file ``_MAX_DOWNLOAD_SIZE`` cap. The per-file cap bounds one
+    # artefact; these bound the whole pass so a pathological outputs tree
+    # (thousands of files, or many sub-cap files summing to gigabytes, or a slow
+    # VM) cannot make release download unboundedly. When a ceiling is hit the
+    # pass stops early, logs what it dropped, and leaves the manifest un-pruned
+    # so files it never reached are reconciled on the next release rather than
+    # being forgotten.
+    _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024  # total bytes downloaded per pass
+    _MAX_SYNC_FILES = 2000  # files downloaded per pass
+    _SYNC_DEADLINE_SECONDS = 120  # wall-clock budget per pass
+
     @staticmethod
     def _load_sync_manifest(manifest_path: Path, sandbox_id: str) -> tuple[dict[str, dict[str, int]], bool]:
         """Load verified remote and host versions from a prior output sync."""
@@ -845,7 +858,16 @@ class E2BSandboxProvider(SandboxProvider):
         seen_manifest_keys: set[str] = set()
         from .e2b_sandbox import _MAX_DOWNLOAD_SIZE
 
+        # Aggregate budget for this pass (see the _MAX_SYNC_* class constants).
+        downloaded_bytes = 0
+        downloaded_files = 0
+        truncated_reason: str | None = None
+        deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
+
         for entry in stdout.split("\0"):
+            if time.monotonic() >= deadline:
+                truncated_reason = f"time budget {self._SYNC_DEADLINE_SECONDS}s"
+                break
             entry = entry.strip()
             if not entry:
                 continue
@@ -900,6 +922,13 @@ class E2BSandboxProvider(SandboxProvider):
             except OSError:
                 pass
 
+            if downloaded_files >= self._MAX_SYNC_FILES:
+                truncated_reason = f"file count cap {self._MAX_SYNC_FILES}"
+                break
+            if downloaded_bytes + remote_size > self._MAX_SYNC_TOTAL_BYTES:
+                truncated_reason = f"total byte budget {self._MAX_SYNC_TOTAL_BYTES}"
+                break
+
             try:
                 data = sandbox.download_file(virtual_path)
             except Exception as e:
@@ -910,6 +939,10 @@ class E2BSandboxProvider(SandboxProvider):
                     e,
                 )
                 continue
+            # Count the download against the budget regardless of the host-side
+            # write below: the remote round-trip is the resource being bounded.
+            downloaded_files += 1
+            downloaded_bytes += remote_size
 
             try:
                 host_path.parent.mkdir(parents=True, exist_ok=True)
@@ -929,14 +962,29 @@ class E2BSandboxProvider(SandboxProvider):
             except OSError as e:
                 logger.warning("e2b sync: failed to write %s on host: %s", host_path, e)
 
+        # A truncated pass did not observe every remote file, so
+        # ``seen_manifest_keys`` is incomplete; pruning "stale" entries here
+        # would forget files we simply never reached. Skip pruning and let the
+        # next release reconcile them (freshly downloaded entries are still
+        # written below).
         stale_keys = set(manifest) - seen_manifest_keys
-        if stale_keys:
+        if stale_keys and truncated_reason is None:
             for key in stale_keys:
                 manifest.pop(key)
             manifest_dirty = True
 
         if manifest_dirty:
             self._write_sync_manifest(manifest_path, remote_sandbox_id, manifest)
+
+        if truncated_reason is not None:
+            logger.warning(
+                "e2b sync: sandbox=%s thread=%s truncated (%s); downloaded=%d files/%d bytes this pass, remaining artefacts deferred to next release",
+                sandbox.id,
+                thread_id,
+                truncated_reason,
+                downloaded_files,
+                downloaded_bytes,
+            )
 
         if synced or skipped:
             logger.info(
@@ -1025,6 +1073,22 @@ class E2BSandboxProvider(SandboxProvider):
         the warm-pool entry stays valid for at least one ``idle_timeout``
         window after release.
         """
+        with self._lock:
+            thread_key = next(
+                (key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id),
+                None,
+            )
+
+        if thread_key is None:
+            self._release_internal(sandbox_id)
+            return
+
+        user_id, thread_id = thread_key
+        with self._get_thread_lock(thread_id, user_id):
+            self._release_internal(sandbox_id)
+
+    def _release_internal(self, sandbox_id: str) -> None:
+        """Complete one release while the thread transition lock is held."""
         sandbox: E2BSandbox | None = None
         seed: str | None = None
 

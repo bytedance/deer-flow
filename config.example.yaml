@@ -1469,6 +1469,7 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
@@ -1842,6 +1843,29 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Agent Storage Configuration
+# ============================================================================
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
+# separate from `database` (run/thread/event data) and from agent memory.
+# Restart-required (the backend is captured at Gateway lifespan startup).
+#
+# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
+#                   Single-node only: an agent created on one node is invisible
+#                   to other nodes without a shared mount.
+# backend: db    -- A row per agent in the shared SQL persistence layer, so every
+#                   node sees the same agents. Requires database.backend to be
+#                   'sqlite' or 'postgres' (rejected at startup on 'memory').
+#
+# Switching an existing install to 'db'? Import the on-disk agents once with:
+#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# The source files are left in place, so reverting to 'file' is a clean rollback.
+#
+# agent_storage:
+#   backend: file
+agent_storage:
+  backend: file
 
 # ============================================================================
 # Scheduled Tasks Configuration

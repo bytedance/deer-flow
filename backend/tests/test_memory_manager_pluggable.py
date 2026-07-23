@@ -79,18 +79,23 @@ def test_noop_runs_with_empty_memory() -> None:
     assert manager.get_memory(user_id="u") == {"facts": []}
 
 
-def test_internal_capabilities_are_hasattr_probeable() -> None:
-    """reload_memory + fact CRUD + warm exist on DeerMem but not on noop (the ABC omits them)."""
-    set_memory_config(MemoryConfig(manager_class="deermem"))
-    deermem = get_memory_manager()
-    for cap in ("warm", "reload_memory", "create_fact", "delete_fact", "update_fact"):
-        assert hasattr(deermem, cap), cap
-
-    reset_memory_manager()
+def test_tier3_hooks_have_defaults_noop_inherits() -> None:
+    """warm/reload/fact CRUD are tier-3 hooks ON the ABC with defaults (no more
+    ``hasattr`` probing): noop inherits ``warm``=None (nothing to warm) and
+    fact-CRUD/reload raise ``NotImplementedError``. DeerMem overrides the ones
+    it supports (covered elsewhere)."""
     set_memory_config(MemoryConfig(manager_class="noop"))
     noop = get_memory_manager()
-    for cap in ("warm", "reload_memory", "create_fact", "delete_fact", "update_fact"):
-        assert not hasattr(noop, cap), cap
+    assert noop.warm() is None  # inherited default (nothing to warm)
+    with pytest.raises(NotImplementedError):
+        noop.reload_memory(user_id="u")
+    with pytest.raises(NotImplementedError):
+        noop.create_fact("x", user_id="u")
+    with pytest.raises(NotImplementedError):
+        noop.delete_fact("x", user_id="u")
+    with pytest.raises(NotImplementedError):
+        noop.update_fact("x", user_id="u")
+    reset_memory_manager()
 
 
 def test_deermem_search_works_delete_export_are_stubs() -> None:
@@ -149,11 +154,13 @@ def test_empty_storage_path_factory_injects_runtime_home(tmp_path, monkeypatch) 
     assert len(user_dirs) == 1
 
 
-def test_shutdown_flush_is_on_abc_and_noop_is_noop_success() -> None:
-    """``shutdown_flush`` is part of the MemoryManager ABC (every backend must
-    implement a bounded graceful-shutdown drain); noop has no buffer, so it
-    returns True immediately."""
-    assert "shutdown_flush" in MemoryManager.__abstractmethods__
+def test_shutdown_flush_has_default_and_noop_is_noop_success() -> None:
+    """``shutdown_flush`` is a tier-2 method with a default (True -- backends
+    without a buffer have nothing to drain), NOT abstract; noop inherits/overrides
+    to True. Only ``add`` / ``get_context`` are tier-1 abstract."""
+    assert "add" in MemoryManager.__abstractmethods__
+    assert "get_context" in MemoryManager.__abstractmethods__
+    assert "shutdown_flush" not in MemoryManager.__abstractmethods__
     reset_memory_manager()
     set_memory_config(MemoryConfig(manager_class="noop"))
     noop = get_memory_manager()

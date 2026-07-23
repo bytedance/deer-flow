@@ -115,6 +115,7 @@ export const zhCN: Translations = {
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
+    disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
@@ -423,6 +424,24 @@ export const zhCN: Translations = {
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
+    settings: "模型设置",
+    settingsTitle: "模型设置",
+    settingsDescription:
+      "为该智能体选择默认模型和生成参数，修改在下一条消息生效。",
+    settingsModel: "默认模型",
+    settingsModelDefault: "使用全局默认",
+    settingsTemperature: "温度",
+    settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
+    settingsMaxTokens: "最大输出 token",
+    settingsMaxTokensPlaceholder: "继承模型配置",
+    settingsThinking: "思考模式",
+    settingsThinkingOn: "开启",
+    settingsThinkingOff: "关闭",
+    settingsReasoningEffort: "推理强度",
+    settingsInherit: "继承",
+    settingsSaved: "模型设置已保存",
+    settingsInvalidTemperature: "温度必须在 0 到 2 之间",
+    settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
   },
 
   // Breadcrumb

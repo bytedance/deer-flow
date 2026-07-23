@@ -375,6 +375,7 @@ export default function AgentChatPage() {
                     threadId={threadId}
                     draftThreadId={isNewThread ? "new" : threadId}
                     draftAgentName={agent_name}
+                    defaultModelName={agent?.model}
                     autoFocus={isWelcomeMode}
                     status={
                       thread.error

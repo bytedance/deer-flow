@@ -3,21 +3,36 @@
 import asyncio
 import logging
 import re
-import shutil
+from typing import Literal
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
-from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul, preserve_non_managed_fields
+from deerflow.config.agents_config import (
+    AgentConfig,
+    AgentModelSettings,
+    list_custom_agents,
+    load_agent_config,
+    load_agent_soul,
+    preserve_non_managed_fields,
+)
+from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
+from deerflow.persistence.agents import AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+
+ReasoningEffort = Literal["low", "medium", "high"]
+
+# Fields carrying a custom agent's per-agent model behavior (issue #4336),
+# shared by the create/update request bodies and the response so the three
+# stay in lockstep. ``model`` picks the profile; the rest layer on top of it.
+_MODEL_BEHAVIOR_FIELDS = ("model", "model_settings", "thinking_enabled", "reasoning_effort")
 
 
 class AgentResponse(BaseModel):
@@ -28,6 +43,9 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
+    thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -45,6 +63,9 @@ class AgentCreateRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
+    thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -55,6 +76,9 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    model_settings: AgentModelSettings | None = Field(default=None, description="Updated per-agent sampling overrides")
+    thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
+    reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -88,6 +112,71 @@ def _require_agents_api_enabled() -> None:
         )
 
 
+def _validate_model_exists(model: str | None) -> None:
+    """Reject an agent ``model`` that is not a configured profile.
+
+    Mirrors the ``update_agent`` harness tool: without this, an unknown model
+    silently falls back to the default at runtime and the user sees confusing
+    repeated warnings on every later turn instead of an actionable error here.
+    ``None``/empty means "use the global default" and is always allowed.
+
+    Best-effort: if the app config cannot be loaded (e.g. no ``config.yaml`` on
+    disk in a bare/test deployment), skip the check rather than failing the
+    write — the runtime still falls back to the default for an unknown model.
+    """
+    if not model:
+        return
+    try:
+        app_config = get_app_config()
+    except Exception:
+        logger.warning("Could not load app config to validate agent model %r; skipping model existence check.", model)
+        return
+    if app_config.get_model_config(model) is None:
+        raise HTTPException(status_code=422, detail=f"Unknown model '{model}'. Use a model name defined under `models:` in config.yaml.")
+
+
+def _merge_model_settings_update(value: AgentModelSettings, existing: AgentModelSettings | None) -> dict:
+    """Merge an explicit ``model_settings`` update with existing sub-fields.
+
+    The top-level ``model_settings`` key is optional in update requests:
+    omitted means "preserve the current block", while explicit ``null`` means
+    "clear the block". Inside the block, omitted sub-fields should behave the
+    same way. This lets API callers update only ``temperature`` without
+    accidentally clearing an existing ``max_tokens``.
+    """
+    merged = existing.model_dump(exclude_none=True) if existing is not None else {}
+    for field in value.model_fields_set:
+        field_value = getattr(value, field)
+        if field_value is None:
+            merged.pop(field, None)
+        else:
+            merged[field] = field_value
+    return merged
+
+
+def _apply_model_behavior(config_data: dict, source: BaseModel, existing: AgentConfig | None = None) -> None:
+    """Write the model-behavior fields (issue #4336) onto ``config_data``.
+
+    Only fields explicitly set on ``source`` (``model_fields_set``) are taken
+    from it; the rest fall back to ``existing`` (on update) so an omitted field
+    is preserved rather than cleared. A resulting ``None`` is dropped so the
+    persisted YAML stays minimal and "unset" round-trips cleanly.
+    """
+    for field in _MODEL_BEHAVIOR_FIELDS:
+        if field in source.model_fields_set:
+            value = getattr(source, field)
+        else:
+            value = getattr(existing, field, None) if existing is not None else None
+        if value is None:
+            continue
+        if field == "model_settings" and isinstance(value, AgentModelSettings):
+            dumped_settings = _merge_model_settings_update(value, existing.model_settings if existing is not None else None)
+            if dumped_settings:
+                config_data[field] = dumped_settings
+            continue
+        config_data[field] = value.model_dump(exclude_none=True) if isinstance(value, BaseModel) else value
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -100,6 +189,9 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        model_settings=agent_cfg.model_settings,
+        thinking_enabled=agent_cfg.thinking_enabled,
+        reasoning_effort=agent_cfg.reasoning_effort,
         soul=soul,
     )
 
@@ -119,9 +211,16 @@ async def list_agents() -> AgentsListResponse:
     _require_agents_api_enabled()
 
     user_id = get_effective_user_id()
-    try:
+
+    def _list() -> AgentsListResponse:
+        # Worker thread: the store read plus the per-agent SOUL read inside
+        # _agent_config_to_response are filesystem IO (file backend) or DB round
+        # trips (db backend) and must stay off the event loop.
         agents = list_custom_agents(user_id=user_id)
         return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
+
+    try:
+        return await asyncio.to_thread(_list)
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
@@ -148,12 +247,11 @@ async def check_agent_name(name: str) -> dict:
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    paths = get_paths()
-    # Treat the name as taken if either the per-user path or the legacy shared
-    # path holds an agent — picking a name that collides with an unmigrated
-    # legacy agent would shadow the legacy entry once migration runs.
-    available = not paths.user_agent_dir(user_id, normalized).exists() and not paths.agent_dir(normalized).exists()
-    return {"available": available, "name": normalized}
+    # Availability is defined by the active backend and stays consistent with
+    # create()'s conflict rule (file: per-user or legacy dir; db: a row). The
+    # exists() probe is filesystem IO / a DB round trip, so keep it off the loop.
+    exists = await asyncio.to_thread(get_agent_store().exists, normalized, user_id=user_id)
+    return {"available": not exists, "name": normalized}
 
 
 @router.get(
@@ -179,9 +277,13 @@ async def get_agent(name: str) -> AgentResponse:
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
-    try:
+    def _get() -> AgentResponse:
+        # Worker thread: config read + SOUL read must stay off the event loop.
         agent_cfg = load_agent_config(name, user_id=user_id)
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+
+    try:
+        return await asyncio.to_thread(_get)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -210,64 +312,39 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     """
     _require_agents_api_enabled()
     _validate_agent_name(request.name)
+    _validate_model_exists(request.model)
     normalized_name = _normalize_agent_name(request.name)
     user_id = get_effective_user_id()
-    paths = get_paths()
 
-    def _create_agent() -> AgentResponse | None:
-        # Worker thread: base-dir resolution, existence checks, directory/file
-        # creation, read-back, and failure cleanup are all blocking filesystem
-        # IO that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, normalized_name)
-        legacy_dir = paths.agent_dir(normalized_name)
+    # Config document — only the fields the caller set, matching the historical
+    # writer (an omitted field stays absent rather than being materialized).
+    config_data: dict = {"name": normalized_name}
+    if request.description:
+        config_data["description"] = request.description
+    if request.tool_groups is not None:
+        config_data["tool_groups"] = request.tool_groups
+    if request.skills is not None:
+        config_data["skills"] = request.skills
+    # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
+    _apply_model_behavior(config_data, request)
 
-        if legacy_dir.exists():
-            return None  # signals 409 to the caller
+    store = get_agent_store()
 
-        try:
-            try:
-                agent_dir.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                return None  # signals 409 to the caller
-            # Write config.yaml
-            config_data: dict = {"name": normalized_name}
-            if request.description:
-                config_data["description"] = request.description
-            if request.model is not None:
-                config_data["model"] = request.model
-            if request.tool_groups is not None:
-                config_data["tool_groups"] = request.tool_groups
-            if request.skills is not None:
-                config_data["skills"] = request.skills
-
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
-
-            # Write SOUL.md
-            soul_file = agent_dir / "SOUL.md"
-            soul_file.write_text(request.soul, encoding="utf-8")
-
-            logger.info(f"Created agent '{normalized_name}' at {agent_dir}")
-
-            agent_cfg = load_agent_config(normalized_name, user_id=user_id)
-            return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
-        except Exception:
-            # Clean up partial state on failure before surfacing the error.
-            if agent_dir.exists():
-                shutil.rmtree(agent_dir)
-            raise
+    def _create_agent() -> AgentResponse:
+        # Worker thread: existence checks + persistence (file IO or a DB round
+        # trip) must stay off the event loop.
+        store.create(normalized_name, config_data, request.soul, user_id=user_id)
+        logger.info("Created agent '%s'", normalized_name)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        response = await asyncio.to_thread(_create_agent)
+        return await asyncio.to_thread(_create_agent)
+    except AgentExistsError:
+        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
-
-    if response is None:
-        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
-
-    return response
 
 
 @router.put(
@@ -295,41 +372,47 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     user_id = get_effective_user_id()
 
     try:
-        agent_cfg = load_agent_config(name, user_id=user_id)
+        agent_cfg = await asyncio.to_thread(load_agent_config, name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    paths = get_paths()
-    agent_dir = paths.user_agent_dir(user_id, name)
-    legacy_dir = paths.agent_dir(name)
-    # Require config.yaml, not bare directory existence — a per-user agent
-    # directory can exist containing only memory.json (written the first
-    # time this user chats with a legacy shared agent, before this route
-    # is ever called). Bare .exists() would miss that case and let this
-    # fall through to a silent fork of a brand-new config.yaml/SOUL.md
-    # into the memory-only directory instead of blocking (mirrors
-    # resolve_agent_dir's guard, see #3390).
-    if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
+    def _is_legacy_only_layout() -> bool:
+        # Require config.yaml, not bare directory existence — a per-user agent
+        # directory can exist containing only memory.json (written the first
+        # time this user chats with a legacy shared agent, before this route
+        # is ever called). Bare .exists() would miss that case and let this
+        # fall through to a silent fork of a brand-new config.yaml/SOUL.md
+        # into the memory-only directory instead of blocking (mirrors
+        # resolve_agent_dir's guard, see #3390). The db backend has no legacy
+        # shared layout, so this file-only guard is a no-op there. The .exists()
+        # probes are filesystem IO, so they run off the event loop.
+        paths = get_paths()
+        agent_dir = paths.user_agent_dir(user_id, name)
+        legacy_dir = paths.agent_dir(name)
+        return not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists()
+
+    if await asyncio.to_thread(_is_legacy_only_layout):
         raise HTTPException(
             status_code=409,
             detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating."),
         )
+
+    if "model" in request.model_fields_set:
+        _validate_model_exists(request.model)
 
     try:
         # Update config if any config fields changed
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
+        config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
+        updated: dict | None = None
         if config_changed:
-            updated: dict = {
+            updated = {
                 "name": agent_cfg.name,
                 "description": request.description if "description" in fields_set else agent_cfg.description,
             }
-            new_model = request.model if "model" in fields_set else agent_cfg.model
-            if new_model is not None:
-                updated["model"] = new_model
 
             new_tool_groups = request.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
             if new_tool_groups is not None:
@@ -343,6 +426,11 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             if new_skills is not None:
                 updated["skills"] = new_skills
 
+            # model / model_settings / thinking_enabled / reasoning_effort:
+            # take explicitly-set request fields, else preserve the existing
+            # value (issue #4336).
+            _apply_model_behavior(updated, request, existing=agent_cfg)
+
             # Carry forward every top-level AgentConfig field this route does
             # not manage (currently ``github:``, plus any future field added
             # to :class:`AgentConfig`). The harness ``update_agent`` tool uses
@@ -354,19 +442,20 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             for key, value in preserve_non_managed_fields(agent_cfg).items():
                 updated.setdefault(key, value)
 
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(updated, f, default_flow_style=False, allow_unicode=True)
-
-        # Update SOUL.md if provided
-        if request.soul is not None:
-            soul_path = agent_dir / "SOUL.md"
-            soul_path.write_text(request.soul, encoding="utf-8")
+        store = get_agent_store()
+        # Persist config (when changed) and/or soul (when provided) off the
+        # event loop. A no-change PATCH commits nothing and re-reads current state.
+        if updated is not None or request.soul is not None:
+            await asyncio.to_thread(store.update, name, updated, request.soul, user_id=user_id)
 
         logger.info(f"Updated agent '{name}'")
 
-        refreshed_cfg = load_agent_config(name, user_id=user_id)
-        return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
+        def _refresh() -> AgentResponse:
+            # Worker thread: re-read config + SOUL off the event loop.
+            refreshed_cfg = load_agent_config(name, user_id=user_id)
+            return _agent_config_to_response(refreshed_cfg, include_soul=True, user_id=user_id)
+
+        return await asyncio.to_thread(_refresh)
 
     except HTTPException:
         raise
@@ -460,23 +549,11 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    paths = get_paths()
-
-    def _remove_agent_dir() -> tuple[str, str]:
-        # Runs in a worker thread: resolving the base dir, probing the directory
-        # (`exists`), and removing it (`rmtree`) are all blocking filesystem IO
-        # that must stay off the event loop.
-        agent_dir = paths.user_agent_dir(user_id, name)
-        if not agent_dir.exists():
-            outcome = "legacy" if paths.agent_dir(name).exists() else "missing"
-            return outcome, str(agent_dir)
-        if not (agent_dir / "config.yaml").is_file():
-            return "not-custom-agent", str(agent_dir)
-        shutil.rmtree(agent_dir)
-        return "deleted", str(agent_dir)
+    store = get_agent_store()
 
     try:
-        outcome, agent_dir = await asyncio.to_thread(_remove_agent_dir)
+        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
+        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -494,4 +571,4 @@ async def delete_agent(name: str) -> None:
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
 
-    logger.info(f"Deleted agent '{name}' from {agent_dir}")
+    logger.info(f"Deleted agent '{name}'")
