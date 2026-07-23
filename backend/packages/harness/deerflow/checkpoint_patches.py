@@ -95,7 +95,7 @@ def ensure_inmemory_delta_history_patch() -> None:
             return
         InMemorySaver.get_delta_channel_history = _get_delta_channel_history_via_base  # type: ignore[method-assign]
         InMemorySaver.aget_delta_channel_history = _aget_delta_channel_history_via_base  # type: ignore[method-assign]
-        InMemorySaver._deerflow_delta_history_patched = True  # type: ignore[attr-defined]
+        setattr(InMemorySaver, _PATCH_FLAG, True)
     except (AttributeError, TypeError):
         logger.warning("Failed to apply the InMemorySaver delta-history patch; leaving the upstream implementation untouched.", exc_info=True)
 
@@ -183,7 +183,7 @@ def ensure_binop_overwrite_first_write_patch() -> None:
             # Upstream unwraps the first write itself: nothing to patch.
             return
         BinaryOperatorAggregate.update = _binop_update_unwrapping_empty_channel  # type: ignore[method-assign]
-        BinaryOperatorAggregate._deerflow_overwrite_first_write_patched = True  # type: ignore[attr-defined]
+        setattr(BinaryOperatorAggregate, _BINOP_PATCH_FLAG, True)
     except Exception:
         logger.warning("Failed to apply the BinaryOperatorAggregate Overwrite first-write patch; leaving the upstream implementation untouched.", exc_info=True)
 
