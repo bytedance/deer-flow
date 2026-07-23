@@ -92,13 +92,18 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
           if (lastGroup) {
             lastGroup.messages.push(message);
           } else {
-            // groups is empty (shouldn't happen — the outer for loop is guarded
-            // by `messages.length === 0 -> return []`), but keep the diagnostic
-            // just in case.
-            console.error(
-              "Unexpected tool message with no preceding group",
-              message,
-            );
+            // Leading orphan: history pagination cuts by event seq, not turn
+            // boundaries, so the first loaded page can begin mid-turn with a
+            // tool result whose AI tool-call message sits on an unloaded older
+            // page (#4399). Open a processing group so the message stays
+            // grouped and visible instead of being dropped with a console
+            // error on every render; loading the older page re-groups it
+            // under its real turn.
+            groups.push({
+              id: message.id,
+              type: "assistant:processing",
+              messages: [message],
+            });
           }
         }
       }
