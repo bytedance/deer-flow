@@ -57,6 +57,19 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  runDuration: {
+    reasoning: "Reasoning",
+    working: "Working…",
+    completedIn: (duration) => `Completed in ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
+  },
+
   // Home
   home: {
     docs: "Docs",

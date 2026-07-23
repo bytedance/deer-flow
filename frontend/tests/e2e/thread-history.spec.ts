@@ -94,6 +94,54 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("shows a completed run duration once after multi-step history", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Multi-step duration",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-duration",
+              content: [{ type: "text", text: "Complete several steps" }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-1",
+              content: "Intermediate result",
+              additional_kwargs: { turn_duration: 114 },
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-2",
+              content: "Final result",
+              additional_kwargs: {
+                turn_duration: 114,
+                reasoning_content: "Final synthesis reasoning",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Final result")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await expect(page.getByTestId("run-duration")).toHaveCount(1);
+    await expect(page.getByText("Completed in 1m 54s")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Reasoning", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Thought for 114 seconds")).toHaveCount(0);
+  });
+
   test("input box recalls previous prompts with arrow keys", async ({
     page,
   }) => {
