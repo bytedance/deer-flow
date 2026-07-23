@@ -21,19 +21,24 @@ VALID_FEEDBACK_TAGS = frozenset(
 )
 
 
-class FeedbackError(Exception): ...
+class FeedbackError(Exception):
+    """Base error for the feedback domain."""
 
 
-class InvalidRatingError(FeedbackError): ...
+class InvalidRatingError(FeedbackError):
+    """Raised when a rating is not +1 or -1."""
 
 
-class InvalidTagError(FeedbackError): ...
+class InvalidTagError(FeedbackError):
+    """Raised when a feedback tag is not a known reason slug."""
 
 
-class DuplicateFeedbackError(FeedbackError): ...
+class DuplicateFeedbackError(FeedbackError):
+    """Raised when a concurrent upsert conflicts on the same run's feedback."""
 
 
-class RunNotFoundError(FeedbackError): ...
+class RunNotFoundError(FeedbackError):
+    """Raised when the run does not exist or does not belong to the thread."""
 
 
 @dataclass(frozen=True)
