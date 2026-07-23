@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_run_manager
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     build_checkpoint_state_accessor,
@@ -54,6 +54,7 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     write_thread_goal,
 )
+from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.runs.worker import valid_duration_entry
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
@@ -415,6 +416,9 @@ class ThreadBranchResponse(BaseModel):
     parent_checkpoint_id: str
     branched_from_message_id: str
     workspace_clone_mode: str
+    # "seeded" | "skipped_empty" | "failed" — whether the parent history was
+    # copied into the branch's run-event feed (see branch_thread).
+    history_seed_mode: str
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +772,29 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
+    # The thread feed (GET /messages, /messages/page) reads the run-event
+    # store, not checkpoints, and a fresh branch has no run_events — so the
+    # inherited history would vanish from the UI as soon as the branch's
+    # first run refreshes the feed (#4380 problem 2). Seed the branch's
+    # run_events from the same checkpoint snapshot the branch was created
+    # from. Best-effort: on failure the branch stays usable, with history
+    # visible only through the checkpoint overlay until it is re-branched.
+    try:
+        seed_events = build_branch_history_seed_events(
+            _checkpoint_messages(snapshot),
+            thread_id=new_thread_id,
+            run_id=f"branch-seed-{new_thread_id}",
+            parent_thread_id=thread_id,
+        )
+        if seed_events:
+            await get_run_event_store(request).put_batch(seed_events)
+            history_seed_mode = "seeded"
+        else:
+            history_seed_mode = "skipped_empty"
+    except Exception:
+        logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
+        history_seed_mode = "failed"
+
     if branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:
@@ -778,6 +805,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         parent_checkpoint_id=parent_checkpoint_id,
         branched_from_message_id=body.message_id,
         workspace_clone_mode=workspace_clone_mode,
+        history_seed_mode=history_seed_mode,
     )
 
 
