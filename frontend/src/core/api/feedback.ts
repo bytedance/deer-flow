@@ -6,20 +6,38 @@ export interface FeedbackData {
   feedback_id: string;
   rating: number;
   comment: string | null;
+  tags?: string[];
 }
+
+/** Language-neutral thumbs-down reason slugs; must match the backend's
+ *  VALID_FEEDBACK_TAGS (deerflow.domain.feedback.model). */
+export const FEEDBACK_TAG_SLUGS = [
+  "incorrect",
+  "not_as_expected",
+  "slow",
+  "style_tone",
+  "safety_legal",
+  "other",
+] as const;
+export type FeedbackTagSlug = (typeof FEEDBACK_TAG_SLUGS)[number];
 
 export async function upsertFeedback(
   threadId: string,
   runId: string,
   rating: number,
   comment?: string,
+  tags?: string[],
 ): Promise<FeedbackData> {
   const res = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/feedback`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rating, comment: comment ?? null }),
+      body: JSON.stringify({
+        rating,
+        comment: comment ?? null,
+        tags: tags ?? [],
+      }),
     },
   );
   if (!res.ok) {
