@@ -1,9 +1,16 @@
-from collections.abc import Mapping
-from typing import Annotated, NotRequired, TypedDict
+import copy
+from collections.abc import Mapping, Sequence
+from functools import cache
+from typing import Annotated, Any, NotRequired, TypedDict, get_type_hints
 
 from langchain.agents import AgentState
+from langchain_core.messages import AnyMessage
+from langgraph.channels import DeltaChannel
+from langgraph.graph.message import add_messages
 
+import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
+from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
@@ -18,8 +25,17 @@ class ThreadDataState(TypedDict):
 
 
 class ViewedImageData(TypedDict):
-    base64: str
+    """Metadata for a viewed image file.
+
+    Only lightweight metadata is persisted in checkpoint state; the actual
+    image bytes are read on-demand from disk when the model needs them.
+    This avoids duplicating large base64 payloads across every checkpoint
+    (see #4138).
+    """
+
     mime_type: str
+    size: int
+    actual_path: str
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -125,6 +141,7 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
+    run_id: NotRequired[str]
     description: str
     subagent_type: str
     status: str
@@ -160,6 +177,8 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
             order.append(entry_id)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
+            if previous.get("run_id") and not entry.get("run_id"):
+                entry["run_id"] = previous["run_id"]
         by_id[entry_id] = entry
     merged = [by_id[entry_id] for entry_id in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
@@ -232,8 +251,72 @@ class ThreadState(AgentState):
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
     uploaded_files: NotRequired[list[dict] | None]
-    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+
+
+def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list[AnyMessage]:
+    result = list(state)
+    for write in writes:
+        result = list(add_messages(result, write))
+    return result
+
+
+DELTA_MESSAGES_FIELD = Annotated[
+    list[AnyMessage],
+    DeltaChannel(merge_message_writes, snapshot_frequency=1000),
+]
+
+
+class DeltaThreadState(ThreadState):
+    messages: DELTA_MESSAGES_FIELD
+
+
+THREAD_STATE_REDUCER_FIELDS = frozenset(
+    {
+        "messages",
+        "sandbox",
+        "artifacts",
+        "todos",
+        "goal",
+        "viewed_images",
+        "promoted",
+        "delegations",
+        "skill_context",
+    }
+)
+
+
+def get_thread_state_schema(mode: CheckpointChannelMode) -> type:
+    return DeltaThreadState if mode == "delta" else ThreadState
+
+
+@cache
+def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode) -> type:
+    if mode == "full":
+        return schema
+    annotations = get_type_hints(schema, include_extras=True)
+    annotations["messages"] = DELTA_MESSAGES_FIELD
+    return TypedDict(
+        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}",
+        annotations,
+        total=getattr(schema, "__total__", True),
+    )
+
+
+def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode) -> list[Any]:
+    if mode == "full":
+        return list(middleware)
+    normalized = []
+    for item in middleware:
+        schema = getattr(item, "state_schema", None)
+        if schema is None:
+            normalized.append(item)
+            continue
+        adapted = copy.copy(item)
+        adapted.state_schema = adapt_state_schema_for_mode(schema, mode)
+        normalized.append(adapted)
+    return normalized

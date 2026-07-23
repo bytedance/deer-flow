@@ -7,6 +7,7 @@ import {
   compactDisplayMathBlocks,
   normalizeStreamdownMathMarkdown,
   preprocessStreamdownMarkdown,
+  stripLeakedSystemTags,
 } from "@/core/streamdown/preprocess";
 
 test("capBlockquoteNesting returns normal content unchanged", () => {
@@ -246,4 +247,201 @@ test("normalizeStreamdownMathMarkdown requires matching backtick run to close co
   const input = "Use ``\\(literal\\)` and still code`` then \\(x\\)";
   const expected = "Use ``\\(literal\\)` and still code`` then $x$";
   expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
+});
+
+// ---------------------------------------------------------------------------
+// stripLeakedSystemTags
+// ---------------------------------------------------------------------------
+
+test("stripLeakedSystemTags strips <memory> tags preserving content", () => {
+  expect(stripLeakedSystemTags("<memory>hello</memory>")).toBe("hello");
+});
+
+test("stripLeakedSystemTags strips all internal marker tags", () => {
+  expect(
+    stripLeakedSystemTags(
+      "<system-reminder>reminder</system-reminder> <current_date>2024</current_date>",
+    ),
+  ).toBe("reminder 2024");
+});
+
+test("stripLeakedSystemTags strips self-closing tags", () => {
+  expect(stripLeakedSystemTags("text<memory/>more")).toBe("textmore");
+});
+
+test("stripLeakedSystemTags strips tags with attributes", () => {
+  expect(stripLeakedSystemTags('<memory class="x">text</memory>')).toBe("text");
+});
+
+test("stripLeakedSystemTags handles multiple occurrences", () => {
+  expect(
+    stripLeakedSystemTags(
+      "<memory>a</memory> <memory>b</memory> <memory>c</memory>",
+    ),
+  ).toBe("a b c");
+});
+
+test("stripLeakedSystemTags leaves fenced code content untouched", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "```text",
+    "<memory>inside code</memory>",
+    "```",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "```text",
+    "<memory>inside code</memory>",
+    "```",
+    "after",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags leaves indented code content untouched", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "    <memory>indented code</memory>",
+  ].join("\n");
+  const expected = ["outside", "    <memory>indented code</memory>"].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags passes plain text unchanged", () => {
+  expect(stripLeakedSystemTags("plain text")).toBe("plain text");
+});
+
+test("stripLeakedSystemTags returns empty string unchanged", () => {
+  expect(stripLeakedSystemTags("")).toBe("");
+});
+
+test("stripLeakedSystemTags handles no tags present", () => {
+  const input = "normal text with **bold** and `code`";
+  expect(stripLeakedSystemTags(input)).toBe(input);
+});
+
+test("stripLeakedSystemTags strips <uploaded_files> tag", () => {
+  expect(
+    stripLeakedSystemTags("<uploaded_files>file.pdf</uploaded_files>"),
+  ).toBe("file.pdf");
+});
+
+test("stripLeakedSystemTags strips <slash_skill_activation> tag", () => {
+  expect(
+    stripLeakedSystemTags(
+      "<slash_skill_activation>skill</slash_skill_activation>",
+    ),
+  ).toBe("skill");
+});
+
+test("stripLeakedSystemTags handles mixed tags on same line", () => {
+  expect(
+    stripLeakedSystemTags(
+      "<memory>a</memory><system-reminder>b</system-reminder>",
+    ),
+  ).toBe("ab");
+});
+
+test("stripLeakedSystemTags handles multiple fences correctly", () => {
+  const input = [
+    "<memory>a</memory>",
+    "```",
+    "<memory>inside 1</memory>",
+    "```",
+    "<memory>b</memory>",
+    "```",
+    "<memory>inside 2</memory>",
+    "```",
+  ].join("\n");
+  const expected = [
+    "a",
+    "```",
+    "<memory>inside 1</memory>",
+    "```",
+    "b",
+    "```",
+    "<memory>inside 2</memory>",
+    "```",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags preserves tags inside tilde fence with inner backtick fence", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "~~~~",
+    "```",
+    "<memory>inside tilde</memory>",
+    "```",
+    "~~~~",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "~~~~",
+    "```",
+    "<memory>inside tilde</memory>",
+    "```",
+    "~~~~",
+    "after",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags preserves tags inside 4-backtick fence with inner 3-backtick fence", () => {
+  const input = [
+    "<memory>outside</memory>",
+    "````",
+    "```",
+    "<memory>inside 4-backtick</memory>",
+    "```",
+    "````",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "````",
+    "```",
+    "<memory>inside 4-backtick</memory>",
+    "```",
+    "````",
+    "after",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags handles backtick fence inside tilde fence with shorter tilde closing", () => {
+  // A 4-tilde fence containing a 3-backtick sub-fence; the closing tilde run
+  // is shorter (3 vs 4) so it should NOT close the fence.
+  const input = [
+    "<memory>outside</memory>",
+    "~~~~",
+    "```",
+    "<memory>inside</memory>",
+    "```",
+    "~~~",
+  ].join("\n");
+  const expected = [
+    "outside",
+    "~~~~",
+    "```",
+    "<memory>inside</memory>",
+    "```",
+    "~~~",
+  ].join("\n");
+  expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags strips tags after real closing fence", () => {
+  const input = [
+    "~~~~",
+    "<memory>inside</memory>",
+    "~~~~",
+    "<memory>after</memory>",
+  ].join("\n");
+  const expected = ["~~~~", "<memory>inside</memory>", "~~~~", "after"].join(
+    "\n",
+  );
+  expect(stripLeakedSystemTags(input)).toBe(expected);
 });

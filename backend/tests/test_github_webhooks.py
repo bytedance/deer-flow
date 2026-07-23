@@ -542,17 +542,30 @@ def test_dispatch_result_included_in_response(client: TestClient, monkeypatch: p
     assert fake.await_count == 1
 
 
-def test_dispatch_failure_returns_503_so_github_retries(client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """A crashing fan-out helper must return 503 so GitHub retries.
+def test_dispatch_failure_returns_503_not_200(client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A crashing fan-out helper must return 503, not 200.
 
     The earlier behaviour swallowed every fan-out exception into a 200 OK
-    response (``dispatch={"error": "fanout failed"}``). GitHub only retries
-    5xx — a 200 ack permanently drops the delivery. The route now lets
-    runtime failures propagate as 503 so a transient registry/bus error
-    triggers GitHub's redelivery path. The startup-time
-    ``is_route_enabled`` check still handles *configuration* failures
-    fail-closed (route absent → 404); 503 is reserved for runtime
-    failures GitHub can retry past.
+    response (``dispatch={"error": "fanout failed"}``). GitHub treats 200
+    as final success and never automatically retries any failure,
+    including 5xx (see
+    https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)
+    — so a mistaken 200 ack hides the failure from GitHub's Recent
+    Deliveries status and from any recovery script filtering on non-OK
+    deliveries (the pattern GitHub's own docs recommend). That is a
+    discoverability gap, not literal unrecoverability: GitHub's manual
+    "Redeliver" button and its REST redelivery endpoint place no
+    failed-status precondition on the delivery id (see
+    https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks),
+    so a 200'd delivery can still be redelivered by an operator who
+    independently finds it — they just get no signal to. The route now
+    lets runtime failures propagate as 503 instead, so the delivery is
+    correctly recorded as failed and actually surfaces for a manual
+    "Redeliver" click, the REST API, or an operator's own recovery
+    script to find and recover. The startup-time ``is_route_enabled``
+    check still handles *configuration* failures fail-closed (route
+    absent → 404); 503 is reserved for runtime failures worth making
+    discoverable and recoverable this way.
     """
 
     async def fake_fanout(*args, **kwargs) -> dict:
@@ -611,7 +624,8 @@ def test_dispatch_failure_503_lets_github_redeliver_successfully(client: TestCli
     )
     assert first.status_code == 503
 
-    # GitHub redelivers — same payload, same signature.
+    # A redelivery — same payload, same signature (e.g. a manual
+    # "Redeliver" click, since GitHub does not resend this automatically).
     second = client.post(
         "/api/webhooks/github",
         content=body,
@@ -672,8 +686,9 @@ def test_channel_disabled_skips_fanout(client: TestClient, monkeypatch: pytest.M
     publishing inbound onto the bus would let the ChannelManager consumer
     pick it up and run agents that then post back to GitHub via ``gh``,
     contradicting the documented off-switch. Returns 200 (permanent
-    state, not transient) so GitHub doesn't retry; ``dispatch.skipped``
-    surfaces the reason in the Recent Deliveries panel.
+    state, not transient) rather than mark the delivery failed and invite
+    a pointless redelivery; ``dispatch.skipped`` surfaces the reason in
+    the Recent Deliveries panel.
     """
     bus = MessageBus()
 

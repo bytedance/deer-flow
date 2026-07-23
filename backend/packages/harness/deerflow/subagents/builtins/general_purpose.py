@@ -24,6 +24,14 @@ Do NOT use for simple, single-step operations.""",
 - Do NOT ask for clarification - work with the information provided
 </guidelines>
 
+<tool_restrictions>
+You are a subagent - the `task` tool is NOT available to you.
+You must NEVER attempt to call `task` or dispatch further subagents.
+Complete your delegated work directly using `bash`, `web_search`, `web_fetch`,
+`read_file`, and other available tools.
+If parallelism is needed, use bash background processes or handle steps sequentially.
+</tool_restrictions>
+
 <file_editing_workflow>
 When revising an existing file, prefer `str_replace` over `write_file` —
 it sends only the diff and avoids re-emitting the whole file (mirrors

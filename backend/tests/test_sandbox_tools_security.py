@@ -115,6 +115,115 @@ def test_mask_local_paths_in_output_hides_skills_host_paths() -> None:
         assert "/mnt/skills/public/bootstrap/SKILL.md" in masked
 
 
+@pytest.mark.parametrize("suffix", ["-extra/data.txt", "2/x", ".bak", "foo", "_backup/y"])
+def test_mask_local_paths_does_not_match_inside_longer_sibling(suffix: str) -> None:
+    """A host base must not match inside a sibling that merely shares its prefix.
+
+    The trailing group needs a separator to consume anything, so without a
+    segment-boundary lookahead the regex matches the bare base and
+    ``replace_match`` takes its ``matched_path == base`` branch -- rewriting
+    ``.../skills-extra/data.txt`` to ``/mnt/skills-extra/data.txt``, a container
+    path forward resolution refuses to map back. Reverse-direction mirror of
+    ``LocalSandbox._reverse_output_patterns`` (#4035).
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        output = f"found /home/user/deer-flow/skills{suffix}"
+        masked = mask_local_paths_in_output(output, None)
+
+        assert masked == output
+        assert "/mnt/skills" not in masked
+
+
+@pytest.mark.parametrize("suffix", ["-backup/hello.py", "2/hello.py", ".old", "_tmp/x"])
+def test_mask_local_paths_does_not_match_inside_longer_acp_sibling(suffix: str) -> None:
+    """Same bug, second source: the ACP workspace has no enclosing virtual root.
+
+    ``_compiled_mask_patterns`` builds every source's matcher, so the ACP
+    workspace carried the same defect as skills -- and unlike user-data (see
+    below) nothing maps its parent, so ``/mnt/acp-workspace-backup/hello.py``
+    is unresolvable in both directions.
+    """
+    acp_host = "/home/user/.deer-flow/acp-workspace"
+    with patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=acp_host):
+        output = f"copied {acp_host}{suffix}"
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+        assert masked == output
+        assert "/mnt/acp-workspace" not in masked
+
+
+@pytest.mark.parametrize("suffix", ["2/report.txt", ".bak/report.txt", "-old"])
+def test_mask_local_paths_user_data_sibling_is_carried_by_the_virtual_root(suffix: str) -> None:
+    """User-data siblings are benign -- and must stay that way.
+
+    ``_thread_virtual_to_actual_mappings`` also maps the virtual root
+    ``/mnt/user-data`` to the three dirs' common parent, so a sibling of
+    ``outputs`` is still *inside* a mount and has a real virtual path. Whichever
+    pattern wins -- the bare ``outputs`` base (pre-#4053) or the root (post-) --
+    the string is the same, so the boundary changes nothing here.
+
+    Green on ``main`` too: this is not a bug anchor, it guards the boundary from
+    being narrowed into one that would stop translating a mapped path.
+    """
+    masked = mask_local_paths_in_output(f"wrote /tmp/deer-flow/threads/t1/user-data/outputs{suffix}", _THREAD_DATA)
+
+    assert masked == f"wrote /mnt/user-data/outputs{suffix}"
+    assert replace_virtual_path(f"/mnt/user-data/outputs{suffix}", _THREAD_DATA) == f"/tmp/deer-flow/threads/t1/user-data/outputs{suffix}"
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        (", done", "/mnt/skills, done"),
+        (":/other", "/mnt/skills:/other"),
+        (" tail", "/mnt/skills tail"),
+        ('"quoted', '/mnt/skills"quoted'),
+        # A backslash is consumed by the trailing group (Windows paths match in
+        # full, separator normalised) rather than acting as a terminator -- but
+        # it must still reach the trailing group, which needs the lookahead to
+        # admit it first.
+        ("\\win", "/mnt/skills/win"),
+    ],
+)
+def test_mask_local_paths_still_matches_base_before_non_slash_boundaries(boundary: str, expected: str) -> None:
+    """The lookahead must not narrow away boundaries that translate today.
+
+    This runs over arbitrary command output, where a base can legitimately be
+    followed by a comma (prose), a colon (PATH-style concatenation) or a
+    backslash (Windows separator). Borrowing the shell-oriented class from
+    ``_command_pattern`` -- ``(?=/|$|[\\s"';&|<>()])`` -- admits none of the
+    three, so the lookahead would fail and the raw host path would be emitted.
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output(f"root is /home/user/deer-flow/skills{boundary}", None)
+
+        assert masked == f"root is {expected}"
+        assert "/home/user/deer-flow/skills" not in masked
+
+
+@pytest.mark.parametrize("prefix", ["", "cwd: ", "see "])
+def test_mask_local_paths_translates_a_bare_base_at_end_of_output(prefix: str) -> None:
+    """``$`` is load-bearing: output ending exactly at a host base still masks.
+
+    Without it the lookahead fails and the raw host path is handed to the model
+    -- the leak this function exists to prevent.
+    """
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+    ):
+        masked = mask_local_paths_in_output(f"{prefix}/home/user/deer-flow/skills", None)
+
+        assert masked == f"{prefix}/mnt/skills"
+        assert "/home/user/deer-flow/skills" not in masked
+
+
 def test_mask_local_paths_compiled_patterns_are_cached() -> None:
     """The compiled patterns for a given source set are built once and reused
     (mask runs once per glob/grep match, so this avoids per-match recompiles)."""
@@ -340,6 +449,53 @@ def test_replace_virtual_paths_in_command_replaces_user_data_only() -> None:
         # User-data paths should still be resolved
         assert "/mnt/user-data" not in result
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        "/mnt/user-data-backup/secret.txt",
+        "/mnt/user-data2/report.txt",
+        "/mnt/user-data.bak",
+        "/mnt/user-data_old/x",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibling: str) -> None:
+    """A path that merely starts with the virtual root is not a virtual path.
+
+    The matcher's trailing group needs a ``/`` to consume anything, so when the
+    character after ``/mnt/user-data`` is ``-``, ``.``, ``_``, a digit or a
+    letter, the group matches empty and the bare root still matches. The
+    substitution then rewrites it to the thread's host directory, and the rest of
+    the sibling name rides along — handing the command a real host path outside
+    the mount contract (``.../user-data-backup``), which the agent then reads or
+    writes.
+
+    Same defect as #4035 (reverse patterns) and #4053 (masking patterns),
+    mirrored into the virtual→host command direction.
+    """
+    result = replace_virtual_paths_in_command(f"cat {sibling}", _THREAD_DATA)
+
+    assert result == f"cat {sibling}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # The bare root, at end of string and before shell/text punctuation, must
+        # keep translating — these guard the boundary from being narrowed too far.
+        ("ls /mnt/user-data", "ls /tmp/deer-flow/threads/t1/user-data"),
+        ("ls /mnt/user-data && pwd", "ls /tmp/deer-flow/threads/t1/user-data && pwd"),
+        ("PYTHONPATH=/mnt/user-data:/opt x", "PYTHONPATH=/tmp/deer-flow/threads/t1/user-data:/opt x"),
+        ("echo '/mnt/user-data, done'", "echo '/tmp/deer-flow/threads/t1/user-data, done'"),
+        # Real children still translate.
+        ("cat /mnt/user-data/workspace/a.txt", "cat /tmp/deer-flow/threads/t1/user-data/workspace/a.txt"),
+    ],
+)
+def test_replace_virtual_paths_in_command_still_translates_genuine_paths(command: str, expected: str) -> None:
+    """The narrowing must not stop translating paths that translate today."""
+    assert replace_virtual_paths_in_command(command, _THREAD_DATA) == expected
 
 
 # ---------- validate_local_bash_command_paths ----------

@@ -80,9 +80,9 @@ memory:
 
 ### SubagentLimitMiddleware
 
-Limits the number of parallel subagent task calls the agent can make in a single turn. This prevents the agent from spawning an unbounded number of concurrent subagents.
+Limits both the number of parallel subagent task calls in one turn and the total number of subagent delegations in one lead-agent run. This prevents the agent from spawning unbounded batches across repeated planning checkpoints.
 
-**Configuration**: `subagent_enabled` and `max_concurrent_subagents` in the per-request config.
+**Configuration**: `subagent_enabled`, `max_concurrent_subagents`, and optional `max_total_subagents` in the per-request config. The total cap falls back to `subagents.max_total_per_run` in `config.yaml`.
 
 ---
 

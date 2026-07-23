@@ -1,7 +1,7 @@
-import type { PageMapItem } from "nextra";
 import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 
+import { buildLocalizedDocsPageMap } from "@/components/docs/docs-page-map";
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
 import { getLocaleByLang } from "@/core/i18n/locale";
@@ -13,23 +13,11 @@ const i18n = [
   { locale: "vi", name: "Tiếng Việt" },
 ];
 
-function formatPageRoute(base: string, items: PageMapItem[]): PageMapItem[] {
-  return items.map((item) => {
-    if ("route" in item && !item.route.startsWith(base)) {
-      item.route = `${base}${item.route}`;
-    }
-    if ("children" in item && item.children) {
-      item.children = formatPageRoute(base, item.children);
-    }
-    return item;
-  });
-}
-
 export default async function DocLayout({ children, params }) {
   const { lang } = await params;
   const locale = getLocaleByLang(lang);
   const pages = await getPageMap(`/${lang}`);
-  const pageMap = formatPageRoute(`/${lang}/docs`, pages);
+  const pageMap = buildLocalizedDocsPageMap(`/${lang}/docs`, pages);
 
   return (
     <Layout
@@ -41,7 +29,7 @@ export default async function DocLayout({ children, params }) {
         />
       }
       pageMap={pageMap}
-      docsRepositoryBase="https://github.com/bytedance/deerflow/tree/main/frontend/src/content"
+      docsRepositoryBase="https://github.com/bytedance/deer-flow/tree/main/frontend"
       footer={<Footer className="mt-0" />}
       i18n={i18n}
       // ... Your additional layout options

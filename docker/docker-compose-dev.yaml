@@ -64,6 +64,9 @@ services:
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
       # which is unreachable from inside the container
       - K8S_API_SERVER=https://host.docker.internal:26443
+      # Optional: set PROVISIONER_API_KEY in .env to enable provisioner auth.
+      # The same value must be set on the gateway side via config.yaml sandbox.provisioner_api_key.
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     env_file:
       - ../.env
     extra_hosts:
@@ -191,6 +194,9 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
+      # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal

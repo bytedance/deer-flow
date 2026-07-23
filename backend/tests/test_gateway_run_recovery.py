@@ -29,8 +29,9 @@ class _FakeRunManager:
     recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
-    def __init__(self, *, store):
+    def __init__(self, *, store, run_ownership_config=None):
         self.store = store
+        self.run_ownership_config = run_ownership_config
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
         self.shutdown_calls: int = 0
@@ -43,6 +44,12 @@ class _FakeRunManager:
     async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 100):
         self.list_by_thread_calls.append({"thread_id": thread_id, "user_id": user_id, "limit": limit})
         return self.latest_by_thread.get(thread_id, self.recovered_runs[:limit])
+
+    async def start_heartbeat(self) -> None:
+        pass
+
+    async def stop_heartbeat(self) -> None:
+        pass
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         # No in-flight tasks in these startup-recovery tests; langgraph_runtime
@@ -93,7 +100,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     """SQLite startup should recover stale active runs before serving requests."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite"),
+        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full"),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
@@ -137,7 +144,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite"),
+        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full"),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )

@@ -19,6 +19,7 @@ def _set_skills_cache_state(*, skills=None, active=False, version=0):
         prompt_module._enabled_skills_refresh_active = active
         prompt_module._enabled_skills_refresh_version = version
         prompt_module._enabled_skills_refresh_event.clear()
+        prompt_module._enabled_skills_refresh_waiters.clear()
 
 
 def test_build_self_update_section_empty_for_default_agent():
@@ -103,6 +104,38 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
+    tool_config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=True, mode="tool"),
+        acp_agents={},
+    )
+    middleware_config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=tool_config.skills,
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=True, mode="middleware"),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
+
+    assert "<memory_tool_system>" in tool_prompt
+    assert "memory_search" in tool_prompt
+    assert "memory_add" in tool_prompt
+    assert "<memory_tool_system>" not in middleware_prompt
+
+
 def test_apply_prompt_template_threads_explicit_app_config_without_global_config(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     explicit_config = SimpleNamespace(
@@ -171,6 +204,64 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     assert "**bash**" not in prompt
 
 
+def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=3,
+        max_total_subagents=5,
+        app_config=explicit_config,
+    )
+
+    assert "MAXIMUM 3 `task` CALLS PER RESPONSE" in prompt
+    assert "MAXIMUM 5 `task` CALLS PER RUN" in prompt
+
+
+def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=99,
+        max_total_subagents=99,
+        app_config=explicit_config,
+    )
+
+    assert "MAXIMUM 4 `task` CALLS PER RESPONSE" in prompt
+    assert "MAXIMUM 50 `task` CALLS PER RUN" in prompt
+
+
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(acp_agents={"codex": object()})
 
@@ -194,28 +285,15 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_memory_data(agent_name=None, *, user_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
-        return {"facts": []}
-
-    def fake_format_memory_for_injection(
-        memory_data,
-        *,
-        max_tokens,
-        use_tiktoken=True,
-        guaranteed_categories=None,
-        guaranteed_token_budget=500,
-    ):
-        captured["memory_data"] = memory_data
-        captured["max_tokens"] = max_tokens
-        captured["use_tiktoken"] = use_tiktoken
         return "remember this"
 
+    manager = SimpleNamespace(get_context=fake_get_context)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
-    monkeypatch.setattr("deerflow.agents.memory.get_memory_data", fake_get_memory_data)
-    monkeypatch.setattr("deerflow.agents.memory.format_memory_for_injection", fake_format_memory_for_injection)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
 
     context = prompt_module._get_memory_context("agent-a", app_config=explicit_config)
 
@@ -224,9 +302,6 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     assert captured == {
         "agent_name": "agent-a",
         "user_id": "user-1",
-        "memory_data": {"facts": []},
-        "max_tokens": 1234,
-        "use_tiktoken": True,
     }
 
 
@@ -399,6 +474,14 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     # silently regress to single-shot write_file calls for long content.
     assert "str_replace" in template
     assert "append=True" in template
+
+
+def test_system_prompt_template_requires_virtual_paths_for_output_images():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+
+    assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
+    assert "Never use a bare or workspace-relative filename" in template
+    assert "Call `present_files` for the image before referencing it" in template
 
 
 def test_system_prompt_template_preserves_placeholders():

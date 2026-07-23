@@ -3,11 +3,14 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import CancelOutcome, RunManager, RunStatus
+from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
 
 
@@ -55,6 +58,18 @@ class _CustomRunStoreWithoutProgress(RunStore):
 
     async def aggregate_tokens_by_thread(self, *args, **kwargs):
         return {}
+
+    async def update_lease(self, *args, **kwargs):
+        return True
+
+    async def list_inflight_with_expired_lease(self, *args, **kwargs):
+        return []
+
+    async def create_run_atomic(self, *args, **kwargs):
+        return {}, []
+
+    async def claim_for_takeover(self, *args, **kwargs):
+        return False
 
 
 @pytest.mark.anyio
@@ -125,9 +140,9 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1")
-        await repo.put("r2", thread_id="t1")
-        await repo.put("r3", thread_id="t2")
+        await repo.put("r1", thread_id="t1", status="success")
+        await repo.put("r2", thread_id="t1", status="pending")
+        await repo.put("r3", thread_id="t2", status="pending")
         rows = await repo.list_by_thread("t1")
         assert len(rows) == 2
         assert all(r["thread_id"] == "t1" for r in rows)
@@ -136,8 +151,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread_owner_filter(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", user_id="alice")
-        await repo.put("r2", thread_id="t1", user_id="bob")
+        await repo.put("r1", thread_id="t1", user_id="alice", status="success")
+        await repo.put("r2", thread_id="t1", user_id="bob", status="pending")
         rows = await repo.list_by_thread("t1", user_id="alice")
         assert len(rows) == 1
         assert rows[0]["user_id"] == "alice"
@@ -161,8 +176,8 @@ class TestRunRepository:
     async def test_list_pending(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", status="pending")
-        await repo.put("r2", thread_id="t1", status="running")
-        await repo.put("r3", thread_id="t2", status="pending")
+        await repo.put("r2", thread_id="t2", status="running")
+        await repo.put("r3", thread_id="t3", status="pending")
         pending = await repo.list_pending()
         assert len(pending) == 2
         assert all(r["status"] == "pending" for r in pending)
@@ -171,10 +186,13 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_inflight_returns_pending_and_running_before_cutoff(self, tmp_path):
         repo = await _make_repo(tmp_path)
+        # Each thread can hold at most one pending/running row (partial unique
+        # index ``uq_runs_thread_active``), so spread the inflight rows across
+        # distinct threads to exercise the before-cutoff filter.
         await repo.put("pending-old", thread_id="t1", status="pending", created_at="2026-01-01T00:00:00+00:00")
-        await repo.put("running-old", thread_id="t1", status="running", created_at="2026-01-01T00:00:01+00:00")
-        await repo.put("success-old", thread_id="t1", status="success", created_at="2026-01-01T00:00:02+00:00")
-        await repo.put("pending-new", thread_id="t1", status="pending", created_at="2026-01-01T00:00:03+00:00")
+        await repo.put("running-old", thread_id="t2", status="running", created_at="2026-01-01T00:00:01+00:00")
+        await repo.put("success-old", thread_id="t3", status="success", created_at="2026-01-01T00:00:02+00:00")
+        await repo.put("pending-new", thread_id="t4", status="pending", created_at="2026-01-01T00:00:03+00:00")
 
         inflight = await repo.list_inflight(before="2026-01-01T00:00:02+00:00")
 
@@ -394,8 +412,8 @@ class TestRunRepository:
     async def test_list_by_thread_ordered_desc(self, tmp_path):
         """list_by_thread returns newest first."""
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", created_at="2024-01-01T00:00:00+00:00")
-        await repo.put("r2", thread_id="t1", created_at="2024-01-02T00:00:00+00:00")
+        await repo.put("r1", thread_id="t1", status="success", created_at="2024-01-01T00:00:00+00:00")
+        await repo.put("r2", thread_id="t1", status="pending", created_at="2024-01-02T00:00:00+00:00")
         rows = await repo.list_by_thread("t1")
         assert rows[0]["run_id"] == "r2"
         assert rows[1]["run_id"] == "r1"
@@ -404,8 +422,11 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_list_by_thread_limit(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        for i in range(5):
-            await repo.put(f"r{i}", thread_id="t1")
+        # Only one row can be pending/running per thread; mark earlier ones
+        # terminal so the partial unique index still holds.
+        for i in range(4):
+            await repo.put(f"r{i}", thread_id="t1", status="success")
+        await repo.put("r4", thread_id="t1", status="pending")
         rows = await repo.list_by_thread("t1", limit=2)
         assert len(rows) == 2
         await _cleanup()
@@ -413,8 +434,8 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_owner_none_returns_all(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        await repo.put("r1", thread_id="t1", user_id="alice")
-        await repo.put("r2", thread_id="t1", user_id="bob")
+        await repo.put("r1", thread_id="t1", user_id="alice", status="success")
+        await repo.put("r2", thread_id="t1", user_id="bob", status="pending")
         rows = await repo.list_by_thread("t1", user_id=None)
         assert len(rows) == 2
         await _cleanup()
@@ -428,21 +449,21 @@ class TestRunRepository:
         await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
         repo = RunRepository(get_session_factory())
 
-        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o")
+        await repo.put("run-1", thread_id="thread-1", model_name="gpt-4o", status="success")
         row = await repo.get("run-1")
         assert row is not None
         assert row["model_name"] == "gpt-4o"
 
         long_name = "a" * 200
-        await repo.put("run-2", thread_id="thread-1", model_name=long_name)
+        await repo.put("run-2", thread_id="thread-1", model_name=long_name, status="success")
         row2 = await repo.get("run-2")
         assert row2["model_name"] == "a" * 128
 
-        await repo.put("run-3", thread_id="thread-1", model_name=123)
+        await repo.put("run-3", thread_id="thread-1", model_name=123, status="success")
         row3 = await repo.get("run-3")
         assert row3["model_name"] == "123"
 
-        await repo.put("run-4", thread_id="thread-1", model_name=None)
+        await repo.put("run-4", thread_id="thread-1", model_name=None, status="pending")
         row4 = await repo.get("run-4")
         assert row4["model_name"] is None
 
@@ -562,7 +583,7 @@ class TestRunRepository:
         cancelled = await manager.cancel(record.run_id)
         row = await repo.get(record.run_id)
 
-        assert cancelled is True
+        assert cancelled == CancelOutcome.cancelled
         assert row is not None
         assert row["status"] == "interrupted"
         await _cleanup()
@@ -624,4 +645,242 @@ class TestRunRepository:
 
         row = await repo.get(record.run_id)
         assert row["model_name"] == "model-2"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_run_atomic_reject_propagates_conflict_on_unique_violation(self, tmp_path):
+        """reject path against a real SQLite-backed store must surface as ConflictError, not raw IntegrityError.
+
+        The partial unique index ``uq_runs_thread_active`` is created by
+        ``Base.metadata.create_all`` on SQLite too. Every other atomic-create
+        test in the suite uses ``MemoryRunStore``, which raises ConflictError
+        directly and never exercises the manager's
+        ``_is_unique_violation``-based conversion. This test is the load-bearing
+        coverage for that branch on a real DB: pre-insert an active run on
+        thread T, then attempt a reject-strategy create for the same thread,
+        and assert ConflictError (HTTP 409) — not a leaking IntegrityError
+        (HTTP 500).
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(
+            store=repo,
+            run_ownership_config=RunOwnershipConfig(
+                lease_seconds=30,
+                grace_seconds=10,
+                heartbeat_enabled=False,
+            ),
+        )
+
+        # Pre-insert an active run on thread T directly through the store so
+        # the partial unique index has something to enforce on the second insert.
+        lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.create_run_atomic(
+            "run-A",
+            thread_id="thread-T",
+            owner_worker_id="worker-A",
+            lease_expires_at=lease,
+            multitask_strategy="reject",
+            created_at=datetime.now(UTC).isoformat(),
+        )
+
+        # Second reject-strategy create against the same thread must convert the
+        # underlying IntegrityError into ConflictError via ``_is_unique_violation``.
+        with pytest.raises(ConflictError, match="already has an active run"):
+            await manager.create_or_reject(
+                "thread-T",
+                multitask_strategy="reject",
+            )
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_is_unique_violation_detects_real_sqlite_integrity_error(self, tmp_path):
+        """``_is_unique_violation`` must return True for a real SQLite IntegrityError.
+
+        SQLite raises ``UNIQUE constraint failed: runs.uq_runs_thread_active``
+        which contains "unique" but neither "violat" nor "duplicate" — the
+        previous substring-only heuristic returned False on SQLite, leaking the
+        raw IntegrityError. This test triggers a real violation against the
+        partial unique index and feeds the resulting SQLAlchemy IntegrityError
+        (with the wrapped sqlite3.IntegrityError on ``.orig``) through the
+        detector to assert True.
+        """
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from deerflow.runtime.runs.manager import _is_unique_violation
+
+        repo = await _make_repo(tmp_path)
+
+        # First insert succeeds; second collides on the partial unique index.
+        await repo.put("first", thread_id="thread-T", status="pending")
+        with pytest.raises(IntegrityError) as exc_info:
+            await repo.put("second", thread_id="thread-T", status="pending")
+
+        # The wrapped driver exception must be a sqlite3 IntegrityError carrying
+        # SQLITE_CONSTRAINT_UNIQUE. Walk the chain so we assert on the actual
+        # driver-level signal, not the SQLAlchemy wrapper.
+        driver = exc_info.value.orig
+        assert isinstance(driver, sqlite3.IntegrityError)
+        assert driver.sqlite_errorcode == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+
+        # The detector must return True regardless of message phrasing.
+        assert _is_unique_violation(exc_info.value) is True
+
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_is_unique_violation_does_not_misclassify_application_exception(self):
+        """Message fallbacks must not fire on non-IntegrityError exceptions.
+
+        A ``ValueError`` / ``RuntimeError`` whose ``str()`` happens to
+        contain ``"duplicate key"`` or ``"unique" + "violat"`` substrings
+        must NOT be classified as a unique violation — that would silently
+        mask real application bugs as HTTP 409 conflicts instead of 500.
+        Pre-fix the substring-only fallback fired regardless of exception
+        type. The fix gates the fallback on
+        ``isinstance(current, (SAIntegrityError, sqlite3.IntegrityError))``.
+        """
+        from deerflow.runtime.runs.manager import _is_unique_violation
+
+        assert _is_unique_violation(ValueError("duplicate key in input data: 'email'")) is False
+        assert _is_unique_violation(RuntimeError("unique violat detected in config")) is False
+        assert _is_unique_violation(Exception("unique constraint failed (in a unit test mock)")) is False
+
+    @pytest.mark.anyio
+    async def test_is_unique_violation_detects_psycopg3_sqlstate(self):
+        """psycopg3 exposes the error code via ``sqlstate``, not ``pgcode``.
+
+        On Postgres (the only supported multi-worker backend), psycopg3's
+        ``sqlstate=23505`` must be detected as a unique violation without
+        falling through to the message-substring fallback.
+        """
+        from sqlalchemy.exc import IntegrityError as SAIntegrityError
+
+        from deerflow.runtime.runs.manager import _is_unique_violation
+
+        # Simulate psycopg3's sqlstate attribute on a wrapped IntegrityError
+        dbapi_err = Exception()
+        dbapi_err.sqlstate = "23505"  # psycopg3 uses sqlstate
+
+        sa_err = SAIntegrityError(
+            "duplicate key value violates unique constraint",
+            params=None,
+            orig=dbapi_err,
+        )
+
+        assert _is_unique_violation(sa_err) is True
+
+    @pytest.mark.anyio
+    async def test_create_run_atomic_interrupt_tolerates_tz_naive_lease_on_sqlite(self, tmp_path):
+        """Interrupt path must not raise TypeError comparing naive vs aware datetimes.
+
+        SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` (see
+        the comment in ``RunRepository._row_to_dict``). The interrupt branch
+        of ``create_run_atomic`` compares ``row.lease_expires_at`` against
+        the aware ``cutoff = datetime.now(UTC) - ...`` in Python. Under
+        default config (heartbeat disabled) leases are always NULL so the
+        ``is not None`` check short-circuits, but there is no guard against
+        ``heartbeat_enabled=true`` on SQLite — a naive lease would raise
+        ``TypeError: can't compare offset-naive and offset-aware datetimes``
+        and surface as an opaque 500.
+
+        Pre-fix this test fails with TypeError; post-fix it raises
+        ConflictError (the live other-worker run blocks the interrupt).
+        """
+        from datetime import UTC, datetime, timedelta
+
+        repo = await _make_repo(tmp_path)
+
+        # Seed an active run owned by another worker with a still-valid lease.
+        # The lease value is stored as ISO; SQLite reads it back as a tz-naive
+        # datetime — exactly the shape that triggered the bug.
+        valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.create_run_atomic(
+            "valid-lease-run",
+            thread_id="thread-T",
+            owner_worker_id="other-worker",
+            lease_expires_at=valid_lease,
+            multitask_strategy="reject",
+            created_at=datetime.now(UTC).isoformat(),
+        )
+
+        # The interrupt path must surface a clean ConflictError, not a
+        # TypeError from the naive-vs-aware comparison.
+        with pytest.raises(ConflictError, match="another worker"):
+            await repo.create_run_atomic(
+                "run-new",
+                thread_id="thread-T",
+                owner_worker_id="w1",
+                lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+                multitask_strategy="interrupt",
+                created_at=datetime.now(UTC).isoformat(),
+            )
+
+        await _cleanup()
+
+    # ------------------------------------------------------------------
+    # claim_for_takeover SQL path
+    # ------------------------------------------------------------------
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_succeeds_with_expired_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        expired = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+        await repo.put("run-1", thread_id="t1", status="running", owner_worker_id="w-a", lease_expires_at=expired, created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+        assert ok is True
+
+        row = await repo.get("run-1")
+        assert row["status"] == "error"
+        assert row["error"] == "claimed"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_fails_on_valid_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        valid = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put("run-1", thread_id="t1", status="running", owner_worker_id="w-a", lease_expires_at=valid, created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+        assert ok is False
+
+        row = await repo.get("run-1")
+        assert row["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_succeeds_with_null_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-null", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-null", grace_seconds=10, error="claimed")
+        assert ok is True
+
+        row = await repo.get("run-null")
+        assert row["status"] == "error"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_fails_on_terminal_row(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-done", thread_id="t1", status="success", created_at=datetime.now(UTC).isoformat())
+
+        ok = await repo.claim_for_takeover("run-done", grace_seconds=10, error="claimed")
+        assert ok is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_claim_for_takeover_nonexistent_run(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        ok = await repo.claim_for_takeover("no-such-run", grace_seconds=10, error="claimed")
+        assert ok is False
         await _cleanup()

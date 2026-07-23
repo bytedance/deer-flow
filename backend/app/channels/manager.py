@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -29,6 +30,10 @@ from app.channels.message_bus import (
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+# Import built-in channel run-policy registrars eagerly so direct
+# ChannelManager construction sees the same policy map as gateway bootstrap.
+from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
@@ -67,12 +72,47 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
+# Inbound-redelivery dedup window. ``_recent_inbound_events`` (below) is a
+# process-local, in-memory-only OrderedDict — it is never persisted to
+# ``ChannelStore`` — so a recorded key survives only for this TTL (or until
+# evicted by the entry cap below) and is gone entirely across a Gateway
+# restart. 10 minutes is a deliberately bounded window: long enough to
+# absorb a near-term redelivery of the same event — whether a provider's
+# own automatic retry (where the provider implements one) or an operator
+# explicitly triggering a resend — without keeping a growing in-memory
+# ledger.
+#
+# For GitHub specifically: GitHub does NOT automatically retry or redeliver
+# a failed delivery (non-2xx response, timeout, or connection error) — it
+# is simply recorded as failed. See GitHub's own documentation:
+# https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
+# Every redelivery of the same ``X-GitHub-Delivery`` GUID is therefore an
+# explicit action — the repo/App "Redeliver" button, the REST API, or an
+# operator's own scheduled recovery script polling the failed-deliveries
+# endpoint (the pattern GitHub's own docs recommend) — never an automatic
+# GitHub-side retry. This TTL exists to absorb exactly those explicit
+# near-term replays.
+#
+# At the boundary: a manual redelivery (e.g. GitHub's "Redeliver" button)
+# clicked *after* the TTL has elapsed, or any redelivery following a Gateway
+# restart, is no longer recognized as a duplicate — the key has already been
+# evicted, or never existed in the new process — so the agent runs again
+# and may repeat a real side effect (e.g. a duplicate PR comment on
+# GitHub). This is parity with every other IM channel's dedupe (same
+# mechanism, same TTL), not a channel-specific gap. True idempotency against
+# a late/manual redelivery would require persisting the dedupe key in
+# ``ChannelStore`` instead, which is not implemented here.
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
 INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
 INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
+# Providers that persist connection.workspace_id = chat_id (telegram / feishu /
+# wechat upsert_connection). Unbound inbound has no connection, so msg.workspace_id
+# is unset; chat_id is still the tenant scope and is safe for the dedupe key.
+# Slack is intentionally excluded: its channel ids are not globally unique.
+CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -175,6 +215,14 @@ class _BoundIdentityRejection:
     # channel senders preserve per-connection context without trusting the
     # rejected inbound identity assertion.
     outbound_owner_user_id: str | None = None
+
+
+@dataclass(slots=True)
+class _SerializedThreadRunState:
+    """Per-thread lock state for channels that queue same-thread turns."""
+
+    lock: asyncio.Lock
+    waiters: int = 0
 
 
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
@@ -357,12 +405,17 @@ def _merge_stream_text(existing: str, chunk: str) -> str:
     """Merge either delta text or cumulative text into a single snapshot."""
     if not chunk:
         return existing
-    if not existing or chunk == existing:
-        return chunk or existing
-    if chunk.startswith(existing):
+    if not existing:
         return chunk
-    if existing.endswith(chunk):
-        return existing
+    # Cumulative re-delivery: strictly longer and starts with existing.
+    if len(chunk) > len(existing) and chunk.startswith(existing):
+        return chunk
+    # Everything else is a delta — always append, even when the delta
+    # happens to match the buffer suffix (e.g. 'hel' + 'l') or equals
+    # the buffer (CJK reduplication: '谢' + '谢' = '谢谢'). Channels feed
+    # only delta ('messages-tuple') events to this function; 'values'
+    # snapshots are consumed via a separate branch, so a same-content
+    # delta (chunk == existing) still represents a fresh token to keep.
     return existing + chunk
 
 
@@ -486,10 +539,15 @@ def _unknown_command_reply(command: str | None = None) -> str:
     return f"Unknown command. Available commands: {available}"
 
 
-def _human_input_message(content: str, *, original_content: str | None = None) -> dict[str, Any]:
+def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "human", "content": content}
-    if original_content is not None and original_content != content:
-        message["additional_kwargs"] = {ORIGINAL_USER_CONTENT_KEY: original_content}
+    if original_content is not None and original_content != content or files:
+        additional_kwargs: dict[str, Any] = {}
+        if original_content is not None and original_content != content:
+            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
+        if files:
+            additional_kwargs["files"] = files
+        message["additional_kwargs"] = additional_kwargs
     return message
 
 
@@ -750,33 +808,6 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     return created
 
 
-def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
-    lines = [
-        "<uploaded_files>",
-        "The following files were uploaded in this message:",
-        "",
-    ]
-    if not files:
-        lines.append("(empty)")
-    else:
-        for f in files:
-            filename = f.get("filename", "")
-            size = int(f.get("size") or 0)
-            size_kb = size / 1024 if size else 0
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-            path = f.get("path", "")
-            is_image = bool(f.get("is_image"))
-            file_kind = "image" if is_image else "file"
-            lines.append(f"- {filename} ({size_str})")
-            lines.append(f"  Type: {file_kind}")
-            lines.append(f"  Path: {path}")
-            lines.append("")
-    lines.append("Use `read_file` for text-based files and documents.")
-    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
-    lines.append("</uploaded_files>")
-    return "\n".join(lines)
-
-
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -814,6 +845,9 @@ class ChannelManager:
         # Per-conversation locks so concurrent inbound messages for the same
         # chat don't race to create duplicate threads (see _get_or_create_thread).
         self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        # Per-thread run locks for channels that want in-manager serialization
+        # instead of surfacing the runtime's generic busy reply.
+        self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
@@ -840,6 +874,57 @@ class ChannelManager:
         users_layer = _as_dict(channel_layer.get("users"))
         user_layer = _as_dict(users_layer.get(msg.user_id))
         return channel_layer, user_layer
+
+    def _begin_serialized_thread_run(
+        self,
+        *,
+        channel_name: str,
+        thread_id: str,
+    ) -> tuple[_SerializedThreadRunState | None, bool]:
+        policy = CHANNEL_RUN_POLICY.get(channel_name)
+        if policy is None or not policy.serialize_thread_runs:
+            return None, False
+
+        key = (channel_name, thread_id)
+        state = self._serialized_thread_runs.get(key)
+        if state is None:
+            state = _SerializedThreadRunState(lock=asyncio.Lock())
+            self._serialized_thread_runs[key] = state
+        queued = state.lock.locked()
+        state.waiters += 1
+        return state, queued
+
+    def _finish_serialized_thread_run(
+        self,
+        *,
+        channel_name: str,
+        thread_id: str,
+        state: _SerializedThreadRunState | None,
+        lock_acquired: bool,
+    ) -> None:
+        if state is None:
+            return
+
+        if lock_acquired:
+            state.lock.release()
+        state.waiters -= 1
+        if state.waiters == 0 and not state.lock.locked():
+            self._serialized_thread_runs.pop((channel_name, thread_id), None)
+
+    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=text,
+                is_final=False,
+                thread_ts=msg.thread_ts,
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                metadata=_response_metadata(msg.metadata),
+            )
+        )
 
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
@@ -990,7 +1075,11 @@ class ChannelManager:
         if not isinstance(agent_name, str) or not agent_name.strip():
             return None
 
-        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name))
+        # Read the agent config from the same owner bucket the run uses:
+        # ``run_context["user_id"]`` is the resolved owner (``_channel_storage_user_id``),
+        # but without it ``load_agent_config`` falls back to the dispatch loop's unset
+        # contextvar (``"default"``), reading the wrong user's per-user custom agent.
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name), user_id=run_context.get("user_id"))
         if agent_config and agent_config.skills is not None:
             return set(agent_config.skills)
         return None
@@ -1094,7 +1183,15 @@ class ChannelManager:
         # Fail closed: without a workspace/team/guild identifier we cannot tell two
         # workspaces apart (e.g. Slack channel ids are not globally unique), so
         # skip dedupe rather than risk collapsing distinct workspaces' messages.
-        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        # Both fallbacks are appended last and gated on every earlier source being
+        # absent, so they can only turn "no key" into a key — never change one.
+        # A conversation_id not reused across a provider's own redelivery would
+        # degrade to today's no-dedupe behaviour, never collapse two conversations
+        # (chat_id and message_id stay in the tuple). conversation_id covers
+        # DingTalk (group + P2P); chat-scoped providers fall back to chat_id.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or metadata.get("conversation_id")
+        if not workspace_id and msg.channel_name in CHAT_SCOPED_WORKSPACE_CHANNELS:
+            workspace_id = msg.chat_id or None
         if not workspace_id:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
@@ -1439,6 +1536,50 @@ class ChannelManager:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
 
+        serial_state, queued = self._begin_serialized_thread_run(
+            channel_name=msg.channel_name,
+            thread_id=thread_id,
+        )
+        serial_lock_acquired = False
+        try:
+            if queued:
+                await self._publish_progress_update(
+                    msg,
+                    thread_id,
+                    "Queued behind another request in this conversation. I’ll start working on this as soon as it finishes.",
+                )
+            if serial_state is not None:
+                await serial_state.lock.acquire()
+                serial_lock_acquired = True
+            if queued:
+                await self._publish_progress_update(msg, thread_id, "thinking...")
+            await self._handle_chat_on_thread(
+                client,
+                msg,
+                thread_id,
+                extra_context=extra_context,
+                storage_user_id=storage_user_id,
+            )
+        finally:
+            self._finish_serialized_thread_run(
+                channel_name=msg.channel_name,
+                thread_id=thread_id,
+                state=serial_state,
+                lock_acquired=serial_lock_acquired,
+            )
+
+    async def _handle_chat_on_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        thread_id: str,
+        *,
+        extra_context: dict[str, Any] | None = None,
+        storage_user_id: str | None = None,
+    ) -> None:
+        if storage_user_id is None:
+            storage_user_id = _channel_storage_user_id(msg)
+
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
 
         # Apply per-channel policy: credentials provider (e.g. GitHub
@@ -1464,9 +1605,7 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        if uploaded:
-            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
-        human_message = _human_input_message(msg.text, original_content=original_text)
+        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -1512,6 +1651,10 @@ class ChannelManager:
             except Exception as exc:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    # Swallowed like the generic handler would not be: release the
+                    # key so the provider's redelivery can retry once the thread
+                    # frees, instead of being dropped for the dedupe TTL.
+                    self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 raise
@@ -1527,6 +1670,9 @@ class ChannelManager:
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                # Same reason as the fire-and-forget branch above: this error is
+                # handled here rather than re-raised, so release explicitly.
+                self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -1698,6 +1844,12 @@ class ChannelManager:
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
+            if stream_error is not None:
+                # This path swallows its own errors, so _handle_message's generic
+                # handler never runs and never releases the key. Release only
+                # after publishing the final outbound so a provider redelivery
+                # cannot overtake this attempt's terminal reply.
+                self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 

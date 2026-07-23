@@ -8,10 +8,12 @@ import {
   GraduationCapIcon,
   LightbulbIcon,
   Loader2Icon,
+  MicIcon,
   PaperclipIcon,
   PlusIcon,
   RocketIcon,
   SparklesIcon,
+  SquareIcon,
   TargetIcon,
   Undo2Icon,
   XIcon,
@@ -21,9 +23,11 @@ import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ComponentProps,
   type ClipboardEvent,
   type FormEvent,
@@ -65,6 +69,7 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { fetch } from "@/core/api/fetcher";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
@@ -79,6 +84,15 @@ import { useSkills } from "@/core/skills/hooks";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
+import {
+  buildComposerDraftKey,
+  clearComposerDraft,
+  getSessionComposerDraftStorage,
+  readComposerDraft,
+  resolveComposerDraft,
+  type ComposerDraft,
+  writeComposerDraft,
+} from "@/core/threads/composer-draft";
 import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -89,6 +103,16 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import {
+  appendSpeechTranscript,
+  getSpeechRecognitionConstructor,
+  getSpeechRecognitionLanguage,
+  mapSpeechRecognitionError,
+  readSpeechRecognitionTranscript,
+  shouldRestartSpeechRecognition,
+  type BrowserSpeechRecognition,
+  type SpeechRecognitionErrorKind,
+} from "@/core/voice-input/speech-recognition";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -116,12 +140,15 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
   type SlashSuggestion,
 } from "./input-box-helpers";
@@ -132,6 +159,8 @@ import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
 type InputMode = "flash" | "thinking" | "pro" | "ultra";
+
+const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
 
 function focusContentEditableEnd(element: HTMLElement | null) {
   if (!element) {
@@ -200,6 +229,10 @@ export type InputBoxSubmitOptions = {
   onSent?: () => void;
 };
 
+type VoiceRecognitionStartOptions = {
+  focusAfterStart?: boolean;
+};
+
 function buildHiddenConversationQuoteMessage({
   contexts,
 }: {
@@ -257,6 +290,9 @@ export function InputBox({
   extraHeader,
   isWelcomeMode,
   threadId,
+  draftThreadId = threadId,
+  draftAgentName,
+  defaultModelName,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -283,6 +319,15 @@ export function InputBox({
    */
   isWelcomeMode?: boolean;
   threadId: string;
+  draftThreadId?: string;
+  draftAgentName?: string | null;
+  /**
+   * The active custom agent's configured default model, if any. Used as the
+   * auto-selection fallback so an agent chat honors the agent's own default
+   * model instead of silently snapping to the first configured model
+   * (issue #4336). ``null`` / undefined = no agent default → use models[0].
+   */
+  defaultModelName?: string | null;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -306,12 +351,14 @@ export function InputBox({
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
+  const { user } = useAuth();
   const { thread, isMock } = useThread();
   const { attachments, textInput } = usePromptInputController();
+  const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
   const attachmentParts = attachments.files;
   const removeAttachment = attachments.remove;
-  const { skills } = useSkills();
+  const { skills, isLoading: skillsLoading } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -326,8 +373,26 @@ export function InputBox({
     controller: null,
     sequence: 0,
   });
+  const voiceRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const voiceBaseTextRef = useRef("");
+  const voiceLatestTextRef = useRef("");
+  const voiceLastErrorKindRef = useRef<SpeechRecognitionErrorKind | null>(null);
+  const voiceStopRequestedRef = useRef(false);
+  const voiceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const startVoiceRecognitionRef = useRef<
+    ((options?: VoiceRecognitionStartOptions) => boolean) | null
+  >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
+  const pendingDraftSubmissionKeyRef = useRef<string | null>(null);
+  const latestDraftRef = useRef<{
+    key: string;
+    draft: { text: string; skillName: string | null };
+  } | null>(null);
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const draftSaveGenerationRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -336,6 +401,7 @@ export function InputBox({
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [polishingInput, setPolishingInput] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
   const [inputPolishUndo, setInputPolishUndo] = useState<{
     originalText: string;
     rewrittenText: string;
@@ -344,11 +410,64 @@ export function InputBox({
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [selectedSlashSkill, setSelectedSlashSkill] =
     useState<SlashSuggestion | null>(null);
+  const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
   const messagesRef = useRef(thread.messages);
+
+  const clearVoiceRestartTimer = useCallback(() => {
+    if (voiceRestartTimerRef.current === null) {
+      return;
+    }
+    clearTimeout(voiceRestartTimerRef.current);
+    voiceRestartTimerRef.current = null;
+  }, []);
+
+  const cleanupVoiceRecognition = useCallback(
+    (
+      recognition: BrowserSpeechRecognition | null,
+      options: { keepListening?: boolean } = {},
+    ) => {
+      clearVoiceRestartTimer();
+      if (!recognition) {
+        if (!options.keepListening) {
+          voiceLastErrorKindRef.current = null;
+          voiceStopRequestedRef.current = false;
+          setVoiceListening(false);
+        }
+        return;
+      }
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      if (voiceRecognitionRef.current === recognition) {
+        voiceRecognitionRef.current = null;
+      }
+      if (!options.keepListening) {
+        voiceLastErrorKindRef.current = null;
+        voiceStopRequestedRef.current = false;
+        setVoiceListening(false);
+      }
+    },
+    [clearVoiceRestartTimer],
+  );
+
+  const abortVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    cleanupVoiceRecognition(recognition);
+    try {
+      recognition.abort();
+    } catch {
+      // Browser implementations can throw when the recognizer already ended.
+    }
+  }, [cleanupVoiceRecognition]);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -435,7 +554,13 @@ export function InputBox({
       return;
     }
     const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    // Prefer the active agent's configured default model over models[0] as the
+    // auto-selection fallback, so an agent chat respects the agent's own
+    // default instead of snapping to the first model (issue #4336).
+    const agentDefaultModel = defaultModelName
+      ? models.find((m) => m.name === defaultModelName)
+      : undefined;
+    const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
@@ -449,7 +574,7 @@ export function InputBox({
       model_name: nextModelName,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
+  }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -468,6 +593,83 @@ export function InputBox({
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
     [selectedModel],
+  );
+
+  const draftKey = useMemo(
+    () =>
+      buildComposerDraftKey({
+        userId: user?.id ?? "anonymous",
+        agentName:
+          draftAgentName ??
+          (typeof context.agent_name === "string" ? context.agent_name : null),
+        threadId: draftThreadId,
+      }),
+    [context.agent_name, draftAgentName, draftThreadId, user?.id],
+  );
+  const enabledSkillNames = useMemo(
+    () =>
+      new Set(
+        skills.filter((skill) => skill.enabled).map((skill) => skill.name),
+      ),
+    [skills],
+  );
+  const cancelDraftSaveTimer = useCallback(() => {
+    if (draftSaveTimerRef.current === null) {
+      return;
+    }
+    window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = null;
+  }, []);
+  const invalidateDraftSaveTimer = useCallback(() => {
+    draftSaveGenerationRef.current += 1;
+    cancelDraftSaveTimer();
+  }, [cancelDraftSaveTimer]);
+  const scheduleDraftSave = useCallback(
+    (draft: ComposerDraft, key = draftKey) => {
+      if (
+        !draft.text &&
+        !draft.skillName &&
+        pendingDraftSubmissionKeyRef.current === key
+      ) {
+        return null;
+      }
+      if (draft.text || draft.skillName) {
+        pendingDraftSubmissionKeyRef.current = null;
+      }
+
+      latestDraftRef.current = { key, draft };
+      cancelDraftSaveTimer();
+      draftSaveGenerationRef.current += 1;
+      const generation = draftSaveGenerationRef.current;
+      const timer = window.setTimeout(() => {
+        if (
+          draftSaveGenerationRef.current !== generation ||
+          draftSaveTimerRef.current !== timer
+        ) {
+          return;
+        }
+        draftSaveTimerRef.current = null;
+        writeComposerDraft(getSessionComposerDraftStorage(), key, draft);
+      }, COMPOSER_DRAFT_SAVE_DELAY_MS);
+      draftSaveTimerRef.current = timer;
+      return timer;
+    },
+    [cancelDraftSaveTimer, draftKey],
+  );
+  const flushLatestDraft = useCallback(
+    (expectedKey?: string) => {
+      const latest = latestDraftRef.current;
+      if (!latest || (expectedKey && latest.key !== expectedKey)) {
+        return;
+      }
+      cancelDraftSaveTimer();
+      writeComposerDraft(
+        getSessionComposerDraftStorage(),
+        latest.key,
+        latest.draft,
+      );
+    },
+    [cancelDraftSaveTimer],
   );
 
   const promptHistory = useMemo(() => {
@@ -495,12 +697,97 @@ export function InputBox({
     return history;
   }, [thread.messages]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
+    setTextInput("");
     setSelectedSlashSkill(null);
     setInputPolishUndo(null);
-  }, [threadId]);
+    setHydratedDraftKey(null);
+    pendingDraftSubmissionKeyRef.current = null;
+    latestDraftRef.current = null;
+    invalidateDraftSaveTimer();
+    return () => flushLatestDraft(draftKey);
+  }, [draftKey, flushLatestDraft, invalidateDraftSaveTimer, setTextInput]);
+
+  useLayoutEffect(() => {
+    const handlePageHide = () => flushLatestDraft();
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [flushLatestDraft]);
+
+  useEffect(() => {
+    if (skillsLoading || hydratedDraftKey === draftKey) {
+      return;
+    }
+
+    const savedDraft = readComposerDraft(
+      getSessionComposerDraftStorage(),
+      draftKey,
+    );
+    if (!savedDraft) {
+      if (!textInput.value && initialValue) {
+        setTextInput(initialValue);
+      }
+      setHydratedDraftKey(draftKey);
+      return;
+    }
+
+    const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
+    setTextInput(resolvedDraft.text);
+    const restoredSkill = resolvedDraft.skillName
+      ? skills.find(
+          (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
+        )
+      : undefined;
+    setSelectedSlashSkill(
+      restoredSkill
+        ? {
+            name: restoredSkill.name,
+            description: restoredSkill.description,
+            kind: "skill",
+          }
+        : null,
+    );
+    setHydratedDraftKey(draftKey);
+  }, [
+    draftKey,
+    enabledSkillNames,
+    hydratedDraftKey,
+    initialValue,
+    setTextInput,
+    skills,
+    skillsLoading,
+    textInput.value,
+  ]);
+
+  useEffect(() => {
+    if (hydratedDraftKey !== draftKey) {
+      return;
+    }
+
+    const draft: ComposerDraft = {
+      text: textInput.value ?? "",
+      skillName:
+        selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+    };
+    const timer = scheduleDraftSave(draft, draftKey);
+    return () => {
+      if (timer === null) {
+        return;
+      }
+      window.clearTimeout(timer);
+      if (draftSaveTimerRef.current === timer) {
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    draftKey,
+    hydratedDraftKey,
+    scheduleDraftSave,
+    selectedSlashSkill,
+    textInput.value,
+  ]);
 
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
@@ -795,22 +1082,30 @@ export function InputBox({
       const quotes = sidecar?.conversationQuotes ?? [];
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
-      const submitOptions: InputBoxSubmitOptions | undefined = quotes.length
-        ? {
-            additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
-            additionalInputMessages: [
-              buildHiddenConversationQuoteMessage({
-                contexts: quoteContexts,
-              }),
-            ],
-            // Clear quotes only once the send genuinely proceeds. If the send
-            // is dropped by the in-flight guard, `onSent` never fires and the
-            // quotes stay attached so they aren't silently lost.
-            onSent: () => {
-              sidecar?.clearConversationQuotes(quoteIds);
-            },
+      pendingDraftSubmissionKeyRef.current = draftKey;
+      const submitOptions: InputBoxSubmitOptions = {
+        ...(quotes.length
+          ? {
+              additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
+              additionalInputMessages: [
+                buildHiddenConversationQuoteMessage({
+                  contexts: quoteContexts,
+                }),
+              ],
+            }
+          : {}),
+        // Clear one-time state only once the send genuinely proceeds. If the
+        // send is dropped by the in-flight guard, `onSent` never fires.
+        onSent: () => {
+          if (pendingDraftSubmissionKeyRef.current === draftKey) {
+            pendingDraftSubmissionKeyRef.current = null;
+            latestDraftRef.current = null;
+            invalidateDraftSaveTimer();
+            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
           }
-        : undefined;
+          sidecar?.clearConversationQuotes(quoteIds);
+        },
+      };
       const submit = () => onSubmit?.(message, submitOptions);
 
       // Guard against submitting before the initial model auto-selection
@@ -835,6 +1130,8 @@ export function InputBox({
     },
     [
       context,
+      draftKey,
+      invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
       reportUploadLimitViolations,
@@ -852,6 +1149,7 @@ export function InputBox({
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
+      abortVoiceInput();
       const messageWithSlashSkill = selectedSlashSkill
         ? {
             ...message,
@@ -864,6 +1162,19 @@ export function InputBox({
         status,
       });
       if (submitAction.kind === "goal") {
+        if (
+          submitAction.command.kind === "set" &&
+          isGoalObjectiveTooLong(submitAction.command.objective)
+        ) {
+          toast.error(
+            t.inputBox.goalTooLong.replace("{max}", () =>
+              String(MAX_GOAL_OBJECTIVE_CHARS),
+            ),
+          );
+          // Reject so the composer keeps the user's text for editing instead of
+          // clearing it (PromptInput only preserves input on a rejected submit).
+          return Promise.reject(new Error("goal-too-long"));
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -896,12 +1207,14 @@ export function InputBox({
       }
     },
     [
+      abortVoiceInput,
       handleCompactCommand,
       handleGoalCommand,
       onStop,
       selectedSlashSkill,
       status,
       submitThreadMessage,
+      t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
     ],
   );
@@ -961,6 +1274,10 @@ export function InputBox({
     () => getLeadingSlashSkillQuery(textInput.value ?? ""),
     [textInput.value],
   );
+  const goalObjectiveCounter = useMemo(
+    () => getGoalObjectiveCounter(textInput.value ?? ""),
+    [textInput.value],
+  );
   const skillSuggestions = useMemo(
     () =>
       slashSkillQuery === null
@@ -1003,6 +1320,193 @@ export function InputBox({
       (status === "streaming" ||
         slashSkillQuery !== null ||
         !canPolishInput(textInput.value ?? "")));
+  const speechRecognitionConstructor = useMemo(
+    () =>
+      typeof window === "undefined"
+        ? null
+        : getSpeechRecognitionConstructor(window),
+    [],
+  );
+  const voiceInputSupported = speechRecognitionConstructor !== null;
+
+  const getVoiceInputErrorMessage = useCallback(
+    (kind: SpeechRecognitionErrorKind) => {
+      switch (kind) {
+        case "permission_denied":
+          return t.inputBox.voiceInputPermissionDenied;
+        case "microphone_unavailable":
+          return t.inputBox.voiceInputMicrophoneUnavailable;
+        case "unsupported_language":
+          return t.inputBox.voiceInputUnsupportedLanguage;
+        case "network":
+          return t.inputBox.voiceInputNetworkError;
+        case "no_speech":
+          return t.inputBox.voiceInputNoSpeech;
+        case "cancelled":
+          return null;
+        default:
+          return t.inputBox.voiceInputFailed;
+      }
+    },
+    [t],
+  );
+
+  const startVoiceRecognition = useCallback(
+    (options: VoiceRecognitionStartOptions = {}) => {
+      if (composerLocked || !speechRecognitionConstructor) {
+        return false;
+      }
+
+      const recognition = new speechRecognitionConstructor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = getSpeechRecognitionLanguage(locale);
+      recognition.maxAlternatives = 1;
+      voiceLastErrorKindRef.current = null;
+      voiceLatestTextRef.current = voiceBaseTextRef.current;
+      voiceRecognitionRef.current = recognition;
+
+      recognition.onresult = (event) => {
+        if (voiceRecognitionRef.current !== recognition) {
+          return;
+        }
+        const transcript = readSpeechRecognitionTranscript(event.results).text;
+        const nextValue = appendSpeechTranscript(
+          voiceBaseTextRef.current,
+          transcript,
+        );
+        voiceLatestTextRef.current = nextValue;
+        textInput.setInput(nextValue);
+      };
+      recognition.onerror = (event) => {
+        const errorKind = mapSpeechRecognitionError(event.error);
+        voiceLastErrorKindRef.current = errorKind;
+        if (
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(errorKind)
+        ) {
+          return;
+        }
+
+        const message = getVoiceInputErrorMessage(errorKind);
+        if (message) {
+          toast.error(message);
+        }
+      };
+      recognition.onend = () => {
+        const shouldRestart =
+          voiceRecognitionRef.current === recognition &&
+          !voiceStopRequestedRef.current &&
+          shouldRestartSpeechRecognition(voiceLastErrorKindRef.current);
+        if (shouldRestart) {
+          voiceBaseTextRef.current = voiceLatestTextRef.current;
+          cleanupVoiceRecognition(recognition, { keepListening: true });
+          voiceRestartTimerRef.current = setTimeout(() => {
+            voiceRestartTimerRef.current = null;
+            if (voiceStopRequestedRef.current) {
+              cleanupVoiceRecognition(null);
+              return;
+            }
+            const restarted = startVoiceRecognitionRef.current?.() ?? false;
+            if (!restarted) {
+              cleanupVoiceRecognition(null);
+            }
+          }, 150);
+          return;
+        }
+        cleanupVoiceRecognition(recognition);
+      };
+
+      setVoiceListening(true);
+      try {
+        recognition.start();
+        if (options.focusAfterStart) {
+          requestAnimationFrame(() => {
+            if (selectedSlashSkill) {
+              focusContentEditableEnd(inlineSkillTextRef.current);
+            } else {
+              textareaRef.current?.focus();
+            }
+          });
+        }
+        return true;
+      } catch {
+        cleanupVoiceRecognition(recognition);
+        toast.error(t.inputBox.voiceInputFailed);
+        return false;
+      }
+    },
+    [
+      cleanupVoiceRecognition,
+      composerLocked,
+      getVoiceInputErrorMessage,
+      locale,
+      selectedSlashSkill,
+      speechRecognitionConstructor,
+      t.inputBox.voiceInputFailed,
+      textInput,
+    ],
+  );
+
+  useEffect(() => {
+    startVoiceRecognitionRef.current = startVoiceRecognition;
+  }, [startVoiceRecognition]);
+
+  const stopVoiceInput = useCallback(() => {
+    const recognition = voiceRecognitionRef.current;
+    voiceStopRequestedRef.current = true;
+    if (!recognition) {
+      cleanupVoiceRecognition(null);
+      return;
+    }
+    try {
+      recognition.stop();
+    } catch {
+      cleanupVoiceRecognition(recognition);
+    }
+  }, [cleanupVoiceRecognition]);
+
+  const toggleVoiceInput = useCallback(() => {
+    if (voiceListening) {
+      stopVoiceInput();
+      return;
+    }
+    if (composerLocked) {
+      return;
+    }
+    if (!speechRecognitionConstructor) {
+      toast.error(t.inputBox.voiceInputUnsupported);
+      return;
+    }
+
+    abortInputPolishRequest();
+    setInputPolishUndo(null);
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    voiceStopRequestedRef.current = false;
+    voiceBaseTextRef.current = textInput.value ?? "";
+    voiceLatestTextRef.current = voiceBaseTextRef.current;
+    startVoiceRecognition({ focusAfterStart: true });
+  }, [
+    abortInputPolishRequest,
+    composerLocked,
+    speechRecognitionConstructor,
+    startVoiceRecognition,
+    stopVoiceInput,
+    t.inputBox.voiceInputUnsupported,
+    textInput,
+    voiceListening,
+  ]);
+
+  useEffect(() => {
+    if (composerLocked && voiceListening) {
+      stopVoiceInput();
+    }
+  }, [composerLocked, stopVoiceInput, voiceListening]);
+
+  useEffect(() => {
+    return () => abortVoiceInput();
+  }, [abortVoiceInput, threadId]);
 
   useEffect(() => {
     setSkillSuggestionIndex(0);
@@ -1281,20 +1785,52 @@ export function InputBox({
     ],
   );
 
-  const handlePromptTextareaChange = useCallback(() => {
-    abortInputPolishRequest();
-    setInputPolishUndo(null);
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-  }, [abortInputPolishRequest]);
+  const handlePromptTextareaChange = useCallback(
+    (event: ChangeEvent<HTMLTextAreaElement>) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
+      abortInputPolishRequest();
+      setInputPolishUndo(null);
+      promptHistoryIndexRef.current = null;
+      promptHistoryDraftRef.current = "";
+      scheduleDraftSave({
+        text: event.currentTarget.value,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
+    },
+    [
+      abortInputPolishRequest,
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      voiceListening,
+    ],
+  );
 
   const updateInlineSkillTextInput = useCallback(
     (element: HTMLElement) => {
+      if (voiceListening) {
+        abortVoiceInput();
+      }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
-      textInput.setInput(element.textContent ?? "");
+      const nextText = element.textContent ?? "";
+      textInput.setInput(nextText);
+      scheduleDraftSave({
+        text: nextText,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      });
     },
-    [textInput],
+    [
+      abortVoiceInput,
+      scheduleDraftSave,
+      selectedSlashSkill,
+      textInput,
+      voiceListening,
+    ],
   );
 
   useEffect(() => {
@@ -1731,6 +2267,12 @@ export function InputBox({
               disabled={composerLocked}
               uploadLimits={uploadLimits}
             />
+            <VoiceInputButton
+              disabled={composerLocked}
+              listening={voiceListening}
+              supported={voiceInputSupported}
+              onToggle={toggleVoiceInput}
+            />
             <Tooltip
               content={
                 polishingInput
@@ -1950,7 +2492,8 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortMinimal}
                     {context.reasoning_effort === "low" &&
                       " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
+                    {(context.reasoning_effort === "medium" ||
+                      !context.reasoning_effort) &&
                       " " + t.inputBox.reasoningEffortMedium}
                     {context.reasoning_effort === "high" &&
                       " " + t.inputBox.reasoningEffortHigh}
@@ -2059,6 +2602,24 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
+            {goalObjectiveCounter && (
+              <span
+                aria-label={t.inputBox.goalLengthCounter
+                  .replace("{length}", () =>
+                    String(goalObjectiveCounter.length),
+                  )
+                  .replace("{max}", () => String(goalObjectiveCounter.max))}
+                className={cn(
+                  "shrink-0 text-xs tabular-nums",
+                  goalObjectiveCounter.overLimit
+                    ? "text-destructive font-medium"
+                    : "text-muted-foreground",
+                )}
+                data-testid="goal-length-counter"
+              >
+                {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
+              </span>
+            )}
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
@@ -2128,6 +2689,15 @@ export function InputBox({
           </div>
         )}
 
+      <p
+        className={cn(
+          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
+          !isWelcomeMode && "absolute top-full right-0 left-0",
+        )}
+      >
+        {t.inputBox.disclaimer}
+      </p>
+
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
@@ -2150,6 +2720,50 @@ export function InputBox({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function VoiceInputButton({
+  disabled,
+  listening,
+  supported,
+  onToggle,
+}: {
+  disabled?: boolean;
+  listening: boolean;
+  supported: boolean;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  const tooltipContent = !supported
+    ? t.inputBox.voiceInputUnsupported
+    : listening
+      ? t.inputBox.voiceInputListening
+      : t.inputBox.voiceInputStart;
+  const label = listening
+    ? t.inputBox.voiceInputStopLabel
+    : t.inputBox.voiceInputStartLabel;
+
+  return (
+    <Tooltip content={<span className="block max-w-72">{tooltipContent}</span>}>
+      <PromptInputButton
+        aria-label={label}
+        aria-pressed={listening}
+        className={cn(
+          "px-2!",
+          listening && "text-primary bg-primary/10 hover:bg-primary/15",
+        )}
+        data-testid="voice-input-button"
+        disabled={(disabled ?? false) || !supported}
+        onClick={onToggle}
+      >
+        {listening ? (
+          <SquareIcon className="size-3 fill-current" />
+        ) : (
+          <MicIcon className="size-3" />
+        )}
+      </PromptInputButton>
+    </Tooltip>
   );
 }
 

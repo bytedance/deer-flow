@@ -53,6 +53,21 @@ export const enUS: Translations = {
     regenerate: "Regenerate",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
+    browser: "Browser",
+    showBrowser: "Open browser panel",
+  },
+
+  runDuration: {
+    reasoning: "Reasoning",
+    working: "Working…",
+    completedIn: (duration) => `Completed in ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
   },
 
   // Home
@@ -107,12 +122,14 @@ export const enUS: Translations = {
     largeUnavailable: "Large file. Diff omitted.",
     sensitiveUnavailable: "Sensitive path. Content hidden.",
     truncatedUnavailable: "Diff omitted because the change set is too large.",
+    symlinkUnavailable: "Symlink change. Diff unavailable.",
     truncatedSummary: "Some changes were truncated.",
   },
 
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
+    disclaimer: "Deerflow is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
@@ -122,6 +139,24 @@ export const enUS: Translations = {
     inputPolishFailed: "Failed to polish input.",
     inputPolishUndo: "Undo polish",
     inputPolishCancel: "Cancel polishing",
+    voiceInputStartLabel: "Dictate with voice",
+    voiceInputStopLabel: "Stop voice input",
+    voiceInputStart:
+      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+    voiceInputStop: "Stop voice input",
+    voiceInputListening: "Listening... Click to stop voice input.",
+    voiceInputUnsupported:
+      "Voice input is not supported in this browser. Try Chrome or Edge.",
+    voiceInputPermissionDenied:
+      "Microphone access was denied. Allow microphone access and try again.",
+    voiceInputMicrophoneUnavailable:
+      "No microphone was detected. Check your device input and try again.",
+    voiceInputUnsupportedLanguage:
+      "Voice input does not support the current language in this browser.",
+    voiceInputNetworkError:
+      "Voice input could not reach the browser speech service.",
+    voiceInputNoSpeech: "No speech was detected. Please try again.",
+    voiceInputFailed: "Voice input failed. Please try again.",
     mode: "Mode",
     flashMode: "Flash",
     flashModeDescription: "Fast and efficient, but may not be accurate",
@@ -168,6 +203,8 @@ export const enUS: Translations = {
     goalNone: "No active goal.",
     goalActive: "Active goal: {goal}",
     goalFailed: "Goal command failed.",
+    goalTooLong: "Goal is too long. Keep it under {max} characters.",
+    goalLengthCounter: "Goal length: {length}/{max} characters",
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -421,6 +458,25 @@ export const enUS: Translations = {
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
     backToGallery: "Back to Gallery",
+    settings: "Model settings",
+    settingsTitle: "Model settings",
+    settingsDescription:
+      "Choose the default model and generation parameters for this agent. Changes take effect on the next message.",
+    settingsModel: "Default model",
+    settingsModelDefault: "Use global default",
+    settingsTemperature: "Temperature",
+    settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
+    settingsMaxTokens: "Max output tokens",
+    settingsMaxTokensPlaceholder: "Inherit from model",
+    settingsThinking: "Thinking mode",
+    settingsThinkingOn: "On",
+    settingsThinkingOff: "Off",
+    settingsReasoningEffort: "Reasoning effort",
+    settingsInherit: "Inherit",
+    settingsSaved: "Model settings saved",
+    settingsInvalidTemperature: "Temperature must be between 0 and 2",
+    settingsInvalidMaxTokens:
+      "Max output tokens must be a positive integer up to 200,000",
   },
 
   // Breadcrumb
@@ -548,6 +604,15 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     skillInstallTooltip: "Install skill and make it available to DeerFlow",
+    browserNavigate: (url: string) => `Open ${url} in browser`,
+    browserNavigateGeneric: "Open page in browser",
+    browserClick: "Click element in browser",
+    browserType: "Type into browser field",
+    browserSnapshot: "Read page in browser",
+    browserGetText: "Read page text in browser",
+    browserBack: "Go back in browser",
+    browserScreenshot: "Capture browser screenshot",
+    browserClose: "Close browser",
   },
 
   humanInput: {
@@ -595,6 +660,7 @@ export const enUS: Translations = {
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
+    collecting: "Collecting tokens",
     note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
     presets: {
       off: "Off",
@@ -809,6 +875,9 @@ export const enUS: Translations = {
     emailPlaceholder: "you@example.com",
     password: "Password",
     passwordPlaceholder: "•••••••",
+    rememberMe: "Keep me signed in",
+    rememberMeDescription:
+      "Keep this browser session when possible. DeerFlow stores only your email, never your password.",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",

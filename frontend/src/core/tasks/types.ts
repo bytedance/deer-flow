@@ -1,5 +1,7 @@
 import type { AIMessage } from "@langchain/langgraph-sdk";
 
+import type { TokenUsage } from "../messages/usage";
+
 import type { SubtaskStep } from "./steps";
 
 export interface Subtask {
@@ -7,6 +9,10 @@ export interface Subtask {
   status: "in_progress" | "completed" | "failed";
   subagent_type: string;
   description: string;
+  /** Effective DeerFlow model selected for this subagent run. */
+  modelName?: string;
+  /** Latest cumulative token snapshot reported while the subagent runs. */
+  usage?: TokenUsage;
   latestMessage?: AIMessage;
   /**
    * Full ordered step history (assistant turns + tool outputs) of the subagent.

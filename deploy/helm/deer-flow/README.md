@@ -11,7 +11,7 @@ Kubernetes resources. No existing repo files are modified.
 ## Prerequisites
 
 - A Kubernetes cluster (Docker Desktop K8s, OrbStack, kind, k3d, or a real cluster).
-- `kubectl` + `helm` 3 installed.
+- `kubectl` + `helm` 3.8+ installed (OCI registry support stabilized in 3.8; earlier 3.x needs `HELM_EXPERIMENTAL_OCI=1`).
 - The three DeerFlow images — either the published ones (see "Install the
   published chart" below) or built locally (see step 1).
 - An Ingress controller (e.g. ingress-nginx) if you enable `ingress`.
@@ -23,7 +23,7 @@ The chart and all three images are published to GHCR on every `v*` release tag
 and install directly:
 
 ```bash
-helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
+helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
   --version <version> \
   -n deer-flow --create-namespace \
   -f my-values.yaml
@@ -31,7 +31,14 @@ helm install deer-flow oci://ghcr.io/<owner>/deer-flow \
 
 where `<owner>` is the GitHub owner the chart is published from and `<version>`
 matches the release tag without the leading `v` (tag `v0.1.0` → `--version
-0.1.0`). Point the chart at the published images:
+0.1.0`).
+
+> **Note:** the helm chart is new in 2.1.0 - no chart was published before it.
+> It publishes to `oci://ghcr.io/<owner>/charts/deer-flow` (the `charts/` prefix
+> keeps it distinct from the `deer-flow-{backend,frontend,provisioner}` image
+> packages).
+
+Point the chart at the published images:
 
 ```yaml
 image:
@@ -58,11 +65,25 @@ Skip this section if you're using the published chart above. To build the
 images yourself from the existing Dockerfiles:
 
 ```bash
-REGISTRY=ghcr.io/yourorg TAG=latest ./deploy/helm/deer-flow/scripts/build-and-push.sh
+REGISTRY=ghcr.io/yourorg
+TAG=latest
+
+# backend - build with the `postgres` extra so multi-replica deploys can use
+# shared Postgres (matches the published image)
+docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres -f backend/Dockerfile .
+# frontend
+docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
+# provisioner
+docker build -t $REGISTRY/deer-flow-provisioner:$TAG -f docker/provisioner/Dockerfile docker/provisioner
+
+docker push $REGISTRY/deer-flow-backend:$TAG
+docker push $REGISTRY/deer-flow-frontend:$TAG
+docker push $REGISTRY/deer-flow-provisioner:$TAG
 ```
 
-This produces `$REGISTRY/deer-flow-backend`, `$REGISTRY/deer-flow-frontend`,
-`$REGISTRY/deer-flow-provisioner`. The chart's image-name defaults match these.
+These names match the chart's `gatewayImage` / `frontendImage` /
+`provisionerImage` defaults, so only `image.registry` and `image.tag` need to
+point at them.
 
 If your registry needs auth, create a pull secret:
 
@@ -103,7 +124,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 20
+  config_version: 29
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -116,6 +137,8 @@ config: |
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
+    pool_recycle: 300
+    command_timeout: 30
   checkpointer:
     type: postgres
     connection_string: $DATABASE_URL
@@ -206,6 +229,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
       username: deerflow
       password: changeme
   ```
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
 - **Gateway replicas.** Postgres + the Redis stream bridge together make the
   gateway's *persisted* state (checkpointer + run/thread metadata) and *live
   stream* path cross-pod-safe. The default is still 1 replica: **do not raise
@@ -354,17 +378,28 @@ an opt-in root `volumePermissions` initContainer that chowns on every start (the
 Bitnami pattern) — is not yet wired into this chart; it would introduce a root
 container, so it's left as an operator decision for now.
 
-## Sandbox NodePort reachability
+## Sandbox Service type
 
-The provisioner returns `http://{NODE_HOST}:{NodePort}` to the gateway so the
-agent can reach its sandbox. In Docker Compose `NODE_HOST=host.docker.internal`;
-in Kubernetes `NODE_HOST` **defaults to the provisioner pod's node IP** via the
-[downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
-(`status.hostIP`). Because a NodePort is exposed on every node, the gateway can
-reach `<node-IP>:<NodePort>` on most clusters without any configuration.
+The provisioner exposes each sandbox Pod behind a per-sandbox Service whose type
+is controlled by `provisioner.sandboxServiceType` (default `ClusterIP`).
 
-Override `provisioner.nodeHost` only if your CNI or network policy blocks
-pod->node-IP traffic:
+**`ClusterIP` (default, recommended).** The provisioner returns a cluster-DNS
+URL - `http://sandbox-<id>-svc.<namespace>.svc.cluster.local:8080` - so the
+gateway reaches its sandbox entirely inside the cluster network. No node IP, no
+high port, and the code-execution surface is **not** bound on every node's
+interfaces. This is correct for the chart, where the gateway always runs
+in-cluster.
+
+**`NodePort` (Docker-Compose/hybrid escape hatch).** Set
+`provisioner.sandboxServiceType: NodePort` only when the gateway is *not* in K8s
+(e.g. the compose dev path, where the gateway is a container reaching sandbox
+Pods on the host's Docker Desktop K8s). The provisioner then returns
+`http://{NODE_HOST}:{NodePort}`. `NODE_HOST` defaults to the provisioner pod's
+node IP via the [downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/)
+(`status.hostIP`); because a NodePort is exposed on every node, the gateway can
+reach `<node-IP>:<NodePort>` on most clusters without configuration. Override
+`provisioner.nodeHost` only if your CNI or network policy blocks pod->node-IP
+traffic:
 
 ```bash
 kubectl get nodes -o wide    # use INTERNAL-IP or EXTERNAL-IP
@@ -372,11 +407,13 @@ kubectl get nodes -o wide    # use INTERNAL-IP or EXTERNAL-IP
 
 ```yaml
 provisioner:
+  sandboxServiceType: NodePort
   nodeHost: 192.168.x.x
 ```
 
 On multi-node clusters, also switch `persistence.home.accessMode` to
-`ReadWriteMany`.
+`ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
+sandbox Pod can be scheduled on a node other than the gateway's).
 
 ## Lint / dry-run
 

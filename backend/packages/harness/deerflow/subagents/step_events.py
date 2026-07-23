@@ -23,7 +23,14 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from deerflow.runtime.events.catalog import (
+    SUBAGENT_END_EVENT,
+    SUBAGENT_START_EVENT,
+    SUBAGENT_STEP_EVENT,
+)
 from deerflow.utils.messages import message_content_to_text
+
+from .status_contract import normalize_token_usage
 
 #: Default per-step character cap for the ``text`` field. Tool outputs (web
 #: search results, file contents) can be large; this cap bounds the persisted
@@ -34,7 +41,7 @@ SUBAGENT_STEP_MAX_CHARS = 8192
 #: ``RunEvent.category`` for persisted subagent steps. A dedicated category (not
 #: ``"message"``) keeps these events out of ``list_messages`` (the thread message
 #: feed) while still being returned by ``list_events`` for fetch-on-expand (#3779).
-SUBAGENT_EVENT_CATEGORY = "subagent"
+SUBAGENT_EVENT_CATEGORY = SUBAGENT_START_EVENT.category
 
 #: Map of ``task_*`` terminal custom-event types to their persisted status.
 _TERMINAL_EVENT_STATUS: dict[str, str] = {
@@ -95,8 +102,27 @@ def capture_new_step_messages(
     grow, re-examine only the trailing message so an id-less in-place replacement
     (same length, new content) is still captured — ``capture_step_message``'s
     dedup makes an unchanged re-yield a no-op. Returns the new cursor.
+
+    When the history *contracted* (``total < processed_count``) — which happens
+    when ``DeerFlowSummarizationMiddleware`` rewrites the channel via
+    ``RemoveMessage(id=REMOVE_ALL_MESSAGES)`` (#3875 Phase 3) — reset the cursor
+    to the new tail and let ``capture_step_message``'s id/content dedup prevent
+    re-emitting steps captured before the compaction. Without this reset, every
+    step appended after the compaction point is dropped until ``total`` overtakes
+    the stale cursor.
+
+    INVARIANT: after the reset the no-growth branch only re-examines
+    ``messages[-1]``, so a genuinely new AIMessage/ToolMessage inserted at an
+    index BELOW the reset cursor in a compacted list would be missed. This is
+    not reachable today: the summarization middleware puts the summary into a
+    separate ``summary_text`` state key, and the messages channel after
+    compaction holds only already-seen preserved tail messages — compaction
+    never inserts a NEW capturable message below the cursor. If a future
+    middleware violates this invariant, the reset branch needs a full re-scan.
     """
     total = len(messages)
+    if total < processed_count:
+        processed_count = total
     if total > processed_count:
         for message in messages[processed_count:total]:
             capture_step_message(message, captured, seen_ids)
@@ -172,8 +198,8 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
 
     Returns the ``event_type`` / ``category`` / ``content`` / ``metadata`` for a
     persistable subagent lifecycle event, or ``None`` for any chunk that is not a
-    subagent event (so the worker only persists what it recognizes). ``thread_id``
-    / ``run_id`` are filled in by the caller.
+    valid subagent event (so the worker only persists what it recognizes).
+    ``thread_id`` / ``run_id`` are filled in by the caller.
     """
     if not isinstance(chunk, dict):
         return None
@@ -183,27 +209,43 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         return None
 
     task_id = chunk.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
 
     if event == "task_started":
+        description = chunk.get("description")
+        if description is not None and not isinstance(description, str):
+            return None
         return {
-            "event_type": "subagent.start",
-            "category": SUBAGENT_EVENT_CATEGORY,
-            "content": {"task_id": task_id, "description": chunk.get("description")},
+            "event_type": SUBAGENT_START_EVENT.event_type,
+            "category": SUBAGENT_START_EVENT.category,
+            "content": {"task_id": task_id, "description": description},
             "metadata": {"task_id": task_id},
         }
 
     if event == "task_running":
         message_index = chunk.get("message_index")
+        message = chunk.get("message")
+        if isinstance(message_index, bool) or not isinstance(message_index, int) or message_index < 0:
+            return None
+        if not isinstance(message, dict):
+            return None
         return {
-            "event_type": "subagent.step",
-            "category": SUBAGENT_EVENT_CATEGORY,
-            "content": build_subagent_step(chunk.get("message") or {}, task_id=task_id, message_index=message_index),
+            "event_type": SUBAGENT_STEP_EVENT.event_type,
+            "category": SUBAGENT_STEP_EVENT.category,
+            "content": build_subagent_step(message, task_id=task_id, message_index=message_index),
             "metadata": {"task_id": task_id, "message_index": message_index},
         }
 
     status = _TERMINAL_EVENT_STATUS.get(event)
     if status is not None:
         content: dict[str, Any] = {"task_id": task_id, "status": status}
+        model_name = chunk.get("model_name")
+        if isinstance(model_name, str) and model_name.strip():
+            content["model_name"] = model_name.strip()
+        usage = normalize_token_usage(chunk.get("usage"))
+        if usage is not None:
+            content["usage"] = usage
         # The final result/error can be a multi-page report; cap it so the
         # persisted run-event row stays bounded (it is also kept verbatim on the
         # terminal ToolMessage, which the card reads separately).
@@ -218,8 +260,8 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
             if error_truncated:
                 content["error_truncated"] = True
         return {
-            "event_type": "subagent.end",
-            "category": SUBAGENT_EVENT_CATEGORY,
+            "event_type": SUBAGENT_END_EVENT.event_type,
+            "category": SUBAGENT_END_EVENT.category,
             "content": content,
             "metadata": {"task_id": task_id},
         }

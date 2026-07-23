@@ -47,6 +47,23 @@ class TestThreadDataMiddleware:
         assert _as_posix(result["thread_data"]["uploads_path"]).endswith("threads/thread-from-config/user-data/uploads")
         assert runtime.context == {}
 
+    def test_before_agent_handles_none_context_with_trailing_human_message(self, tmp_path, monkeypatch):
+        # Regression: run_id was read via the unguarded `runtime.context`, so a None context plus a
+        # trailing HumanMessage raised AttributeError (thread_id still resolves from config.configurable).
+        from langchain_core.messages import HumanMessage
+
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        runtime = Runtime(context=None)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.thread_data_middleware.get_config",
+            lambda: {"configurable": {"thread_id": "thread-from-config"}},
+        )
+
+        result = middleware.before_agent(state={"messages": [HumanMessage(content="hello", id="m1")]}, runtime=runtime)
+
+        assert result is not None
+        assert runtime.context is None
+
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         monkeypatch.setattr(

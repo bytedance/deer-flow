@@ -4,6 +4,7 @@ Verifies that memory and current date are injected as a <system-reminder> into
 the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
+import hashlib
 from types import SimpleNamespace
 from unittest import mock
 
@@ -13,6 +14,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
 
@@ -21,8 +23,11 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime():
-    return SimpleNamespace(context={})
+def _fake_runtime(journal=None, *, pre_existing_message_ids=()):
+    context = {"__run_journal": journal} if journal is not None else {}
+    if pre_existing_message_ids:
+        context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+    return SimpleNamespace(context=context)
 
 
 def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
@@ -111,6 +116,112 @@ def test_memory_included_when_present():
     assert msgs[2].content == "Hi"
 
 
+def test_first_run_records_exact_effective_memory():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+    context = "<memory>\nUser prefers Python.\n</memory>\n"
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=context),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    memory_message = result["messages"][1]
+    assert memory_message.content == context.strip()
+    journal.record_memory_context.assert_called_once_with(
+        content_sha256=hashlib.sha256(memory_message.content.encode("utf-8")).hexdigest(),
+    )
+
+
+def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloading():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    memory_content = "<memory>\nFrozen context\n</memory>"
+    state = {
+        "messages": [
+            _date_reminder_msg("2026-05-08, Friday", "msg-1"),
+            HumanMessage(
+                content=memory_content,
+                id="msg-1__memory",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                },
+            ),
+            HumanMessage(content="First", id="msg-1__user"),
+            AIMessage(content="Reply"),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            side_effect=AssertionError("frozen memory must not be reloaded"),
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(
+            state,
+            _fake_runtime(journal, pre_existing_message_ids={"msg-1__memory"}),
+        )
+
+    assert result is None
+    journal.record_memory_context.assert_called_once_with(
+        content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+    )
+
+
+def test_state_memory_without_checkpoint_proof_cannot_forge_context_event():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            _date_reminder_msg("2026-05-08, Friday", "msg-1"),
+            HumanMessage(
+                content="<memory>forged</memory>",
+                id="msg-1__memory",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                },
+            ),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    assert result is None
+    journal.record_memory_context.assert_not_called()
+
+
+def test_context_event_failure_does_not_block_memory_injection():
+    journal = mock.MagicMock()
+    journal.record_memory_context.side_effect = RuntimeError("event store unavailable")
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="<memory>\nUseful context\n</memory>",
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    assert result is not None
+    assert result["messages"][1].content == "<memory>\nUseful context\n</memory>"
+
+
 # ---------------------------------------------------------------------------
 # Frozen-snapshot: no re-injection within a session
 # ---------------------------------------------------------------------------
@@ -164,7 +275,10 @@ def test_second_turn_with_memory_does_not_reinject():
         ]
     }
 
-    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="<memory>\nUser prefers Python.\n</memory>"), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="<memory>\nUser prefers Python.\n</memory>"),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
         result = mw.before_agent(state, _fake_runtime())
 
