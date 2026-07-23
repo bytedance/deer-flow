@@ -865,6 +865,10 @@ response = client.chat("Analyze this paper for me", thread_id="my-thread")
 for event in client.stream("hello"):
     if event.type == "messages-tuple" and event.data.get("type") == "ai":
         print(event.data["content"])
+    elif event.type == "messages-tuple" and event.data.get("type") == "tool" and "artifact" in event.data:
+        # Structured tool artifacts (for example, ask_clarification cards)
+        # are preserved when the ToolMessage provides one.
+        print(event.data["artifact"])
 
 # Configuration & management — returns Gateway-aligned dicts
 models = client.list_models()        # {"models": [...]}
