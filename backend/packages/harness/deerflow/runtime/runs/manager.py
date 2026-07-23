@@ -184,6 +184,9 @@ class RunRecord:
     stop_reason: str | None = None
 
 
+OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
+
+
 class RunManager:
     """In-memory run registry with optional persistent RunStore backing.
 
@@ -199,6 +202,7 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
+        on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -211,6 +215,7 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
+        self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
 
@@ -1335,6 +1340,14 @@ class RunManager:
                 "Periodic reconciliation recovered %d orphaned run(s) as error",
                 len(recovered),
             )
+            if self._on_orphans_recovered is not None:
+                try:
+                    await self._on_orphans_recovered(recovered)
+                except Exception:
+                    logger.warning(
+                        "Periodic orphan recovery callback failed",
+                        exc_info=True,
+                    )
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.

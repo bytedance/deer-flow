@@ -5,6 +5,7 @@ Coverage:
 - create_or_reject with interrupt strategy claims and cancels old runs
 - create_run_atomic refuses to interrupt a run owned by another live worker
 - reconcile_orphaned_inflight_runs uses lease-based detection
+- periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
 - Lease heartbeat renews active run leases
 - GATEWAY_WORKERS=1 + heartbeat_enabled=false behaviour unchanged
@@ -344,6 +345,33 @@ async def test_reconciliation_returns_empty_when_no_orphaned_runs():
     )
 
     assert recovered == []
+
+
+@pytest.mark.anyio
+async def test_periodic_reconciliation_notifies_recovery_callback():
+    """Periodic recovery must hand terminalized rows to Gateway orchestration."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock()
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+
+    await manager._reconcile_orphans_periodic()
+
+    on_orphans_recovered.assert_awaited_once()
+    recovered = on_orphans_recovered.await_args.args[0]
+    assert [record.run_id for record in recovered] == ["periodic-orphan"]
+    assert recovered[0].status == RunStatus.error
 
 
 # ---------------------------------------------------------------------------

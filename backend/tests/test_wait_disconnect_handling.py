@@ -1,4 +1,4 @@
-"""Regression tests for issue #3265.
+"""Regression tests for issues #3265 and #3932.
 
 The non-streaming ``/wait`` endpoints used to ``await record.task`` with no
 disconnect handling and silently swallow ``CancelledError``.  When a long
@@ -10,7 +10,9 @@ The fix introduces ``wait_for_run_completion`` in ``app.gateway.services``:
 it subscribes to the stream bridge until ``END_SENTINEL``, polls
 ``request.is_disconnected()`` on every wake-up, and honours the record's
 ``on_disconnect`` mode by cancelling the background run on real client
-disconnect.
+disconnect. Store-only consumers also refresh durable run status on heartbeat,
+so peer orphan recovery cannot leave them blocked behind a retained stream
+whose producer died before publishing END.
 """
 
 from __future__ import annotations
@@ -67,6 +69,17 @@ class _MissingStreamBridge:
 
     async def cleanup(self, run_id, *, delay=0):
         return None
+
+
+class _FastHeartbeatBridge(MemoryStreamBridge):
+    """Memory bridge with a short heartbeat for durable-status refresh tests."""
+
+    def subscribe(self, run_id, *, last_event_id=None, heartbeat_interval=15.0):
+        return super().subscribe(
+            run_id,
+            last_event_id=last_event_id,
+            heartbeat_interval=0.01,
+        )
 
 
 async def _create_running_record(mgr: RunManager, *, on_disconnect: DisconnectMode) -> Any:
@@ -247,5 +260,68 @@ class TestWaitForRunCompletion:
 
             assert frames == ["event: end\ndata: null\n\n"]
             assert bridge.subscribed is False
+
+        asyncio.run(run())
+
+    def test_sse_consumer_refreshes_store_only_status_on_heartbeat(self) -> None:
+        """A retained stream without END must not hide a durable terminal status."""
+        from app.gateway.services import sse_consumer
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            await store.put(
+                "periodic-orphan",
+                thread_id=THREAD_ID,
+                status="running",
+            )
+            mgr = RunManager(store=store)
+            record = await mgr.get("periodic-orphan")
+            assert record is not None
+            assert record.store_only is True
+            bridge = _FastHeartbeatBridge()
+            await bridge.publish(record.run_id, "values", {"step": 1})
+            request = _FakeRequest()
+            consumer = sse_consumer(bridge, record, request, mgr)
+
+            first_frame = await anext(consumer)
+            assert first_frame.startswith("event: values\n")
+
+            await store.update_status(record.run_id, "error", error="lease expired")
+            end_frame = await asyncio.wait_for(anext(consumer), timeout=1.0)
+
+            assert end_frame == "event: end\ndata: null\n\n"
+            assert record.status == RunStatus.running
+            await consumer.aclose()
+
+        asyncio.run(run())
+
+    def test_wait_refreshes_store_only_status_on_heartbeat(self) -> None:
+        """The non-streaming wait path must share the durable terminal fallback."""
+        from app.gateway.services import wait_for_run_completion
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            await store.put(
+                "periodic-orphan",
+                thread_id=THREAD_ID,
+                status="running",
+            )
+            mgr = RunManager(store=store)
+            record = await mgr.get("periodic-orphan")
+            assert record is not None
+            assert record.store_only is True
+            bridge = _FastHeartbeatBridge()
+            await bridge.publish(record.run_id, "values", {"step": 1})
+            await store.update_status(record.run_id, "error", error="lease expired")
+
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, _FakeRequest(), mgr),
+                timeout=1.0,
+            )
+
+            assert completed is True
+            assert record.status == RunStatus.running
 
         asyncio.run(run())

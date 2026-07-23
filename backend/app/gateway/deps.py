@@ -230,6 +230,27 @@ async def _mark_latest_recovered_threads_error(
             logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
 
 
+async def _terminalize_recovered_runs(
+    bridge: StreamBridge,
+    run_manager: RunManager,
+    thread_store: ThreadMetaStore,
+    recovered_runs: list[RunRecord],
+    *,
+    cleanup_delay: float,
+) -> None:
+    """Apply transport and thread-state side effects after durable recovery."""
+    await _publish_recovered_run_stream_end(
+        bridge,
+        recovered_runs,
+        cleanup_delay=cleanup_delay,
+    )
+    await _mark_latest_recovered_threads_error(
+        run_manager,
+        thread_store,
+        recovered_runs,
+    )
+
+
 def get_config() -> AppConfig:
     """Return the freshest ``AppConfig`` for the current request.
 
@@ -358,9 +379,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
+        sb_config = getattr(config, "stream_bridge", None)
+        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+
+        async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _terminalize_recovered_runs(
+                app.state.stream_bridge,
+                app.state.run_manager,
+                app.state.thread_store,
+                recovered_runs,
+                cleanup_delay=cleanup_delay,
+            )
+
         app.state.run_manager = RunManager(
             store=app.state.run_store,
             run_ownership_config=run_ownership_config,
+            on_orphans_recovered=terminalize_recovered_runs,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
@@ -373,10 +407,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             error="Gateway restarted before this run reached a durable final state.",
             before=now_iso(),
         )
-        sb_config = getattr(config, "stream_bridge", None)
-        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        await terminalize_recovered_runs(recovered_runs)
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
