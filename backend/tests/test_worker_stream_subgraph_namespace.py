@@ -12,15 +12,32 @@ bypass the root-only consumers (file-tool chunk batcher, subagent event
 persistence).
 """
 
-import pytest
+import asyncio
+import importlib
+import sys
+from importlib.metadata import version as package_version
+from types import SimpleNamespace
 
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from packaging.version import Version
+
+from deerflow.runtime.runs import worker
+from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import (
     _compose_sse_event,
     _publish_stream_item,
     _unpack_stream_item,
 )
+from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
 SUBAGENT_NS = ("tools:call_subagent_1",)
+
+# Delegated graphs inherit the parent checkpoint namespace (and therefore
+# stream as subgraphs) only on LangGraph >= 1.2.6 — same gate as
+# tests/test_subagent_executor.py::TestSubagentCheckpointLineage.
+_LANGGRAPH_INHERITS_SUBGRAPH_NAMESPACE = Version(package_version("langgraph")) >= Version("1.2.6")
 
 
 class _FakeBridge:
@@ -232,3 +249,308 @@ class TestPublishStreamItem:
         )
         assert batcher.pushed == [chunk]
         assert [event for _run, event, _payload in bridge.published] == ["messages"]
+
+
+# ---------------------------------------------------------------------------
+# Production-shaped integration: SubagentExecutor -> astream(subgraphs=...)
+# -> run_agent stream loop -> StreamBridge. The namespace must originate from
+# LangGraph's own delegation routing (checkpoint-namespace inheritance), not
+# be hand-fed to the publishing helper — the #4399 regression lived in that
+# interaction, not in any helper in isolation.
+# ---------------------------------------------------------------------------
+
+_CHILD_MESSAGE_IDS = frozenset(
+    {
+        "child-task-sentinel",
+        "child-ai-sentinel",
+        "child-tool-sentinel",
+        "child-final-sentinel",
+    }
+)
+_PARENT_FINAL_ID = "parent-final-sentinel"
+_THREAD_ID = "thread-subgraph-stream-integration"
+
+
+@pytest.fixture
+def real_executor_module():
+    """Swap the conftest MagicMock for the real subagent executor module.
+
+    conftest.py mocks ``deerflow.subagents.executor`` to break a package-init
+    import cycle; by the time this fixture runs every other deerflow module is
+    already imported, so a fresh import of the real module is safe.
+    """
+    original = sys.modules.get("deerflow.subagents.executor")
+    sys.modules.pop("deerflow.subagents.executor", None)
+    subagents_pkg = sys.modules.get("deerflow.subagents")
+    if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
+        delattr(subagents_pkg, "executor")
+
+    module = importlib.import_module("deerflow.subagents.executor")
+    # Hermetic in CI (no config.yaml) — same defaults as test_subagent_executor.
+    module.get_app_config = lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=False))
+    module.build_tracing_callbacks = lambda: []
+    yield module
+
+    if original is not None:
+        sys.modules["deerflow.subagents.executor"] = original
+    else:
+        sys.modules.pop("deerflow.subagents.executor", None)
+    subagents_pkg = sys.modules.get("deerflow.subagents")
+    if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
+        delattr(subagents_pkg, "executor")
+
+
+class _RecordingStreamBridge(MemoryStreamBridge):
+    """Real in-memory bridge that also records (event, payload) pairs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.published: list[tuple[str, object]] = []
+
+    async def publish(self, run_id: str, event: str, payload: object) -> None:
+        self.published.append((event, payload))
+        await super().publish(run_id, event, payload)
+
+
+class _IntegrationRunManager:
+    def __init__(self, record: RunRecord) -> None:
+        self._record = record
+
+    async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+        return None
+
+    async def set_status(self, _run_id, status, **_kwargs):
+        self._record.status = status
+
+    async def update_model_name(self, *_args, **_kwargs):
+        return None
+
+    async def update_run_completion(self, *_args, **_kwargs):
+        return None
+
+    async def has_later_started_run(self, *_args, **_kwargs):
+        return False
+
+    async def set_finalizing(self, *_args, **_kwargs):
+        return None
+
+
+def _collect_ids(payload: object) -> set[str]:
+    """All string ``id`` values anywhere in a serialized stream payload."""
+    ids: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            node_id = node.get("id")
+            if isinstance(node_id, str):
+                ids.add(node_id)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value)
+
+    walk(payload)
+    return ids
+
+
+def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_error_fallback: bool = False):
+    """Real parent graph whose node delegates a scripted child through the
+    real ``SubagentExecutor`` and emits ``task_*`` custom events the way the
+    production task tool does (root-graph ``get_stream_writer``).
+
+    With ``child_emits_error_fallback`` the child stream contains an assistant
+    message carrying the ``deerflow_error_fallback`` marker (not as its final
+    message, so the delegation itself still completes) — the shape whose leak
+    would mark the *parent* run as errored (#4399).
+    """
+    from langgraph.config import get_stream_writer
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    from deerflow.subagents.config import SubagentConfig
+
+    child_builder = StateGraph(MessagesState)
+    child_builder.add_node(
+        "child_model",
+        lambda _state: {
+            "messages": [
+                AIMessage(
+                    content="",
+                    id="child-ai-sentinel",
+                    tool_calls=[{"name": "child_tool", "args": {}, "id": "child-tool-call", "type": "tool_call"}],
+                )
+            ]
+        },
+    )
+    child_builder.add_node(
+        "child_tool",
+        lambda _state: {"messages": [ToolMessage(content="child tool output", name="child_tool", tool_call_id="child-tool-call", id="child-tool-sentinel")]},
+    )
+    child_builder.add_node(
+        "child_fallback",
+        lambda _state: {
+            "messages": [
+                AIMessage(
+                    content="child provider failed after retries",
+                    id="child-fallback-sentinel",
+                    additional_kwargs={"deerflow_error_fallback": True},
+                )
+            ]
+        },
+    )
+    child_builder.add_node(
+        "child_final",
+        lambda _state: {"messages": [AIMessage(content="child final answer", id="child-final-sentinel")]},
+    )
+    child_builder.add_edge(START, "child_model")
+    child_builder.add_edge("child_model", "child_tool")
+    if child_emits_error_fallback:
+        child_builder.add_edge("child_tool", "child_fallback")
+        child_builder.add_edge("child_fallback", "child_final")
+    else:
+        child_builder.add_edge("child_tool", "child_final")
+    child_builder.add_edge("child_final", END)
+    child_graph = child_builder.compile(checkpointer=False)
+
+    executor = executor_module.SubagentExecutor(
+        config=SubagentConfig(
+            name="general-purpose",
+            description="Namespace integration test agent",
+            system_prompt="You are a namespace integration test agent.",
+            max_turns=5,
+            timeout_seconds=30,
+        ),
+        tools=[],
+        parent_model="test-model",
+        thread_id=_THREAD_ID,
+        trace_id="trace-namespace-integration",
+    )
+
+    async def build_initial_state(task):
+        return ({"messages": [HumanMessage(content=task, id="child-task-sentinel")]}, [], None)
+
+    monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
+    monkeypatch.setattr(executor, "_create_agent", lambda *_args, **_kwargs: child_graph)
+
+    async def delegate(_state):
+        writer = get_stream_writer()
+        task_id = executor.execute_async("run the delegated child graph")
+        writer({"type": "task_started", "task_id": task_id})
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while True:
+                result = executor_module.get_background_task_result(task_id)
+                if result is not None and result.status.is_terminal:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("delegated subagent did not complete")
+                await asyncio.sleep(0.001)
+            assert result.status.value == "completed", f"delegation failed: {result.error}"
+        finally:
+            executor_module.cleanup_background_task(task_id)
+        writer({"type": "task_completed", "task_id": task_id})
+        return {"messages": [AIMessage(content="parent final answer", id=_PARENT_FINAL_ID)]}
+
+    parent_builder = StateGraph(MessagesState)
+    parent_builder.add_node("delegate", delegate)
+    parent_builder.add_edge(START, "delegate")
+    parent_builder.add_edge("delegate", END)
+    return parent_builder.compile()
+
+
+async def _run_delegation_through_worker(executor_module, monkeypatch, *, stream_subgraphs: bool, child_emits_error_fallback: bool = False) -> tuple[RunRecord, _RecordingStreamBridge]:
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    parent_graph = _build_delegating_parent_graph(executor_module, monkeypatch, child_emits_error_fallback=child_emits_error_fallback)
+    bridge = _RecordingStreamBridge()
+    record = RunRecord(
+        run_id=f"run-ns-int-{int(stream_subgraphs)}",
+        thread_id=_THREAD_ID,
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name=None,
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        bridge,
+        _IntegrationRunManager(record),
+        record,
+        ctx=worker.RunContext(checkpointer=InMemorySaver()),
+        agent_factory=lambda config: parent_graph,
+        graph_input={"messages": [HumanMessage(content="delegate to the subagent")]},
+        config={"configurable": {"thread_id": _THREAD_ID}},
+        stream_modes=["values", "messages-tuple", "custom"],
+        stream_subgraphs=stream_subgraphs,
+    )
+    return record, bridge
+
+
+@pytest.mark.skipif(
+    not _LANGGRAPH_INHERITS_SUBGRAPH_NAMESPACE,
+    reason="delegated graphs stream as namespaced subgraphs only on LangGraph >= 1.2.6",
+)
+class TestWorkerSubgraphStreamIntegration:
+    @pytest.mark.asyncio
+    async def test_stream_subgraphs_publishes_delegated_frames_namespaced_never_bare(self, real_executor_module, monkeypatch):
+        record, bridge = await _run_delegation_through_worker(real_executor_module, monkeypatch, stream_subgraphs=True)
+        assert record.status == RunStatus.success, f"run failed: {bridge.published}"
+
+        events = bridge.published
+        bare_values = [payload for event, payload in events if event == "values"]
+        bare_messages = [payload for event, payload in events if event == "messages"]
+        namespaced_values = [(event, payload) for event, payload in events if event.startswith("values|")]
+        namespaced_messages = [(event, payload) for event, payload in events if event.startswith("messages|")]
+
+        # The #4399 takeover: a delegated values snapshot must never be
+        # published as bare "values" (SDK clients replace the thread view).
+        for payload in bare_values:
+            assert not (_collect_ids(payload) & _CHILD_MESSAGE_IDS), f"delegated messages leaked into a bare values frame: {payload}"
+        for payload in bare_messages:
+            assert not (_collect_ids(payload) & _CHILD_MESSAGE_IDS), f"delegated message chunk leaked into the bare messages stream: {payload}"
+
+        # The delegated frames must actually arrive — namespaced by LangGraph,
+        # not silently dropped (guards against a vacuous pass).
+        assert any(_collect_ids(payload) & _CHILD_MESSAGE_IDS for _event, payload in namespaced_values), f"expected namespaced delegated values frames, got events: {[event for event, _ in events]}"
+        assert any(_collect_ids(payload) & _CHILD_MESSAGE_IDS for _event, payload in namespaced_messages), f"expected namespaced delegated message chunks, got events: {[event for event, _ in events]}"
+        for event, _payload in namespaced_values + namespaced_messages:
+            segments = event.split("|")[1:]
+            assert segments and all(segments), f"namespaced event name has empty namespace segments: {event}"
+
+        # Root frames stay bare and intact.
+        assert any(_PARENT_FINAL_ID in _collect_ids(payload) for payload in bare_values)
+        custom_types = [payload.get("type") for event, payload in events if event == "custom" and isinstance(payload, dict)]
+        assert "task_started" in custom_types and "task_completed" in custom_types
+
+    @pytest.mark.asyncio
+    async def test_delegated_error_fallback_does_not_mark_the_parent_run_as_error(self, real_executor_module, monkeypatch):
+        record, bridge = await _run_delegation_through_worker(real_executor_module, monkeypatch, stream_subgraphs=True, child_emits_error_fallback=True)
+
+        # A delegated subagent's LLM error fallback is the executor's to map
+        # (task_failed); it must not decide the parent run's status.
+        assert record.status == RunStatus.success, "delegated error fallback leaked into the parent run status"
+        assert not [payload for event, payload in bridge.published if event == "error"]
+
+        # Non-vacuous: the marked child message really rode the stream —
+        # namespaced, where the root-only fallback detector must ignore it.
+        namespaced_payloads = [payload for event, payload in bridge.published if event.startswith(("values|", "messages|"))]
+        assert any("child-fallback-sentinel" in _collect_ids(payload) for payload in namespaced_payloads)
+
+    @pytest.mark.asyncio
+    async def test_without_stream_subgraphs_delegated_frames_stay_out_while_task_events_remain(self, real_executor_module, monkeypatch):
+        record, bridge = await _run_delegation_through_worker(real_executor_module, monkeypatch, stream_subgraphs=False)
+        assert record.status == RunStatus.success, f"run failed: {bridge.published}"
+
+        events = bridge.published
+        # No delegated frame of any mode reaches the parent stream...
+        for event, payload in events:
+            assert not (_collect_ids(payload) & _CHILD_MESSAGE_IDS), f"delegated messages leaked into event {event!r}: {payload}"
+        assert not [event for event, _payload in events if "|" in event]
+
+        # ...while the parent's own frames and the task_* progress contract
+        # (what the web frontend relies on instead of the flag) still hold.
+        bare_values = [payload for event, payload in events if event == "values"]
+        assert any(_PARENT_FINAL_ID in _collect_ids(payload) for payload in bare_values)
+        custom_types = [payload.get("type") for event, payload in events if event == "custom" and isinstance(payload, dict)]
+        assert "task_started" in custom_types and "task_completed" in custom_types
