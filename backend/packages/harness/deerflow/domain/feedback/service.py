@@ -1,0 +1,71 @@
+from deerflow.domain.feedback.model import Feedback, RunNotFoundError
+from deerflow.domain.feedback.ports import FeedbackRepository, RunLookup
+
+
+class FeedbackService:
+    """Input port of the feedback context (application service).
+
+    Orchestrates use cases only: fetch/verify -> apply domain rules ->
+    persist through output ports. Holds no business rules itself (those
+    live on the Feedback aggregate) and knows nothing about HTTP or
+    storage. user_id is always passed in explicitly -- resolving the
+    current user is the primary adapter's job.
+    """
+
+    def __init__(self, repository: FeedbackRepository, runs: RunLookup):
+        self._repository = repository
+        self._runs = runs
+
+    async def _require_run(self, thread_id: str, run_id: str) -> None:
+        """Reject runs that do not exist or belong to another thread."""
+        if await self._runs.thread_of(run_id) != thread_id:
+            raise RunNotFoundError("Run does not belong to the specified thread")
+
+    async def rate_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        rating: int,
+        comment: str | None,
+        user_id: str | None,
+        tags: tuple[str, ...] | list[str] = (),
+    ) -> Feedback:
+        """Set the user's current rating for a run (idempotent).
+
+        Backs the PUT endpoint: "my current verdict on this run is X".
+        Verifies run ownership first, then creates the aggregate (which
+        validates the rating) and stores it with upsert-by-identity
+        semantics -- repeated calls replace the previous rating.
+
+        Raises:
+            RunNotFoundError: the run does not exist or does not belong
+                to the given thread (cross-thread ids are rejected).
+            InvalidRatingError: rating is not +1 or -1 (raised by the
+                aggregate factory before any I/O happens).
+        """
+        await self._require_run(thread_id, run_id)
+        feedback = Feedback.create(
+            run_id=run_id,
+            thread_id=thread_id,
+            rating=rating,
+            user_id=user_id,
+            comment=comment,
+            tags=tags,
+        )
+        return await self._repository.save(feedback)
+
+    async def retract_run_rating(self, thread_id: str, run_id: str, *, user_id: str | None) -> bool:
+        """Withdraw the user's rating for a run (clicking the active button
+        again). Returns False when there was nothing to retract."""
+        return await self._repository.remove_for_run(thread_id, run_id, user_id=user_id)
+
+    async def latest_per_run_in_thread(self, thread_id: str, *, user_id: str | None) -> dict[str, Feedback]:
+        """Current feedback per run across a thread -- powers the message-list
+        thumb badges (full-list path)."""
+        return await self._repository.latest_per_run_in_thread(thread_id, user_id=user_id)
+
+    async def latest_for_runs(self, thread_id: str, run_ids: set[str], *, user_id: str | None) -> dict[str, Feedback]:
+        """Current feedback for the selected runs only -- powers the paged
+        message-list badges."""
+        return await self._repository.latest_for_runs(thread_id, run_ids, user_id=user_id)
