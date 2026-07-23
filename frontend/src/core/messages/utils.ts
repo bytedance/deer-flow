@@ -92,13 +92,22 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
           if (lastGroup) {
             lastGroup.messages.push(message);
           } else {
-            // Leading orphan: history pagination cuts by event seq, not turn
-            // boundaries, so the first loaded page can begin mid-turn with a
-            // tool result whose AI tool-call message sits on an unloaded older
-            // page (#4399). Open a processing group so the message stays
-            // grouped and visible instead of being dropped with a console
-            // error on every render; loading the older page re-groups it
-            // under its real turn.
+            // Leading orphan: `groups` is empty when this tool message
+            // arrives. Two paths reach here: (1) history pagination cuts by
+            // event seq, not turn boundaries, so the first loaded page begins
+            // mid-turn with a tool result whose AI tool-call sits on an
+            // unloaded older page (#4399); (2) the tool message is preceded
+            // only by hidden control messages. Open a processing group so it
+            // stays visible instead of being dropped with a per-render console
+            // error.
+            //
+            // Only case (1) self-heals — loading the older page re-groups the
+            // tool under its real turn. Case (2), and any truly orphaned tool
+            // with no AI antecedent, has no page to load: the group persists
+            // and renders as an empty ChainOfThought shell (convertToSteps
+            // emits steps only for `type === "ai"`). That empty shell is an
+            // accepted degradation — still a net win over dropping the result
+            // and firing console.error every render.
             groups.push({
               id: message.id,
               type: "assistant:processing",

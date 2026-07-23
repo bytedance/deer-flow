@@ -760,6 +760,44 @@ describe("orphan tool messages", () => {
     ]);
   });
 
+  test("leading orphan absorbs the following real AI turn into one processing group", () => {
+    // A leading orphan followed by a real tool-call turn must accumulate into
+    // a single processing group via the assistant:processing branch, not
+    // strand the orphan as a separate empty group beside the real turn.
+    const messages = [
+      {
+        id: "t-lead",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "running",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // One processing group holds the orphan, the AI turn, and its tool result.
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead",
+      "ai-1",
+      "t-1",
+    ]);
+  });
+
   test("tool message preceded only by hidden messages gets a group", () => {
     // messages is non-empty, but every earlier message is hidden from the UI —
     // groups is still empty when the tool message arrives.
