@@ -9,6 +9,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
 
 def find_pnpm_command() -> list[str] | None:
     """Return the preferred pnpm-compatible command for this machine."""
@@ -47,6 +49,7 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             [*command, *arguments],
             check=False,
             shell=False,
+            cwd=FRONTEND_DIR,
         )
     except OSError as exc:
         print(f"Error: Failed to run pnpm via {command[0]}: {exc}", file=sys.stderr)

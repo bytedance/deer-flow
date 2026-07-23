@@ -28,12 +28,16 @@ def _write_fake_command(bin_dir: Path, name: str, label: str, exit_code: int = 0
     return path
 
 
-def _run_pnpm(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_pnpm(
+    path: Path,
+    *args: str,
+    cwd: Path = FRONTEND_DIR,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = str(path)
     return subprocess.run(
         [sys.executable, str(PNPM_SCRIPT), *args],
-        cwd=FRONTEND_DIR,
+        cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -66,6 +70,17 @@ def test_runner_uses_corepack_pnpm_from_frontend_directory(tmp_path: Path):
 
     package_json = json.loads((FRONTEND_DIR / "package.json").read_text(encoding="utf-8"))
     assert package_json["packageManager"] == "pnpm@10.26.2"
+
+
+def test_runner_uses_frontend_directory_when_called_from_repo_root(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_command(bin_dir, "corepack", "corepack")
+
+    result = _run_pnpm(bin_dir, "--version", cwd=REPO_ROOT)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"corepack|{FRONTEND_DIR}|pnpm --version"
 
 
 def test_runner_reports_actionable_error_when_pnpm_and_corepack_are_missing(tmp_path: Path):
