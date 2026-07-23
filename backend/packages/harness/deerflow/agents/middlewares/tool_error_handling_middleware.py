@@ -306,7 +306,7 @@ def build_lead_runtime_middlewares(
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
 
@@ -332,7 +332,7 @@ def build_subagent_runtime_middlewares(
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
     if model_name is None and app_config.models:
