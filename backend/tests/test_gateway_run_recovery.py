@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -42,8 +43,14 @@ class _FakeRunManager:
         self.shutdown_calls: int = 0
         _FakeRunManager.instances.append(self)
 
-    async def reconcile_orphaned_inflight_runs(self, *, error: str, before: str | None = None):
-        self.reconcile_calls.append({"error": error, "before": before})
+    async def reconcile_orphaned_inflight_runs(
+        self,
+        *,
+        error: str,
+        before: str | None = None,
+        stop_reason: str | None = None,
+    ):
+        self.reconcile_calls.append({"error": error, "before": before, "stop_reason": stop_reason})
         return self.recovered_runs
 
     async def list_by_thread(self, thread_id: str, *, user_id=None, limit: int = 100):
@@ -97,6 +104,24 @@ class _RetainedMemoryStreamBridge(MemoryStreamBridge):
         self.cleanup_calls.append((run_id, delay))
 
 
+class _DelayedCleanupStreamBridge(_FakeStreamBridge):
+    def __init__(self) -> None:
+        super().__init__(existing_streams={"run-1"})
+        self.delayed_cleanup_started = asyncio.Event()
+        self.delayed_cleanup_cancelled = asyncio.Event()
+
+    async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
+        self.cleanup_calls.append((run_id, delay))
+        if delay <= 0:
+            return
+        self.delayed_cleanup_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.delayed_cleanup_cancelled.set()
+            raise
+
+
 @pytest.mark.anyio
 async def test_recovered_run_stream_end_skips_expired_stream():
     """Startup recovery should not recreate an already-expired retained stream."""
@@ -112,8 +137,29 @@ async def test_recovered_run_stream_end_skips_expired_stream():
 
 
 @pytest.mark.anyio
-async def test_periodic_recovery_terminalizes_retained_stream_and_thread():
-    """Lease recovery must close retained subscribers without a Gateway restart."""
+async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
+    """Bridge shutdown must not abandon a delayed cleanup until the stream TTL."""
+    stream_bridge = _DelayedCleanupStreamBridge()
+    cleanups = await gateway_deps._publish_recovered_run_stream_end(
+        stream_bridge,
+        [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
+        cleanup_delay=60.0,
+    )
+    cleanup_tasks = {task: run_id for run_id, task in cleanups}
+    await asyncio.wait_for(stream_bridge.delayed_cleanup_started.wait(), timeout=0.5)
+
+    await gateway_deps._flush_recovered_stream_cleanups(
+        stream_bridge,
+        cleanup_tasks,
+    )
+
+    assert stream_bridge.delayed_cleanup_cancelled.is_set()
+    assert stream_bridge.cleanup_calls == [("run-1", 60.0), ("run-1", 0)]
+
+
+@pytest.mark.anyio
+async def test_periodic_recovery_terminalizes_stream_without_thread_projection():
+    """Periodic recovery must close streams without racing thread projection."""
     store = MemoryRunStore()
     stream_bridge = _RetainedMemoryStreamBridge()
     thread_store = _FakeThreadStore()
@@ -131,8 +177,6 @@ async def test_periodic_recovery_terminalizes_retained_stream_and_thread():
     async def terminalize(recovered_runs):
         await gateway_deps._terminalize_recovered_runs(
             stream_bridge,
-            manager,
-            thread_store,
             recovered_runs,
             cleanup_delay=60.0,
         )
@@ -157,10 +201,11 @@ async def test_periodic_recovery_terminalizes_retained_stream_and_thread():
             heartbeat_interval=0.01,
         )
     ]
+    await anyio.sleep(0)
 
     assert received[-1] is END_SENTINEL
     assert stream_bridge.cleanup_calls == [("periodic-orphan", 60.0)]
-    assert thread_store.status_updates == [("thread-1", "error", None)]
+    assert thread_store.status_updates == []
 
 
 @pytest.mark.anyio
@@ -201,6 +246,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert len(_FakeRunManager.instances) == 1
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
+    assert _FakeRunManager.instances[0].reconcile_calls[0]["stop_reason"] == runtime_module.ORPHAN_RECOVERY_STOP_REASON
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]

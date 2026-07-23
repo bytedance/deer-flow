@@ -35,6 +35,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    ORPHAN_RECOVERY_STOP_REASON,
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
@@ -120,25 +121,22 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
         return False
 
 
-async def _terminal_record_after_heartbeat(
-    bridge: StreamBridge,
+async def _orphan_recovery_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,
 ) -> bool:
-    """Return whether a heartbeat should terminate this consumer.
+    """Return whether durable orphan recovery is the consumer's liveness edge.
 
-    Store-only records are immutable snapshots hydrated when the request starts.
-    A peer can reconcile the durable row to a terminal status later while the
-    retained stream still exists without an END marker. Refresh those records
-    on heartbeat so a failed END publication cannot leave SSE or ``/wait``
-    consumers blocked indefinitely.
+    A normal terminal status is not sufficient: the producer persists status
+    before publishing its final error/data frames and END. Orphan recovery is
+    different because the producer is known to be gone and the durable
+    ``stop_reason`` is written atomically with the terminal status. Only that
+    explicit signal may synthesize END after a heartbeat.
     """
-    if await _terminal_record_stream_missing(bridge, record):
-        return True
     if not record.store_only:
         return False
     refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
-    return refreshed is not None and _run_is_terminal(refreshed)
+    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
 
 
 # ---------------------------------------------------------------------------
@@ -1146,7 +1144,7 @@ async def sse_consumer(
                 break
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _terminal_record_after_heartbeat(bridge, record, run_mgr):
+                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
@@ -1209,7 +1207,7 @@ async def wait_for_run_completion(
             if entry is END_SENTINEL:
                 completed = True
                 return True
-            if entry is HEARTBEAT_SENTINEL and await _terminal_record_after_heartbeat(bridge, record, run_mgr):
+            if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                 completed = True
                 return True
             if await request.is_disconnected():

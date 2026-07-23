@@ -577,6 +577,25 @@ async def test_list_by_thread_merges_store_runs_newest_first():
 
 
 @pytest.mark.anyio
+async def test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run():
+    """A local row must not consume the store query's newest-run limit."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old_memory = await manager.create("thread-1")
+    old_memory.created_at = "2026-01-01T00:00:00+00:00"
+    await store.put(
+        "new-store",
+        thread_id="thread-1",
+        status="success",
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+
+    runs = await manager.list_by_thread("thread-1", limit=1)
+
+    assert [run.run_id for run in runs] == ["new-store"]
+
+
+@pytest.mark.anyio
 async def test_create_defaults(manager: RunManager):
     """Create with no optional args should use defaults."""
     record = await manager.create("thread-1")

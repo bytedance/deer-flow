@@ -10,9 +10,10 @@ The fix introduces ``wait_for_run_completion`` in ``app.gateway.services``:
 it subscribes to the stream bridge until ``END_SENTINEL``, polls
 ``request.is_disconnected()`` on every wake-up, and honours the record's
 ``on_disconnect`` mode by cancelling the background run on real client
-disconnect. Store-only consumers also refresh durable run status on heartbeat,
-so peer orphan recovery cannot leave them blocked behind a retained stream
-whose producer died before publishing END.
+disconnect. Store-only consumers wait for the bridge's real terminal marker
+instead of treating an ordinary durable terminal status as proof that all tail
+events have already been published. A durable ``orphan_recovered`` stop reason
+provides the narrow heartbeat fallback when the publisher is known to be gone.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from deerflow.runtime import RunManager, RunRecord, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunRecord, RunStatus
 from deerflow.runtime.runs.schemas import DisconnectMode
 from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
@@ -263,8 +264,8 @@ class TestWaitForRunCompletion:
 
         asyncio.run(run())
 
-    def test_sse_consumer_refreshes_store_only_status_on_heartbeat(self) -> None:
-        """A retained stream without END must not hide a durable terminal status."""
+    def test_sse_consumer_preserves_tail_events_after_durable_terminal_status(self) -> None:
+        """A durable terminal row must not overtake delayed error and END events."""
         from app.gateway.services import sse_consumer
         from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -288,16 +289,25 @@ class TestWaitForRunCompletion:
             assert first_frame.startswith("event: values\n")
 
             await store.update_status(record.run_id, "error", error="lease expired")
-            end_frame = await asyncio.wait_for(anext(consumer), timeout=1.0)
 
-            assert end_frame == "event: end\ndata: null\n\n"
+            async def publish_tail() -> None:
+                await asyncio.sleep(0.05)
+                await bridge.publish(record.run_id, "error", {"message": "late error"})
+                await bridge.publish_end(record.run_id)
+
+            publisher = asyncio.create_task(publish_tail())
+            tail_frames = [frame async for frame in consumer]
+            await publisher
+
+            error_index = next(index for index, frame in enumerate(tail_frames) if frame.startswith("event: error\n"))
+            end_index = next(index for index, frame in enumerate(tail_frames) if frame.startswith("event: end\n"))
+            assert error_index < end_index
             assert record.status == RunStatus.running
-            await consumer.aclose()
 
         asyncio.run(run())
 
-    def test_wait_refreshes_store_only_status_on_heartbeat(self) -> None:
-        """The non-streaming wait path must share the durable terminal fallback."""
+    def test_wait_preserves_tail_events_after_durable_terminal_status(self) -> None:
+        """The wait path must remain blocked until the real END is published."""
         from app.gateway.services import wait_for_run_completion
         from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -316,12 +326,85 @@ class TestWaitForRunCompletion:
             await bridge.publish(record.run_id, "values", {"step": 1})
             await store.update_status(record.run_id, "error", error="lease expired")
 
+            wait_task = asyncio.create_task(wait_for_run_completion(bridge, record, _FakeRequest(), mgr))
+            await asyncio.sleep(0.05)
+            assert wait_task.done() is False
+
+            await bridge.publish(record.run_id, "error", {"message": "late error"})
+            await asyncio.sleep(0)
+            assert wait_task.done() is False
+
+            await bridge.publish_end(record.run_id)
+            completed = await asyncio.wait_for(wait_task, timeout=1.0)
+
+            assert completed is True
+            assert record.status == RunStatus.running
+
+        asyncio.run(run())
+
+    def test_sse_consumer_uses_explicit_orphan_recovery_liveness_boundary(
+        self,
+    ) -> None:
+        """A recovered orphan may synthesize END when its publisher is gone."""
+        from app.gateway.services import sse_consumer
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            await store.put(
+                "periodic-orphan",
+                thread_id=THREAD_ID,
+                status="running",
+            )
+            mgr = RunManager(store=store)
+            record = await mgr.get("periodic-orphan")
+            assert record is not None
+            bridge = _FastHeartbeatBridge()
+            await bridge.publish(record.run_id, "values", {"step": 1})
+            consumer = sse_consumer(bridge, record, _FakeRequest(), mgr)
+            assert (await anext(consumer)).startswith("event: values\n")
+
+            await store.update_status(
+                record.run_id,
+                "error",
+                error="lease expired",
+                stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+            )
+
+            end_frame = await asyncio.wait_for(anext(consumer), timeout=1.0)
+            assert end_frame == "event: end\ndata: null\n\n"
+
+        asyncio.run(run())
+
+    def test_wait_uses_explicit_orphan_recovery_liveness_boundary(self) -> None:
+        """The non-streaming consumer shares the recovered-orphan boundary."""
+        from app.gateway.services import wait_for_run_completion
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            await store.put(
+                "periodic-orphan",
+                thread_id=THREAD_ID,
+                status="running",
+            )
+            mgr = RunManager(store=store)
+            record = await mgr.get("periodic-orphan")
+            assert record is not None
+            bridge = _FastHeartbeatBridge()
+            await bridge.publish(record.run_id, "values", {"step": 1})
+            await store.update_status(
+                record.run_id,
+                "error",
+                error="lease expired",
+                stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+            )
+
             completed = await asyncio.wait_for(
                 wait_for_run_completion(bridge, record, _FakeRequest(), mgr),
                 timeout=1.0,
             )
 
             assert completed is True
-            assert record.status == RunStatus.running
 
         asyncio.run(run())
