@@ -1,0 +1,67 @@
+import { describe, expect, it } from "@rstest/core";
+
+import {
+  decideCoalesce,
+  STREAM_RENDER_COALESCE_MS,
+} from "@/core/threads/hooks";
+
+describe("decideCoalesce", () => {
+  it("flushes immediately once a full interval has elapsed (leading edge)", () => {
+    expect(decideCoalesce(1000, 900, 80, false)).toEqual({
+      action: "flush-now",
+    });
+    expect(decideCoalesce(1000, 920, 80, false)).toEqual({
+      action: "flush-now",
+    });
+  });
+
+  it("schedules exactly one trailing flush for the interval remainder", () => {
+    expect(decideCoalesce(1000, 950, 80, false)).toEqual({
+      action: "schedule",
+      delayMs: 30,
+    });
+  });
+
+  it("waits while a trailing flush is already pending", () => {
+    expect(decideCoalesce(1000, 950, 80, true)).toEqual({ action: "wait" });
+  });
+
+  it("never delays a flush beyond the interval, unlike a debounce", () => {
+    // Simulate a dense stream: updates every 10ms. A debounce would keep
+    // resetting its timer and never fire; here the trailing flush scheduled at
+    // the first update stays put and every later update just waits on it.
+    let lastFlush = 0;
+    let pendingUntil: number | null = null;
+    const flushes: number[] = [];
+    for (let now = 10; now <= 400; now += 10) {
+      if (pendingUntil !== null && now >= pendingUntil) {
+        flushes.push(pendingUntil);
+        lastFlush = pendingUntil;
+        pendingUntil = null;
+      }
+      const decision = decideCoalesce(
+        now,
+        lastFlush,
+        80,
+        pendingUntil !== null,
+      );
+      if (decision.action === "flush-now") {
+        flushes.push(now);
+        lastFlush = now;
+      } else if (decision.action === "schedule") {
+        pendingUntil = now + decision.delayMs;
+      }
+    }
+    expect(flushes.length).toBeGreaterThanOrEqual(4);
+    for (let i = 1; i < flushes.length; i++) {
+      const gap = flushes[i]! - flushes[i - 1]!;
+      expect(gap).toBeGreaterThanOrEqual(80);
+      expect(gap).toBeLessThanOrEqual(90);
+    }
+  });
+
+  it("exports a frame-scale default interval", () => {
+    expect(STREAM_RENDER_COALESCE_MS).toBeGreaterThanOrEqual(50);
+    expect(STREAM_RENDER_COALESCE_MS).toBeLessThanOrEqual(100);
+  });
+});
