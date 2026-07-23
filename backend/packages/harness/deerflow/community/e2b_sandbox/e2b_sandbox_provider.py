@@ -96,6 +96,9 @@ class E2BSandboxProvider(SandboxProvider):
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        # Evictions with unknown remote state. Each id keeps its transition
+        # slot until a later eviction attempt confirms destruction.
+        self._eviction_tombstones: set[str] = set()
         # In-flight creates that have reserved capacity but not yet committed
         # to ``_sandboxes``.  Guarded by ``_lock``.
         self._reserved_slots = 0
@@ -1306,35 +1309,47 @@ class E2BSandboxProvider(SandboxProvider):
         """Evict the oldest warm entry, holding a transitioning slot.
 
         The warm entry is popped and a transitioning slot is taken.  The slot
-        is freed when the remote VM has been killed and the client closed
-        (or if reconnection fails, which means the VM is unreachable).
+        stays occupied until the control plane confirms the VM is gone.
         """
         with self._lock:
-            if not self._warm_pool:
+            if self._eviction_tombstones:
+                evict_id = next(iter(self._eviction_tombstones))
+            elif self._warm_pool:
+                evict_id, (_, _) = self._warm_pool.popitem(last=False)
+                self._begin_transition_locked()
+            else:
                 return None
-            evict_id, (_, _) = self._warm_pool.popitem(last=False)
-            self._begin_transition_locked()
 
         try:
-            client = self._reconnect_client(self._get_sandbox_cls(), evict_id)
+            client = self._reconnect_live_client(self._get_sandbox_cls(), evict_id)
         except Exception as e:
             logger.warning(
                 "Evicted warm-pool e2b sandbox %s could not be reconnected for kill: %s",
                 evict_id,
                 e,
             )
-            self._free_transitioning_slot()
+            with self._lock:
+                self._eviction_tombstones.add(evict_id)
+            return None
+
+        if client is None:
+            with self._lock:
+                self._eviction_tombstones.discard(evict_id)
+                self._end_transition_locked()
+            logger.info("Evicted warm-pool e2b sandbox %s was already gone", evict_id)
             return evict_id
 
         if error := self._kill_client(client):
             logger.warning("Failed to kill evicted e2b sandbox %s: %s", evict_id, error)
-        close = getattr(client, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass
-        self._free_transitioning_slot()
+            self._safe_close_client(client)
+            with self._lock:
+                self._eviction_tombstones.add(evict_id)
+            return None
+
+        self._safe_close_client(client)
+        with self._lock:
+            self._eviction_tombstones.discard(evict_id)
+            self._end_transition_locked()
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id
 
@@ -1430,8 +1445,13 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("Failed to refresh timeout during release: %s", e)
 
             with self._lock:
-                shutting_down = self._shutdown_called
-            if shutting_down:
+                should_kill = self._shutdown_called
+                if not should_kill:
+                    self._warm_pool[sandbox_id] = (seed or "", time.time())
+                    self._warm_pool.move_to_end(sandbox_id)
+                    logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
+
+            if should_kill:
                 logger.info(
                     "Provider shut down during release of sandbox %s; killing instead of parking in warm pool",
                     sandbox_id,
@@ -1445,23 +1465,6 @@ class E2BSandboxProvider(SandboxProvider):
                 sandbox.close()
             except Exception as e:
                 logger.warning("Error closing e2b sandbox %s during release: %s", sandbox_id, e)
-
-            with self._lock:
-                shutting_down = self._shutdown_called
-                if not shutting_down:
-                    self._warm_pool[sandbox_id] = (seed or "", time.time())
-                    self._warm_pool.move_to_end(sandbox_id)
-                    logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
-            if shutting_down:
-                # shutdown can start while sandbox.close() releases its host
-                # transport. The saved client still lets us destroy the VM.
-                logger.info(
-                    "Provider shut down during release of sandbox %s; killing instead of parking in warm pool",
-                    sandbox_id,
-                )
-                if error := self._kill_client(client):
-                    logger.debug("Failed to kill e2b sandbox %s during release: %s", sandbox_id, error)
-                self._safe_close_client(client)
         finally:
             self._free_transitioning_slot()
 
@@ -1498,6 +1501,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._thread_sandboxes.clear()
             self._thread_locks.clear()
             self._warm_pool.clear()
+            self._eviction_tombstones.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0
 
@@ -1507,9 +1511,10 @@ class E2BSandboxProvider(SandboxProvider):
                 return
             self._shutdown_called = True
             active = list(self._sandboxes.items())
-            warm_ids = list(self._warm_pool.keys())
+            warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones)
             self._sandboxes.clear()
             self._warm_pool.clear()
+            self._eviction_tombstones.clear()
             self._thread_sandboxes.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0

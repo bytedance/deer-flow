@@ -765,7 +765,7 @@ This is how DeerFlow handles tasks that take minutes to hours: a research task m
 
 ### Sandbox & File System
 
-When you use `E2BSandboxProvider`, `sandbox.burst_limit` applies only with `sandbox.overflow_policy: burst`. The `wait` and `reject` policies use only `sandbox.replicas`.
+When you use `E2BSandboxProvider`, `sandbox.burst_limit` applies only with `sandbox.overflow_policy: burst`. The `wait` and `reject` policies use only `sandbox.replicas`. `sandbox.replicas` limits one Gateway process. It does not limit all Gateway processes.
 
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 

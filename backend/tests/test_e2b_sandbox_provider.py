@@ -180,6 +180,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._thread_sandboxes = {}
     provider._thread_locks = {}
     provider._warm_pool = OrderedDict()
+    provider._eviction_tombstones = set()
     provider._reserved_slots = 0
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
@@ -643,7 +644,7 @@ def test_kill_client_ignores_missing_or_uncallable_clients():
     assert p._kill_client(SimpleNamespace()) is None
 
 
-def test_evict_oldest_warm_closes_client_when_kill_lookup_raises(monkeypatch):
+def test_evict_oldest_warm_keeps_slot_when_kill_lookup_raises(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
     error = RuntimeError("kill unavailable")
@@ -663,8 +664,10 @@ def test_evict_oldest_warm_closes_client_when_kill_lookup_raises(monkeypatch):
     fake_cls.connect_factory = lambda _sid, **_kw: client
     p._warm_pool["sb-warm"] = ("seed", 12345.0)
 
-    assert p._evict_oldest_warm() == "sb-warm"
+    assert p._evict_oldest_warm() is None
     assert client.closed is True
+    assert p._eviction_tombstones == {"sb-warm"}
+    assert p._transitioning_slots == 1
 
 
 def test_evict_oldest_warm_uses_kill_helper_and_closes_client(monkeypatch):
@@ -1713,8 +1716,8 @@ def test_capacity_reject_policy_does_not_leak_reserved_slots(monkeypatch):
         assert p._reserved_slots == 0
 
 
-def test_capacity_evict_counted_in_capacity(monkeypatch):
-    """An evicted warm sandbox that fails kill still frees its capacity slot."""
+def test_capacity_keeps_slot_when_warm_eviction_reconnect_fails(monkeypatch):
+    """An uncertain warm eviction must not make room for a new VM."""
     p = _make_provider(replicas=1, overflow_policy="reject")
     fake_cls = _install_fake_sdk(monkeypatch, p)
     fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("gone"))
@@ -1724,9 +1727,56 @@ def test_capacity_evict_counted_in_capacity(monkeypatch):
     assert len(p._warm_pool) == 1
     assert len(p._sandboxes) == 0
 
-    sid2 = p.acquire("t2", user_id="u2")
-    assert sid2 is not None
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+    assert len(fake_cls.create_calls) == 1
     assert "sb-1" not in p._warm_pool
+    assert p._transitioning_slots == 1
+
+
+def test_capacity_keeps_slot_when_warm_eviction_kill_fails(monkeypatch):
+    """An uncertain kill must not make room for a new VM."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    reconnect_client = FakeClient(sandbox_id="created-1")
+
+    def fail_kill():
+        raise RuntimeError("control plane unavailable")
+
+    reconnect_client.kill = fail_kill
+    fake_cls.connect_factory = lambda _sid, **_kw: reconnect_client
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+    assert len(fake_cls.create_calls) == 1
+    assert reconnect_client.closed
+
+
+def test_capacity_retries_tombstone_until_warm_vm_is_destroyed(monkeypatch):
+    """A later confirmed eviction can release the retained capacity slot."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+    reconnect_client = FakeClient(sandbox_id=sid1)
+    fake_cls.connect_factory = lambda _sid, **_kw: reconnect_client
+    sid2 = p.acquire("t2", user_id="u2")
+
+    assert sid2 != sid1
+    assert reconnect_client.killed
+    assert p._eviction_tombstones == set()
+    assert p._transitioning_slots == 0
 
 
 def test_capacity_reset_clears_reserved_slots(monkeypatch):
@@ -1995,6 +2045,45 @@ def test_shutdown_during_release_does_not_repopulate_warm_pool(monkeypatch):
     assert release_done.is_set()
     assert sid1 not in p._warm_pool, "must not park in warm pool after shutdown"
     assert client.killed, "release must kill its saved client after shutdown"
+
+
+def test_shutdown_during_release_close_kills_published_warm_vm(monkeypatch):
+    """Shutdown must find a released VM before its client transport closes."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-release-close-race")
+    fake_cls.create_factory = lambda **_kw: client
+    sid = p.acquire("t1", user_id="u1")
+
+    close_started = threading.Event()
+    allow_close = threading.Event()
+
+    def slow_close():
+        client.closed = True
+        close_started.set()
+        assert allow_close.wait(timeout=2)
+
+    def fail_kill_after_close():
+        if client.closed:
+            raise RuntimeError("transport closed")
+        client.killed = True
+
+    client.close = slow_close
+    client.kill = fail_kill_after_close
+    shutdown_client = FakeClient(sandbox_id=sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: shutdown_client
+
+    release_thread = threading.Thread(target=p.release, args=(sid,))
+    release_thread.start()
+    assert close_started.wait(timeout=1)
+
+    shutdown_thread = threading.Thread(target=p.shutdown)
+    shutdown_thread.start()
+    shutdown_thread.join(timeout=2)
+    allow_close.set()
+    release_thread.join(timeout=5)
+
+    assert shutdown_client.killed
 
 
 def test_shutdown_during_reclaim_does_not_register_active(monkeypatch):
