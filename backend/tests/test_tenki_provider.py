@@ -466,6 +466,33 @@ def test_download_cap_counts_bytes_actually_received(monkeypatch) -> None:
     assert excinfo.value.errno == errno.EFBIG
 
 
+def test_download_size_cap_does_not_evict_sandbox(monkeypatch) -> None:
+    # Hitting the size cap is a client-side limit, not a dead session — the
+    # sandbox must stay live.
+    monkeypatch.setattr("deerflow.community.tenki.sandbox._MAX_DOWNLOAD_SIZE", 100)
+    invalidated: list[tuple[str, str]] = []
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda sid, reason: invalidated.append((sid, reason)))
+    fake.files["/home/tenki/outputs/big.bin"] = b"x" * 500
+    with pytest.raises(OSError):
+        box.download_file("/mnt/user-data/outputs/big.bin")
+    assert invalidated == []
+
+
+def test_download_terminal_transport_error_evicts_sandbox() -> None:
+    # A ConnectionError mid-stream is an OSError subclass and terminal; the old
+    # `except OSError: raise` re-raised it before _note_failure, so a session
+    # that died mid-download never got evicted.
+    invalidated: list[tuple[str, str]] = []
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda sid, reason: invalidated.append((sid, reason)))
+    box.write_file("/mnt/user-data/outputs/f.bin", "payload")
+    fake.fs_error = ConnectionError("connection reset mid-stream")
+    with pytest.raises(ConnectionError):
+        box.download_file("/mnt/user-data/outputs/f.bin")
+    assert invalidated == [("sb", "connection reset mid-stream")]
+
+
 def test_fs_terminal_failure_evicts_sandbox() -> None:
     invalidated: list[tuple[str, str]] = []
     fake = _FakeSandbox(fs_error=_FakeSessionTerminatedError("session gone"))
@@ -504,6 +531,18 @@ def test_grep_glob_keeps_its_directory_prefix() -> None:
     assert [m.path for m in matches] == ["/mnt/user-data/workspace/src/a.js"]
 
 
+def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
+    # Without -H, `grep -r` on a path that resolves to a single file prints
+    # "line:text" and the file:line:text unpack drops every match. The flag must
+    # always be present regardless of the other options.
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "needle here\n")
+    box.grep("/mnt/user-data/workspace", "needle")
+    grep_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
+
+
 def test_paths_outside_the_virtual_prefix_are_reported_as_is() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     assert box._virtual_path("/etc/hostname") == "/etc/hostname"
@@ -516,7 +555,7 @@ def test_paths_outside_the_virtual_prefix_are_reported_as_is() -> None:
 def test_sandbox_id_deterministic(monkeypatch):
     provider = _install(monkeypatch)
     assert provider._sandbox_id("t1", "u1") == provider._sandbox_id("t1", "u1")
-    assert len(provider._sandbox_id("t1", "u1")) == 8
+    assert len(provider._sandbox_id("t1", "u1")) == 16  # 64-bit, like community/e2b_sandbox
 
 
 def test_sandbox_id_distinct_users_and_threads(monkeypatch):

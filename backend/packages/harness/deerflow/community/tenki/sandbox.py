@@ -98,6 +98,11 @@ class TenkiSandbox(Sandbox):
         self._home_dir = home_dir.rstrip("/") or "/"
         self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
+        # Serialises the append read-modify-write across its three fs ops. A
+        # lock distinct from _lock, so it can wrap the whole sequence without the
+        # per-op eviction callback (which reaches back into the provider) ever
+        # running under it.
+        self._write_lock = threading.Lock()
         self._closed = False
 
     @property
@@ -146,16 +151,25 @@ class TenkiSandbox(Sandbox):
             logger.exception("Terminal Tenki failure callback errored for %s", self.id)
 
     def _fs_op(self, op: Callable[[SandboxFS], T]) -> T:
-        """Run a native ``sandbox.fs`` call, evicting the sandbox on terminal errors."""
+        """Run a native ``sandbox.fs`` call, evicting the sandbox on terminal errors.
+
+        The lock is held across ``op`` (not just the fs lookup) so concurrent
+        calls on the same sandbox serialise: the Tenki SDK shares one connection
+        per instance, like community/e2b_sandbox. ``_note_failure`` runs *after*
+        the lock is released — it reaches back into the provider, which locks in
+        the opposite order (provider then sandbox), so holding both at once could
+        deadlock.
+        """
         with self._lock:
             if self._closed:
                 raise RuntimeError("sandbox has been closed")
             fs = self._sandbox.fs
-        try:
-            return op(fs)
-        except Exception as e:
-            self._note_failure(e)
-            raise
+            try:
+                return op(fs)
+            except Exception as e:
+                failure = e
+        self._note_failure(failure)
+        raise failure
 
     def _exec(self, *argv: str, env: dict[str, str] | None = None, timeout: float | None = None) -> Any:
         # No forced cwd: commands run in the sandbox default working directory
@@ -270,18 +284,26 @@ class TenkiSandbox(Sandbox):
 
     def _write_bytes(self, resolved: str, data: bytes, *, append: bool) -> None:
         parent = posixpath.dirname(resolved)
-        if parent:
-            self._fs_op(lambda fs: fs.mkdir(parent))
+        if not append:
+            if parent:
+                self._fs_op(lambda fs: fs.mkdir(parent))
+            self._fs_op(lambda fs: fs.write_stream(resolved, _frames(data)))
+            return
 
-        if append:
-            # Tenki's write stream has no append mode (it starts at offset 0),
-            # so read-modify-write like community/e2b_sandbox does.
+        # Tenki's write stream has no append mode (it starts at offset 0), so we
+        # read-modify-write like community/e2b_sandbox. The read and the write are
+        # separate fs ops, so two concurrent appends could both read the same
+        # pre-image and the second would clobber the first; _write_lock makes the
+        # whole sequence atomic.
+        with self._write_lock:
+            if parent:
+                self._fs_op(lambda fs: fs.mkdir(parent))
             try:
                 data = self._fs_op(lambda fs: fs.read_bytes(resolved)) + data
             except Exception as e:
                 if type(e).__name__ != "FileNotFoundError":
                     raise
-        self._fs_op(lambda fs: fs.write_stream(resolved, _frames(data)))
+            self._fs_op(lambda fs: fs.write_stream(resolved, _frames(data)))
 
     def download_file(self, path: str) -> bytes:
         normalized = self._guard_traversal(path)
@@ -306,7 +328,17 @@ class TenkiSandbox(Sandbox):
                 if total > _MAX_DOWNLOAD_SIZE:
                     raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
                 chunks.append(chunk)
-        except OSError:
+        except OSError as e:
+            # Our own EFBIG size-cap is not a session death — let it pass through
+            # without evicting. Every other OSError is a real transport failure:
+            # ConnectionError / BrokenPipeError / EOFError are OSError subclasses
+            # that _is_terminal_failure treats as terminal, so they must route
+            # through _note_failure like _fs_op/_exec do. Without this, a session
+            # that dies mid-download is never evicted and the agent keeps hitting
+            # OSErrors until some other op happens to reap it.
+            if e.errno == errno.EFBIG:
+                raise
+            self._note_failure(e)
             raise
         except Exception as e:
             self._note_failure(e)
@@ -367,11 +399,13 @@ class TenkiSandbox(Sandbox):
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
-        # busybox+GNU-portable flags: -r recursive (prints the filename), -n line
-        # numbers, -I skip binary, -E/-F regex vs fixed. --include and -m are
+        # busybox+GNU-portable flags: -r recursive, -H always print the filename
+        # (without it, grep -r on a path that resolves to a single file prints
+        # "line:text" and the file:line:text unpack below drops every match), -n
+        # line numbers, -I skip binary, -E/-F regex vs fixed. --include and -m are
         # omitted for busybox portability; glob-scoping and the result cap are
         # applied in Python below.
-        flags = ["-r", "-n", "-I"]
+        flags = ["-r", "-H", "-n", "-I"]
         if not case_sensitive:
             flags.append("-i")
         flags.append("-F" if literal else "-E")

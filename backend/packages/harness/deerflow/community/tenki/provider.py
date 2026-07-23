@@ -95,9 +95,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         """Deterministic sandbox ID from user/thread scope.
 
         Includes user_id so a sandbox created for one user's bucket cannot be
-        reclaimed by another user's thread with the same thread_id.
+        reclaimed by another user's thread with the same thread_id. The warm
+        pool is keyed by this id alone (``_reclaim_warm_pool`` looks it up
+        directly, with no full-seed fallback), so on a hosted multi-tenant
+        gateway a hash collision would let one user reclaim another's parked
+        sandbox. 64 bits, like community/e2b_sandbox, keeps that negligible.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:8]
+        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
     # ── Provider lifecycle ───────────────────────────────────────────────
 
