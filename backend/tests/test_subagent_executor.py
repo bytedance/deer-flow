@@ -46,7 +46,10 @@ _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgra
 
 
 def _default_app_config():
-    return SimpleNamespace(tool_search=SimpleNamespace(enabled=False))
+    return SimpleNamespace(
+        tool_search=SimpleNamespace(enabled=False),
+        authorization=SimpleNamespace(enabled=False),
+    )
 
 
 def _patch_default_get_app_config(executor_module):
@@ -312,10 +315,13 @@ class TestAgentConstruction:
             app_config=app_config,
             parent_model="parent-model",
         )
+        provider = object()
+        executor._authz_provider = provider
 
         result = executor._create_agent()
 
         assert result is agent
+        assert captured["middlewares"]["authorization_provider"] is provider
         assert captured["model"] == {
             "name": "parent-model",
             "thinking_enabled": False,
@@ -332,6 +338,7 @@ class TestAgentConstruction:
             "lazy_init": True,
             "deferred_setup": None,
             "agent_name": "test-agent",
+            "authorization_provider": provider,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
@@ -599,7 +606,14 @@ class TestAgentConstruction:
             "get_or_new_user_skill_storage",
             lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
-        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
+        monkeypatch.setattr(
+            executor_module,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                tool_search=SimpleNamespace(enabled=True),
+                authorization=SimpleNamespace(enabled=False),
+            ),
+        )
 
         @as_tool
         def mcp_calc(expression: str) -> str:
@@ -640,7 +654,14 @@ class TestAgentConstruction:
             "get_or_new_user_skill_storage",
             lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
-        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=False)))
+        monkeypatch.setattr(
+            executor_module,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                tool_search=SimpleNamespace(enabled=False),
+                authorization=SimpleNamespace(enabled=False),
+            ),
+        )
 
         @as_tool
         def mcp_calc(expression: str) -> str:
@@ -654,6 +675,47 @@ class TestAgentConstruction:
         assert "tool_search" not in [t.name for t in final_tools]
         assert deferred_setup.deferred_names == frozenset()
         assert "<available-deferred-tools>" not in state["messages"][0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_applies_authorization_before_deferral(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        app_config = SimpleNamespace(
+            authorization=AuthorizationConfig(
+                enabled=True,
+                provider=AuthorizationProviderConfig(
+                    use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                    config={"roles": {"user": {"tools": {"allow": ["safe_tool"]}}}},
+                ),
+            ),
+            models=[SimpleNamespace(name="test-model")],
+            tool_search=SimpleNamespace(enabled=False),
+        )
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[NamedTool("safe_tool"), NamedTool("denied_tool")],
+            app_config=app_config,
+            parent_model="test-model",
+            user_role="user",
+            thread_id="test-thread",
+        )
+
+        _state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert [tool.name for tool in final_tools] == ["safe_tool"]
+        assert deferred_setup.deferred_names == frozenset()
+        assert executor._authz_provider is not None
 
     @pytest.mark.anyio
     async def test_build_initial_state_deferral_respects_tool_policy_and_tool_search_is_infra(
@@ -685,7 +747,14 @@ class TestAgentConstruction:
             "get_or_new_user_skill_storage",
             lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
         )
-        monkeypatch.setattr(executor_module, "get_app_config", lambda: SimpleNamespace(tool_search=SimpleNamespace(enabled=True)))
+        monkeypatch.setattr(
+            executor_module,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                tool_search=SimpleNamespace(enabled=True),
+                authorization=SimpleNamespace(enabled=False),
+            ),
+        )
 
         @as_tool
         def active_tool(x: str) -> str:
