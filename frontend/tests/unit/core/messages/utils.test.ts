@@ -326,15 +326,18 @@ describe("human message internal context stripping", () => {
     const content =
       "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n  Document outline (use `read_file` with line ranges to read sections):\n    L1: Introduction\n- data.xlsx (12.0 KB)\n  Path: /mnt/user-data/uploads/data.xlsx\n</current_uploads>\n\nSummarize";
 
+    // size is bytes (FileInMessage contract): the block's "177.6 KB" /
+    // "12.0 KB" are converted back from the human-readable form the backend
+    // emits, so formatBytes re-renders them at the original magnitude.
     expect(parseUploadedFiles(content)).toEqual([
       {
         filename: "paper.docx",
-        size: 177,
+        size: Math.round(177.6 * 1024), // 181862
         path: "/mnt/user-data/uploads/paper.docx",
       },
       {
         filename: "data.xlsx",
-        size: 12,
+        size: 12 * 1024, // 12288
         path: "/mnt/user-data/uploads/data.xlsx",
       },
     ]);

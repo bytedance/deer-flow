@@ -637,6 +637,27 @@ export function stripInternalMarkers(content: string): string {
   return content.replace(INTERNAL_MARKER_RE, "").trim();
 }
 
+// The upload context block renders sizes as human-readable strings
+// (uploads_middleware.py::_format_file_entry emits "<n> KB" / "<n> MB",
+// mirroring formatBytes). Convert them back to bytes so the parsed
+// FileInMessage.size honours its bytes contract and chips re-render at the
+// original magnitude instead of e.g. treating "177.6 KB" as 177 bytes.
+function parseHumanReadableSize(raw: string): number {
+  const match = /([\d.]+)\s*(B|KB|MB|GB|TB)?/i.exec(raw.trim());
+  if (!match) return 0;
+  const value = parseFloat(match[1] ?? "");
+  if (!Number.isFinite(value)) return 0;
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1024,
+    MB: 1024 ** 2,
+    GB: 1024 ** 3,
+    TB: 1024 ** 4,
+  };
+  const unit = (match[2] ?? "B").toUpperCase();
+  return Math.round(value * (multipliers[unit] ?? 1));
+}
+
 export function parseUploadedFiles(content: string): FileInMessage[] {
   // Match the upload context block; the tag name depends on backend version
   // (<current_uploads> since #4174, <uploaded_files> before / on IM paths).
@@ -670,7 +691,7 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      size: parseHumanReadableSize(fileMatch[2]),
       path: fileMatch[3].trim(),
     });
   }
