@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import threading
+import time
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from deerflow.config.paths import Paths
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fakes for the e2b SDK
@@ -169,7 +171,7 @@ class FakeSandboxClass:
         return self.list_return
 
 
-def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800) -> Any:
+def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_policy: str = "wait", acquire_timeout: int = 30, burst_limit: int = 0) -> Any:
     """Build a ``E2BSandboxProvider`` instance bypassing ``__init__``."""
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
@@ -178,6 +180,9 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800) -> Any:
     provider._thread_sandboxes = {}
     provider._thread_locks = {}
     provider._warm_pool = OrderedDict()
+    provider._reserved_slots = 0
+    provider._transitioning_slots = 0
+    provider._capacity_cond = threading.Condition(provider._lock)
     provider._shutdown_called = False
     provider._config = {
         "api_key": "test-key",
@@ -186,6 +191,9 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800) -> Any:
         "home_dir": "/home/user",
         "idle_timeout": idle_timeout,
         "replicas": replicas,
+        "overflow_policy": overflow_policy,
+        "acquire_timeout": acquire_timeout,
+        "burst_limit": burst_limit,
         "mounts": [],
         "environment": {},
     }
@@ -1496,3 +1504,576 @@ def test_grep_without_glob_is_unaffected():
 
     assert [m.path for m in matches] == ["/home/user/workspace/anywhere/file.txt"]
     assert truncated is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Capacity enforcement tests (#4339)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_capacity_reject_policy_raises_when_full(monkeypatch):
+    """With overflow_policy='reject' and replicas=1, a second acquire raises
+    SandboxCapacityExceededError instead of creating an unbounded sandbox."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    assert sid1 is not None
+    assert len(p._sandboxes) == 1
+
+    with pytest.raises(SandboxCapacityExceededError) as exc_info:
+        p.acquire("t2", user_id="u2")
+    assert exc_info.value.replicas == 1
+    assert exc_info.value.retry_after_seconds > 0
+    assert exc_info.value.details["code"] == "SANDBOX_CAPACITY_EXCEEDED"
+    assert len(fake_cls.create_calls) == 1  # no second create
+
+
+def test_capacity_reject_frees_slot_on_release(monkeypatch):
+    """Releasing a sandbox frees a capacity slot so the next acquire succeeds."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+
+    sid2 = p.acquire("t2", user_id="u2")
+    assert sid2 is not None
+    assert sid2 != sid1
+
+
+def test_capacity_reject_evicts_warm_before_raising(monkeypatch):
+    """When at capacity, the provider evicts a warm entry before rejecting."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+    assert len(p._warm_pool) == 1
+
+    sid2 = p.acquire("t1", user_id="u1")
+    assert sid2 == sid1
+    assert len(p._warm_pool) == 0
+
+
+def test_capacity_wait_policy_times_out(monkeypatch):
+    """With overflow_policy='wait' and a short timeout, the provider raises
+    SandboxCapacityExceededError when no slot frees up."""
+    p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=1)
+    _install_fake_sdk(monkeypatch, p)
+
+    p.acquire("t1", user_id="u1")
+
+    with pytest.raises(SandboxCapacityExceededError) as exc_info:
+        p.acquire("t2", user_id="u2")
+    assert "Timed out" in str(exc_info.value)
+
+
+def test_capacity_wait_policy_succeeds_when_slot_freed(monkeypatch):
+    """A blocked waiter proceeds once a slot is freed by another thread."""
+    p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=10)
+    _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+
+    results: list[str | Exception] = []
+    barrier = threading.Barrier(2, timeout=5)
+    acquired = threading.Event()
+
+    def waiter() -> None:
+        barrier.wait()
+        try:
+            results.append(p.acquire("t2", user_id="u2"))
+        except Exception as e:
+            results.append(e)
+        acquired.set()
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    barrier.wait()
+
+    # Give the waiter a moment to block on the condition.
+    time.sleep(0.2)
+
+    p.release(sid1)
+    t.join(timeout=5)
+
+    assert not t.is_alive(), "waiter thread must complete"
+    assert len(results) == 1
+    assert isinstance(results[0], str)
+
+
+def test_capacity_burst_policy_allows_limited_overflow(monkeypatch):
+    """With overflow_policy='burst' and burst_limit=2, the provider allows
+    up to replicas + burst_limit sandboxes."""
+    p = _make_provider(replicas=1, overflow_policy="burst", burst_limit=2)
+    _install_fake_sdk(monkeypatch, p)
+
+    sids = []
+    for i in range(3):  # replicas(1) + burst(2) = 3
+        sids.append(p.acquire(f"t{i}", user_id=f"u{i}"))
+    assert len(sids) == 3
+    assert len(p._sandboxes) == 3
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t-extra", user_id="u-extra")
+
+
+def test_capacity_burst_with_zero_limit_falls_back_to_reject(monkeypatch):
+    """overflow_policy='burst' with burst_limit=0 is treated as 'reject'."""
+    p = _make_provider(replicas=1, overflow_policy="burst", burst_limit=0)
+    _install_fake_sdk(monkeypatch, p)
+
+    p.acquire("t1", user_id="u1")
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+
+def test_capacity_release_on_create_failure(monkeypatch):
+    """A failed create releases the reserved slot so capacity is not leaked."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    call_count = 0
+
+    def flaky_create(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("API down")
+        return FakeClient(sandbox_id=f"sb-{call_count}")
+
+    fake_cls.create_factory = flaky_create
+
+    with pytest.raises(RuntimeError, match="API down"):
+        p.acquire("t1", user_id="u1")
+
+    assert p._reserved_slots == 0
+    sid = p.acquire("t1", user_id="u1")
+    assert sid is not None
+
+
+def test_capacity_release_on_bootstrap_failure(monkeypatch):
+    """A failed bootstrap releases the reserved slot."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    call_count = 0
+
+    def flaky_create(**kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return FakeClient(
+                sandbox_id="sb-broken",
+                commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="fail", exit_code=1)]),
+            )
+        return FakeClient(sandbox_id=f"sb-ok-{call_count}")
+
+    fake_cls.create_factory = flaky_create
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        p.acquire("t1", user_id="u1")
+
+    assert p._reserved_slots == 0
+    sid = p.acquire("t1", user_id="u1")
+    assert sid is not None
+
+
+def test_capacity_reject_policy_does_not_leak_reserved_slots(monkeypatch):
+    """Repeated reject failures must not accumulate reserved slots."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    _install_fake_sdk(monkeypatch, p)
+
+    p.acquire("t1", user_id="u1")
+
+    for _ in range(5):
+        with pytest.raises(SandboxCapacityExceededError):
+            p.acquire("t-extra", user_id="u-extra")
+        assert p._reserved_slots == 0
+
+
+def test_capacity_evict_counted_in_capacity(monkeypatch):
+    """An evicted warm sandbox that fails kill still frees its capacity slot."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("gone"))
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+    assert len(p._warm_pool) == 1
+    assert len(p._sandboxes) == 0
+
+    sid2 = p.acquire("t2", user_id="u2")
+    assert sid2 is not None
+    assert "sb-1" not in p._warm_pool
+
+
+def test_capacity_reset_clears_reserved_slots(monkeypatch):
+    """reset() must clear _reserved_slots."""
+    p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=30)
+    _install_fake_sdk(monkeypatch, p)
+
+    p._reserved_slots = 3
+    p.reset()
+    assert p._reserved_slots == 0
+
+
+def test_capacity_default_config_values():
+    """Default config values are backward-compatible."""
+    p = _make_provider()
+    assert p._config["overflow_policy"] == "wait"
+    assert p._config["acquire_timeout"] == 30
+    assert p._config["burst_limit"] == 0
+
+
+# ── Race-condition regression tests ──────────────────────────────────────
+
+
+def test_capacity_release_holds_slot_during_transition(monkeypatch):
+    """replicas=1. T1 releases sb1 (slow sync). T2 acquires → reject."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+
+    def slow_sync(*_args, **_kwargs):
+        sync_started.set()
+        assert allow_sync.wait(timeout=2)
+
+    monkeypatch.setattr(p, "_sync_outputs_to_host", slow_sync)
+
+    result: list[str | Exception] = []
+
+    def do_acquire():
+        try:
+            result.append(p.acquire("t2", user_id="u2"))
+        except Exception as e:
+            result.append(e)
+
+    release_thread = threading.Thread(target=p.release, args=(sid1,))
+    release_thread.start()
+    assert sync_started.wait(timeout=1), "release must enter sync"
+
+    t = threading.Thread(target=do_acquire)
+    t.start()
+    t.join(timeout=2)
+
+    allow_sync.set()
+    release_thread.join(timeout=2)
+
+    assert isinstance(result[0], SandboxCapacityExceededError), f"expected reject, got {result[0]!r}"
+    assert len(p._sandboxes) + len(p._warm_pool) <= p._capacity_limit()
+
+
+def test_capacity_reclaim_holds_slot_during_transition(monkeypatch):
+    """replicas=1. T1 reclaims warm sb (slow reconnect). T2 acquires → reject."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+
+    reconnect_started = threading.Event()
+    allow_reconnect = threading.Event()
+    original_connect = fake_cls.connect_factory
+
+    def slow_connect(sid, **kw):
+        reconnect_started.set()
+        assert allow_reconnect.wait(timeout=2)
+        return original_connect(sid, **kw)
+
+    fake_cls.connect_factory = slow_connect
+
+    result: list[str | Exception] = []
+
+    def do_acquire():
+        try:
+            result.append(p.acquire("t2", user_id="u2"))
+        except Exception as e:
+            result.append(e)
+
+    reclaim_thread = threading.Thread(target=p._reclaim_warm_pool_sandbox, args=("t1",), kwargs={"user_id": "u1"})
+    reclaim_thread.start()
+    assert reconnect_started.wait(timeout=1), "reclaim must enter reconnect"
+
+    t = threading.Thread(target=do_acquire)
+    t.start()
+    t.join(timeout=2)
+
+    allow_reconnect.set()
+    reclaim_thread.join(timeout=2)
+
+    assert isinstance(result[0], SandboxCapacityExceededError), f"expected reject during reclaim, got {result[0]!r}"
+
+
+def test_capacity_shutdown_wakes_waiter_with_error(monkeypatch):
+    """Waiter blocked on capacity must raise on shutdown, not create VM."""
+    p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=30)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    p.acquire("t1", user_id="u1")
+
+    result: list[Exception | None] = []
+    started = threading.Event()
+
+    def waiter():
+        started.set()
+        try:
+            p.acquire("t2", user_id="u2")
+        except Exception as e:
+            result.append(e)
+
+    t = threading.Thread(target=waiter)
+    t.start()
+    assert started.wait(timeout=1)
+
+    time.sleep(0.2)
+    p.shutdown()
+    t.join(timeout=5)
+
+    assert len(result) == 1
+    assert isinstance(result[0], SandboxCapacityExceededError)
+    assert "shutting down" in str(result[0]).lower()
+    assert len(fake_cls.create_calls) == 1
+
+
+def test_capacity_create_aborted_by_shutdown_kills_vm(monkeypatch):
+    """shutdown after create() but before commit: kill VM, raise error."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    created_client: FakeClient | None = None
+    create_returned = threading.Event()
+    allow_commit = threading.Event()
+
+    def intercept_create(**kw):
+        nonlocal created_client
+        c = FakeClient(sandbox_id="sb-shutdown-race")
+        created_client = c
+        create_returned.set()
+        assert allow_commit.wait(timeout=2)
+        return c
+
+    fake_cls.create_factory = intercept_create
+
+    result: list[str | Exception] = []
+
+    def do_acquire():
+        try:
+            result.append(p.acquire("t1", user_id="u1"))
+        except Exception as e:
+            result.append(e)
+
+    t = threading.Thread(target=do_acquire)
+    t.start()
+    assert create_returned.wait(timeout=1)
+
+    p.shutdown()
+    allow_commit.set()
+    t.join(timeout=5)
+
+    assert len(result) == 1
+    assert isinstance(result[0], SandboxCapacityExceededError)
+    assert created_client is not None
+    assert created_client.killed, "VM must be killed when shutdown aborts create"
+
+
+def test_capacity_concurrent_different_threads_only_one_creates(monkeypatch):
+    """replicas=1. Two threads for different users/threads → exactly 1 create."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    create_count = 0
+    create_lock = threading.Lock()
+    create_started = threading.Event()
+    allow_first_create = threading.Event()
+
+    def counted_create(**kw):
+        nonlocal create_count
+        with create_lock:
+            create_count += 1
+            if create_count == 1:
+                create_started.set()
+                assert allow_first_create.wait(timeout=2)
+        return FakeClient(sandbox_id=f"sb-{create_count}")
+
+    fake_cls.create_factory = counted_create
+
+    results: list[str | Exception] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def worker_a():
+        barrier.wait()
+        try:
+            results.append(p.acquire("t-a", user_id="u-a"))
+        except Exception as e:
+            results.append(e)
+
+    def worker_b():
+        barrier.wait()
+        time.sleep(0.1)
+        try:
+            results.append(p.acquire("t-b", user_id="u-b"))
+        except Exception as e:
+            results.append(e)
+
+    ta = threading.Thread(target=worker_a)
+    tb = threading.Thread(target=worker_b)
+    ta.start()
+    tb.start()
+    assert create_started.wait(timeout=2)
+
+    tb.join(timeout=5)
+    allow_first_create.set()
+    ta.join(timeout=5)
+
+    assert create_count == 1, f"expected 1 create, got {create_count}"
+    assert len(results) == 2
+    sids = [r for r in results if isinstance(r, str)]
+    errs = [r for r in results if isinstance(r, Exception)]
+    assert len(sids) == 1, f"expected 1 successful acquire, got {len(sids)}"
+    assert len(errs) == 1
+    assert isinstance(errs[0], SandboxCapacityExceededError)
+
+
+def test_shutdown_during_release_does_not_repopulate_warm_pool(monkeypatch):
+    """release in flight when shutdown fires must kill the VM, not park it."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+
+    sync_entered = threading.Event()
+    allow_sync = threading.Event()
+
+    def slow_sync(*_args, **_kwargs):
+        sync_entered.set()
+        assert allow_sync.wait(timeout=2)
+
+    monkeypatch.setattr(p, "_sync_outputs_to_host", slow_sync)
+
+    release_done = threading.Event()
+
+    def do_release():
+        p.release(sid1)
+        release_done.set()
+
+    t = threading.Thread(target=do_release)
+    t.start()
+    assert sync_entered.wait(timeout=1)
+
+    p.shutdown()
+    allow_sync.set()
+    t.join(timeout=5)
+
+    assert release_done.is_set()
+    assert sid1 not in p._warm_pool, "must not park in warm pool after shutdown"
+
+
+def test_shutdown_during_reclaim_does_not_register_active(monkeypatch):
+    """reclaim in flight when shutdown fires must kill the VM, not register."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid1 = p.acquire("t1", user_id="u1")
+    p.release(sid1)
+
+    reconnect_entered = threading.Event()
+    allow_reconnect = threading.Event()
+    original_connect = fake_cls.connect_factory
+
+    def slow_connect(sid, **kw):
+        reconnect_entered.set()
+        assert allow_reconnect.wait(timeout=2)
+        return original_connect(sid, **kw)
+
+    fake_cls.connect_factory = slow_connect
+
+    result: list[str | None] = []
+
+    def do_reclaim():
+        result.append(p._reclaim_warm_pool_sandbox("t1", user_id="u1"))
+
+    t = threading.Thread(target=do_reclaim)
+    t.start()
+    assert reconnect_entered.wait(timeout=1)
+
+    p.shutdown()
+    allow_reconnect.set()
+    t.join(timeout=5)
+
+    assert result == [None], "reclaim must return None after shutdown"
+    assert sid1 not in p._sandboxes, "must not register active after shutdown"
+
+
+def test_shutdown_during_bootstrap_does_not_commit(monkeypatch):
+    """create in bootstrap when shutdown fires must kill, not commit."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    client = FakeClient(sandbox_id="sb-bootstrap-shutdown")
+    fake_cls.create_factory = lambda **kw: client
+
+    bootstrap_entered = threading.Event()
+    allow_bootstrap = threading.Event()
+
+    original_bootstrap = p._bootstrap_sandbox_paths
+
+    def slow_bootstrap(c):
+        bootstrap_entered.set()
+        assert allow_bootstrap.wait(timeout=2)
+        return original_bootstrap(c)
+
+    monkeypatch.setattr(p, "_bootstrap_sandbox_paths", slow_bootstrap)
+
+    result: list[str | Exception] = []
+
+    def do_acquire():
+        try:
+            result.append(p.acquire("t1", user_id="u1"))
+        except Exception as e:
+            result.append(e)
+
+    t = threading.Thread(target=do_acquire)
+    t.start()
+    assert bootstrap_entered.wait(timeout=1)
+
+    p.shutdown()
+    allow_bootstrap.set()
+    t.join(timeout=5)
+
+    assert len(result) == 1
+    assert isinstance(result[0], SandboxCapacityExceededError)
+    assert "sb-bootstrap-shutdown" not in p._sandboxes
+    assert client.killed, "VM must be killed"
+
+
+def test_discovery_obeys_capacity(monkeypatch):
+    """discovery of a remote sandbox must reserve capacity; reject if full."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    # Fill the single slot.
+    p.acquire("t1", user_id="u1")
+
+    # Discovery finds a matching sandbox.
+    fake_cls.list_return = [
+        SimpleNamespace(
+            sandbox_id="sb-remote",
+            metadata={
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_user": "u2",
+                "deer_flow_thread": "t2",
+            },
+        )
+    ]
+
+    # Discovery succeeds in finding but fails to reserve → returns None.
+    sid = p._discover_remote_sandbox("t2", user_id="u2")
+    assert sid is None
+    assert "sb-remote" not in p._sandboxes

@@ -69,3 +69,41 @@ class SandboxFileNotFoundError(SandboxFileError):
     """Raised when a file or directory is not found."""
 
     pass
+
+
+class SandboxCapacityExceededError(SandboxError):
+    """Raised when the sandbox provider has no available capacity.
+
+    The caller may retry after a delay.  This is a recoverable error:
+    the provider is healthy but all configured replica slots are occupied.
+    """
+
+    CODE = "SANDBOX_CAPACITY_EXCEEDED"
+
+    def __init__(
+        self,
+        message: str = "All sandbox replica slots are in use",
+        *,
+        active: int = 0,
+        warm: int = 0,
+        reserved: int = 0,
+        replicas: int = 0,
+        retry_after_seconds: float = 5.0,
+    ) -> None:
+        details: dict[str, object] = {
+            "code": self.CODE,
+            "replicas": replicas,
+            "retry_after_seconds": retry_after_seconds,
+        }
+        if active:
+            details["active"] = active
+        if warm:
+            details["warm"] = warm
+        if reserved:
+            details["reserved"] = reserved
+        super().__init__(message, details)
+        self.active = active
+        self.warm = warm
+        self.reserved = reserved
+        self.replicas = replicas
+        self.retry_after_seconds = retry_after_seconds
