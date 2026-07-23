@@ -293,6 +293,11 @@ def _is_middleware_message_row(row: dict[str, Any]) -> bool:
     return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
 
 
+def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
+    caller = str((row.get("metadata") or {}).get("caller", ""))
+    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
+
+
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
     values = getattr(snapshot, "values", None) or {}
     messages = values.get("messages", []) if isinstance(values, dict) else []
@@ -807,7 +812,7 @@ async def _scan_thread_message_page(
             raise RuntimeError("Run event message rows are missing sequence values")
 
         for row in reversed(raw):
-            if _is_middleware_message_row(row) or row.get("run_id") in superseded_run_ids:
+            if _is_thread_history_hidden_message_row(row) or row.get("run_id") in superseded_run_ids:
                 continue
             visible_desc.append(row)
             if len(visible_desc) == limit + 1:
