@@ -70,12 +70,22 @@ def build_branch_history_seed_events(
     checkpoint snapshot the branch was created from keeps the feed
     consistent with what the branch actually contains.
 
-    Mirrors RunJournal's message-event contract — same event types,
-    ``category="message"``, ``content=message.model_dump()``, the same
-    hidden-message rules (``_should_persist_human_input_message`` for human
-    messages, ``hide_from_ui`` for AI/tool), and the same original-user-text
-    restoration — so downstream consumers cannot tell a seeded row from a
-    journaled one except by the ``branch_seed`` metadata marker.
+    Mirrors RunJournal's message-event contract for the load-bearing fields —
+    same event types, ``category="message"``, ``content=message.model_dump()``,
+    the human-input persistence rule (``_should_persist_human_input_message``),
+    and the original-user-text restoration — so seeded rows render identically
+    to journaled ones, distinguished only by the ``branch_seed`` marker.
+
+    Deliberate divergences, all because a checkpoint message carries no run
+    scope: AI rows omit RunJournal's run-scoped enrichment (``usage`` /
+    ``latency_ms`` / ``llm_call_index``), and ``caller`` is stamped
+    ``lead_agent`` rather than the message's original caller (unrecoverable
+    here). Neither is observable today — no consumer indexes those metadata
+    keys, and per-message ``caller`` drives no attribution (the ``by_caller``
+    usage panel is run-scoped, not fed from the message feed). Hidden-message
+    filtering is also stricter than RunJournal's live paths — ``hide_from_ui``
+    AI/tool rows are dropped here rather than persisted-then-hidden (safe
+    direction; the frontend hides them anyway).
     """
     events: list[dict] = []
     created_at = datetime.now(UTC).isoformat()
@@ -90,6 +100,9 @@ def build_branch_history_seed_events(
             content = restore_original_human_message(message).model_dump()
             metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
         elif isinstance(message, AIMessage):
+            # Intentionally stricter than RunJournal's live paths (which persist
+            # hide_from_ui rows and rely on the frontend to hide them): dropping
+            # them at seed time is the safe direction. Same for the tool branch.
             if message.additional_kwargs.get("hide_from_ui") is True:
                 continue
             event_type = "llm.ai.response"
