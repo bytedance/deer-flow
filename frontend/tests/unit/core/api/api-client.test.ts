@@ -5,6 +5,7 @@ import {
   getAPIClient,
   isInactiveRunStreamError,
   isRunNotCancellableError,
+  StreamReplayGapError,
 } from "@/core/api/api-client";
 
 function makeSessionStorage() {
@@ -18,6 +19,16 @@ function makeSessionStorage() {
       values.set(key, value);
     }),
   };
+}
+
+function makeSSEResponse(body: string, headers?: HeadersInit) {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream",
+      ...headers,
+    },
+  });
 }
 
 afterEach(() => {
@@ -299,6 +310,263 @@ test("proceeds to join when the run is still active", async () => {
   // Two requests: preflight GET + the real join. A short-circuit would be one.
   expect(fetchFn).toHaveBeenCalledTimes(2);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("recovers a join stream gap from durable state and resumes after the retained tail", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-1", "run-1");
+  const gap = {
+    code: "stream_replay_gap",
+    run_id: "run-1",
+    requested_event_id: "1-0",
+    earliest_available_event_id: "2-0",
+    latest_available_event_id: "3-0",
+    recovery: "reload_durable_state",
+  };
+  const recoveryRequests: RequestInit[] = [];
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const path = url.toString();
+    if (path.endsWith("/runs/run-1")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (path.includes("/runs/run-1/stream")) {
+      recoveryRequests.push(init ?? {});
+      if (recoveryRequests.length === 1) {
+        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
+      }
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    if (path.includes("/threads/thread-1/state")) {
+      return new Response(
+        JSON.stringify({
+          values: { messages: [{ type: "ai", content: "durable" }] },
+          next: [],
+          tasks: [],
+          metadata: {},
+          created_at: null,
+          checkpoint: {},
+          parent_checkpoint: null,
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const received: Array<{ id?: string; event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-1",
+    "run-1",
+    { lastEventId: "1-0" },
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([
+    {
+      event: "custom",
+      data: { type: "stream_replay_gap", ...gap },
+    },
+    {
+      event: "values",
+      data: { messages: [{ type: "ai", content: "durable" }] },
+    },
+    { event: "end", data: null },
+  ]);
+  expect(new Headers(recoveryRequests[1]?.headers).get("Last-Event-ID")).toBe(
+    "3-0",
+  );
+});
+
+test("recovers a gap emitted by the initial run stream", async () => {
+  const sessionStorage = makeSessionStorage();
+  const gap = {
+    code: "stream_replay_gap",
+    run_id: "run-2",
+    requested_event_id: null,
+    earliest_available_event_id: "4-0",
+    latest_available_event_id: "5-0",
+    recovery: "reload_durable_state",
+  };
+  const recoveryHeaders: Headers[] = [];
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const path = url.toString();
+    if (path.endsWith("/threads/thread-2/runs/stream")) {
+      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+        "Content-Location": "/threads/thread-2/runs/run-2",
+      });
+    }
+    if (path.includes("/threads/thread-2/state")) {
+      return new Response(
+        JSON.stringify({
+          values: { messages: [{ type: "ai", content: "checkpoint" }] },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.includes("/runs/run-2/stream")) {
+      recoveryHeaders.push(new Headers(init?.headers));
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const received: Array<{ id?: string; event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.stream(
+    "thread-2",
+    "lead_agent",
+    { streamResumable: true },
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([
+    {
+      event: "custom",
+      data: { type: "stream_replay_gap", ...gap },
+    },
+    {
+      event: "values",
+      data: { messages: [{ type: "ai", content: "checkpoint" }] },
+    },
+    { event: "end", data: null },
+  ]);
+  expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
+});
+
+test("stops after five consecutive stream gap recoveries", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-gap-loop", "run-gap-loop");
+  let streamCalls = 0;
+  let stateCalls = 0;
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = url.toString();
+    if (path.endsWith("/runs/run-gap-loop")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (path.includes("/runs/run-gap-loop/stream")) {
+      streamCalls += 1;
+      const gap = {
+        code: "stream_replay_gap",
+        run_id: "run-gap-loop",
+        requested_event_id: `${streamCalls}-0`,
+        earliest_available_event_id: `${streamCalls + 1}-0`,
+        latest_available_event_id: `${streamCalls + 2}-0`,
+        recovery: "reload_durable_state",
+      };
+      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
+    }
+    if (path.includes("/threads/thread-gap-loop/state")) {
+      stateCalls += 1;
+      return new Response(JSON.stringify({ values: { messages: [] } }), {
+        status: 200,
+      });
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const consume = async () => {
+    for await (const entry of getAPIClient(true).runs.joinStream(
+      "thread-gap-loop",
+      "run-gap-loop",
+      { lastEventId: "1-0" },
+    )) {
+      // Drain until the recovery budget is exhausted.
+      void entry;
+    }
+  };
+
+  await expect(consume()).rejects.toBeInstanceOf(StreamReplayGapError);
+  expect(streamCalls).toBe(6);
+  expect(stateCalls).toBe(5);
+});
+
+test("surfaces durable-state recovery failures as a structured gap error", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-gap-state", "run-gap-state");
+  sessionStorage.setItem.mockClear();
+  const gap = {
+    code: "stream_replay_gap",
+    run_id: "run-gap-state",
+    requested_event_id: "1-0",
+    earliest_available_event_id: "2-0",
+    latest_available_event_id: "3-0",
+    recovery: "reload_durable_state",
+  };
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = url.toString();
+    if (path.endsWith("/runs/run-gap-state")) {
+      return new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+      });
+    }
+    if (path.includes("/runs/run-gap-state/stream")) {
+      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`);
+    }
+    if (path.includes("/threads/thread-gap-state/state")) {
+      return new Response(JSON.stringify({ detail: "state unavailable" }), {
+        status: 404,
+      });
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const consume = async () => {
+    for await (const entry of getAPIClient(true).runs.joinStream(
+      "thread-gap-state",
+      "run-gap-state",
+      { lastEventId: "1-0" },
+    )) {
+      void entry;
+    }
+  };
+
+  const error = await consume().catch((cause: unknown) => cause);
+  expect(error).toBeInstanceOf(StreamReplayGapError);
+  expect(error).toMatchObject({
+    gap,
+    recoveryAttempts: 1,
+    recoveryCause: expect.any(Error),
+  });
+  expect(sessionStorage.removeItem).toHaveBeenCalledWith(
+    "lg:stream:thread-gap-state",
+  );
+  expect(sessionStorage.setItem).not.toHaveBeenCalledWith(
+    "lg:stream:thread-gap-state",
+    "run-gap-state",
+  );
 });
 
 test("short-circuits reconnect to an interrupted (user-cancelled) run", async () => {

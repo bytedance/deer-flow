@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent
+from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
 
 logger = logging.getLogger(__name__)
+_MEMORY_STREAM_ID_RE = re.compile(r"\d+-(\d+)")
 
 
 @dataclass
@@ -56,15 +58,20 @@ class MemoryStreamBridge(StreamBridge):
         event, so it equals the event's absolute offset within the run. Returns
         ``None`` for ids that do not match the expected format.
         """
-        _, sep, seq_text = event_id.rpartition("-")
-        if not sep:
+        match = _MEMORY_STREAM_ID_RE.fullmatch(event_id)
+        if match is None:
             return None
-        try:
-            return int(seq_text)
-        except ValueError:
-            return None
+        return int(match.group(1))
 
-    def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int:
+    @staticmethod
+    def _make_gap(stream: _RunStream, requested_event_id: str | None) -> StreamGap:
+        return StreamGap(
+            requested_event_id=requested_event_id,
+            earliest_available_event_id=stream.events[0].id,
+            latest_available_event_id=stream.events[-1].id,
+        )
+
+    def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
         if last_event_id is None:
             return stream.start_offset
 
@@ -75,6 +82,8 @@ class MemoryStreamBridge(StreamBridge):
         # to replay-from-earliest — identical to the previous linear scan.
         seq = self._parse_event_seq(last_event_id)
         if seq is not None:
+            if stream.events and seq < stream.start_offset:
+                return self._make_gap(stream, last_event_id)
             local_index = seq - stream.start_offset
             if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
                 return stream.start_offset + local_index + 1
@@ -115,39 +124,57 @@ class MemoryStreamBridge(StreamBridge):
         *,
         last_event_id: str | None = None,
         heartbeat_interval: float = 15.0,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamItem]:
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
-            next_offset = self._resolve_start_offset(stream, last_event_id)
+            start = self._resolve_start_offset(stream, last_event_id)
+            if isinstance(start, StreamGap):
+                gap = start
+                next_offset = stream.start_offset
+            else:
+                gap = None
+                next_offset = start
+
+        if gap is not None:
+            yield gap
+            return
+
+        cursor_event_id = last_event_id
 
         while True:
             async with stream.condition:
                 if next_offset < stream.start_offset:
                     logger.warning(
-                        "subscriber for run %s fell behind retained buffer; resuming from offset %s",
+                        "subscriber for run %s fell behind retained buffer at offset %s",
                         run_id,
-                        stream.start_offset,
+                        next_offset,
                     )
-                    next_offset = stream.start_offset
-
-                local_index = next_offset - stream.start_offset
-                if 0 <= local_index < len(stream.events):
-                    entry = stream.events[local_index]
-                    next_offset += 1
-                elif stream.ended:
-                    entry = END_SENTINEL
+                    entry: StreamItem = self._make_gap(stream, cursor_event_id)
+                    should_stop = True
                 else:
-                    try:
-                        await asyncio.wait_for(stream.condition.wait(), timeout=heartbeat_interval)
-                    except TimeoutError:
-                        entry = HEARTBEAT_SENTINEL
+                    should_stop = False
+
+                    local_index = next_offset - stream.start_offset
+                    if 0 <= local_index < len(stream.events):
+                        entry = stream.events[local_index]
+                        next_offset += 1
+                        cursor_event_id = entry.id
+                    elif stream.ended:
+                        entry = END_SENTINEL
                     else:
-                        continue
+                        try:
+                            await asyncio.wait_for(stream.condition.wait(), timeout=heartbeat_interval)
+                        except TimeoutError:
+                            entry = HEARTBEAT_SENTINEL
+                        else:
+                            continue
 
             if entry is END_SENTINEL:
                 yield END_SENTINEL
                 return
             yield entry
+            if should_stop:
+                return
 
     async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
         if delay > 0:

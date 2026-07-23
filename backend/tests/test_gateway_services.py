@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import suppress
 
 import pytest
 
@@ -47,6 +49,71 @@ def test_format_sse_no_event_id():
 
     frame = format_sse("values", {"x": 1})
     assert "id:" not in frame
+
+
+@pytest.mark.anyio
+async def test_sse_consumer_emits_gap_without_cancelling_run():
+    """A replay gap is a recovery boundary, not a client disconnect."""
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
+
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-gap", on_disconnect=DisconnectMode.cancel)
+    await run_manager.set_status(record.run_id, RunStatus.running)
+
+    await bridge.publish(record.run_id, "event-1", {"step": 1})
+    evicted_id = bridge._streams[record.run_id].events[0].id
+    await bridge.publish(record.run_id, "event-2", {"step": 2})
+    await bridge.publish(record.run_id, "event-3", {"step": 3})
+    retained = bridge._streams[record.run_id].events
+
+    worker_started = asyncio.Event()
+
+    async def _pending_worker() -> None:
+        worker_started.set()
+        await asyncio.Event().wait()
+
+    record.task = asyncio.create_task(_pending_worker())
+    await worker_started.wait()
+
+    class _ConnectedRequest:
+        headers = {"Last-Event-ID": evicted_id}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    try:
+        frames = [
+            frame
+            async for frame in sse_consumer(
+                bridge,
+                record,
+                _ConnectedRequest(),
+                run_manager,
+            )
+        ]
+
+        assert len(frames) == 1
+        assert frames[0].startswith("event: gap\n")
+        assert "\nid:" not in frames[0]
+        assert "\nevent: end\n" not in frames[0]
+        payload = json.loads(frames[0].split("data: ", 1)[1].splitlines()[0])
+        assert payload == {
+            "code": "stream_replay_gap",
+            "run_id": record.run_id,
+            "requested_event_id": evicted_id,
+            "earliest_available_event_id": retained[0].id,
+            "latest_available_event_id": retained[-1].id,
+            "recovery": "reload_durable_state",
+        }
+        assert record.status == RunStatus.running
+        assert not record.abort_event.is_set()
+        assert not record.task.done()
+    finally:
+        record.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await record.task
 
 
 def test_sanitize_log_param_strips_control_characters():

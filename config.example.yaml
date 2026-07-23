@@ -1904,12 +1904,14 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256
+#   queue_maxsize: 256           # data events retained per run. A reconnect
+#                                # older than this window receives SSE `gap`.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # events retained per run (redis stream MAXLEN)
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.

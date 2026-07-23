@@ -57,6 +57,10 @@ async function captureThreadStreamOptions() {
     }),
   }));
   rs.doMock("@/core/tasks/context", () => ({
+    useSubtaskContext: () => ({
+      tasksRef: { current: {} },
+      setTasks: rs.fn(),
+    }),
     useUpdateSubtask: () => rs.fn(),
   }));
 

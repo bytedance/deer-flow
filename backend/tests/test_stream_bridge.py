@@ -10,7 +10,7 @@ import anyio
 import pytest
 
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, set_stream_bridge_config
-from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, make_stream_bridge
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
 # optional extra; see the NOTE in runtime/stream_bridge/__init__.py). Import it
@@ -62,6 +62,10 @@ class _FakeRedis:
         entries = list(reversed(self.streams.get(name, [])))
         return entries[:count] if count is not None else entries
 
+    async def xrange(self, name, min="-", max="+", count=None):
+        entries = list(self.streams.get(name, []))
+        return entries[:count] if count is not None else entries
+
     async def delete(self, name):
         self.deleted.append(name)
         self.streams.pop(name, None)
@@ -100,6 +104,18 @@ class _FakeRedisPipeline:
         self.ops.append(("expire", name, seconds))
         return self
 
+    def xrange(self, name, min="-", max="+", count=None):
+        self.ops.append(("xrange", name, min, max, count))
+        return self
+
+    def xrevrange(self, name, max="+", min="-", count=None):
+        self.ops.append(("xrevrange", name, max, min, count))
+        return self
+
+    def xread(self, streams, count=None, block=None):
+        self.ops.append(("xread", streams, count, block))
+        return self
+
     async def execute(self):
         results = []
         for op in self.ops:
@@ -109,6 +125,15 @@ class _FakeRedisPipeline:
             elif op[0] == "expire":
                 _, name, seconds = op
                 results.append(await self.redis.expire(name, seconds))
+            elif op[0] == "xrange":
+                _, name, min_id, max_id, count = op
+                results.append(await self.redis.xrange(name, min=min_id, max=max_id, count=count))
+            elif op[0] == "xrevrange":
+                _, name, max_id, min_id, count = op
+                results.append(await self.redis.xrevrange(name, max=max_id, min=min_id, count=count))
+            elif op[0] == "xread":
+                _, streams, count, block = op
+                results.append(await self.redis.xread(streams, count=count, block=block))
         return results
 
 
@@ -290,48 +315,58 @@ async def test_subscribe_replays_after_last_event_id(bridge: MemoryStreamBridge)
 
 
 @pytest.mark.anyio
-async def test_slow_subscriber_does_not_skip_after_buffer_trim():
-    """A slow subscriber should continue from the correct absolute offset."""
+async def test_evicted_last_event_id_yields_gap_before_partial_replay():
+    """A valid cursor older than retained history must not silently partial-replay."""
     bridge = MemoryStreamBridge(queue_maxsize=2)
-    run_id = "run-slow-subscriber"
+    run_id = "run-evicted-cursor"
     await bridge.publish(run_id, "e1", {"step": 1})
     await bridge.publish(run_id, "e2", {"step": 2})
 
     stream = bridge._streams[run_id]
     e1_id = stream.events[0].id
-    assert stream.start_offset == 0
-
     await bridge.publish(run_id, "e3", {"step": 3})  # trims e1
-    assert stream.start_offset == 1
-    assert [entry.event for entry in stream.events] == ["e2", "e3"]
-
-    resumed_after_e1 = []
-    async for entry in bridge.subscribe(
-        run_id,
-        last_event_id=e1_id,
-        heartbeat_interval=1.0,
-    ):
-        resumed_after_e1.append(entry)
-        if len(resumed_after_e1) == 2:
-            break
-
-    assert [entry.event for entry in resumed_after_e1] == ["e2", "e3"]
-    e2_id = resumed_after_e1[0].id
-
     await bridge.publish_end(run_id)
 
     received = []
     async for entry in bridge.subscribe(
         run_id,
-        last_event_id=e2_id,
+        last_event_id=e1_id,
         heartbeat_interval=1.0,
     ):
         received.append(entry)
-        if entry is END_SENTINEL:
-            break
 
-    assert [entry.event for entry in received[:-1]] == ["e3"]
-    assert received[-1] is END_SENTINEL
+    assert received == [
+        StreamGap(
+            requested_event_id=e1_id,
+            earliest_available_event_id=stream.events[0].id,
+            latest_available_event_id=stream.events[-1].id,
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_slow_subscriber_yields_gap_after_buffer_trim():
+    """A live subscriber that falls behind must not silently jump forward."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-slow-subscriber"
+    await bridge.publish(run_id, "e1", {"step": 1})
+    await bridge.publish(run_id, "e2", {"step": 2})
+
+    subscriber = bridge.subscribe(run_id, heartbeat_interval=1.0)
+    first = await anext(subscriber)
+    assert first.event == "e1"
+
+    await bridge.publish(run_id, "e3", {"step": 3})
+    await bridge.publish(run_id, "e4", {"step": 4})
+
+    stream = bridge._streams[run_id]
+    assert await anext(subscriber) == StreamGap(
+        requested_event_id=first.id,
+        earliest_available_event_id=stream.events[0].id,
+        latest_available_event_id=stream.events[-1].id,
+    )
+    with pytest.raises(StopAsyncIteration):
+        await anext(subscriber)
 
 
 # ---------------------------------------------------------------------------
@@ -404,11 +439,11 @@ async def test_publish_end_preserves_history_when_space_available():
 
 
 @pytest.mark.anyio
-async def test_concurrent_tasks_end_sentinel():
-    """Multiple concurrent producer/consumer pairs should all terminate properly.
+async def test_concurrent_slow_consumers_receive_gap():
+    """Concurrent consumers must all receive a gap when producers outrun retention.
 
-    Simulates the production scenario where multiple runs share a single
-    bridge instance — each must receive its own END sentinel.
+    Each producer fills a four-entry bridge without yielding, so subscribers
+    that started at offset zero cannot observe the first six events.
     """
     bridge = MemoryStreamBridge(queue_maxsize=4)
     num_runs = 4
@@ -442,7 +477,9 @@ async def test_concurrent_tasks_end_sentinel():
 
     for run_id in run_ids:
         events = results[run_id]
-        assert events[-1] is END_SENTINEL, f"Run {run_id} did not receive END sentinel"
+        assert len(events) == 1
+        assert isinstance(events[0], StreamGap), f"Run {run_id} did not receive a gap"
+        assert events[0].requested_event_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +535,86 @@ async def test_redis_replays_after_last_event_id(redis_bridge: RedisStreamBridge
 
     assert [entry.event for entry in received[:-1]] == ["values"]
     assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_redis_evicted_last_event_id_yields_gap_before_partial_replay(
+    redis_bridge: RedisStreamBridge,
+):
+    """Redis must distinguish a trimmed cursor from a complete replay."""
+    run_id = "redis-run-evicted-cursor"
+    await redis_bridge.publish(run_id, "e1", {"step": 1})
+    key = redis_bridge._stream_key(run_id)
+    e1_id = redis_bridge._redis.streams[key][0][0]
+    await redis_bridge.publish(run_id, "e2", {"step": 2})
+    await redis_bridge.publish(run_id, "e3", {"step": 3})
+
+    retained_ids = [event_id for event_id, _fields in redis_bridge._redis.streams[key]]
+    received = [
+        entry
+        async for entry in redis_bridge.subscribe(
+            run_id,
+            last_event_id=e1_id,
+            heartbeat_interval=1.0,
+        )
+    ]
+
+    assert received == [
+        StreamGap(
+            requested_event_id=e1_id,
+            earliest_available_event_id=retained_ids[0],
+            latest_available_event_id=retained_ids[-1],
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_redis_slow_subscriber_yields_gap_after_buffer_trim(
+    redis_bridge: RedisStreamBridge,
+):
+    """A live Redis subscriber must detect trimming after its last batch."""
+    run_id = "redis-run-slow-subscriber"
+    await redis_bridge.publish(run_id, "e1", {"step": 1})
+    subscriber = redis_bridge.subscribe(run_id, heartbeat_interval=1.0)
+    first = await anext(subscriber)
+    assert first.event == "e1"
+
+    await redis_bridge.publish(run_id, "e2", {"step": 2})
+    await redis_bridge.publish(run_id, "e3", {"step": 3})
+    await redis_bridge.publish(run_id, "e4", {"step": 4})
+    key = redis_bridge._stream_key(run_id)
+    retained_ids = [event_id for event_id, _fields in redis_bridge._redis.streams[key]]
+
+    assert await anext(subscriber) == StreamGap(
+        requested_event_id=first.id,
+        earliest_available_event_id=retained_ids[0],
+        latest_available_event_id=retained_ids[-1],
+    )
+    with pytest.raises(StopAsyncIteration):
+        await anext(subscriber)
+
+
+@pytest.mark.anyio
+async def test_redis_recovery_cursor_at_end_yields_end_immediately(
+    redis_bridge: RedisStreamBridge,
+):
+    """The latest gap cursor may be the internal end marker."""
+    run_id = "redis-run-end-cursor"
+    await redis_bridge.publish(run_id, "event", {})
+    await redis_bridge.publish_end(run_id)
+    key = redis_bridge._stream_key(run_id)
+    end_id = redis_bridge._redis.streams[key][-1][0]
+
+    received = [
+        entry
+        async for entry in redis_bridge.subscribe(
+            run_id,
+            last_event_id=end_id,
+            heartbeat_interval=0.01,
+        )
+    ]
+
+    assert received == [END_SENTINEL]
 
 
 @pytest.mark.anyio
@@ -744,6 +861,27 @@ async def test_redis_transient_error_gives_up_after_max_retries():
             pass
 
 
+@pytest.mark.anyio
+async def test_redis_blocking_wakeup_error_gives_up_after_max_retries():
+    """Successful snapshots must not hide a permanently failing blocking XREAD."""
+    from redis.exceptions import RedisError
+
+    fake = _FakeRedis()
+    original_xread = fake.xread
+
+    async def fail_blocking_xread(streams, count=None, block=None):
+        if block is not None:
+            raise RedisError("Persistent blocking connection error")
+        return await original_xread(streams, count=count, block=block)
+
+    fake.xread = fail_blocking_xread
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    with pytest.raises(RedisError, match="Persistent blocking connection error"):
+        async for _ in bridge.subscribe("redis-run-blocking-fail", heartbeat_interval=0.01):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------
@@ -757,7 +895,7 @@ async def test_make_stream_bridge_defaults():
 
 
 # ---------------------------------------------------------------------------
-# _resolve_start_offset: O(1) seq-indexed resolution (parity with linear scan)
+# _resolve_start_offset: O(1) seq-indexed resolution
 # ---------------------------------------------------------------------------
 
 
@@ -776,6 +914,7 @@ def _linear_resolve(stream, last_event_id):
     [
         ("1718000000000-0", 0),
         ("1718000000000-42", 42),
+        ("-1", None),  # malformed live-tail sentinel, not a valid event id
         ("garbage", None),  # no separator
         ("1718000000000-x", None),  # non-integer seq
         ("", None),
@@ -787,8 +926,7 @@ def test_parse_event_seq(event_id, expected):
 
 @pytest.mark.anyio
 async def test_resolve_start_offset_matches_linear_scan():
-    """The seq-indexed resolver must return exactly what the linear scan returned,
-    across retained, evicted, foreign (same seq / wrong ts), malformed, and None ids."""
+    """Retained and unknown cursors preserve the previous linear-scan behavior."""
     bridge = MemoryStreamBridge(queue_maxsize=4)
     run_id = "run-parity"
     ids = []
@@ -802,9 +940,16 @@ async def test_resolve_start_offset_matches_linear_scan():
     ts, _, seq_text = stream.events[0].id.rpartition("-")
     foreign_id = f"{int(ts) + 1}-{seq_text}"
 
-    candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids]
+    candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids[6:]]
     for eid in candidates:
         assert bridge._resolve_start_offset(stream, eid) == _linear_resolve(stream, eid), eid
+
+    for evicted_id in ids[:6]:
+        assert bridge._resolve_start_offset(stream, evicted_id) == StreamGap(
+            requested_event_id=evicted_id,
+            earliest_available_event_id=stream.events[0].id,
+            latest_available_event_id=stream.events[-1].id,
+        )
 
 
 @pytest.mark.anyio
@@ -824,6 +969,29 @@ async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
 
     assert [entry.event for entry in received[:-1]] == ["first", "second"]
     assert received[-1] is END_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_memory_malformed_last_event_id_is_not_reported_as_gap():
+    """Malformed cursor policy stays separate from valid evicted cursors."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-malformed-id"
+    await bridge.publish(run_id, "first", {})
+    await bridge.publish(run_id, "second", {})
+    await bridge.publish_end(run_id)
+
+    received = [
+        entry
+        async for entry in bridge.subscribe(
+            run_id,
+            last_event_id="-1",
+            heartbeat_interval=1.0,
+        )
+    ]
+
+    assert [entry.event for entry in received[:-1]] == ["first", "second"]
+    assert received[-1] is END_SENTINEL
+    assert all(not isinstance(entry, StreamGap) for entry in received)
 
 
 @pytest.mark.anyio
@@ -1007,6 +1175,37 @@ async def test_redis_integration_maxlen_trims_history(real_redis_bridge):
     key = real_redis_bridge._stream_key(run_id)
     length = await real_redis_bridge._redis.xlen(key)
     assert length == 2
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_evicted_cursor_yields_gap(real_redis_bridge):
+    """Real Redis MAXLEN trimming must produce the same gap contract."""
+    run_id = "integ-gap"
+    await real_redis_bridge.publish(run_id, "event-1", {"i": 1})
+    key = real_redis_bridge._stream_key(run_id)
+    first_id = (await real_redis_bridge._redis.xrange(key, count=1))[0][0]
+    await real_redis_bridge.publish(run_id, "event-2", {"i": 2})
+    await real_redis_bridge.publish(run_id, "event-3", {"i": 3})
+
+    retained = await real_redis_bridge._redis.xrange(key)
+    received = [
+        entry
+        async for entry in real_redis_bridge.subscribe(
+            run_id,
+            last_event_id=first_id,
+            heartbeat_interval=1.0,
+        )
+    ]
+
+    assert received == [
+        StreamGap(
+            requested_event_id=first_id,
+            earliest_available_event_id=retained[0][0],
+            latest_available_event_id=retained[-1][0],
+        )
+    ]
 
 
 @pytest.mark.integration
