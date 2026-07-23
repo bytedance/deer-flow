@@ -334,53 +334,32 @@ async def test_run_events_cross_user_delete_denied(tmp_path):
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
 async def test_feedback_cross_user_isolation(tmp_path):
+    """Ownership is an explicit user_id filter on the new feedback port —
+    the AUTO-sentinel context no longer applies (hexagonal slice)."""
+    from app.infra.persistence.feedback import SqlFeedbackRepository
+    from deerflow.domain.feedback import Feedback
     from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.feedback import FeedbackRepository
 
     cleanup = await _make_engines(tmp_path)
     try:
-        repo = FeedbackRepository(get_session_factory())
+        repo = SqlFeedbackRepository(get_session_factory())
 
-        # User A submits positive feedback.
-        with _as_user(USER_A):
-            a_feedback = await repo.create(
-                run_id="run-a1",
-                thread_id="t-alpha",
-                rating=1,
-                comment="A liked this",
-            )
-
-        # User B submits negative feedback.
-        with _as_user(USER_B):
-            b_feedback = await repo.create(
-                run_id="run-b1",
-                thread_id="t-beta",
-                rating=-1,
-                comment="B disliked this",
-            )
+        await repo.save(Feedback.create(run_id="run-a1", thread_id="t-alpha", rating=1, user_id=USER_A.id, comment="A liked this"))
+        await repo.save(Feedback.create(run_id="run-b1", thread_id="t-beta", rating=-1, user_id=USER_B.id, comment="B disliked this"))
 
         # User A must see only A's feedback.
-        with _as_user(USER_A):
-            retrieved = await repo.get(a_feedback["feedback_id"])
-            assert retrieved is not None
-            assert retrieved["comment"] == "A liked this"
+        a_view = await repo.latest_per_run_in_thread("t-alpha", user_id=USER_A.id)
+        assert set(a_view) == {"run-a1"}
+        assert a_view["run-a1"].comment == "A liked this"
 
-            # CRITICAL: cannot read B's feedback by id.
-            leaked = await repo.get(b_feedback["feedback_id"])
-            assert leaked is None, "User A leaked User B's feedback"
-
-            # list_by_run for B's run must be empty.
-            empty = await repo.list_by_run("t-beta", "run-b1")
-            assert empty == []
+        # CRITICAL: A cannot see B's feedback through B's thread.
+        leaked = await repo.latest_per_run_in_thread("t-beta", user_id=USER_A.id)
+        assert leaked == {}, "User A leaked User B's feedback"
 
         # User B must see only B's feedback.
-        with _as_user(USER_B):
-            leaked = await repo.get(a_feedback["feedback_id"])
-            assert leaked is None, "User B leaked User A's feedback"
-
-            b_list = await repo.list_by_run("t-beta", "run-b1")
-            assert len(b_list) == 1
-            assert b_list[0]["comment"] == "B disliked this"
+        assert await repo.latest_per_run_in_thread("t-alpha", user_id=USER_B.id) == {}
+        b_view = await repo.latest_per_run_in_thread("t-beta", user_id=USER_B.id)
+        assert b_view["run-b1"].comment == "B disliked this"
     finally:
         await cleanup()
 
@@ -388,25 +367,21 @@ async def test_feedback_cross_user_isolation(tmp_path):
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
 async def test_feedback_cross_user_delete_denied(tmp_path):
+    from app.infra.persistence.feedback import SqlFeedbackRepository
+    from deerflow.domain.feedback import Feedback
     from deerflow.persistence.engine import get_session_factory
-    from deerflow.persistence.feedback import FeedbackRepository
 
     cleanup = await _make_engines(tmp_path)
     try:
-        repo = FeedbackRepository(get_session_factory())
+        repo = SqlFeedbackRepository(get_session_factory())
+        await repo.save(Feedback.create(run_id="run-a1", thread_id="t-alpha", rating=1, user_id=USER_A.id))
 
-        with _as_user(USER_A):
-            fb = await repo.create(run_id="run-a1", thread_id="t-alpha", rating=1)
+        # User B tries to retract A's feedback — must return False (no-op).
+        deleted = await repo.remove_for_run("t-alpha", "run-a1", user_id=USER_B.id)
+        assert deleted is False, "User B deleted User A's feedback"
 
-        # User B tries to delete A's feedback — must return False (no-op).
-        with _as_user(USER_B):
-            deleted = await repo.delete(fb["feedback_id"])
-            assert deleted is False, "User B deleted User A's feedback"
-
-        # A's feedback still retrievable.
-        with _as_user(USER_A):
-            row = await repo.get(fb["feedback_id"])
-            assert row is not None
+        # A's feedback still present.
+        assert set(await repo.latest_per_run_in_thread("t-alpha", user_id=USER_A.id)) == {"run-a1"}
     finally:
         await cleanup()
 
