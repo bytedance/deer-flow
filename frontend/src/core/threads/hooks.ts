@@ -311,11 +311,16 @@ export function flattenThreadHistoryPages(
   );
 }
 
-export function mergeMessages(
+type PreparedHistoryMessages = {
+  canonical: Message[];
+  canonicalByIdentity: ReadonlyMap<string, Message>;
+  savedRunIds: ReadonlyMap<string, string>;
+  savedTurnDurations: ReadonlyMap<string, number>;
+};
+
+export function prepareHistoryMessagesForMerge(
   historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
+): PreparedHistoryMessages {
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
@@ -333,13 +338,29 @@ export function mergeMessages(
   }
 
   const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
   const canonicalByIdentity = new Map(
     canonical.flatMap((message) => {
       const identity = messageIdentity(message);
       return identity ? [[identity, message] as const] : [];
     }),
   );
+
+  return {
+    canonical,
+    canonicalByIdentity,
+    savedRunIds,
+    savedTurnDurations,
+  };
+}
+
+export function mergeMessagesWithPreparedHistory(
+  preparedHistory: PreparedHistoryMessages,
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  const { canonical, canonicalByIdentity, savedRunIds, savedTurnDurations } =
+    preparedHistory;
+  const live = dedupeMessagesByIdentity(threadMessages);
   const replacementByIdentity = new Map<string, Message>();
   // This uses the same identity-anchor weaving shape as
   // resolveTransientHistoryBridge, but intentionally remains separate: live
@@ -442,6 +463,18 @@ export function mergeMessages(
     }
     return message;
   });
+}
+
+export function mergeMessages(
+  historyMessages: Message[],
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  return mergeMessagesWithPreparedHistory(
+    prepareHistoryMessagesForMerge(historyMessages),
+    threadMessages,
+    optimisticMessages,
+  );
 }
 
 /**
@@ -1735,8 +1768,12 @@ export function useThreadStream({
     threadId,
     transientHistoryOrder,
   );
-  const mergedMessages = mergeMessages(
-    effectiveHistory,
+  const preparedHistory = useMemo(
+    () => prepareHistoryMessagesForMerge(effectiveHistory),
+    [effectiveHistory],
+  );
+  const mergedMessages = mergeMessagesWithPreparedHistory(
+    preparedHistory,
     persistedMessages,
     visibleOptimisticMessages,
   );

@@ -13,6 +13,8 @@ import {
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  mergeMessagesWithPreparedHistory,
+  prepareHistoryMessagesForMerge,
   pruneConfirmedTransientMessages,
   removeSetItems,
   resolveThreadTransientHistoryBridge,
@@ -127,6 +129,61 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
       additional_kwargs: { turn_duration: 114 },
     },
   ]);
+});
+
+test("prepared history merge preserves direct merge semantics", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "persisted",
+    additional_kwargs: { turn_duration: 114 },
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        content: persistedAi,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-07-21T00:00:00Z",
+      },
+    ],
+    new Set(),
+  );
+  const checkpointAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live checkpoint",
+  } as Message;
+  const liveTail = {
+    id: "ai-2",
+    type: "ai",
+    content: "live tail",
+  } as Message;
+  const optimisticHuman = {
+    id: "optimistic-1",
+    type: "human",
+    content: "optimistic follow-up",
+  } as Message;
+  const expected = [
+    {
+      ...checkpointAi,
+      run_id: "run-1",
+      additional_kwargs: { turn_duration: 114 },
+    },
+    liveTail,
+    optimisticHuman,
+  ];
+
+  expect(
+    mergeMessagesWithPreparedHistory(
+      prepareHistoryMessagesForMerge(history),
+      [checkpointAi, liveTail],
+      [optimisticHuman],
+    ),
+  ).toEqual(expected);
+  expect(
+    mergeMessages(history, [checkpointAi, liveTail], [optimisticHuman]),
+  ).toEqual(expected);
 });
 
 test("mergeMessages keeps a protected pre-compression input at its canonical position", () => {
