@@ -74,8 +74,8 @@ class SandboxFileNotFoundError(SandboxFileError):
 class SandboxCapacityExceededError(SandboxError):
     """Raised when the sandbox provider has no available capacity.
 
-    The caller may retry after a delay.  This is a recoverable error:
-    the provider is healthy but all configured replica slots are occupied.
+    The reason distinguishes occupied capacity from provider shutdown.
+    The caller controls retry scheduling. DeerFlow does not retry automatically.
     """
 
     CODE = "SANDBOX_CAPACITY_EXCEEDED"
@@ -89,10 +89,13 @@ class SandboxCapacityExceededError(SandboxError):
         reserved: int = 0,
         replicas: int = 0,
         retry_after_seconds: float = 5.0,
+        reason: str = "capacity",
     ) -> None:
         details: dict[str, object] = {
             "code": self.CODE,
+            "reason": reason,
             "replicas": replicas,
+            "retryable": True,
             "retry_after_seconds": retry_after_seconds,
         }
         if active:
@@ -107,3 +110,4 @@ class SandboxCapacityExceededError(SandboxError):
         self.reserved = reserved
         self.replicas = replicas
         self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
