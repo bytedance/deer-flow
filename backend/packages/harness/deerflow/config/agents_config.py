@@ -156,6 +156,36 @@ def validate_agent_name(name: str | None) -> str | None:
     return name
 
 
+class AgentMemoryConfig(BaseModel):
+    """Per-agent override for the memory subsystem (issue #3626).
+
+    A custom agent — typically a per-user lead agent stored at
+    ``users/{user_id}/agents/{name}/config.yaml`` — can opt out of memory by
+    hand-authoring a ``memory:`` block in its ``config.yaml``. Some custom
+    agents are meant to be stateless execution machines with no memory of their
+    own, even when the deployment has memory turned on globally.
+
+    The override is deliberately *narrow*: an agent may only turn memory
+    **off**. It cannot force memory **on** when the operator disabled it
+    globally in the main ``config.yaml`` (``memory.enabled: false``) — the
+    global switch stays the master kill switch (e.g. a deployment that disables
+    memory for compliance). The resolution rule lives in
+    ``deerflow.config.memory_config.disabled_memory_config`` and the call site
+    is ``deerflow.agents.lead_agent.agent.apply_agent_memory_override``.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "When false, this custom agent runs without memory — no capture, no "
+            "tool access, and no injected <memory> context — regardless of the "
+            "global memory config. When true or omitted, memory follows the "
+            "global config (a custom agent cannot re-enable memory the operator "
+            "disabled globally)."
+        ),
+    )
+
+
 class AgentModelSettings(BaseModel):
     """Per-agent LLM sampling overrides layered on top of the model profile.
 
@@ -214,6 +244,14 @@ class AgentConfig(BaseModel):
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
     github: GitHubAgentConfig | None = None
+    # Optional per-agent memory override (issue #3626). None (the omitted
+    # default) inherits the global memory config, so every existing agent loads
+    # unchanged; ``memory: {enabled: false}`` switches memory off for this agent
+    # only. Like ``github`` above this is a hand-authored field, preserved
+    # verbatim by ``preserve_non_managed_fields`` (it is intentionally absent
+    # from MANAGED_AGENT_CONFIG_FIELDS, so the update_agent tool / PATCH route
+    # never overwrite or drop it).
+    memory: AgentMemoryConfig | None = None
 
 
 # Fields explicitly managed by agent-update surfaces. Anything else declared

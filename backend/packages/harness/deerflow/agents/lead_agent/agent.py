@@ -46,9 +46,9 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import should_use_memory_tools
+from deerflow.config.memory_config import disabled_memory_config, should_use_memory_tools
 from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
@@ -106,6 +106,37 @@ def _append_memory_tools_without_name_conflicts(tools: list) -> None:
             continue
         tools.append(memory_tool)
         existing_names.add(memory_tool.name)
+
+
+def apply_agent_memory_override(app_config: AppConfig, agent_config: AgentConfig | None) -> AppConfig:
+    """Fold a custom agent's memory opt-out into the effective app config (issue #3626).
+
+    When a custom agent sets ``memory: {enabled: false}`` in its ``config.yaml``,
+    return a shallow copy of ``app_config`` whose ``memory`` section is switched
+    off (see :func:`deerflow.config.memory_config.disabled_memory_config`).
+    Otherwise return ``app_config`` unchanged — the *same* object, no copy — so
+    every existing agent (and any agent that leaves memory on) is unaffected.
+
+    Resolving the override once, here, means the four downstream memory gates all
+    read the already-resolved ``app_config.memory`` and need no per-gate flag:
+    MemoryMiddleware capture, the ``memory_*`` tools, the ``<memory>`` injection
+    in DynamicContextMiddleware, and the summarization memory-flush hook. The
+    override is narrow by design — an agent may only disable memory, never force
+    it on when the operator disabled it globally.
+
+    Invariant: this "fold once" only holds while every gate reads the *passed*
+    ``app_config.memory``. A future memory gate that reaches for the global
+    ``get_memory_config()`` / ``get_app_config()`` directly would bypass the
+    opt-out and must instead take its memory config from the resolved config
+    threaded through here.
+    """
+    # A missing ``memory`` attribute is treated the same as ``memory=None``
+    # (inherit the global config): a real AgentConfig always declares the field,
+    # so this only softens the duck-typed agent configs used in some tests.
+    memory_override = getattr(agent_config, "memory", None) if agent_config is not None else None
+    if memory_override is not None and not memory_override.enabled:
+        return app_config.model_copy(update={"memory": disabled_memory_config(app_config.memory)})
+    return app_config
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -273,6 +304,7 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    memory_opt_out: bool = False,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -293,6 +325,11 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        memory_opt_out: True when ``app_config.memory`` was switched off by a
+            custom agent's explicit opt-out rather than by the operator's global
+            config. Suppresses the mode/enabled mismatch warning below — that
+            signal is meant for a genuinely misconfigured global ``config.yaml``,
+            not for an intentional per-agent opt-out.
 
     Returns:
         List of middleware instances.
@@ -369,7 +406,7 @@ def build_middlewares(
     if should_use_memory_tools(resolved_app_config.memory):
         pass
     else:
-        if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
+        if not memory_opt_out and resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
@@ -530,6 +567,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+
+    # Fold the custom agent's memory opt-out (issue #3626) into the effective app
+    # config before anything reads it, so a custom agent with
+    # ``memory: {enabled: false}`` gets no memory capture, tools, or injection.
+    # A no-op for every other agent (returns the same object), so behavior is
+    # unchanged unless an agent explicitly disables memory.
+    resolved_app_config = apply_agent_memory_override(resolved_app_config, agent_config)
+    # The fold returns a copy exactly when it applied an opt-out (same object
+    # otherwise), so identity tells build_middlewares to skip the mode/enabled
+    # mismatch warning — that signal is for a misconfigured global config.yaml,
+    # not for a deliberate per-agent opt-out.
+    memory_opt_out = resolved_app_config is not app_config
+
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -715,6 +765,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_setup=setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=resolved_user_id,
+                memory_opt_out=memory_opt_out,
             ),
             mode,
         ),
