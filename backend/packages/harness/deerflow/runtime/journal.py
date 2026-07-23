@@ -6,11 +6,11 @@ handles token usage accumulation.
 
 Key design decisions:
 - on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
-- on_chat_model_start captures structured prompts as llm_request (OpenAI format) and
+- on_chat_model_start captures the first user-visible prompt as llm.human.input and
   extracts the first human message for run.input, because it is more reliable than
   on_chain_start (fires on every node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
-- on_llm_end emits llm_response in OpenAI Chat Completions format
+- on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
 """
@@ -20,16 +20,27 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.runtime.events.catalog import (
+    LLM_AI_RESPONSE_EVENT,
+    LLM_ERROR_EVENT,
+    LLM_HUMAN_INPUT_EVENT,
+    LLM_TOOL_RESULT_EVENT,
+    MEMORY_CONTEXT_EVENT,
+    MIDDLEWARE_EVENT_PATTERN,
+    RUN_END_EVENT,
+    RUN_ERROR_EVENT,
+    RUN_START_EVENT,
+)
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -51,6 +62,102 @@ def _should_persist_human_input_message(message: BaseMessage) -> bool:
         return True
     response = read_human_input_response(message.additional_kwargs)
     return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
+
+
+def _coerce_seed_message(message: Any) -> Any:
+    """Return ``message`` as a ``BaseMessage``, deserializing dict form if needed.
+
+    ``_checkpoint_messages`` (threads.py) returns whatever the snapshot holds,
+    and its sibling branch-matching helpers all handle a message being either a
+    ``BaseMessage`` or a ``model_dump()``-shaped dict (serde differences across
+    checkpoint backends/modes). The seed path must handle both too — otherwise a
+    dict-backed checkpoint seeds nothing and the branch silently reports
+    ``skipped_empty`` while history exists. Unparseable dicts fall through
+    unchanged and are dropped by the ``isinstance(BaseMessage)`` guard.
+    """
+    if isinstance(message, BaseMessage):
+        return message
+    if isinstance(message, Mapping):
+        msg_type = message.get("type")
+        if isinstance(msg_type, str) and msg_type:
+            try:
+                return messages_from_dict([{"type": msg_type, "data": dict(message)}])[0]
+            except Exception:
+                logger.warning("branch seed: could not deserialize checkpoint message dict (type=%s)", msg_type)
+    return message
+
+
+def build_branch_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    parent_thread_id: str,
+) -> list[dict]:
+    """Serialize a branch checkpoint's messages into run-event message rows.
+
+    Thread branching copies checkpoint state, but the thread feed
+    (``list_messages`` / ``GET /threads/{id}/messages/page``) reads the
+    run-event store — which a fresh branch has no rows in, so the inherited
+    history vanishes from the UI as soon as the branch's first run refreshes
+    the feed (#4380). Seeding the branch's run_events from the same
+    checkpoint snapshot the branch was created from keeps the feed
+    consistent with what the branch actually contains.
+
+    Mirrors RunJournal's message-event contract so seeded rows are
+    indistinguishable from journaled ones except by the ``branch_seed``
+    marker: same event types, ``category="message"``, ``content=
+    message.model_dump()``, the human-input persistence rule
+    (``_should_persist_human_input_message``), the original-user-text
+    restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
+    RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
+    do not filter) and the frontend hides them client-side, so the seed writes
+    them too rather than dropping them.
+
+    The one deliberate divergence, because a checkpoint message carries no run
+    scope: AI rows omit RunJournal's run-scoped enrichment (``usage`` /
+    ``latency_ms`` / ``llm_call_index``), and ``caller`` is stamped
+    ``lead_agent`` rather than the message's original caller (unrecoverable
+    here). Neither is observable today — no consumer indexes those metadata
+    keys, and per-message ``caller`` drives no attribution (the ``by_caller``
+    usage panel is run-scoped, not fed from the message feed).
+    """
+    events: list[dict] = []
+    created_at = datetime.now(UTC).isoformat()
+    seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
+    for raw_message in messages:
+        message = _coerce_seed_message(raw_message)
+        if not isinstance(message, BaseMessage):
+            continue
+        if isinstance(message, HumanMessage):
+            if not _should_persist_human_input_message(message):
+                continue
+            event_type = "llm.human.input"
+            content = restore_original_human_message(message).model_dump()
+            metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, AIMessage):
+            event_type = "llm.ai.response"
+            content = message.model_dump()
+            metadata = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, ToolMessage):
+            event_type = "llm.tool.result"
+            content = message.model_dump()
+            metadata = dict(seed_metadata)
+        else:
+            # System / remove / summary artifacts never enter the thread feed.
+            continue
+        events.append(
+            {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": "message",
+                "content": content,
+                "metadata": metadata,
+                "created_at": created_at,
+            }
+        )
+    return events
 
 
 class RunJournal(BaseCallbackHandler):
@@ -156,8 +263,8 @@ class RunJournal(BaseCallbackHandler):
             # Root graph invocation — emit a single trace event for the run start.
             chain_name = (serialized or {}).get("name", "unknown")
             self._put(
-                event_type="run.start",
-                category="trace",
+                event_type=RUN_START_EVENT.event_type,
+                category=RUN_START_EVENT.category,
                 content={"chain": chain_name},
                 metadata={"caller": caller, **(metadata or {})},
             )
@@ -175,13 +282,18 @@ class RunJournal(BaseCallbackHandler):
         if parent_run_id is not None:
             return
         self._reconcile_final_tool_messages(outputs)
-        self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
+        self._put(
+            event_type=RUN_END_EVENT.event_type,
+            category=RUN_END_EVENT.category,
+            content=outputs,
+            metadata={"status": "success"},
+        )
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._put(
-            event_type="run.error",
-            category="error",
+            event_type=RUN_ERROR_EVENT.event_type,
+            category=RUN_ERROR_EVENT.category,
             content=str(error),
             metadata={"error_type": type(error).__name__},
         )
@@ -198,7 +310,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Capture structured prompt messages for llm_request event.
+        """Capture the first user-visible prompt as llm.human.input.
 
         This is also the canonical place to extract the first human message:
         messages are fully structured here, it fires only on real LLM calls,
@@ -226,8 +338,8 @@ class RunJournal(BaseCallbackHandler):
                         persisted_message = restore_original_human_message(m)
                         self.set_first_human_message(self._message_text(persisted_message))
                         self._put(
-                            event_type="llm.human.input",
-                            category="message",
+                            event_type=LLM_HUMAN_INPUT_EVENT.event_type,
+                            category=LLM_HUMAN_INPUT_EVENT.category,
                             content=persisted_message.model_dump(),
                             metadata={"caller": caller},
                         )
@@ -291,10 +403,10 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
-            # Trace event: llm_response (OpenAI completion format)
+            # Message event: checkpoint-aligned llm.ai.response payload.
             self._put(
-                event_type="llm.ai.response",
-                category="message",
+                event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                category=LLM_AI_RESPONSE_EVENT.category,
                 content=message.model_dump(),
                 metadata={
                     "caller": caller,
@@ -342,7 +454,11 @@ class RunJournal(BaseCallbackHandler):
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         self._llm_start_times.pop(str(run_id), None)
-        self._put(event_type="llm.error", category="trace", content=str(error))
+        self._put(
+            event_type=LLM_ERROR_EVENT.event_type,
+            category=LLM_ERROR_EVENT.category,
+            content=str(error),
+        )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Handle tool start event, cache tool call ID for later correlation"""
@@ -403,7 +519,11 @@ class RunJournal(BaseCallbackHandler):
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
-        self._put(event_type="llm.tool.result", category="message", content=message.model_dump())
+        self._put(
+            event_type=LLM_TOOL_RESULT_EVENT.event_type,
+            category=LLM_TOOL_RESULT_EVENT.category,
+            content=message.model_dump(),
+        )
         identity = self._message_identity(message)
         if identity:
             self._persisted_tool_message_identities.add(identity)
@@ -619,15 +739,16 @@ class RunJournal(BaseCallbackHandler):
 
         Args:
             tag: Short identifier for the middleware (e.g., "title", "summarize",
-                 "guardrail"). Used to form event_type="middleware:{tag}".
+                 "guardrail"). Used to form event_type="middleware:{tag}" and
+                 limited by the persisted event-type column width.
             name: Full middleware class name.
             hook: Lifecycle hook that triggered the action (e.g., "after_model").
             action: Specific action performed (e.g., "generate_title").
             changes: Dict describing the state changes made.
         """
         self._put(
-            event_type=f"middleware:{tag}",
-            category="middleware",
+            event_type=MIDDLEWARE_EVENT_PATTERN.event_type(tag),
+            category=MIDDLEWARE_EVENT_PATTERN.category,
             content={"name": name, "hook": hook, "action": action, "changes": changes},
         )
 
@@ -642,8 +763,8 @@ class RunJournal(BaseCallbackHandler):
         if self._memory_context_recorded:
             return
         self._put(
-            event_type="context:memory",
-            category="context",
+            event_type=MEMORY_CONTEXT_EVENT.event_type,
+            category=MEMORY_CONTEXT_EVENT.category,
             content={"content_sha256": content_sha256},
         )
         self._memory_context_recorded = True
