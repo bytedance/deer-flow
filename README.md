@@ -765,6 +765,8 @@ This is how DeerFlow handles tasks that take minutes to hours: a research task m
 
 ### Sandbox & File System
 
+When you use `E2BSandboxProvider`, `sandbox.burst_limit` applies only with `sandbox.overflow_policy: burst`. The `wait` and `reject` policies use only `sandbox.replicas`.
+
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.

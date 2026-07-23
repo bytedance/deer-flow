@@ -1619,6 +1619,25 @@ def test_capacity_burst_policy_allows_limited_overflow(monkeypatch):
         p.acquire("t-extra", user_id="u-extra")
 
 
+@pytest.mark.parametrize("overflow_policy", ["reject", "wait"])
+def test_non_burst_policy_ignores_burst_limit(monkeypatch, overflow_policy):
+    """Only the burst policy can use slots above the replica limit."""
+    p = _make_provider(
+        replicas=1,
+        overflow_policy=overflow_policy,
+        acquire_timeout=1,
+        burst_limit=2,
+    )
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    p.acquire("t1", user_id="u1")
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+    assert len(fake_cls.create_calls) == 1
+
+
 def test_capacity_burst_with_zero_limit_falls_back_to_reject(monkeypatch):
     """overflow_policy='burst' with burst_limit=0 is treated as 'reject'."""
     p = _make_provider(replicas=1, overflow_policy="burst", burst_limit=0)
@@ -1944,7 +1963,9 @@ def test_capacity_concurrent_different_threads_only_one_creates(monkeypatch):
 def test_shutdown_during_release_does_not_repopulate_warm_pool(monkeypatch):
     """release in flight when shutdown fires must kill the VM, not park it."""
     p = _make_provider(replicas=2, overflow_policy="reject")
-    _install_fake_sdk(monkeypatch, p)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-release-shutdown")
+    fake_cls.create_factory = lambda **_kw: client
 
     sid1 = p.acquire("t1", user_id="u1")
 
@@ -1973,6 +1994,7 @@ def test_shutdown_during_release_does_not_repopulate_warm_pool(monkeypatch):
 
     assert release_done.is_set()
     assert sid1 not in p._warm_pool, "must not park in warm pool after shutdown"
+    assert client.killed, "release must kill its saved client after shutdown"
 
 
 def test_shutdown_during_reclaim_does_not_register_active(monkeypatch):
@@ -2053,10 +2075,12 @@ def test_shutdown_during_bootstrap_does_not_commit(monkeypatch):
     assert client.killed, "VM must be killed"
 
 
-def test_discovery_obeys_capacity(monkeypatch):
-    """discovery of a remote sandbox must reserve capacity; reject if full."""
+def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
+    """Discovery must report a full provider without destroying the remote VM."""
     p = _make_provider(replicas=1, overflow_policy="reject")
     fake_cls = _install_fake_sdk(monkeypatch, p)
+    discovered_client = FakeClient(sandbox_id="sb-remote")
+    fake_cls.connect_factory = lambda _sid, **_kw: discovered_client
 
     # Fill the single slot.
     p.acquire("t1", user_id="u1")
@@ -2073,7 +2097,54 @@ def test_discovery_obeys_capacity(monkeypatch):
         )
     ]
 
-    # Discovery succeeds in finding but fails to reserve → returns None.
-    sid = p._discover_remote_sandbox("t2", user_id="u2")
-    assert sid is None
+    with pytest.raises(SandboxCapacityExceededError):
+        p._discover_remote_sandbox("t2", user_id="u2")
+
     assert "sb-remote" not in p._sandboxes
+    assert not discovered_client.killed
+    assert discovered_client.closed
+
+
+def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
+    """Discovery must discard a reserved VM when shutdown starts before commit."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-discovery-shutdown")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    fake_cls.list_return = [
+        SimpleNamespace(
+            sandbox_id=client.sandbox_id,
+            metadata={
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_user": "u1",
+                "deer_flow_thread": "t1",
+            },
+        )
+    ]
+
+    reserved = threading.Event()
+    allow_commit = threading.Event()
+    reserve_capacity = p._reserve_capacity
+
+    def pause_after_reserve(thread_id, user_id):
+        reserve_capacity(thread_id, user_id)
+        reserved.set()
+        assert allow_commit.wait(timeout=2)
+
+    monkeypatch.setattr(p, "_reserve_capacity", pause_after_reserve)
+    result: list[str | None] = []
+    thread = threading.Thread(
+        target=lambda: result.append(p._discover_remote_sandbox("t1", user_id="u1")),
+    )
+    thread.start()
+    assert reserved.wait(timeout=1)
+
+    p.shutdown()
+    allow_commit.set()
+    thread.join(timeout=5)
+
+    assert result == [None]
+    assert client.killed
+    assert client.closed
+    assert p._sandboxes == {}
+    assert p._reserved_slots == 0

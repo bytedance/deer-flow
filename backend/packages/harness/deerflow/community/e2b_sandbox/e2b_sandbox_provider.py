@@ -347,18 +347,23 @@ class E2BSandboxProvider(SandboxProvider):
             self._free_transitioning_slot()
             return None
 
+        discard_after_shutdown = False
         with self._lock:
             if self._shutdown_called:
                 logger.info(
                     "Provider shut down during reclaim of sandbox %s; killing VM",
                     target_id,
                 )
-                self._kill_client(client)
-                self._safe_close_client(client)
                 self._end_transition_locked()
-                return None
-            self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
-            self._end_transition_locked()
+                discard_after_shutdown = True
+            else:
+                self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
+                self._end_transition_locked()
+
+        if discard_after_shutdown:
+            self._kill_client(client)
+            self._safe_close_client(client)
+            return None
 
         logger.info(
             "Reclaimed warm-pool e2b sandbox %s for user/thread %s/%s",
@@ -481,16 +486,23 @@ class E2BSandboxProvider(SandboxProvider):
             self._reserve_capacity(thread_id, user_id)
         except SandboxCapacityExceededError:
             logger.info(
-                "Discovered e2b sandbox %s, but capacity is full; not adopting (e2b will reap it on idle timeout)",
+                "Discovered e2b sandbox %s, but capacity is full; not adopting it",
                 target_id,
             )
+            self._safe_close_client(client)
+            raise
+
+        discard_after_shutdown = False
+        with self._lock:
+            if self._shutdown_called:
+                discard_after_shutdown = True
+            else:
+                self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
+                self._commit_capacity()
+        if discard_after_shutdown:
             self._kill_client(client)
             self._safe_close_client(client)
             return None
-
-        with self._lock:
-            self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
-            self._commit_capacity()
         logger.info(
             "Discovered remote e2b sandbox %s for user/thread %s/%s (seed=%s)",
             target_id,
@@ -525,7 +537,10 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _capacity_limit(self) -> int:
         """Hard ceiling for reserved + active + warm + transitioning slots."""
-        return int(self._config["replicas"]) + int(self._config["burst_limit"])
+        replicas = int(self._config["replicas"])
+        if self._config["overflow_policy"] == "burst":
+            return replicas + int(self._config["burst_limit"])
+        return replicas
 
     def _begin_transition_locked(self) -> None:
         """Increment the transitioning counter (``_lock`` must be held).
@@ -1374,6 +1389,10 @@ class E2BSandboxProvider(SandboxProvider):
                 user_id, thread_id = removed_keys[0]
                 seed = self._stable_seed(thread_id, user_id)
 
+        # E2BSandbox.close() clears its client reference. Keep this reference
+        # so a shutdown that races release can still kill the remote VM.
+        client = sandbox.client
+
         try:
             if sandbox.is_dead:
                 logger.info(
@@ -1406,9 +1425,21 @@ class E2BSandboxProvider(SandboxProvider):
                 return
 
             try:
-                self._refresh_remote_timeout(sandbox.client)
+                self._refresh_remote_timeout(client)
             except Exception as e:
                 logger.debug("Failed to refresh timeout during release: %s", e)
+
+            with self._lock:
+                shutting_down = self._shutdown_called
+            if shutting_down:
+                logger.info(
+                    "Provider shut down during release of sandbox %s; killing instead of parking in warm pool",
+                    sandbox_id,
+                )
+                if error := self._kill_client(client):
+                    logger.debug("Failed to kill e2b sandbox %s during release: %s", sandbox_id, error)
+                self._safe_close_client(client)
+                return
 
             try:
                 sandbox.close()
@@ -1416,17 +1447,21 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.warning("Error closing e2b sandbox %s during release: %s", sandbox_id, e)
 
             with self._lock:
-                if self._shutdown_called:
-                    logger.info(
-                        "Provider shut down during release of sandbox %s; killing instead of parking in warm pool",
-                        sandbox_id,
-                    )
-                    self._kill_client(getattr(sandbox, "_client", None))
-                    self._safe_close_client(getattr(sandbox, "_client", None))
-                else:
+                shutting_down = self._shutdown_called
+                if not shutting_down:
                     self._warm_pool[sandbox_id] = (seed or "", time.time())
                     self._warm_pool.move_to_end(sandbox_id)
                     logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
+            if shutting_down:
+                # shutdown can start while sandbox.close() releases its host
+                # transport. The saved client still lets us destroy the VM.
+                logger.info(
+                    "Provider shut down during release of sandbox %s; killing instead of parking in warm pool",
+                    sandbox_id,
+                )
+                if error := self._kill_client(client):
+                    logger.debug("Failed to kill e2b sandbox %s during release: %s", sandbox_id, error)
+                self._safe_close_client(client)
         finally:
             self._free_transitioning_slot()
 
