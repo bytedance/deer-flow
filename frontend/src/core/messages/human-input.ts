@@ -3,7 +3,8 @@ import type { Message } from "@langchain/langgraph-sdk";
 export type HumanInputMode =
   | "free_text"
   | "single_choice"
-  | "choice_with_other";
+  | "choice_with_other"
+  | "form";
 
 export type HumanInputOption = {
   id: string;
@@ -11,8 +12,28 @@ export type HumanInputOption = {
   value: string;
 };
 
+export type HumanInputFieldType =
+  | "text"
+  | "textarea"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "checkbox"
+  | "date";
+
+export type HumanInputField = {
+  name: string;
+  label: string;
+  type: HumanInputFieldType;
+  required: boolean;
+  placeholder?: string;
+  options?: HumanInputOption[];
+};
+
+export type HumanInputFormValue = string | number | boolean | string[];
+
 export type HumanInputRequest = {
-  version: 1;
+  version: 1 | 2;
   kind: "human_input_request";
   source: "ask_clarification" | string;
   request_id: string;
@@ -23,6 +44,7 @@ export type HumanInputRequest = {
   context?: string | null;
   input_mode: HumanInputMode;
   options?: HumanInputOption[];
+  fields?: HumanInputField[];
 };
 
 export type HumanInputResponse =
@@ -77,7 +99,20 @@ function isHumanInputMode(value: unknown): value is HumanInputMode {
   return (
     value === "free_text" ||
     value === "single_choice" ||
-    value === "choice_with_other"
+    value === "choice_with_other" ||
+    value === "form"
+  );
+}
+
+function isHumanInputFieldType(value: unknown): value is HumanInputFieldType {
+  return (
+    value === "text" ||
+    value === "textarea" ||
+    value === "number" ||
+    value === "select" ||
+    value === "multi_select" ||
+    value === "checkbox" ||
+    value === "date"
   );
 }
 
@@ -113,6 +148,55 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
   return options;
 }
 
+function parseFields(value: unknown): HumanInputField[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const fields: HumanInputField[] = [];
+  for (const field of value) {
+    if (!isRecord(field)) {
+      return undefined;
+    }
+    const name = field.name;
+    const label = field.label;
+    const type = field.type;
+    const required = field.required;
+    if (
+      !isNonEmptyString(name) ||
+      !isNonEmptyString(label) ||
+      !isHumanInputFieldType(type) ||
+      (required !== undefined && typeof required !== "boolean")
+    ) {
+      return undefined;
+    }
+    const options = parseOptions(field.options);
+    if (field.options !== undefined && options === undefined) {
+      return undefined;
+    }
+    if (
+      (type === "select" || type === "multi_select") &&
+      (!options || options.length === 0)
+    ) {
+      return undefined;
+    }
+    fields.push({
+      name,
+      label,
+      type,
+      required: required === true,
+      ...(readOptionalString(field.placeholder)
+        ? { placeholder: readOptionalString(field.placeholder) }
+        : {}),
+      ...(options ? { options } : {}),
+    });
+  }
+  return fields;
+}
+
 export function parseHumanInputRequest(
   value: unknown,
 ): HumanInputRequest | null {
@@ -120,7 +204,7 @@ export function parseHumanInputRequest(
     return null;
   }
   if (
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     value.kind !== "human_input_request" ||
     !isNonEmptyString(value.source) ||
     !isNonEmptyString(value.request_id) ||
@@ -142,6 +226,14 @@ export function parseHumanInputRequest(
     return null;
   }
 
+  const fields = parseFields(value.fields);
+  if (value.fields !== undefined && fields === undefined) {
+    return null;
+  }
+  if (value.input_mode === "form" && (!fields || fields.length === 0)) {
+    return null;
+  }
+
   const context = value.context;
   if (
     context !== undefined &&
@@ -152,7 +244,7 @@ export function parseHumanInputRequest(
   }
 
   return {
-    version: 1,
+    version: value.version,
     kind: "human_input_request",
     source: value.source,
     request_id: value.request_id,
@@ -169,6 +261,7 @@ export function parseHumanInputRequest(
     ...(context !== undefined ? { context } : {}),
     input_mode: value.input_mode,
     ...(options ? { options } : {}),
+    ...(fields ? { fields } : {}),
   };
 }
 
@@ -302,6 +395,45 @@ export function createHumanInputOptionResponse(
     option_id: option.id,
     value: option.value,
   };
+}
+
+function formatFormValue(value: HumanInputFormValue) {
+  if (Array.isArray(value)) {
+    return value.join(", ");
+  }
+  if (typeof value === "boolean") {
+    return value ? "yes" : "no";
+  }
+  return String(value);
+}
+
+function isEmptyFormValue(value: HumanInputFormValue | undefined) {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value === "string") {
+    return value.trim().length === 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  return false;
+}
+
+export function buildHumanInputFormSummary(
+  request: HumanInputRequest,
+  values: Record<string, HumanInputFormValue>,
+) {
+  const fields = request.fields ?? [];
+  const parts: string[] = [];
+  for (const field of fields) {
+    const value = values[field.name];
+    if (isEmptyFormValue(value)) {
+      continue;
+    }
+    parts.push(`${field.label}: ${formatFormValue(value!)}`);
+  }
+  return parts.join("; ");
 }
 
 export function createHumanInputTextResponse(

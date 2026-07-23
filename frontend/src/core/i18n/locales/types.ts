@@ -498,6 +498,8 @@ export interface Translations {
     otherPlaceholder: string;
     submit: string;
     emptyError: string;
+    requiredError: string;
+    selectPlaceholder: string;
     answeredValue: (value: string) => string;
   };
 

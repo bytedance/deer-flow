@@ -215,6 +215,204 @@ class TestHumanInputPayload:
         assert "options" not in payload
 
 
+class TestFormPayload:
+    """v2 protocol: fields render a structured form card."""
+
+    def _fields(self):
+        return [
+            {"name": "amount", "label": "Amount", "type": "number", "required": True},
+            {"name": "category", "label": "Category", "type": "select", "options": ["travel", "meals"], "required": True},
+            {"name": "receipts", "label": "Receipts", "type": "multi_select", "options": ["A-1", "A-2"]},
+            {"name": "note", "type": "textarea"},
+        ]
+
+    def test_form_payload_with_native_fields(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Please provide the expense details.",
+                "clarification_type": "missing_info",
+                "fields": self._fields(),
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["version"] == 2
+        assert payload["input_mode"] == "form"
+        assert payload["fields"] == [
+            {"name": "amount", "label": "Amount", "type": "number", "required": True},
+            {
+                "name": "category",
+                "label": "Category",
+                "type": "select",
+                "required": True,
+                "options": [
+                    {"id": "category-option-1", "label": "travel", "value": "travel"},
+                    {"id": "category-option-2", "label": "meals", "value": "meals"},
+                ],
+            },
+            {
+                "name": "receipts",
+                "label": "Receipts",
+                "type": "multi_select",
+                "required": False,
+                "options": [
+                    {"id": "receipts-option-1", "label": "A-1", "value": "A-1"},
+                    {"id": "receipts-option-2", "label": "A-2", "value": "A-2"},
+                ],
+            },
+            {"name": "note", "label": "note", "type": "textarea", "required": False},
+        ]
+
+    def test_form_payload_with_json_string_fields(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": json.dumps([{"name": "amount", "type": "number"}]),
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "form"
+        assert payload["fields"] == [{"name": "amount", "label": "amount", "type": "number", "required": False}]
+
+    def test_form_takes_precedence_over_options(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "amount"}],
+                "options": ["dev", "prod"],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "form"
+        assert "options" not in payload
+
+    def test_unknown_field_type_degrades_to_text(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "amount", "type": "slider"}],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["fields"][0]["type"] == "text"
+
+    def test_select_without_options_degrades_to_text(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "category", "type": "select"}],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["fields"][0]["type"] == "text"
+        assert "options" not in payload["fields"][0]
+
+    def test_invalid_field_entries_are_dropped(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [
+                    "not-a-dict",
+                    {"label": "no name"},
+                    {"name": "   "},
+                    {"name": "amount", "type": "number"},
+                ],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "form"
+        assert [field["name"] for field in payload["fields"]] == ["amount"]
+
+    def test_duplicate_field_names_keep_first(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [
+                    {"name": "amount", "type": "number"},
+                    {"name": "amount", "type": "text"},
+                ],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["fields"] == [{"name": "amount", "label": "amount", "type": "number", "required": False}]
+
+    def test_all_invalid_fields_fall_back_to_legacy_modes(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": ["bad", {"label": "no name"}],
+                "options": ["dev", "prod"],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["version"] == 1
+        assert payload["input_mode"] == "choice_with_other"
+        assert "fields" not in payload
+
+    def test_field_placeholder_is_preserved(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "note", "placeholder": "Optional remarks"}],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["fields"][0]["placeholder"] == "Optional remarks"
+
+    def test_form_fallback_text_lists_fields(self, middleware):
+        result = middleware._format_clarification_message(
+            {
+                "question": "Please provide the expense details.",
+                "clarification_type": "missing_info",
+                "fields": self._fields(),
+            }
+        )
+
+        assert "1. Amount (required)" in result
+        assert "2. Category (required) — options: travel / meals" in result
+        assert "3. Receipts — options: A-1 / A-2 (multiple allowed)" in result
+        assert "4. note" in result
+        assert "Please reply with a value for each field." in result
+
+
+class TestClarificationToolSchema:
+    """The tool schema must expose the v2 form parameter (request-side only)."""
+
+    def test_tool_exposes_fields_argument(self):
+        from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+        schema = ask_clarification_tool.args
+        assert "fields" in schema
+        # The reply protocol stays v1 (text/option): no top-level multi_select
+        # mode — a standalone multi-select question is a one-field form.
+        assert "multi_select" not in schema
+
+
 class TestClarificationCommandIdempotency:
     """Clarification tool-call retries should not duplicate messages in state."""
 

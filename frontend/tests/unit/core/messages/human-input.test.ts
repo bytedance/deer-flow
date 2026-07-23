@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  buildHumanInputFormSummary,
   buildHumanInputResponseText,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
@@ -220,4 +221,131 @@ test("creates option and text responses for a request", () => {
   expect(buildHumanInputResponseText(request!, optionResponse)).toBe(
     'For your clarification "Which environment should I deploy to?", my answer is: staging',
   );
+});
+
+const formPayload = {
+  version: 2,
+  kind: "human_input_request",
+  source: "ask_clarification",
+  request_id: "clarification:call-form",
+  question: "Please provide the expense details.",
+  input_mode: "form",
+  fields: [
+    { name: "amount", label: "Amount", type: "number", required: true },
+    {
+      name: "category",
+      label: "Category",
+      type: "select",
+      required: true,
+      options: [
+        { id: "category-option-1", label: "travel", value: "travel" },
+        { id: "category-option-2", label: "meals", value: "meals" },
+      ],
+    },
+    {
+      name: "receipts",
+      label: "Receipts",
+      type: "multi_select",
+      required: false,
+      options: [
+        { id: "receipts-option-1", label: "A-1", value: "A-1" },
+        { id: "receipts-option-2", label: "A-2", value: "A-2" },
+      ],
+    },
+    { name: "note", label: "note", type: "textarea", required: false },
+  ],
+};
+
+function toolMessage(payload: unknown): Message {
+  return {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: { human_input: payload },
+  } as unknown as Message;
+}
+
+test("parses a v2 form request", () => {
+  expect(extractHumanInputRequest(toolMessage(formPayload))).toEqual(
+    formPayload,
+  );
+});
+
+test("rejects a form request without fields", () => {
+  expect(
+    extractHumanInputRequest(toolMessage({ ...formPayload, fields: [] })),
+  ).toBeNull();
+});
+
+test("rejects a form request with malformed fields", () => {
+  expect(
+    extractHumanInputRequest(
+      toolMessage({
+        ...formPayload,
+        fields: [{ label: "missing name", type: "text" }],
+      }),
+    ),
+  ).toBeNull();
+  expect(
+    extractHumanInputRequest(
+      toolMessage({
+        ...formPayload,
+        fields: [{ name: "amount", label: "Amount", type: "slider" }],
+      }),
+    ),
+  ).toBeNull();
+});
+
+test("rejects unknown protocol versions", () => {
+  expect(
+    extractHumanInputRequest(toolMessage({ ...formPayload, version: 3 })),
+  ).toBeNull();
+});
+
+test("builds a readable form summary submitted as a v1 text response", () => {
+  const request = extractHumanInputRequest(toolMessage(formPayload))!;
+  const values = {
+    amount: "300",
+    category: "travel",
+    receipts: ["A-1", "A-2"],
+    note: "",
+  };
+
+  const summary = buildHumanInputFormSummary(request, values);
+  expect(summary).toBe("Amount: 300; Category: travel; Receipts: A-1, A-2");
+
+  // Request-side-only protocol scope: form answers reuse the existing v1
+  // text response — no structured response kind is introduced.
+  expect(createHumanInputTextResponse(request, summary)).toEqual({
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: "clarification:call-form",
+    response_kind: "text",
+    value: "Amount: 300; Category: travel; Receipts: A-1, A-2",
+  });
+});
+
+test("derives answered state for a form request answered by text", () => {
+  const response = {
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: "clarification:call-form",
+    response_kind: "text",
+    value: "Amount: 300",
+  };
+  const state = deriveHumanInputThreadState([
+    toolMessage(formPayload),
+    {
+      type: "human",
+      content: "answer",
+      additional_kwargs: { hide_from_ui: true, human_input_response: response },
+    } as unknown as Message,
+  ]);
+
+  expect(state.answeredResponses.get("clarification:call-form")).toEqual(
+    response,
+  );
+  expect(state.latestOpenRequestId).toBeNull();
 });

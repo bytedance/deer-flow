@@ -15,6 +15,11 @@ from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
+# Whitelisted form field types; anything else degrades to "text" so a bad
+# model-provided type can never produce an unrenderable card.
+FORM_FIELD_TYPES = frozenset({"text", "textarea", "number", "select", "multi_select", "checkbox", "date"})
+_OPTION_FIELD_TYPES = frozenset({"select", "multi_select"})
+
 
 class ClarificationMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -64,19 +69,105 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return [str(option) for option in options]
 
+    @staticmethod
+    def _normalize_bool(raw: Any) -> bool:
+        """Coerce a model-provided boolean; some models serialize booleans as strings."""
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() == "true"
+        return False
+
+    def _normalize_fields(self, raw_fields: Any) -> list[dict[str, Any]]:
+        """Normalize tool-provided form fields into the validated v2 field schema.
+
+        Invalid entries are dropped rather than failing the whole card: a
+        partially-usable form still beats degrading to free text.
+        """
+        fields = raw_fields
+        if isinstance(fields, str):
+            try:
+                fields = json.loads(fields)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        if not isinstance(fields, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for entry in fields:
+            if not isinstance(entry, dict):
+                continue
+            raw_name = entry.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                continue
+            name = raw_name.strip()
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+
+            raw_label = entry.get("label")
+            label = raw_label.strip() if isinstance(raw_label, str) and raw_label.strip() else name
+
+            field_type = entry.get("type")
+            if field_type not in FORM_FIELD_TYPES:
+                field_type = "text"
+
+            options = self._normalize_options(entry.get("options")) if field_type in _OPTION_FIELD_TYPES else []
+            if field_type in _OPTION_FIELD_TYPES and not options:
+                field_type = "text"
+
+            field: dict[str, Any] = {
+                "name": name,
+                "label": label,
+                "type": field_type,
+                "required": self._normalize_bool(entry.get("required")),
+            }
+            if field_type in _OPTION_FIELD_TYPES:
+                field["options"] = [
+                    {
+                        "id": f"{name}-option-{index}",
+                        "label": option,
+                        "value": option,
+                    }
+                    for index, option in enumerate(options, 1)
+                ]
+            placeholder = entry.get("placeholder")
+            if isinstance(placeholder, str) and placeholder.strip():
+                field["placeholder"] = placeholder.strip()
+            normalized.append(field)
+
+        return normalized
+
     def _build_human_input_payload(self, args: dict[str, Any], *, tool_call_id: str, request_id: str) -> dict[str, Any]:
-        """Build the structured UI payload while keeping ToolMessage.content as fallback."""
+        """Build the structured UI payload while keeping ToolMessage.content as fallback.
+
+        Protocol versioning: legacy modes (``free_text`` / ``choice_with_other``)
+        keep ``version: 1`` so their wire format is unchanged; the v2 ``form``
+        mode carries ``version: 2`` so older frontends reject the payload and
+        degrade to the plain-text ToolMessage content. Replies stay on the v1
+        response protocol (``text`` / ``option``) — the form card submits a
+        readable ``value`` summary, so no new response kind is introduced.
+        """
+        fields = self._normalize_fields(args.get("fields"))
         options = self._normalize_options(args.get("options", []))
         clarification_type = str(args.get("clarification_type", "missing_info"))
 
+        if fields:
+            version, input_mode = 2, "form"
+        elif options:
+            version, input_mode = 1, "choice_with_other"
+        else:
+            version, input_mode = 1, "free_text"
+
         payload: dict[str, Any] = {
-            "version": 1,
+            "version": version,
             "kind": "human_input_request",
             "source": "ask_clarification",
             "request_id": request_id,
             "clarification_type": clarification_type,
             "question": str(args.get("question") or ""),
-            "input_mode": "choice_with_other" if options else "free_text",
+            "input_mode": input_mode,
         }
 
         if tool_call_id:
@@ -86,7 +177,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             context = args.get("context")
             payload["context"] = None if context is None else str(context)
 
-        if options:
+        if input_mode == "form":
+            payload["fields"] = fields
+        elif options:
             payload["options"] = [
                 {
                     "id": f"option-{index}",
@@ -121,6 +214,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
+        fields = self._normalize_fields(args.get("fields"))
         options = self._normalize_options(args.get("options", []))
 
         # Type-specific icons
@@ -146,8 +240,22 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             # Just the question with icon
             message_parts.append(f"{icon} {question}")
 
-        # Add options in a cleaner format
-        if options and len(options) > 0:
+        # Form fields take precedence over options, mirroring the payload logic.
+        if fields:
+            message_parts.append("")  # blank line for spacing
+            for i, field in enumerate(fields, 1):
+                line = f"  {i}. {field['label']}"
+                if field["required"]:
+                    line += " (required)"
+                field_options = field.get("options")
+                if field_options:
+                    line += " — options: " + " / ".join(option["label"] for option in field_options)
+                    if field["type"] == "multi_select":
+                        line += " (multiple allowed)"
+                message_parts.append(line)
+            message_parts.append("")
+            message_parts.append("Please reply with a value for each field.")
+        elif options and len(options) > 0:
             message_parts.append("")  # blank line for spacing
             for i, option in enumerate(options, 1):
                 message_parts.append(f"  {i}. {option}")
