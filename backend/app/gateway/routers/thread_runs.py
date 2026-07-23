@@ -23,7 +23,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_service, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
@@ -731,10 +731,10 @@ async def list_thread_messages(
     # Attach feedback to the last AI message of each run. Only query when there
     # is an AI message to attach it to — threads with no completed AI turn yet
     # would otherwise pay for a grouped feedback lookup whose result is unused.
-    feedback_map: dict[str, dict] = {}
+    feedback_map = {}
     if last_ai_per_run:
-        feedback_repo = get_feedback_repo(request)
-        feedback_map = await feedback_repo.list_by_thread_grouped(thread_id, user_id=user_id)
+        feedback_service = get_feedback_service(request)
+        feedback_map = await feedback_service.latest_per_run_in_thread(thread_id, user_id=user_id)
 
     last_ai_indices = set(last_ai_per_run.values())
     for i, msg in enumerate(messages):
@@ -743,9 +743,10 @@ async def list_thread_messages(
             fb = feedback_map.get(run_id)
             msg["feedback"] = (
                 {
-                    "feedback_id": fb["feedback_id"],
-                    "rating": fb["rating"],
-                    "comment": fb.get("comment"),
+                    "feedback_id": fb.feedback_id,
+                    "rating": fb.rating,
+                    "comment": fb.comment,
+                    "tags": list(fb.tags),
                 }
                 if fb
                 else None
@@ -851,11 +852,11 @@ async def _enrich_thread_message_page(
 
     event_store = get_run_event_store(request)
     last_ai_seq_by_run = await event_store.get_last_visible_ai_seq_by_run(thread_id, run_ids, user_id=user_id)
-    feedback_map: dict[str, dict] = {}
+    feedback_map = {}
     feedback_run_ids = {run_id for row in data if isinstance((run_id := row.get("run_id")), str) and row.get("seq") == last_ai_seq_by_run.get(run_id)}
     if feedback_run_ids:
-        feedback_repo = get_feedback_repo(request)
-        feedback_map = await feedback_repo.list_by_run_ids(thread_id, feedback_run_ids, user_id=user_id)
+        feedback_service = get_feedback_service(request)
+        feedback_map = await feedback_service.latest_for_runs(thread_id, feedback_run_ids, user_id=user_id)
 
     for row in data:
         run_id = row.get("run_id")
@@ -864,9 +865,10 @@ async def _enrich_thread_message_page(
             feedback = feedback_map.get(run_id)
             if feedback:
                 row["feedback"] = {
-                    "feedback_id": feedback["feedback_id"],
-                    "rating": feedback["rating"],
-                    "comment": feedback.get("comment"),
+                    "feedback_id": feedback.feedback_id,
+                    "rating": feedback.rating,
+                    "comment": feedback.comment,
+                    "tags": list(feedback.tags),
                 }
 
         content = row.get("content")

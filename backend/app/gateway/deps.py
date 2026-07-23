@@ -29,7 +29,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.domain.feedback import FeedbackService
 from deerflow.runtime import RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
@@ -322,16 +322,25 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
-            from deerflow.persistence.feedback import FeedbackRepository
+            from app.infra.persistence.feedback import (
+                RunStoreRunLookup,
+                SqlFeedbackRepository,
+            )
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
-            app.state.feedback_repo = FeedbackRepository(sf)
+            # Hexagonal feedback slice: the service (input port) is wired with
+            # its SQL adapter here — the composition root is the only place
+            # adapters are instantiated.
+            app.state.feedback_service = FeedbackService(
+                repository=SqlFeedbackRepository(sf),
+                runs=RunStoreRunLookup(app.state.run_store),
+            )
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
-            app.state.feedback_repo = None
+            app.state.feedback_service = None  # memory backend → 503, as before
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -417,7 +426,7 @@ get_stream_bridge: Callable[[Request], StreamBridge] = _require("stream_bridge",
 get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run manager")
 get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "Checkpointer")
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
-get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
+get_feedback_service: Callable[[Request], FeedbackService] = _require("feedback_service", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
 

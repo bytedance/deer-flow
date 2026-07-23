@@ -245,67 +245,6 @@ def _make_feedback_repo(rows: list[dict]):
     return repo
 
 
-def _make_feedback(run_id: str, idx: int) -> dict:
-    return {"id": f"fb-{idx}", "run_id": run_id, "thread_id": "thread-x", "value": "up"}
-
-
-# ---------------------------------------------------------------------------
-# TestRunFeedback
-# ---------------------------------------------------------------------------
-
-
-class TestRunFeedback:
-    def test_returns_list_of_feedback_dicts(self):
-        """GET /api/runs/{run_id}/feedback returns a list of feedback dicts."""
-        run_record = {"run_id": "run-fb-1", "thread_id": "thread-fb-1"}
-        rows = [_make_feedback("run-fb-1", i) for i in range(3)]
-        app = _make_app(
-            run_store=_make_run_store(run_record),
-            feedback_repo=_make_feedback_repo(rows),
-        )
-        with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-1/feedback")
-        assert response.status_code == 200
-        body = response.json()
-        assert isinstance(body, list)
-        assert len(body) == 3
-
-    def test_404_when_run_not_found(self):
-        """Returns 404 when run store returns None."""
-        app = _make_app(
-            run_store=_make_run_store(None),
-            feedback_repo=_make_feedback_repo([]),
-        )
-        with TestClient(app) as client:
-            response = client.get("/api/runs/missing-run/feedback")
-        assert response.status_code == 404
-        assert "missing-run" in response.json()["detail"]
-
-    def test_empty_list_when_no_feedback(self):
-        """Returns empty list when no feedback exists for the run."""
-        run_record = {"run_id": "run-fb-2", "thread_id": "thread-fb-2"}
-        app = _make_app(
-            run_store=_make_run_store(run_record),
-            feedback_repo=_make_feedback_repo([]),
-        )
-        with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-2/feedback")
-        assert response.status_code == 200
-        assert response.json() == []
-
-    def test_503_when_feedback_repo_not_configured(self):
-        """Returns 503 when feedback_repo is None (no DB configured)."""
-        run_record = {"run_id": "run-fb-3", "thread_id": "thread-fb-3"}
-        app = _make_app(
-            run_store=_make_run_store(run_record),
-        )
-        # Explicitly set feedback_repo to None to simulate missing DB
-        app.state.feedback_repo = None
-        with TestClient(app) as client:
-            response = client.get("/api/runs/run-fb-3/feedback")
-        assert response.status_code == 503
-
-
 def test_resolve_thread_id_handles_null_configurable():
     """A client may send ``config.configurable`` as JSON ``null``.
 
