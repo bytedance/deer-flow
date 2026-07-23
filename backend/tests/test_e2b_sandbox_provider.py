@@ -182,6 +182,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
+    provider._remote_ops_in_progress = set()
     provider._reserved_slots = 0
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
@@ -1759,6 +1760,46 @@ def test_capacity_keeps_slot_when_warm_reclaim_reconnect_fails(monkeypatch):
     assert p._transitioning_slots == 0
 
 
+def test_shutdown_during_reclaim_reconnect_failure_tracks_vm(monkeypatch):
+    """Shutdown must see a warm VM while reclaim reconnects."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+
+    reconnect_started = threading.Event()
+    allow_failure = threading.Event()
+    shutdown_client = FakeClient(sandbox_id=sid)
+    calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            reconnect_started.set()
+            assert allow_failure.wait(timeout=2)
+            raise RuntimeError("network down")
+        return shutdown_client
+
+    fake_cls.connect_factory = reconnect
+    result: list[str | None] = []
+    reclaim = threading.Thread(
+        target=lambda: result.append(p._reclaim_warm_pool_sandbox("t1", user_id="u1")),
+    )
+    reclaim.start()
+    assert reconnect_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    reclaim.join(timeout=5)
+
+    assert result == [None]
+    assert shutdown_client.killed
+    assert p._warm_pool == {}
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
+
+
 def test_capacity_keeps_slot_when_warm_reclaim_bootstrap_kill_fails(monkeypatch):
     """An uncertain reclaim cleanup must not make room for a new VM."""
     p = _make_provider(replicas=1, overflow_policy="reject")
@@ -1815,6 +1856,46 @@ def test_capacity_keeps_slot_when_create_bootstrap_kill_fails(monkeypatch):
     assert p.acquire("t2", user_id="u2") != client.sandbox_id
     assert destroy_client.killed
     assert p._transitioning_slots == 0
+
+
+def test_shutdown_during_create_bootstrap_kill_failure_tracks_vm(monkeypatch):
+    """Shutdown must see a created VM while bootstrap is in progress."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="create-bootstrap-race")
+    client.kill = MagicMock(side_effect=RuntimeError("kill failed"))
+    fake_cls.create_factory = lambda **_kw: client
+    shutdown_client = FakeClient(sandbox_id=client.sandbox_id)
+    fake_cls.connect_factory = lambda _sid, **_kw: shutdown_client
+    bootstrap_started = threading.Event()
+    allow_failure = threading.Event()
+
+    def slow_bootstrap(_client):
+        bootstrap_started.set()
+        assert allow_failure.wait(timeout=2)
+        raise RuntimeError("bootstrap failed")
+
+    monkeypatch.setattr(p, "_bootstrap_sandbox_paths", slow_bootstrap)
+    result: list[Exception] = []
+
+    def create():
+        try:
+            p.acquire("t1", user_id="u1")
+        except Exception as error:
+            result.append(error)
+
+    create_thread = threading.Thread(target=create)
+    create_thread.start()
+    assert bootstrap_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    create_thread.join(timeout=5)
+
+    assert len(result) == 1
+    assert shutdown_client.killed
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
 
 
 def test_capacity_keeps_slot_when_warm_eviction_kill_fails(monkeypatch):
@@ -2317,9 +2398,12 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
     fake_cls = _install_fake_sdk(monkeypatch, p)
     discovered_client = FakeClient(sandbox_id="sb-remote")
     fake_cls.connect_factory = lambda _sid, **_kw: discovered_client
+    bootstrap = MagicMock()
+    monkeypatch.setattr(p, "_bootstrap_sandbox_paths", bootstrap)
 
     # Fill the single slot.
     p.acquire("t1", user_id="u1")
+    bootstrap.reset_mock()
 
     # Discovery finds a matching sandbox.
     fake_cls.list_return = [
@@ -2337,8 +2421,94 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
         p._discover_remote_sandbox("t2", user_id="u2")
 
     assert "sb-remote" not in p._sandboxes
+    bootstrap.assert_not_called()
     assert not discovered_client.killed
     assert discovered_client.closed
+
+
+def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
+    """Discovery keeps capacity when bootstrap cleanup cannot destroy the VM."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(
+        sandbox_id="discovery-bootstrap-failure",
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="bootstrap failed", exit_code=1),
+            ]
+        ),
+    )
+    client.kill = MagicMock(side_effect=RuntimeError("kill failed"))
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    fake_cls.list_return = [
+        SimpleNamespace(
+            sandbox_id=client.sandbox_id,
+            metadata={
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_user": "u1",
+                "deer_flow_thread": "t1",
+            },
+        )
+    ]
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+
+    assert p._eviction_tombstones == {client.sandbox_id}
+    assert p._reserved_slots == 0
+    assert p._transitioning_slots == 1
+    assert p._remote_ops_in_progress == set()
+
+
+def test_shutdown_during_discovery_bootstrap_kill_failure_tracks_vm(monkeypatch):
+    """Shutdown must see a discovered VM while bootstrap is in progress."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="discovery-bootstrap-race")
+    client.kill = MagicMock(side_effect=RuntimeError("kill failed"))
+    shutdown_client = FakeClient(sandbox_id=client.sandbox_id)
+    connect_calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal connect_calls
+        connect_calls += 1
+        return client if connect_calls == 1 else shutdown_client
+
+    fake_cls.connect_factory = reconnect
+    fake_cls.list_return = [
+        SimpleNamespace(
+            sandbox_id=client.sandbox_id,
+            metadata={
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_user": "u1",
+                "deer_flow_thread": "t1",
+            },
+        )
+    ]
+    bootstrap_started = threading.Event()
+    allow_failure = threading.Event()
+
+    def slow_bootstrap(_client):
+        bootstrap_started.set()
+        assert allow_failure.wait(timeout=2)
+        raise RuntimeError("bootstrap failed")
+
+    monkeypatch.setattr(p, "_bootstrap_sandbox_paths", slow_bootstrap)
+    result: list[str | None] = []
+    discovery = threading.Thread(
+        target=lambda: result.append(p._discover_remote_sandbox("t1", user_id="u1")),
+    )
+    discovery.start()
+    assert bootstrap_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    discovery.join(timeout=5)
+
+    assert result == [None]
+    assert shutdown_client.killed
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
 
 
 def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
@@ -2362,8 +2532,8 @@ def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
     allow_commit = threading.Event()
     reserve_capacity = p._reserve_capacity
 
-    def pause_after_reserve(thread_id, user_id):
-        reserve_capacity(thread_id, user_id)
+    def pause_after_reserve(thread_id, user_id, *, remote_id=None):
+        reserve_capacity(thread_id, user_id, remote_id=remote_id)
         reserved.set()
         assert allow_commit.wait(timeout=2)
 

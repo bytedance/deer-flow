@@ -102,6 +102,9 @@ class E2BSandboxProvider(SandboxProvider):
         # IDs currently reconnecting or stopping. This grants one retry owner
         # to each tombstone and prevents a second call from freeing its slot.
         self._evictions_in_progress: set[str] = set()
+        # Remote IDs that are between tracked lifecycle states. Shutdown uses
+        # this set to retain cleanup visibility during remote calls.
+        self._remote_ops_in_progress: set[str] = set()
         # In-flight creates that have reserved capacity but not yet committed
         # to ``_sandboxes``.  Guarded by ``_lock``.
         self._reserved_slots = 0
@@ -328,6 +331,7 @@ class E2BSandboxProvider(SandboxProvider):
                 return None
             self._warm_pool.pop(target_id)
             self._begin_transition_locked()
+            self._remote_ops_in_progress.add(target_id)
 
         try:
             client = self._reconnect_live_client(self._get_sandbox_cls(), target_id)
@@ -337,9 +341,7 @@ class E2BSandboxProvider(SandboxProvider):
                 target_id,
                 e,
             )
-            with self._lock:
-                if not self._shutdown_called:
-                    self._eviction_tombstones.add(target_id)
+            self._complete_transition_remote_op(target_id, remote_destroyed=False)
             return None
 
         if client is None:
@@ -347,16 +349,16 @@ class E2BSandboxProvider(SandboxProvider):
                 "Warm-pool e2b sandbox %s is no longer alive (reaped by control plane); dropping and falling back to create",
                 target_id,
             )
-            self._free_transitioning_slot()
+            self._complete_transition_remote_op(target_id, remote_destroyed=True)
             return None
 
         self._refresh_remote_timeout(client)
         bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
         if bootstrap_error is not None:
             if remote_destroyed:
-                self._free_transitioning_slot()
+                self._complete_transition_remote_op(target_id, remote_destroyed=True)
             else:
-                self._retain_transition_tombstone(target_id)
+                self._complete_transition_remote_op(target_id, remote_destroyed=False)
             return None
 
         discard_after_shutdown = False
@@ -366,9 +368,9 @@ class E2BSandboxProvider(SandboxProvider):
                     "Provider shut down during reclaim of sandbox %s; killing VM",
                     target_id,
                 )
-                self._end_transition_locked()
                 discard_after_shutdown = True
             else:
+                self._remote_ops_in_progress.discard(target_id)
                 self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
                 self._end_transition_locked()
 
@@ -487,19 +489,8 @@ class E2BSandboxProvider(SandboxProvider):
             )
             return None
 
-        self._refresh_remote_timeout(client)
-        bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
-        if bootstrap_error is not None:
-            if not remote_destroyed:
-                self._reserve_capacity(thread_id, user_id)
-                self._convert_reserved_to_tombstone(target_id)
-            return None
-
-        # Reserve capacity for the discovered sandbox.  If capacity is full
-        # per the overflow policy, do not adopt — the e2b idle timeout will
-        # eventually reap the VM, and the next create will get a fresh one.
         try:
-            self._reserve_capacity(thread_id, user_id)
+            self._reserve_capacity(thread_id, user_id, remote_id=target_id)
         except SandboxCapacityExceededError:
             logger.info(
                 "Discovered e2b sandbox %s, but capacity is full; not adopting it",
@@ -508,11 +499,18 @@ class E2BSandboxProvider(SandboxProvider):
             self._safe_close_client(client)
             raise
 
+        self._refresh_remote_timeout(client)
+        bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
+        if bootstrap_error is not None:
+            self._complete_reserved_remote_op(target_id, remote_destroyed=remote_destroyed)
+            return None
+
         discard_after_shutdown = False
         with self._lock:
             if self._shutdown_called:
                 discard_after_shutdown = True
             else:
+                self._remote_ops_in_progress.discard(target_id)
                 self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
                 self._commit_capacity()
         if discard_after_shutdown:
@@ -581,7 +579,7 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             self._end_transition_locked()
 
-    def _reserve_capacity(self, thread_id: str | None, user_id: str) -> None:
+    def _reserve_capacity(self, thread_id: str | None, user_id: str, *, remote_id: str | None = None) -> None:
         """Acquire a capacity slot, blocking or raising as configured.
 
         Must be called before ``Sandbox.create()``.  The caller MUST call
@@ -617,6 +615,8 @@ class E2BSandboxProvider(SandboxProvider):
                 cap = self._capacity_limit()
                 if self._total_capacity_used_locked() < cap:
                     self._reserved_slots += 1
+                    if remote_id is not None:
+                        self._remote_ops_in_progress.add(remote_id)
                     return
 
             # 2. Try evicting a warm entry to free a slot.
@@ -631,6 +631,8 @@ class E2BSandboxProvider(SandboxProvider):
                         )
                     if self._total_capacity_used_locked() < cap:
                         self._reserved_slots += 1
+                        if remote_id is not None:
+                            self._remote_ops_in_progress.add(remote_id)
                         return
                     # Slot was stolen; fall through to policy / wait.
 
@@ -683,19 +685,40 @@ class E2BSandboxProvider(SandboxProvider):
                 self._reserved_slots -= 1
             self._capacity_cond.notify_all()
 
-    def _retain_transition_tombstone(self, sandbox_id: str) -> None:
-        """Keep an existing transition slot for a VM with unknown state."""
+    def _complete_transition_remote_op(self, sandbox_id: str, *, remote_destroyed: bool) -> None:
+        """Finish a remote operation that already owns a transition slot."""
         with self._lock:
-            if not self._shutdown_called:
+            if sandbox_id not in self._remote_ops_in_progress:
+                return
+            self._remote_ops_in_progress.discard(sandbox_id)
+            if self._shutdown_called:
+                return
+            if remote_destroyed:
+                self._end_transition_locked()
+            else:
                 self._eviction_tombstones.add(sandbox_id)
 
-    def _convert_reserved_to_tombstone(self, sandbox_id: str) -> None:
-        """Keep a create reservation when cleanup cannot confirm destruction."""
+    def _track_reserved_remote_op(self, sandbox_id: str) -> bool:
+        """Make a reserved remote ID visible to shutdown."""
         with self._lock:
+            if self._shutdown_called:
+                return False
+            self._remote_ops_in_progress.add(sandbox_id)
+            return True
+
+    def _complete_reserved_remote_op(self, sandbox_id: str, *, remote_destroyed: bool) -> None:
+        """Finish a remote operation that owns a reserved slot."""
+        with self._lock:
+            if sandbox_id not in self._remote_ops_in_progress:
+                return
+            self._remote_ops_in_progress.discard(sandbox_id)
             if self._shutdown_called:
                 return
             if self._reserved_slots > 0:
                 self._reserved_slots -= 1
+            if remote_destroyed:
+                self._capacity_cond.notify_all()
+            else:
                 self._begin_transition_locked()
                 self._eviction_tombstones.add(sandbox_id)
             self._capacity_cond.notify_all()
@@ -743,6 +766,14 @@ class E2BSandboxProvider(SandboxProvider):
             raise
 
         sandbox_id: str = getattr(client, "sandbox_id", None) or str(uuid.uuid4())[:8]
+        if not self._track_reserved_remote_op(sandbox_id):
+            self._kill_client(client)
+            self._safe_close_client(client)
+            raise SandboxCapacityExceededError(
+                f"Sandbox provider shut down during sandbox creation; killed remote sandbox {sandbox_id}",
+                replicas=int(self._config["replicas"]),
+                retry_after_seconds=30.0,
+            )
 
         # Materialise DeerFlow's virtual path layout (/mnt/user-data/...) inside
         # the e2b VM. Without this step shell commands the agent emits — which
@@ -751,10 +782,7 @@ class E2BSandboxProvider(SandboxProvider):
         # template. See the path-mapping note in :class:`E2BSandbox`.
         bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, sandbox_id)
         if bootstrap_error is not None:
-            if remote_destroyed:
-                self._release_capacity()
-            else:
-                self._convert_reserved_to_tombstone(sandbox_id)
+            self._complete_reserved_remote_op(sandbox_id, remote_destroyed=remote_destroyed)
             raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from bootstrap_error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
@@ -773,10 +801,8 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             if self._shutdown_called:
                 should_kill = True
-                if self._reserved_slots > 0:
-                    self._reserved_slots -= 1
-                self._capacity_cond.notify_all()
             else:
+                self._remote_ops_in_progress.discard(sandbox_id)
                 self._commit_capacity()
                 self._sandboxes[sandbox_id] = sandbox
                 if thread_id:
@@ -1551,6 +1577,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._warm_pool.clear()
             self._eviction_tombstones.clear()
             self._evictions_in_progress.clear()
+            self._remote_ops_in_progress.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0
 
@@ -1560,11 +1587,12 @@ class E2BSandboxProvider(SandboxProvider):
                 return
             self._shutdown_called = True
             active = list(self._sandboxes.items())
-            warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones)
+            warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones | self._remote_ops_in_progress)
             self._sandboxes.clear()
             self._warm_pool.clear()
             self._eviction_tombstones.clear()
             self._evictions_in_progress.clear()
+            self._remote_ops_in_progress.clear()
             self._thread_sandboxes.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0
