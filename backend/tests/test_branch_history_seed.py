@@ -47,21 +47,78 @@ def test_seed_serializes_visible_history_in_order() -> None:
     assert all(event["metadata"]["branch_parent_thread_id"] == "parent-thread" for event in events)
 
 
-def test_seed_skips_hidden_and_internal_messages() -> None:
+def test_seed_skips_system_summary_and_nonmessage() -> None:
+    """System prompts, summary-named/hidden human turns, and non-messages never
+    enter the thread feed — same as RunJournal's message path."""
     events = _seed(
         [
             SystemMessage(id="s1", content="system prompt"),
             HumanMessage(id="h-hidden", content="internal", additional_kwargs={"hide_from_ui": True}),
             HumanMessage(id="h-summary", content="compacted", name="summary"),
             HumanMessage(id="h1", content="question"),
-            AIMessage(id="a-hidden", content="internal", additional_kwargs={"hide_from_ui": True}),
             AIMessage(id="a1", content="answer"),
-            ToolMessage(id="t-hidden", content="internal", tool_call_id="call-h", additional_kwargs={"hide_from_ui": True}),
             "not-a-message",
         ]
     )
 
     assert [event["content"]["id"] for event in events] == ["h1", "a1"]
+
+
+def test_seed_persists_hidden_ai_and_tool_rows_like_runjournal() -> None:
+    """RunJournal's on_llm_end / _persist_tool_result_message write hide_from_ui
+    AI and tool rows unconditionally (the frontend hides them client-side), so
+    the seed must too — otherwise seeded rows diverge from journaled ones and a
+    hidden turn disappears from a forked feed."""
+    events = _seed(
+        [
+            HumanMessage(id="h1", content="question"),
+            AIMessage(id="a-hidden", content="internal", additional_kwargs={"hide_from_ui": True}),
+            AIMessage(id="a1", content="answer"),
+            ToolMessage(id="t-hidden", content="internal", tool_call_id="call-h", additional_kwargs={"hide_from_ui": True}),
+        ]
+    )
+
+    assert [event["content"]["id"] for event in events] == ["h1", "a-hidden", "a1", "t-hidden"]
+    assert [event["event_type"] for event in events] == [
+        "llm.human.input",
+        "llm.ai.response",
+        "llm.ai.response",
+        "llm.tool.result",
+    ]
+    # The hidden marker is preserved in content so the frontend still hides them.
+    assert events[1]["content"]["additional_kwargs"]["hide_from_ui"] is True
+    assert events[3]["content"]["additional_kwargs"]["hide_from_ui"] is True
+
+
+def test_seed_deserializes_dict_shaped_checkpoint_messages() -> None:
+    """Checkpoint messages can arrive as model_dump()-shaped dicts (the
+    branch-matching helpers in threads.py already handle both); the seed must
+    deserialize them instead of silently producing an empty batch."""
+    dict_messages = [
+        HumanMessage(id="h1", content="question").model_dump(),
+        AIMessage(
+            id="a1",
+            content="answer",
+            tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "call-1", "type": "tool_call"}],
+        ).model_dump(),
+        ToolMessage(id="t1", content="tool output", tool_call_id="call-1").model_dump(),
+    ]
+
+    events = _seed(dict_messages)
+
+    assert [event["event_type"] for event in events] == ["llm.human.input", "llm.ai.response", "llm.tool.result"]
+    assert [event["content"]["id"] for event in events] == ["h1", "a1", "t1"]
+    # Faithful reconstruction: AI tool_calls and the tool's tool_call_id survive.
+    assert events[1]["content"]["tool_calls"][0]["id"] == "call-1"
+    assert events[2]["content"]["tool_call_id"] == "call-1"
+
+
+def test_seed_drops_unparseable_dict_message() -> None:
+    """A dict with no usable ``type`` can't be reconstructed; it is dropped
+    rather than crashing the seed (best-effort — the branch stays usable)."""
+    events = _seed([{"content": "orphan", "no_type": True}, HumanMessage(id="h1", content="q")])
+
+    assert [event["content"]["id"] for event in events] == ["h1"]
 
 
 def test_seed_persists_allowlisted_hidden_human_input_response() -> None:
