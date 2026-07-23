@@ -687,21 +687,24 @@ async def run_agent(
                             logger.info("Run %s abort requested — stopping", run_id)
                             break
 
-                        mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                        mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
                         if mode is None:
                             continue
 
-                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        sse_event = _lg_mode_to_sse_event(mode)
-                        if file_tool_chunk_batcher is not None and mode != "messages":
-                            pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
-                            for publish_chunk in pending_chunks:
-                                await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
-                        chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
-                        for publish_chunk in chunks_to_publish:
-                            await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
-                        if mode == "custom":
-                            await subagent_events.add(chunk)
+                        if not namespace:
+                            # Only root-graph frames may decide the parent run's error
+                            # fallback: a delegated subagent's marked fallback is the
+                            # executor's to map (task_failed), not this run's.
+                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        await _publish_stream_item(
+                            bridge=bridge,
+                            run_id=run_id,
+                            mode=mode,
+                            chunk=chunk,
+                            namespace=namespace,
+                            file_tool_chunk_batcher=file_tool_chunk_batcher,
+                            subagent_events=subagent_events,
+                        )
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
@@ -1776,23 +1779,77 @@ def _unpack_stream_item(
     item: Any,
     lg_modes: list[str],
     stream_subgraphs: bool,
-) -> tuple[str | None, Any]:
-    """Unpack a multi-mode or subgraph stream item into (mode, chunk).
+) -> tuple[str | None, Any, tuple[str, ...]]:
+    """Unpack a multi-mode or subgraph stream item into (mode, chunk, namespace).
 
-    Returns ``(None, None)`` if the item cannot be parsed.
+    ``namespace`` is the subgraph namespace tuple LangGraph prefixes onto each
+    frame when ``subgraphs=True``; it is empty for root-graph frames. Delegated
+    subagent graphs inherit the parent's checkpoint namespace (see
+    ``subagents/executor.py``), so their frames arrive here with a non-empty
+    namespace and must not be mistaken for root frames.
+
+    Returns ``(None, None, ())`` if the item cannot be parsed.
     """
     if stream_subgraphs:
         if isinstance(item, tuple) and len(item) == 3:
-            _ns, mode, chunk = item
-            return str(mode), chunk
+            ns, mode, chunk = item
+            namespace = tuple(str(part) for part in ns) if isinstance(ns, (list, tuple)) else (str(ns),)
+            return str(mode), chunk, namespace
         if isinstance(item, tuple) and len(item) == 2:
             mode, chunk = item
-            return str(mode), chunk
-        return None, None
+            return str(mode), chunk, ()
+        return None, None, ()
 
     if isinstance(item, tuple) and len(item) == 2:
         mode, chunk = item
-        return str(mode), chunk
+        return str(mode), chunk, ()
 
     # Fallback: single-element output from first mode
-    return lg_modes[0] if lg_modes else None, item
+    return lg_modes[0] if lg_modes else None, item, ()
+
+
+def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
+    """Namespace-qualified SSE event name, LangGraph Platform style.
+
+    Root frames keep the bare event name; subgraph frames become
+    ``mode|ns1|ns2`` so clients can tell them apart. The LangGraph SDK parses
+    exactly this shape (``event.split("|").slice(1)``) and routes
+    subagent-namespaced values away from the thread view.
+    """
+    if not namespace:
+        return sse_event
+    return "|".join((sse_event, *namespace))
+
+
+async def _publish_stream_item(
+    *,
+    bridge: Any,
+    run_id: str,
+    mode: str,
+    chunk: Any,
+    namespace: tuple[str, ...],
+    file_tool_chunk_batcher: Any,
+    subagent_events: Any,
+) -> None:
+    """Publish one stream frame, preserving the subgraph namespace.
+
+    A subgraph frame published under a bare event name impersonates the root
+    graph: a delegated subagent's ``values`` snapshot then replaces the whole
+    thread view in SDK clients and its token chunks flood the parent message
+    stream (#4399). Subgraph frames therefore keep their namespace in the event
+    name and bypass the root-only consumers (file-tool chunk batcher, subagent
+    event persistence — task_* lifecycle events are root frames already).
+    """
+    sse_event = _compose_sse_event(_lg_mode_to_sse_event(mode), namespace)
+    if namespace:
+        await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+        return
+    if file_tool_chunk_batcher is not None and mode != "messages":
+        pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+        for publish_chunk in pending_chunks:
+            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+    chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
+    for publish_chunk in chunks_to_publish:
+        await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
+    if mode == "custom":
+        await subagent_events.add(chunk)
