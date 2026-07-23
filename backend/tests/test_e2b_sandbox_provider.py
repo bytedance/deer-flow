@@ -750,7 +750,7 @@ def test_acquire_rejects_falsey_bootstrap_error(monkeypatch):
     client = FakeClient(sandbox_id="bootstrap-failure")
     error = FalseyError("bootstrap failed")
     fake_cls.create_factory = lambda **kwargs: client
-    provider._bootstrap_or_discard = MagicMock(return_value=error)
+    provider._bootstrap_or_discard = MagicMock(return_value=(error, True))
 
     with pytest.raises(RuntimeError, match="bootstrap") as caught:
         provider.acquire("thread-1", user_id="user-1")
@@ -1734,6 +1734,87 @@ def test_capacity_keeps_slot_when_warm_eviction_reconnect_fails(monkeypatch):
     assert len(fake_cls.create_calls) == 1
     assert "sb-1" not in p._warm_pool
     assert p._transitioning_slots == 1
+
+
+def test_capacity_keeps_slot_when_warm_reclaim_reconnect_fails(monkeypatch):
+    """An uncertain warm reclaim must not make room for a new VM."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t1", user_id="u1")
+
+    assert len(fake_cls.create_calls) == 1
+    assert p._eviction_tombstones == {sid}
+    assert p._reserved_slots == 0
+    assert p._transitioning_slots == 1
+
+    destroy_client = FakeClient(sandbox_id=sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: destroy_client
+    assert p.acquire("t2", user_id="u2") != sid
+    assert destroy_client.killed
+    assert p._transitioning_slots == 0
+
+
+def test_capacity_keeps_slot_when_warm_reclaim_bootstrap_kill_fails(monkeypatch):
+    """An uncertain reclaim cleanup must not make room for a new VM."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+    reconnect_client = FakeClient(
+        sandbox_id=sid,
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                SimpleNamespace(stdout="", stderr="bootstrap failed", exit_code=1),
+            ]
+        ),
+    )
+    reconnect_client.kill = MagicMock(side_effect=RuntimeError("kill failed"))
+    fake_cls.connect_factory = lambda _sid, **_kw: reconnect_client
+
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t1", user_id="u1")
+
+    assert len(fake_cls.create_calls) == 1
+    assert p._eviction_tombstones == {sid}
+    assert p._reserved_slots == 0
+    assert p._transitioning_slots == 1
+
+
+def test_capacity_keeps_slot_when_create_bootstrap_kill_fails(monkeypatch):
+    """An uncertain create cleanup must not make room for a new VM."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(
+        sandbox_id="bootstrap-uncertain",
+        commands=FakeCommandsAPI([SimpleNamespace(stdout="", stderr="bootstrap failed", exit_code=1)]),
+    )
+    client.kill = MagicMock(side_effect=RuntimeError("kill failed"))
+    fake_cls.create_factory = lambda **_kw: client
+
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        p.acquire("t1", user_id="u1")
+
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+    with pytest.raises(SandboxCapacityExceededError):
+        p.acquire("t2", user_id="u2")
+
+    assert len(fake_cls.create_calls) == 1
+    assert p._eviction_tombstones == {client.sandbox_id}
+    assert p._reserved_slots == 0
+    assert p._transitioning_slots == 1
+
+    destroy_client = FakeClient(sandbox_id=client.sandbox_id)
+    fake_cls.connect_factory = lambda _sid, **_kw: destroy_client
+    fake_cls.create_factory = lambda **_kw: FakeClient(sandbox_id="bootstrap-replacement")
+    assert p.acquire("t2", user_id="u2") != client.sandbox_id
+    assert destroy_client.killed
+    assert p._transitioning_slots == 0
 
 
 def test_capacity_keeps_slot_when_warm_eviction_kill_fails(monkeypatch):

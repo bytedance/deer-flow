@@ -337,7 +337,9 @@ class E2BSandboxProvider(SandboxProvider):
                 target_id,
                 e,
             )
-            self._free_transitioning_slot()
+            with self._lock:
+                if not self._shutdown_called:
+                    self._eviction_tombstones.add(target_id)
             return None
 
         if client is None:
@@ -349,8 +351,12 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        if self._bootstrap_or_discard(client, target_id) is not None:
-            self._free_transitioning_slot()
+        bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
+        if bootstrap_error is not None:
+            if remote_destroyed:
+                self._free_transitioning_slot()
+            else:
+                self._retain_transition_tombstone(target_id)
             return None
 
         discard_after_shutdown = False
@@ -482,7 +488,11 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         self._refresh_remote_timeout(client)
-        if self._bootstrap_or_discard(client, target_id) is not None:
+        bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, target_id)
+        if bootstrap_error is not None:
+            if not remote_destroyed:
+                self._reserve_capacity(thread_id, user_id)
+                self._convert_reserved_to_tombstone(target_id)
             return None
 
         # Reserve capacity for the discovered sandbox.  If capacity is full
@@ -673,6 +683,23 @@ class E2BSandboxProvider(SandboxProvider):
                 self._reserved_slots -= 1
             self._capacity_cond.notify_all()
 
+    def _retain_transition_tombstone(self, sandbox_id: str) -> None:
+        """Keep an existing transition slot for a VM with unknown state."""
+        with self._lock:
+            if not self._shutdown_called:
+                self._eviction_tombstones.add(sandbox_id)
+
+    def _convert_reserved_to_tombstone(self, sandbox_id: str) -> None:
+        """Keep a create reservation when cleanup cannot confirm destruction."""
+        with self._lock:
+            if self._shutdown_called:
+                return
+            if self._reserved_slots > 0:
+                self._reserved_slots -= 1
+                self._begin_transition_locked()
+                self._eviction_tombstones.add(sandbox_id)
+            self._capacity_cond.notify_all()
+
     def _commit_capacity(self) -> None:
         """Convert a reserved slot to a committed active slot.
 
@@ -722,10 +749,13 @@ class E2BSandboxProvider(SandboxProvider):
         # use the same /mnt/user-data prefix as LocalSandbox / AioSandbox — fail
         # with PermissionError because /mnt is owned by root in the e2b
         # template. See the path-mapping note in :class:`E2BSandbox`.
-        error = self._bootstrap_or_discard(client, sandbox_id)
-        if error is not None:
-            self._release_capacity()
-            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from error
+        bootstrap_error, remote_destroyed = self._bootstrap_or_discard(client, sandbox_id)
+        if bootstrap_error is not None:
+            if remote_destroyed:
+                self._release_capacity()
+            else:
+                self._convert_reserved_to_tombstone(sandbox_id)
+            raise RuntimeError(f"Failed to bootstrap e2b sandbox {sandbox_id}") from bootstrap_error
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
@@ -879,17 +909,18 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("e2b client close raised: %s", e)
                 return
 
-    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> Exception | None:
-        """Bootstrap a sandbox or return its error after cleanup."""
+    def _bootstrap_or_discard(self, client: E2BClientSandbox, sandbox_id: str) -> tuple[Exception | None, bool]:
+        """Bootstrap a sandbox and report whether cleanup destroyed the VM."""
         try:
             self._bootstrap_sandbox_paths(client)
         except Exception as e:
             logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
-            if error := self._kill_client(client):
-                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, error)
+            kill_error = self._kill_client(client)
+            if kill_error:
+                logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, kill_error)
             self._safe_close_client(client)
-            return e
-        return None
+            return e, kill_error is None
+        return None, True
 
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.
