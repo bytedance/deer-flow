@@ -1465,6 +1465,111 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
     assert [message.id for message in branch_values["messages"]] == ["h1", "a1"]
 
 
+async def _seed_branch_history_source(checkpointer, custom_factory, mode, source_thread_id):
+    """Seed a completed turn whose history includes hidden and tool messages."""
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    await accessor.aupdate(
+        config,
+        {
+            "messages": [
+                HumanMessage(id="h1", content="question"),
+                HumanMessage(id="h-hidden", content="internal", additional_kwargs={"hide_from_ui": True}),
+            ]
+        },
+        as_node="model",
+    )
+    await accessor.aupdate(
+        config,
+        {
+            "messages": [
+                ToolMessage(id="t1", content="tool output", tool_call_id="call-1"),
+                AIMessage(id="a1", content="answer"),
+            ]
+        },
+        as_node="model",
+    )
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_seeds_run_events_with_parent_history(monkeypatch, mode) -> None:
+    """Branching must seed the branch's run-event feed with the parent history.
+
+    The thread feed (``GET /messages`` / ``/messages/page``) reads the
+    run-event store, not checkpoints; without seeding, a fresh branch has no
+    message rows, so the inherited history vanishes from the UI as soon as
+    the branch's first run refreshes the feed (#4380 problem 2).
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    event_store = MemoryRunEventStore()
+    app.state.run_event_store = event_store
+    source_thread_id = f"branch-history-source-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_branch_history_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        branch_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+        assert branch_response.status_code == 200, branch_response.text
+        branch_thread_id = branch_response.json()["thread_id"]
+
+    rows = asyncio.run(event_store.list_messages(branch_thread_id, user_id=None))
+
+    # The visible parent history is seeded in order; hidden messages are not.
+    assert [row["content"]["id"] for row in rows] == ["h1", "t1", "a1"]
+    assert [row["event_type"] for row in rows] == ["llm.human.input", "llm.tool.result", "llm.ai.response"]
+    assert all(row["category"] == "message" for row in rows)
+    assert all(row["run_id"] == f"branch-seed-{branch_thread_id}" for row in rows)
+    assert all((row.get("metadata") or {}).get("branch_seed") is True for row in rows)
+    seqs = [row["seq"] for row in rows]
+    assert seqs == sorted(seqs)
+    assert branch_response.json()["history_seed_mode"] == "seeded"
+
+    # The parent thread's feed stays untouched.
+    assert asyncio.run(event_store.list_messages(source_thread_id, user_id=None)) == []
+
+
+def test_branch_history_seed_failure_keeps_branch_usable(monkeypatch) -> None:
+    """A seeding failure must degrade, not fail the branch (best-effort)."""
+
+    class _ExplodingStore:
+        async def put_batch(self, events):
+            raise RuntimeError("event store down")
+
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    app.state.run_event_store = _ExplodingStore()
+    source_thread_id = "branch-history-source-failure"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_branch_history_source(checkpointer, custom_factory, "full", source_thread_id))
+
+        branch_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+
+    assert branch_response.status_code == 200, branch_response.text
+    assert branch_response.json()["history_seed_mode"] == "failed"
+
+
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
     """Unknown fields fail 422 instead of a false-success 200."""
     app, _store, checkpointer = _build_thread_app()

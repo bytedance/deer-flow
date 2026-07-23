@@ -20,13 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
@@ -51,6 +51,102 @@ def _should_persist_human_input_message(message: BaseMessage) -> bool:
         return True
     response = read_human_input_response(message.additional_kwargs)
     return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
+
+
+def _coerce_seed_message(message: Any) -> Any:
+    """Return ``message`` as a ``BaseMessage``, deserializing dict form if needed.
+
+    ``_checkpoint_messages`` (threads.py) returns whatever the snapshot holds,
+    and its sibling branch-matching helpers all handle a message being either a
+    ``BaseMessage`` or a ``model_dump()``-shaped dict (serde differences across
+    checkpoint backends/modes). The seed path must handle both too — otherwise a
+    dict-backed checkpoint seeds nothing and the branch silently reports
+    ``skipped_empty`` while history exists. Unparseable dicts fall through
+    unchanged and are dropped by the ``isinstance(BaseMessage)`` guard.
+    """
+    if isinstance(message, BaseMessage):
+        return message
+    if isinstance(message, Mapping):
+        msg_type = message.get("type")
+        if isinstance(msg_type, str) and msg_type:
+            try:
+                return messages_from_dict([{"type": msg_type, "data": dict(message)}])[0]
+            except Exception:
+                logger.warning("branch seed: could not deserialize checkpoint message dict (type=%s)", msg_type)
+    return message
+
+
+def build_branch_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id: str,
+    parent_thread_id: str,
+) -> list[dict]:
+    """Serialize a branch checkpoint's messages into run-event message rows.
+
+    Thread branching copies checkpoint state, but the thread feed
+    (``list_messages`` / ``GET /threads/{id}/messages/page``) reads the
+    run-event store — which a fresh branch has no rows in, so the inherited
+    history vanishes from the UI as soon as the branch's first run refreshes
+    the feed (#4380). Seeding the branch's run_events from the same
+    checkpoint snapshot the branch was created from keeps the feed
+    consistent with what the branch actually contains.
+
+    Mirrors RunJournal's message-event contract so seeded rows are
+    indistinguishable from journaled ones except by the ``branch_seed``
+    marker: same event types, ``category="message"``, ``content=
+    message.model_dump()``, the human-input persistence rule
+    (``_should_persist_human_input_message``), the original-user-text
+    restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
+    RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
+    do not filter) and the frontend hides them client-side, so the seed writes
+    them too rather than dropping them.
+
+    The one deliberate divergence, because a checkpoint message carries no run
+    scope: AI rows omit RunJournal's run-scoped enrichment (``usage`` /
+    ``latency_ms`` / ``llm_call_index``), and ``caller`` is stamped
+    ``lead_agent`` rather than the message's original caller (unrecoverable
+    here). Neither is observable today — no consumer indexes those metadata
+    keys, and per-message ``caller`` drives no attribution (the ``by_caller``
+    usage panel is run-scoped, not fed from the message feed).
+    """
+    events: list[dict] = []
+    created_at = datetime.now(UTC).isoformat()
+    seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
+    for raw_message in messages:
+        message = _coerce_seed_message(raw_message)
+        if not isinstance(message, BaseMessage):
+            continue
+        if isinstance(message, HumanMessage):
+            if not _should_persist_human_input_message(message):
+                continue
+            event_type = "llm.human.input"
+            content = restore_original_human_message(message).model_dump()
+            metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, AIMessage):
+            event_type = "llm.ai.response"
+            content = message.model_dump()
+            metadata = {"caller": "lead_agent", **seed_metadata}
+        elif isinstance(message, ToolMessage):
+            event_type = "llm.tool.result"
+            content = message.model_dump()
+            metadata = dict(seed_metadata)
+        else:
+            # System / remove / summary artifacts never enter the thread feed.
+            continue
+        events.append(
+            {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": "message",
+                "content": content,
+                "metadata": metadata,
+                "created_at": created_at,
+            }
+        )
+    return events
 
 
 class RunJournal(BaseCallbackHandler):
