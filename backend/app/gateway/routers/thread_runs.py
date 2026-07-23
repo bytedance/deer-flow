@@ -144,17 +144,10 @@ class ThreadTokenUsageCallerBreakdown(BaseModel):
     middleware: int = 0
 
 
-class ThreadContextUsageBreakdownItem(BaseModel):
-    key: str
-    tokens: int
-    active: bool
-
-
 class ThreadContextUsage(BaseModel):
+    token_count: int = 0
     max_context_tokens: int | None = None
-    used_tokens: int = 0
     percentage: float | None = None
-    breakdown: list[ThreadContextUsageBreakdownItem] = Field(default_factory=list)
 
 
 class ThreadTokenUsageResponse(BaseModel):

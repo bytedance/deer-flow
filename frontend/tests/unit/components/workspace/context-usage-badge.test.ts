@@ -26,17 +26,17 @@ test("keeps a gauge placeholder visible while context usage is unavailable", () 
   expect(html).toContain('aria-label="Context window"');
 });
 
-test("keeps the placeholder visible for an empty breakdown", () => {
+test("renders the current percentage when context usage is available", () => {
   const html = renderToStaticMarkup(
     createElement(ContextUsageBadge, {
       contextUsage: {
-        usedTokens: 0,
+        tokenCount: 35_000,
         maxContextTokens: 100_000,
-        percentage: 0,
-        breakdown: [],
+        percentage: 35,
       },
     }),
   );
 
-  expect(html).toContain('data-context-usage-placeholder="true"');
+  expect(html).toContain("35%");
+  expect(html).toContain('aria-label="Context window 35% full"');
 });

@@ -143,7 +143,7 @@ def test_context_usage_reads_materialized_messages_in_both_modes(
 
     request = SimpleNamespace(app=app)
     accessor, read_config = asyncio.run(gateway_services.build_thread_checkpoint_state_accessor(request, thread_id=_THREAD_ID))
-    messages, promoted, checkpoint_token = asyncio.run(context_usage._load_checkpoint_messages(accessor, read_config))
+    messages = asyncio.run(context_usage._load_checkpoint_messages(accessor, read_config))
 
     assert [(message.type, message.content, message.id) for message in messages] == [
         ("human", "question-0", "h0"),
@@ -151,8 +151,6 @@ def test_context_usage_reads_materialized_messages_in_both_modes(
         ("human", "question-1", "h1"),
         ("ai", "answer-3", "a3"),
     ]
-    assert promoted is None
-    assert checkpoint_token
 
 
 def test_full_mode_gateway_rejects_delta_thread_with_409(_stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:

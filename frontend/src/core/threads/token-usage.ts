@@ -26,17 +26,10 @@ export function threadTokenUsageToTokenUsage(
   };
 }
 
-export interface ContextUsageBreakdownItem {
-  key: string;
-  tokens: number;
-  active: boolean;
-}
-
 export interface ContextUsage {
-  usedTokens: number;
+  tokenCount: number;
   maxContextTokens: number | null;
   percentage: number | null;
-  breakdown: ContextUsageBreakdownItem[];
 }
 
 export function selectContextUsage(
@@ -45,16 +38,10 @@ export function selectContextUsage(
   if (!usage?.context_usage) {
     return null;
   }
-  const { used_tokens, max_context_tokens, percentage, breakdown } =
-    usage.context_usage;
+  const { token_count, max_context_tokens, percentage } = usage.context_usage;
   return {
-    usedTokens: used_tokens ?? 0,
+    tokenCount: token_count ?? 0,
     maxContextTokens: max_context_tokens ?? null,
     percentage: percentage ?? null,
-    breakdown: (breakdown ?? []).map((row) => ({
-      key: row.key,
-      tokens: row.tokens,
-      active: row.active,
-    })),
   };
 }
