@@ -57,6 +57,18 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  runDuration: {
+    reasoning: "思考过程",
+    working: "执行中…",
+    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    description: "任务总耗时，包括模型推理、工具调用和等待时间。",
+    lessThanSecond: "不足 1 秒",
+    hours: (value) => `${value} 小时`,
+    minutes: (value) => `${value} 分`,
+    seconds: (value) => `${value} 秒`,
+    separator: " ",
+  },
+
   // Home
   home: {
     docs: "文档",
@@ -115,6 +127,7 @@ export const zhCN: Translations = {
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
+    disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
@@ -177,6 +190,8 @@ export const zhCN: Translations = {
     goalNone: "当前没有目标。",
     goalActive: "当前目标：{goal}",
     goalFailed: "目标命令执行失败。",
+    goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
+    goalLengthCounter: "目标长度：{length}/{max} 字符",
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
@@ -421,6 +436,24 @@ export const zhCN: Translations = {
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
+    settings: "模型设置",
+    settingsTitle: "模型设置",
+    settingsDescription:
+      "为该智能体选择默认模型和生成参数，修改在下一条消息生效。",
+    settingsModel: "默认模型",
+    settingsModelDefault: "使用全局默认",
+    settingsTemperature: "温度",
+    settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
+    settingsMaxTokens: "最大输出 token",
+    settingsMaxTokensPlaceholder: "继承模型配置",
+    settingsThinking: "思考模式",
+    settingsThinkingOn: "开启",
+    settingsThinkingOff: "关闭",
+    settingsReasoningEffort: "推理强度",
+    settingsInherit: "继承",
+    settingsSaved: "模型设置已保存",
+    settingsInvalidTemperature: "温度必须在 0 到 2 之间",
+    settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
   },
 
   // Breadcrumb

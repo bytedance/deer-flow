@@ -100,6 +100,38 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         )
 
 
+def _validate_agent_storage(config: AppConfig) -> None:
+    """Fail fast on an agent-storage backend the database cannot support.
+
+    ``agent_storage.backend: db`` needs a durable, shared SQL database — a
+    ``memory`` database is per-process, so agent definitions would silently
+    diverge across nodes (and there is no SQL URL to open). Mirrors deermem's
+    create_storage fail-fast and the multi-worker gate above.
+
+    Also warns when a multi-worker Postgres deployment leaves agent storage on
+    ``file``: custom agents created on one node's local disk are invisible to
+    the others, exactly the divergence the db backend exists to fix.
+    """
+    agent_storage = getattr(config, "agent_storage", None)
+    backend = getattr(agent_storage, "backend", "file")
+    db_backend = getattr(getattr(config, "database", None), "backend", None)
+    if backend == "db" and db_backend not in ("sqlite", "postgres"):
+        raise SystemExit(
+            f"agent_storage.backend='db' requires database.backend to be 'sqlite' or 'postgres', "
+            f"but database.backend is '{db_backend}'. A 'memory' database is per-process and cannot "
+            "share agent definitions across nodes. Set database.backend, or use agent_storage.backend='file'."
+        )
+    try:
+        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
+    except (TypeError, ValueError):
+        workers = 1
+    if workers > 1 and db_backend == "postgres" and backend == "file":
+        logger.warning(
+            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': custom agents are stored per-node on local disk and are not visible across workers/nodes. Set agent_storage.backend='db' to share them.",
+            workers,
+        )
+
+
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
@@ -261,6 +293,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     """
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.runtime import make_store, make_stream_bridge
+    from deerflow.runtime.checkpoint_mode import freeze_checkpoint_channel_mode
     from deerflow.runtime.checkpointer.async_provider import make_checkpointer
     from deerflow.runtime.events.store import make_run_event_store
 
@@ -269,9 +302,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # SQLite write-locks cannot support concurrent multi-process access.
     # ------------------------------------------------------------------
     _enforce_postgres_for_multi_worker(startup_config)
+    # Reject agent_storage.backend='db' on a non-durable database, and warn on
+    # node-divergent file storage under multi-worker Postgres.
+    _validate_agent_storage(startup_config)
 
     async with AsyncExitStack() as stack:
         config = startup_config
+        app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
@@ -433,6 +470,7 @@ def get_run_context(request: Request) -> RunContext:
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
+        checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         thread_store=get_thread_store(request),
         app_config=get_config(),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,

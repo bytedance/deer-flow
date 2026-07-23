@@ -206,27 +206,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
     # that may be unreachable in restricted networks — see issue #3402).
-    # Warm-up runs via the manager's `warm` capability (getattr-probed, so
-    # non-DeerMem backends skip it). DeerMem.warm re-checks token_counting==
-    # "char" and returns early, so char-mode backends never touch tiktoken
-    # (avoids even the 5s probe in
-    # network-restricted deployments — see issue #3429).
+    # Warm-up runs via the manager's `warm()` tier-3 hook. DeerMem.warm re-checks
+    # token_counting=="char" and returns early, so char-mode backends never touch
+    # tiktoken (avoids even the 5s probe in network-restricted deployments - see
+    # issue #3429). A backend with nothing to warm (e.g. noop) returns None from
+    # the base default -- log "skipping" instead of the misleading "warmed
+    # successfully" so the log reflects what actually happened.
     try:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        warm = getattr(manager, "warm", None)
-        if not callable(warm):
-            logger.info("Memory backend %s has no warm-up hook; skipping tiktoken warm-up", type(manager).__name__)
+        warmed = await asyncio.wait_for(
+            asyncio.to_thread(manager.warm),
+            timeout=5,
+        )
+        if warmed is None:
+            logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(manager).__name__)
+        elif warmed:
+            logger.info("tiktoken encoding cache warmed successfully")
         else:
-            warmed = await asyncio.wait_for(
-                asyncio.to_thread(warm),
-                timeout=5,
-            )
-            if warmed:
-                logger.info("tiktoken encoding cache warmed successfully")
-            else:
-                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
+            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
     except TimeoutError:
         logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
     except Exception:

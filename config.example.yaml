@@ -1445,6 +1445,7 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
@@ -1638,6 +1639,11 @@ memory:
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
+    strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
+    manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
+    file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
+    retrieval_adapter: ""       # optional dotted factory(config) supplied by the retrieval module
     debounce_seconds: 30 # Wait time before processing queued updates
     model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
       # provider: openai
@@ -1792,6 +1798,9 @@ database:
   # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
   # for intentionally long commands.
   command_timeout: 30
+  # Restart required. Use one value across every process sharing this database.
+  # full: current full-message checkpoints; delta: DeltaChannel for messages.
+  checkpoint_channel_mode: full
 
 # ============================================================================
 # Run Events Configuration
@@ -1810,6 +1819,29 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Agent Storage Configuration
+# ============================================================================
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
+# separate from `database` (run/thread/event data) and from agent memory.
+# Restart-required (the backend is captured at Gateway lifespan startup).
+#
+# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
+#                   Single-node only: an agent created on one node is invisible
+#                   to other nodes without a shared mount.
+# backend: db    -- A row per agent in the shared SQL persistence layer, so every
+#                   node sees the same agents. Requires database.backend to be
+#                   'sqlite' or 'postgres' (rejected at startup on 'memory').
+#
+# Switching an existing install to 'db'? Import the on-disk agents once with:
+#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# The source files are left in place, so reverting to 'file' is a clean rollback.
+#
+# agent_storage:
+#   backend: file
+agent_storage:
+  backend: file
 
 # ============================================================================
 # Scheduled Tasks Configuration

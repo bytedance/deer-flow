@@ -14,10 +14,56 @@ permissions:
   contents: read
 
 jobs:
+  default-install-collection:
+    # The main job installs --extra postgres; this job proves the documented
+    # contributor path (uv sync --group dev, no extras) still collects the
+    # whole suite, so optional-dependency imports must stay lazy.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies (documented default)
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Collect backend tests
+        working-directory: backend
+        run: uv run pytest --collect-only -q
+
   backend-unit-tests:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: deerflow
+          POSTGRES_PASSWORD: deerflow
+          POSTGRES_DB: deerflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_POSTGRES_URI: postgresql://deerflow:deerflow@localhost:5432/deerflow_test?sslmode=disable
 
     steps:
       - name: Checkout
@@ -33,7 +79,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: uv sync --group dev
+        run: uv sync --group dev --extra postgres
 
       - name: Run unit tests of backend
         working-directory: backend

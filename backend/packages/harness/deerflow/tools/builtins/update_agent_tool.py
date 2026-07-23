@@ -5,29 +5,39 @@ Bound to the lead agent only when ``runtime.context['agent_name']`` is set
 this tool, and the bootstrap flow continues to use ``setup_agent`` for the
 initial creation handshake.
 
-The tool writes back to ``{base_dir}/users/{user_id}/agents/{agent_name}/{config.yaml,SOUL.md}``
-so an agent created by one user is never visible to (or mutable by) another.
-Writes are staged into temp files first; both files are renamed into place only
-after both temp files are successfully written, so a partial failure cannot leave
-config.yaml updated while SOUL.md still holds stale content.
+The tool writes back through the configured agent store (file: per-user
+``config.yaml``/``SOUL.md``; db: the shared ``agents`` table) so an agent created
+by one user is never visible to (or mutable by) another.
+
+Cross-field write atomicity depends on the backend: the ``db`` store commits
+config and soul in a single transaction, so a partial failure never leaves one
+updated and the other stale. The ``file`` store stages both to temp files and
+commits them with two sequential ``os.replace`` calls (see
+``FileAgentStore._write``): each file is all-or-nothing, but a crash *between*
+the two replaces can leave a freshly-written config.yaml beside a stale SOUL.md
+(single-node, sub-millisecond window). The pre-store tool reported that partial
+window explicitly ("Partial update for agent 'X': ..."); routing through the
+store drops the *reporting* (a mid-replace crash now surfaces as the generic
+"Failed to update agent"). That is an intentional tradeoff — the stage-then-
+replace *safety* is preserved (no corruption, no leftover temp files), only the
+diagnostic is gone. If cross-file atomicity ever matters on ``file``, restore
+that reporting in ``FileAgentStore._write``.
 """
 
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Annotated, Any
 
-import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
-from pydantic import BeforeValidator
+from pydantic import BaseModel, BeforeValidator
 
 from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
+from deerflow.persistence.agents import get_agent_store
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -43,39 +53,11 @@ _NULLISH_STRINGS = frozenset({"null", "none", "undefined"})
 # expose self-mutation over a webhook.
 _UNTRUSTED_CHANNELS: frozenset[str] = frozenset({"github"})
 
-
-def _stage_temp(path: Path, text: str) -> Path:
-    """Write ``text`` into a sibling temp file and return its path.
-
-    The caller is responsible for ``Path.replace``-ing the temp into the target
-    once every staged file is ready, or for unlinking it on failure.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = tempfile.NamedTemporaryFile(
-        mode="w",
-        dir=path.parent,
-        suffix=".tmp",
-        delete=False,
-        encoding="utf-8",
-    )
-    try:
-        fd.write(text)
-        fd.flush()
-        fd.close()
-        return Path(fd.name)
-    except BaseException:
-        fd.close()
-        Path(fd.name).unlink(missing_ok=True)
-        raise
-
-
-def _cleanup_temps(temps: list[Path]) -> None:
-    """Best-effort removal of staged temp files."""
-    for tmp in temps:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to clean up temp file %s", tmp, exc_info=True)
+_MODEL_BEHAVIOR_FIELDS: tuple[str, ...] = (
+    "model_settings",
+    "thinking_enabled",
+    "reasoning_effort",
+)
 
 
 def _is_nullish_string(value: object) -> bool:
@@ -227,6 +209,22 @@ def update_agent(
     if skills is not None and skills != existing_cfg.skills:
         updated_fields.append("skills")
 
+    # This tool intentionally does not expose the #4336 model-behavior fields
+    # as LLM-callable arguments yet, but it still rewrites config.yaml when any
+    # of its supported fields changes. Carry those values forward explicitly so
+    # an agent refining its description/model/skills cannot erase UI/API-owned
+    # defaults such as temperature or reasoning effort.
+    for key in _MODEL_BEHAVIOR_FIELDS:
+        value = getattr(existing_cfg, key, None)
+        if value is None:
+            continue
+        if isinstance(value, BaseModel):
+            dumped = value.model_dump(exclude_none=True)
+            if dumped:
+                config_data[key] = dumped
+        else:
+            config_data[key] = value
+
     # Preserve every top-level AgentConfig field that this tool does not
     # expose as an argument (currently ``github:``, plus any future field
     # added to :class:`AgentConfig`). The same helper is used by the HTTP
@@ -239,58 +237,20 @@ def update_agent(
         config_data.setdefault(key, value)
 
     config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
+    if soul is not None:
+        updated_fields.append("soul")
 
-    # Stage every file we intend to rewrite into a temp sibling. Only after
-    # *all* temp files exist do we rename them into place — so a failure on
-    # SOUL.md cannot leave config.yaml already replaced.
-    pending: list[tuple[Path, Path]] = []
-    staged_temps: list[Path] = []
-
-    try:
-        agent_dir.mkdir(parents=True, exist_ok=True)
-
-        if config_changed:
-            yaml_text = yaml.dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            config_target = agent_dir / "config.yaml"
-            config_tmp = _stage_temp(config_target, yaml_text)
-            staged_temps.append(config_tmp)
-            pending.append((config_tmp, config_target))
-
-        if soul is not None:
-            soul_target = agent_dir / "SOUL.md"
-            soul_tmp = _stage_temp(soul_target, soul)
-            staged_temps.append(soul_tmp)
-            pending.append((soul_tmp, soul_target))
-            updated_fields.append("soul")
-
-        # Commit phase. ``Path.replace`` is atomic per file on POSIX/NTFS and
-        # the staging step above means any earlier failure has already been
-        # reported. The remaining failure mode is a crash *between* two
-        # ``replace`` calls, which is reported via the partial-write error
-        # branch below so the caller knows which files are now on disk.
-        committed: list[Path] = []
+    # Persist config (when a managed field changed) and/or soul through the
+    # store. The db backend commits both in one transaction; the file backend
+    # commits each atomically but sequentially (see this module's docstring).
+    # Nothing to write if the provided values all matched the existing config
+    # and no soul was supplied.
+    if config_changed or soul is not None:
         try:
-            for tmp, target in pending:
-                tmp.replace(target)
-                committed.append(target)
+            get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)
         except Exception as e:
-            _cleanup_temps([t for t, _ in pending if t not in committed])
-            if committed:
-                logger.error(
-                    "[update_agent] Partial write for agent '%s' (user=%s): committed=%s, failed during rename: %s",
-                    agent_name,
-                    user_id,
-                    [p.name for p in committed],
-                    e,
-                    exc_info=True,
-                )
-                return _err(f"Partial update for agent '{agent_name}': {[p.name for p in committed]} were updated, but the rest failed ({e}). Re-run update_agent to retry the remaining fields.")
-            raise
-
-    except Exception as e:
-        _cleanup_temps(staged_temps)
-        logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
-        return _err(f"Failed to update agent '{agent_name}': {e}")
+            logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
+            return _err(f"Failed to update agent '{agent_name}': {e}")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})

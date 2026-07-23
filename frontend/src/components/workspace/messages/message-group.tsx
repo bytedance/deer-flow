@@ -15,7 +15,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -26,7 +26,10 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
@@ -35,7 +38,6 @@ import {
   extractReasoningContentFromMessage,
   findToolCallResult,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -121,7 +123,6 @@ function MessageGroupComponent({
       return filteredSteps[filteredSteps.length - 1];
     }
   }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -242,13 +243,7 @@ function MessageGroupComponent({
     <ChainOfThoughtStep
       key={step.id}
       icon={MessageSquareTextIcon}
-      label={
-        <MarkdownContent
-          content={step.content}
-          isLoading={isLoading}
-          rehypePlugins={rehypePlugins}
-        />
-      }
+      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
     ></ChainOfThoughtStep>
   );
 
@@ -269,7 +264,6 @@ function MessageGroupComponent({
             <MarkdownContent
               content={step.reasoning ?? ""}
               isLoading={isLoading}
-              rehypePlugins={rehypePlugins}
             />
           }
         ></ChainOfThoughtStep>,
@@ -390,7 +384,6 @@ function MessageGroupComponent({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
                   />
                 }
               ></ChainOfThoughtStep>
@@ -564,6 +557,40 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (name === "write_file" || name === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
+
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
   if (name.startsWith("browser_")) {
     const shot = browserView?.screenshot;
@@ -759,38 +786,24 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
 
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
+          if (!writeFileArtifactUrl) {
+            return;
+          }
+          select(writeFileArtifactUrl);
           setOpen(true);
         }}
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>

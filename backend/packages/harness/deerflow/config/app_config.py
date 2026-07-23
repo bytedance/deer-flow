@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
+from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, load_authorization_config_from_dict
@@ -258,6 +259,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "run_events",
             field_doc="Run-event store backend (memory for dev, db for production queries, jsonl for lightweight single-node persistence).",
+        ),
+    )
+    agent_storage: AgentStorageConfig = Field(
+        default_factory=AgentStorageConfig,
+        description=format_field_description(
+            "agent_storage",
+            field_doc="Custom agent definition storage backend ('file' for today's per-user on-disk layout, 'db' to share definitions across nodes via the SQL persistence layer).",
         ),
     )
     scheduler: SchedulerConfig = Field(

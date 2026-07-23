@@ -19,7 +19,8 @@ from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -28,6 +29,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.config.summarization_config import SummarizationConfig
+from deerflow.runtime.checkpoint_mode import INTERNAL_CHECKPOINT_MODE_KEY
 from deerflow.runtime.secret_context import write_slash_skill_source_path
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -147,7 +149,7 @@ def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
 
     seen_attach_tracing: list[bool] = []
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         seen_attach_tracing.append(attach_tracing)
         return object()
 
@@ -182,7 +184,7 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["name"] = name
         captured["app_config"] = app_config
         return object()
@@ -202,6 +204,93 @@ def test_internal_make_lead_agent_uses_explicit_app_config(monkeypatch):
     assert result["model"] is not None
 
 
+@pytest.mark.parametrize("is_bootstrap", [False, True])
+def test_internal_make_lead_agent_selects_and_normalizes_delta_state(monkeypatch, is_bootstrap):
+    app_config = _make_app_config([_make_model("delta-model", supports_thinking=False)])
+    middleware = ViewImageMiddleware()
+    original_schema = middleware.state_schema
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "build_middlewares",
+        lambda config, model_name, agent_name=None, **kwargs: [middleware],
+    )
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {
+            "configurable": {
+                "model_name": "delta-model",
+                "is_bootstrap": is_bootstrap,
+                INTERNAL_CHECKPOINT_MODE_KEY: "delta",
+            }
+        },
+        app_config=app_config,
+    )
+
+    assert result["state_schema"] is DeltaThreadState
+    assert result["middleware"][0] is not middleware
+    assert middleware.state_schema is original_schema
+
+
+def test_internal_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypatch):
+    app_config = _make_app_config([_make_model("full-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module._make_lead_agent(
+        {
+            "configurable": {
+                "model_name": "full-model",
+                INTERNAL_CHECKPOINT_MODE_KEY: "full",
+            },
+            "context": {INTERNAL_CHECKPOINT_MODE_KEY: "delta"},
+        },
+        app_config=app_config,
+    )
+
+    assert result["state_schema"] is ThreadState
+
+
+def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypatch):
+    from deerflow.runtime import checkpoint_mode
+
+    app_config = _make_app_config([_make_model("full-model", supports_thinking=False)])
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+
+    def _capture(config, *, app_config):
+        captured["config"] = config
+        captured["app_config"] = app_config
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "_make_lead_agent", _capture)
+    config = {
+        "configurable": {"model_name": "full-model"},
+        "context": {
+            "app_config": app_config,
+            INTERNAL_CHECKPOINT_MODE_KEY: "delta",
+        },
+    }
+
+    lead_agent_module.make_lead_agent(config)
+
+    assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
+    assert captured["app_config"] is app_config
+
+
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
     app_config = _make_app_config([_make_model("context-model", supports_thinking=False)])
 
@@ -216,7 +305,7 @@ def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_rea
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["name"] = name
         captured["app_config"] = app_config
         return object()
@@ -295,7 +384,7 @@ def test_make_lead_agent_disables_thinking_when_model_does_not_support_it(monkey
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
@@ -339,7 +428,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
@@ -869,7 +958,7 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model = MagicMock()
     fake_model.with_config.return_value = fake_model
 
-    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["name"] = name
         captured["thinking_enabled"] = thinking_enabled
         captured["reasoning_effort"] = reasoning_effort
@@ -945,7 +1034,7 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
     fake_model = MagicMock()
     fake_model.with_config.return_value = fake_model
 
-    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True):
+    def _fake_create_chat_model(*, name=None, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
         captured["app_config"] = app_config
         return fake_model
 
@@ -970,3 +1059,111 @@ def test_memory_middleware_uses_explicit_memory_config_without_global_read(monke
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
 
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model settings (issue #4336)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_runtime_option_precedence():
+    # request value wins, even when falsy
+    assert lead_agent_module._resolve_runtime_option({"thinking_enabled": False}, "thinking_enabled", True, True) is False
+    # agent value used when request omits the key
+    assert lead_agent_module._resolve_runtime_option({}, "thinking_enabled", True, False) is True
+    # default when neither request nor agent set it
+    assert lead_agent_module._resolve_runtime_option({}, "thinking_enabled", None, False) is False
+
+
+def _make_agent_config(**kwargs):
+    from deerflow.config.agents_config import AgentConfig
+
+    return AgentConfig(name="researcher", **kwargs)
+
+
+def test_make_lead_agent_applies_agent_model_settings(monkeypatch):
+    """A custom agent's model_settings flow into create_chat_model as
+    model_overrides, and its thinking/reasoning defaults apply when the request
+    omits them (issue #4336)."""
+    app_config = _make_app_config([_make_model("agent-model", supports_thinking=True)])
+    agent_config = _make_agent_config(
+        model="agent-model",
+        model_settings={"temperature": 0.2, "max_tokens": 12000},
+        thinking_enabled=False,
+        reasoning_effort="high",
+    )
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name: agent_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
+        captured["thinking_enabled"] = thinking_enabled
+        captured["reasoning_effort"] = reasoning_effort
+        captured["model_overrides"] = model_overrides
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module._make_lead_agent({"context": {"agent_name": "researcher"}}, app_config=app_config)
+
+    assert captured["model_overrides"] == {"temperature": 0.2, "max_tokens": 12000}
+    assert captured["thinking_enabled"] is False  # from agent config
+    assert captured["reasoning_effort"] == "high"  # from agent config
+
+
+def test_request_thinking_overrides_agent_default(monkeypatch):
+    """An explicit request thinking_enabled wins over the agent's default."""
+    app_config = _make_app_config([_make_model("agent-model", supports_thinking=True)])
+    agent_config = _make_agent_config(model="agent-model", thinking_enabled=False)
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name: agent_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
+        captured["thinking_enabled"] = thinking_enabled
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module._make_lead_agent(
+        {"context": {"agent_name": "researcher", "thinking_enabled": True}},
+        app_config=app_config,
+    )
+
+    assert captured["thinking_enabled"] is True  # request wins over agent's False
+
+
+def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):
+    """Without a custom agent, model_overrides is None (no behavior change)."""
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    captured: dict[str, object] = {}
+
+    def _fake_create_chat_model(*, name, thinking_enabled, reasoning_effort=None, app_config=None, attach_tracing=True, model_overrides=None):
+        captured["model_overrides"] = model_overrides
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module._make_lead_agent({"context": {"model_name": "safe-model"}}, app_config=app_config)
+
+    assert captured["model_overrides"] is None

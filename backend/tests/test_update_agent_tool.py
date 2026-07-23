@@ -342,6 +342,34 @@ def test_update_agent_preserves_github_block_on_description_change(tmp_path, pat
     assert cfg["github"] == github_block
 
 
+def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, patched_paths):
+    """UI/API-owned model behavior must survive agent self-edits.
+
+    ``update_agent`` does not expose temperature / max_tokens / thinking /
+    reasoning arguments to the LLM, but it still rewrites config.yaml for
+    ordinary self-edits. Those fields therefore need an explicit carry-forward
+    path or a description tweak would silently reset the agent's model defaults.
+    """
+    agent_dir = _seed_agent(tmp_path, description="old desc")
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    cfg.update(
+        {
+            "model_settings": {"temperature": 0.2, "max_tokens": 12000},
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+        }
+    )
+    (agent_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    update_agent.func(runtime=_runtime(), description="refined desc")
+
+    out = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert out["description"] == "refined desc"
+    assert out["model_settings"] == {"temperature": 0.2, "max_tokens": 12000}
+    assert out["thinking_enabled"] is True
+    assert out["reasoning_effort"] == "high"
+
+
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["a", "b"])
 
@@ -423,7 +451,7 @@ def test_update_agent_soul_failure_does_not_replace_config(tmp_path, patched_pat
             raise OSError("disk full while staging SOUL.md")
         return real_named_temp_file(*args, **kwargs)
 
-    with patch("deerflow.tools.builtins.update_agent_tool.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
+    with patch("deerflow.persistence.agents.file.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
         result = update_agent.func(runtime=_runtime(), description="new-desc", soul="new soul")
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
