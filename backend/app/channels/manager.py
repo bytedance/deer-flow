@@ -752,15 +752,21 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
             filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
 
-            try:
-                data = await file_reader(f, client)
-            except Exception:
-                logger.exception(
-                    "[Manager] failed to read inbound file: channel=%s, file=%s",
-                    msg.channel_name,
-                    f.get("url") or filename or idx,
-                )
-                continue
+            inline_content = f.pop("_content", None)
+            if isinstance(inline_content, bytes):
+                data = inline_content
+            elif isinstance(inline_content, (bytearray, memoryview)):
+                data = bytes(inline_content)
+            else:
+                try:
+                    data = await file_reader(f, client)
+                except Exception:
+                    logger.exception(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                        msg.channel_name,
+                        f.get("url") or filename or idx,
+                    )
+                    continue
 
             if data is None:
                 logger.warning(
