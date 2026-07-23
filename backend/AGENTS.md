@@ -821,6 +821,44 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer)
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`
 
+**Checkpoint channel benchmark**: `scripts/benchmark/bench_checkpoint_channels.py`
+runs paired `full`/`delta` message-only StateGraphs in a fresh child process per
+case, using sync `InMemorySaver` or `SqliteSaver` so reducer, serialization, and
+saver costs stay separate from Gateway/async scheduling. It reports deterministic
+correctness digests, write windows/percentiles, warm and graph-rebuilt cold reads,
+logical checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time,
+and peak RSS as versioned JSONL. The controller alternates mode order and rejects
+performance data when paired modes materialize different state. Its default 1 GiB
+estimated cumulative full-payload cap skips both modes of an oversized pair when
+`full` is selected; intentional `--modes delta` diagnostics bypass this
+full-payload cap, so size those runs explicitly. Use `--allow-large-cases` only
+on a provisioned machine. Duplicate CSV matrix values are ignored with a warning;
+use `--repetitions` for repeated samples. Summarize paired successful repetitions
+with `scripts/benchmark/summarize_checkpoint_channels.py` (all ratios are
+`delta/full`). `--profile-dir /tmp/checkpoint-profiles` writes one cProfile
+artifact per case for attribution. Profiled rows carry `profiled: true`, and the
+summarizer automatically excludes them from baseline summaries with a warning.
+Storage-size collection relies on saver-specific diagnostic layouts; if those
+layouts change, the timing/correctness row remains successful while storage
+fields become `null` and `storage_stats_error` records the diagnostic failure.
+Example:
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/bench_checkpoint_channels.py \
+  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
+  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/summarize_checkpoint_channels.py \
+  /tmp/checkpoint-bench.jsonl
+```
+
+The sync storage benchmark is not an end-to-end Gateway benchmark. Complete
+`ThreadState`/`DeltaThreadState`, async saver scheduling, history, mutation,
+rollback, migration, and branch-heavy cases belong to the production-shaped
+follow-up layer. Harness tests live in `tests/test_bench_checkpoint_channels.py`
+and `tests/test_summarize_checkpoint_channels.py`; timing thresholds are not CI
+gates.
+
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 
 A terminal-native UI over the embedded harness, exposed as the `deerflow` console script (`[project.scripts]` in `packages/harness/pyproject.toml`). It is a UI shell over `DeerFlowClient` and does **not** fork agent behavior. `textual` is an optional dependency (`deerflow-harness[tui]`; also in the backend dev group); the console script degrades to headless help when it is absent. Full guide: [docs/TUI.md](docs/TUI.md).
