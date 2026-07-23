@@ -3,7 +3,6 @@ const SUPPORTED_RUN_STREAM_MODES = new Set([
   "messages",
   "messages-tuple",
   "updates",
-  "events",
   "debug",
   "tasks",
   "checkpoints",
@@ -11,6 +10,7 @@ const SUPPORTED_RUN_STREAM_MODES = new Set([
 ] as const);
 
 const warnedUnsupportedStreamModes = new Set<string>();
+let warnedUnsupportedStreamResumable = false;
 
 export function warnUnsupportedStreamModes(
   modes: string[],
@@ -34,17 +34,31 @@ export function warnUnsupportedStreamModes(
 }
 
 export function sanitizeRunStreamOptions<T>(options: T): T {
-  if (
-    typeof options !== "object" ||
-    options === null ||
-    !("streamMode" in options)
-  ) {
+  if (typeof options !== "object" || options === null) {
     return options;
+  }
+
+  let sanitizedOptions: T = options;
+  if ("streamResumable" in options) {
+    const withoutStreamResumable = { ...options };
+    delete withoutStreamResumable.streamResumable;
+    sanitizedOptions = withoutStreamResumable as T;
+
+    if (!warnedUnsupportedStreamResumable) {
+      warnedUnsupportedStreamResumable = true;
+      console.warn(
+        "[deer-flow] Dropped unsupported LangGraph run option: streamResumable",
+      );
+    }
+  }
+
+  if (!("streamMode" in options)) {
+    return sanitizedOptions;
   }
 
   const streamMode = options.streamMode;
   if (streamMode == null) {
-    return options;
+    return sanitizedOptions;
   }
 
   const requestedModes = Array.isArray(streamMode) ? streamMode : [streamMode];
@@ -53,7 +67,7 @@ export function sanitizeRunStreamOptions<T>(options: T): T {
   );
 
   if (sanitizedModes.length === requestedModes.length) {
-    return options;
+    return sanitizedOptions;
   }
 
   const droppedModes = requestedModes.filter(
@@ -61,8 +75,14 @@ export function sanitizeRunStreamOptions<T>(options: T): T {
   );
   warnUnsupportedStreamModes(droppedModes);
 
+  if (sanitizedModes.length === 0) {
+    throw new Error(
+      `[deer-flow] No supported LangGraph stream modes remain after rejecting: ${droppedModes.join(", ")}`,
+    );
+  }
+
   return {
-    ...options,
+    ...sanitizedOptions,
     streamMode: Array.isArray(streamMode) ? sanitizedModes : sanitizedModes[0],
   };
 }

@@ -19,16 +19,21 @@ test("drops unsupported stream modes from array payloads", () => {
     "messages-tuple",
     "custom",
     "updates",
-    "events",
   ]);
 });
 
-test("drops unsupported stream modes from scalar payloads", () => {
-  const sanitized = sanitizeRunStreamOptions({
-    streamMode: "tools",
-  });
+test("rejects payloads when every requested stream mode is unsupported", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: ["events", "tools"],
+    }),
+  ).toThrow("No supported LangGraph stream modes remain");
 
-  expect(sanitized.streamMode).toBeUndefined();
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: "tools",
+    }),
+  ).toThrow("No supported LangGraph stream modes remain");
 });
 
 test("keeps payloads without streamMode untouched", () => {
@@ -37,4 +42,26 @@ test("keeps payloads without streamMode untouched", () => {
   };
 
   expect(sanitizeRunStreamOptions(options)).toBe(options);
+});
+
+test("strips streamResumable before sending run options to the API", () => {
+  const sanitized = sanitizeRunStreamOptions({
+    streamResumable: true,
+    streamSubgraphs: true,
+  });
+
+  expect(sanitized).toEqual({
+    streamSubgraphs: true,
+  });
+});
+
+test("sanitizes streamResumable and mixed stream modes together", () => {
+  const sanitized = sanitizeRunStreamOptions({
+    streamResumable: true,
+    streamMode: ["values", "events"],
+  });
+
+  expect(sanitized).toEqual({
+    streamMode: ["values"],
+  });
 });

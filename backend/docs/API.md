@@ -103,8 +103,14 @@ Content-Type: application/json
 ```
 
 **Stream Mode Compatibility:**
-- Use: `values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
-- Do not use: `tools` (deprecated/invalid in current `langgraph-api` and will trigger schema validation errors)
+- Use: `values`, `messages`, `messages-tuple`, `custom`, `updates`, `debug`, `tasks`, `checkpoints`
+- Unsupported modes, including `events` and `tools`, return `422` before a run is created. DeerFlow never substitutes `values` for an unsupported mode.
+
+**Run Option Compatibility:**
+- Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
+- Compatibility defaults: `on_completion="keep"` and `if_not_exists="create"`; these match DeerFlow's current behavior
+- Unsupported non-default options return `422`: `webhook`, `stream_resumable`, `after_seconds`, `feedback_keys`, `on_completion="delete"`, `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
+- Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
 
 **Recursion Limit:**
 
