@@ -724,6 +724,105 @@ describe("orphan tool messages", () => {
     expect(t2?.type).toBe("tool");
   });
 
+  test("opens a processing group for a leading orphan tool message", () => {
+    // History pagination cuts by event seq, not turn boundaries, so the first
+    // loaded page can begin mid-turn with tool results whose AI tool-call
+    // message sits on an unloaded older page (#4399). They must stay visible
+    // in a processing group, not be dropped with a console error per render.
+    const messages = [
+      {
+        id: "t-lead-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-1",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "t-lead-2",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-2",
+        content: "second output",
+      },
+      { id: "ai-1", type: "ai", content: "Done." },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual([
+      "assistant:processing",
+      "assistant",
+    ]);
+    // Both leading orphans cluster into the same processing group.
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead-1",
+      "t-lead-2",
+    ]);
+  });
+
+  test("leading orphan absorbs the following real AI turn into one processing group", () => {
+    // A leading orphan followed by a real tool-call turn must accumulate into
+    // a single processing group via the assistant:processing branch, not
+    // strand the orphan as a separate empty group beside the real turn.
+    const messages = [
+      {
+        id: "t-lead",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "running",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // One processing group holds the orphan, the AI turn, and its tool result.
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead",
+      "ai-1",
+      "t-1",
+    ]);
+  });
+
+  test("tool message preceded only by hidden messages gets a group", () => {
+    // messages is non-empty, but every earlier message is hidden from the UI —
+    // groups is still empty when the tool message arrives.
+    const messages = [
+      {
+        id: "hidden-1",
+        type: "human",
+        content:
+          "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>",
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual(["t-1"]);
+  });
+
   test("replayed tool with same tool_call_id is not lost (duplicate stream events)", () => {
     // LangGraph subagent state restoration can replay tool-result events. The
     // frontend log shows the same tool_call_id arriving twice. Both occurrences
