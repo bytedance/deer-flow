@@ -18,6 +18,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import { getMessageRunId } from "../messages/run-duration";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -316,8 +317,13 @@ export function mergeMessages(
   optimisticMessages: Message[],
 ): Message[] {
   const savedTurnDurations = new Map<string, number>();
+  const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
+    const runId = getMessageRunId(msg);
+    if (identity && runId) {
+      savedRunIds.set(identity, runId);
+    }
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
         identity,
@@ -412,17 +418,26 @@ export function mergeMessages(
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (
-      identity &&
+    if (!identity) {
+      return message;
+    }
+    const shouldRestoreRunId =
+      savedRunIds.has(identity) && !getMessageRunId(message);
+    const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined
-    ) {
+      message.additional_kwargs?.turn_duration === undefined;
+    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
       return {
         ...message,
-        additional_kwargs: {
-          ...message.additional_kwargs,
-          turn_duration: savedTurnDurations.get(identity),
-        },
+        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
+        ...(shouldRestoreTurnDuration
+          ? {
+              additional_kwargs: {
+                ...message.additional_kwargs,
+                turn_duration: savedTurnDurations.get(identity),
+              },
+            }
+          : {}),
       } as Message;
     }
     return message;

@@ -179,6 +179,56 @@ def test_content_filter_without_tool_calls_passes_through_unchanged():
     assert _TOOL_INVOCATIONS == []
 
 
+def test_content_filter_empty_no_tool_calls_is_backfilled_not_persisted_empty():
+    """#4393: a content_filter response with empty content and no tool calls
+    must not survive in graph state as an empty AIMessage — strict
+    OpenAI-compatible providers reject an empty assistant message on the next
+    request, poisoning the whole thread. The middleware backfills a
+    user-facing explanation so the persisted message is non-empty."""
+    _TOOL_INVOCATIONS.clear()
+
+    class _EmptyContentFilterModel(BaseChatModel):
+        """Mimics Kimi/Moonshot refusing a sensitive question: an empty
+        assistant message flagged finish_reason='content_filter'."""
+
+        @property
+        def _llm_type(self) -> str:
+            return "fake-empty-content-filter"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            msg = AIMessage(content="", response_metadata={"finish_reason": "content_filter"})
+            return ChatResult(generations=[ChatGeneration(message=msg)])
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    agent = create_agent(
+        model=_EmptyContentFilterModel(),
+        tools=[write_file],
+        middleware=[SafetyFinishReasonMiddleware()],
+    )
+    result = agent.invoke({"messages": [HumanMessage(content="a sensitive question")]})
+    final_ai = next(m for m in reversed(result["messages"]) if isinstance(m, AIMessage))
+
+    # The poison condition: the persisted assistant message must not be empty.
+    assert isinstance(final_ai.content, str)
+    assert final_ai.content.strip(), "empty assistant message would be rejected by strict providers on the next turn"
+    assert "safety-related signal" in final_ai.content
+    assert "returned no content" in final_ai.content
+
+    # Observability stamp present with zero suppressed tool calls.
+    record = final_ai.additional_kwargs.get("safety_termination")
+    assert record is not None
+    assert record["suppressed_tool_call_count"] == 0
+
+    # Real provider reason preserved for downstream SSE / converters.
+    assert final_ai.response_metadata.get("finish_reason") == "content_filter"
+    assert _TOOL_INVOCATIONS == []
+
+
 def test_normal_tool_call_round_trip_is_not_affected():
     """Regression: a healthy finish_reason='tool_calls' response must still
     execute the tool. The middleware must not over-fire."""
