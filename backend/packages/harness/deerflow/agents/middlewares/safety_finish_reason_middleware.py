@@ -1,6 +1,8 @@
-"""Suppress tool execution when the provider safety-terminated the response.
+"""Repair AIMessages the provider safety-terminated so they are neither
+executed nor persisted empty.
 
-Background — see issue bytedance/deer-flow#3028.
+Background — see issues bytedance/deer-flow#3028 (truncated tool calls) and
+#4393 (empty response poisons the thread).
 
 Some providers (OpenAI ``finish_reason='content_filter'``, Anthropic
 ``stop_reason='refusal'``, Gemini ``finish_reason='SAFETY'`` ...) can stop
@@ -12,11 +14,22 @@ they were complete. The agent then sees the truncated file, tries to fix it,
 gets filtered again, and loops.
 
 This middleware sits at ``after_model`` and gates that behaviour: when a
-configured ``SafetyTerminationDetector`` fires *and* the AIMessage carries
-tool calls, we strip the tool calls (both structured and raw provider
-payloads), append a user-facing explanation, and stash observability fields
-in ``additional_kwargs.safety_termination`` so logs, traces, and SSE
-consumers can see what happened.
+configured ``SafetyTerminationDetector`` fires it either
+
+* strips the AIMessage's tool calls (both structured and raw provider
+  payloads) when it carries any — the truncated-tool-call case (#3028), or
+* backfills a user-facing explanation when the message is otherwise blank
+  (no tool calls, no visible content) — the empty-response case (#4393),
+  where the empty assistant message would otherwise be persisted and then
+  rejected by strict OpenAI-compatible providers on every following request
+  ("message ... with role 'assistant' must not be empty"), stranding the
+  whole thread until a new chat is started.
+
+A safety-terminated message that carries visible text but no tool calls is
+left untouched so its partial answer still reaches the user. Either way we
+append the explanation and stash observability fields in
+``additional_kwargs.safety_termination`` so logs, traces, and SSE consumers
+can see what happened.
 
 Hook choice: ``after_model`` (not ``wrap_model_call``) because the response
 is a *normal* return — not an exception — and we want to participate in the
@@ -48,6 +61,7 @@ from deerflow.agents.middlewares.safety_termination_detectors import (
     default_detectors,
 )
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
     from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
@@ -63,9 +77,15 @@ _USER_FACING_MESSAGE = (
     "or ask for a narrower output."
 )
 
+# Used when the safety termination produced no tool calls *and* no content:
+# the message is rewritten only so it is not persisted empty (see #4393), so
+# it must not claim any tool calls were suppressed.
+_USER_FACING_EMPTY_MESSAGE = "The model provider stopped this response with a safety-related signal ({reason_field}={reason_value!r}, detector={detector!r}) and returned no content. Please rephrase your request or start a new conversation."
+
 
 class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
-    """Strip tool_calls from AIMessages flagged by a SafetyTerminationDetector."""
+    """Repair AIMessages flagged by a SafetyTerminationDetector: strip tool
+    calls, or backfill an explanation when the message is otherwise empty."""
 
     def __init__(self, detectors: list[SafetyTerminationDetector] | None = None) -> None:
         super().__init__()
@@ -135,8 +155,10 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         message: AIMessage,
         termination: SafetyTermination,
     ) -> AIMessage:
-        suppressed_names = [tc.get("name") or "unknown" for tc in (message.tool_calls or [])]
-        explanation = _USER_FACING_MESSAGE.format(
+        tool_calls = message.tool_calls or []
+        suppressed_names = [tc.get("name") or "unknown" for tc in tool_calls]
+        template = _USER_FACING_MESSAGE if tool_calls else _USER_FACING_EMPTY_MESSAGE
+        explanation = template.format(
             reason_field=termination.reason_field,
             reason_value=termination.reason_value,
             detector=termination.detector,
@@ -272,16 +294,33 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         if not isinstance(last, AIMessage):
             return None
 
-        # Issue scope: only intervene when there's something to suppress.
-        # ``content_filter`` without tool_calls is allowed through unchanged
-        # so the partial text response (if any) reaches the user naturally.
-        tool_calls = last.tool_calls
-        if not tool_calls:
+        # Two provider-safety failure modes are worth rewriting; a safety
+        # termination that produced visible text with no tool calls is left
+        # untouched so the partial answer still reaches the user naturally.
+        #   1. tool_calls present: they may be truncated/unsafe (#3028), so
+        #      suppress them.
+        #   2. blank content and no tool_calls: an empty assistant message
+        #      that strict OpenAI-compatible providers (Moonshot/Kimi, ...)
+        #      reject on the *next* request ("message ... with role
+        #      'assistant' must not be empty", #4393), which poisons the whole
+        #      thread until a new chat is started. Backfill an explanation so
+        #      the persisted message is non-empty.
+        tool_calls = list(last.tool_calls or [])
+        # ``or ""`` normalizes every "no visible content" shape to blank:
+        # None, "", [] and whitespace all count. None is reachable via
+        # ``model_copy(update={"content": None})`` (a rewrite path that skips
+        # validation); without the guard message_content_to_text stringifies
+        # it to "None" and the backfill would be skipped, re-poisoning the
+        # thread this fix is meant to protect.
+        content_is_blank = not message_content_to_text(last.content or "").strip()
+        if not tool_calls and not content_is_blank:
             return None
 
         termination = self._detect(last)
         if termination is None:
             return None
+
+        backfilled_empty = content_is_blank and not tool_calls
 
         # Stamp stop_reason so the worker can surface this capped completion
         # alongside loop_capped / token_capped (#4176).
@@ -295,14 +334,16 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             thread_id = runtime.context.get("thread_id") if isinstance(runtime.context, dict) else None
 
         logger.warning(
-            "Provider safety termination detected — suppressed %d tool call(s)",
+            "Provider safety termination detected — suppressed %d tool call(s), backfilled_empty_content=%s",
             len(tool_calls),
+            backfilled_empty,
             extra={
                 "thread_id": thread_id,
                 "detector": termination.detector,
                 "reason_field": termination.reason_field,
                 "reason_value": termination.reason_value,
                 "suppressed_tool_call_names": [tc.get("name") for tc in tool_calls],
+                "backfilled_empty_content": backfilled_empty,
             },
         )
 

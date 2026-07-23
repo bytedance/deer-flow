@@ -113,6 +113,93 @@ class TestTriggerCriteria:
         }
         assert mw._apply(state, _runtime()) is None
 
+    def test_content_filter_blank_content_no_tool_calls_backfills(self):
+        """#4393: an empty content_filter response with no tool calls would be
+        persisted empty and rejected by strict providers on the next request.
+        Backfill an explanation so the persisted message is non-empty."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="",
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert isinstance(patched.content, str)
+        assert patched.content.strip()  # never persisted empty
+        assert "safety-related signal" in patched.content
+        assert "returned no content" in patched.content
+        # It must not claim tool calls were suppressed — none existed.
+        assert "were suppressed" not in patched.content
+        record = patched.additional_kwargs["safety_termination"]
+        assert record["suppressed_tool_call_count"] == 0
+        assert record["suppressed_tool_call_names"] == []
+
+    def test_content_filter_whitespace_content_no_tool_calls_backfills(self):
+        """Whitespace-only content is still blank to a strict provider."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="   \n  ",
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert "returned no content" in patched.content
+
+    def test_content_filter_none_content_no_tool_calls_backfills(self):
+        """content=None is reachable via model_copy rewrites (which skip
+        validation) and must be treated as blank, not stringified to 'None'."""
+        mw = SafetyFinishReasonMiddleware()
+        none_content = _ai(response_metadata={"finish_reason": "content_filter"}).model_copy(update={"content": None})
+        assert none_content.content is None  # precondition for the regression
+        result = mw._apply({"messages": [none_content]}, _runtime())
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.tool_calls == []
+        assert isinstance(patched.content, str)
+        assert patched.content.strip()
+        assert "returned no content" in patched.content
+
+    def test_anthropic_refusal_blank_content_no_tool_calls_backfills(self):
+        """The empty-content backfill is detector-agnostic (#4393)."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="",
+                    response_metadata={"stop_reason": "refusal"},
+                )
+            ]
+        }
+        result = mw._apply(state, _runtime())
+        assert result is not None
+        assert result["messages"][0].content.strip()
+
+    def test_blank_content_no_tool_calls_without_safety_signal_passes_through(self):
+        """A blank response with no safety signal is out of scope: only a
+        detected safety termination triggers the backfill."""
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    content="",
+                    response_metadata={"finish_reason": "stop"},
+                )
+            ]
+        }
+        assert mw._apply(state, _runtime()) is None
+
     def test_normal_tool_calls_pass_through(self):
         mw = SafetyFinishReasonMiddleware()
         state = {
