@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SandboxOwnershipType = Literal["memory", "redis"]
+SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 
 
 class SandboxOwnershipConfig(BaseModel):
@@ -108,7 +109,22 @@ class SandboxConfig(BaseModel):
     )
     replicas: int | None = Field(
         default=None,
-        description="Maximum active + warm sandboxes/VMs per gateway process (default: 3). Warm/least-recently-used entries are evicted to make room; active sandboxes are not forcibly stopped.",
+        gt=0,
+        description="Maximum active, warm, reserved, and transitioning sandboxes per gateway process. Capacity policy controls full-provider behavior.",
+    )
+    overflow_policy: SandboxOverflowPolicy = Field(
+        default="wait",
+        description="E2B capacity policy. Use wait, reject, or burst.",
+    )
+    acquire_timeout: int = Field(
+        default=30,
+        gt=0,
+        description="Seconds that E2B wait policy waits for capacity.",
+    )
+    burst_limit: int = Field(
+        default=0,
+        ge=0,
+        description="Extra E2B capacity slots when overflow_policy is burst.",
     )
     container_prefix: str | None = Field(
         default=None,
