@@ -254,6 +254,9 @@ export function buildVisibleHistoryMessages(
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      // feedback also lives on the RunMessage wrapper (backend attaches it to
+      // the run's last AI row); carry it over or the thumbs lose their echo.
+      feedback: message.feedback ?? null,
     })),
   ]);
 }
