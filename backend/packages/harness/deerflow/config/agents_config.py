@@ -10,9 +10,8 @@ per-user layout.
 import logging
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
@@ -290,10 +289,12 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
 
 
 def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentConfig | None:
-    """Load the custom or default agent's config from its directory.
+    """Load the custom or default agent's config.
 
-    Reads from the per-user layout first; falls back to the legacy shared layout
-    for installations that have not yet been migrated.
+    Dispatches to the configured agent store (``agent_storage.backend``): the
+    ``file`` backend reads the per-user layout first and falls back to the legacy
+    shared layout; the ``db`` backend reads the shared ``agents`` table. Behaviour
+    and error semantics are unchanged from the historical file-only loader.
 
     Args:
         name: The agent name.
@@ -304,45 +305,25 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
         AgentConfig instance, or ``None`` if ``name`` is ``None``.
 
     Raises:
-        FileNotFoundError: If the agent directory or config.yaml does not exist.
-        ValueError: If config.yaml cannot be parsed.
+        FileNotFoundError: If the agent does not exist.
+        ValueError: If the stored config cannot be parsed.
     """
-
     if name is None:
         return None
+    # Lazy import: the store package imports back from this module.
+    from deerflow.persistence.agents import get_agent_store
 
-    name = validate_agent_name(name)
-    agent_dir = resolve_agent_dir(name, user_id=user_id)
-    config_file = agent_dir / "config.yaml"
-
-    if not agent_dir.exists():
-        raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-
-    if not config_file.exists():
-        raise FileNotFoundError(f"Agent config not found: {config_file}")
-
-    try:
-        with open(config_file, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-    except yaml.YAMLError as e:
-        raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
-
-    # Ensure name is set from directory name if not in file
-    if "name" not in data:
-        data["name"] = name
-
-    # Strip unknown fields before passing to Pydantic (e.g. legacy prompt_file)
-    known_fields = set(AgentConfig.model_fields.keys())
-    data = {k: v for k, v in data.items() if k in known_fields}
-
-    return AgentConfig(**data)
+    return get_agent_store().get(name, user_id=user_id)
 
 
 def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str | None:
-    """Read the SOUL.md file for a custom agent, if it exists.
+    """Read the SOUL.md content for an agent, if any.
 
     SOUL.md defines the agent's personality, values, and behavioral guardrails.
     It is injected into the lead agent's system prompt as additional context.
+    The default agent (``agent_name`` falsy) always reads ``{base_dir}/SOUL.md``
+    directly — it is not a custom-agent record — regardless of backend. A named
+    agent dispatches to the configured store.
 
     Args:
         agent_name: The name of the agent or None for the default agent.
@@ -350,86 +331,34 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
             current request context.
 
     Returns:
-        The SOUL.md content as a string, or None if the file does not exist.
+        The SOUL.md content as a string, or None if not set.
     """
-    if agent_name:
-        agent_dir = resolve_agent_dir(agent_name, user_id=user_id)
-        soul_path = agent_dir / SOUL_FILENAME
-        # Fallback: resolve_agent_dir requires config.yaml to be present
-        # (see #3390), but SOUL.md loading does not depend on config.yaml.
-        # If the resolved dir doesn't have config.yaml (meaning the resolver
-        # returned its default path because no agent dir qualified) and also
-        # lacks SOUL.md, check the per-user and legacy directories directly
-        # so that agents configured via DEER_FLOW_CONFIG_PATH (or any setup
-        # where the agent dir has SOUL.md but no config.yaml) can still load
-        # their soul (#4135). The config.yaml guard ensures this fallback
-        # only fires for dirs the resolver couldn't resolve, not for a
-        # properly-resolved per-user agent that simply lacks SOUL.md -
-        # preserving the "per-user entries fully shadow legacy entries"
-        # invariant (agents_config.py:3-7, list_custom_agents).
-        if not soul_path.exists() and not (agent_dir / "config.yaml").exists():
-            paths = get_paths()
-            effective_user = user_id or get_effective_user_id()
-            for candidate in (
-                paths.user_agent_dir(effective_user, agent_name),
-                paths.agent_dir(agent_name),
-            ):
-                if (candidate / SOUL_FILENAME).exists():
-                    soul_path = candidate / SOUL_FILENAME
-                    break
-    else:
-        agent_dir = get_paths().base_dir
-        soul_path = agent_dir / SOUL_FILENAME
-    if not soul_path.exists():
-        return None
-    content = soul_path.read_text(encoding="utf-8").strip()
-    return content or None
+    if not agent_name:
+        soul_path = get_paths().base_dir / SOUL_FILENAME
+        if not soul_path.exists():
+            return None
+        content = soul_path.read_text(encoding="utf-8").strip()
+        return content or None
+    from deerflow.persistence.agents import get_agent_store
+
+    return get_agent_store().get_soul(agent_name, user_id=user_id)
 
 
 def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:
-    """Scan the agents directory and return all valid custom agents.
+    """Return all valid custom agents for ``user_id``.
 
-    Returns the union of agents in the per-user layout and the legacy shared
-    layout, so that pre-migration installations remain visible until they are
-    migrated. Per-user entries shadow legacy entries with the same name.
+    Dispatches to the configured agent store. The ``file`` backend returns the
+    union of the per-user layout and the legacy shared layout (per-user entries
+    shadow legacy entries with the same name); the ``db`` backend returns the
+    user's rows. Sorted by name.
 
     Args:
         user_id: Owner whose agents to list. Defaults to the effective user
             from the current request context.
 
     Returns:
-        List of AgentConfig for each valid agent directory found.
+        List of AgentConfig for each valid agent found.
     """
-    paths = get_paths()
-    effective_user = user_id or get_effective_user_id()
+    from deerflow.persistence.agents import get_agent_store
 
-    seen: set[str] = set()
-    agents: list[AgentConfig] = []
-
-    user_root = paths.user_agents_dir(effective_user)
-    legacy_root = paths.agents_dir
-
-    for root in (user_root, legacy_root):
-        if not root.exists():
-            continue
-        for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
-                continue
-            if entry.name in seen:
-                continue
-            config_file = entry / "config.yaml"
-            if not config_file.exists():
-                logger.debug(f"Skipping {entry.name}: no config.yaml")
-                continue
-
-            try:
-                agent_cfg = load_agent_config(entry.name, user_id=effective_user)
-                if agent_cfg is None:
-                    continue
-                agents.append(agent_cfg)
-                seen.add(entry.name)
-            except Exception as e:
-                logger.warning(f"Skipping agent '{entry.name}': {e}")
-
-    agents.sort(key=lambda a: a.name)
-    return agents
+    return get_agent_store().list(user_id=user_id)
