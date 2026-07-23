@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -28,5 +28,9 @@ class FeedbackRow(Base):
 
     comment: Mapped[str | None] = mapped_column(Text)
     # Optional text feedback from the user
+
+    tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # Optional thumbs-down reason slugs from the feedback dialog
+    # (language-neutral, e.g. ["incorrect", "slow"])
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
