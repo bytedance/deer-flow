@@ -22,6 +22,7 @@ from app.channels.dingtalk import (
     _normalize_conversation_type,
 )
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 
 
 def _run(coro):
@@ -1689,5 +1690,410 @@ class TestCardMode:
             assert channel._incoming_messages == {}
             assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Inbound file support
+# ---------------------------------------------------------------------------
+
+
+def _make_picture_message(*, download_code: str = "dc_img", **kwargs):
+    """Build a mock DingTalk ``picture`` message carrying an ImageContent."""
+    msg = _make_chatbot_message(text="", message_type="picture", **kwargs)
+    msg.image_content = SimpleNamespace(download_code=download_code)
+    return msg
+
+
+def _make_file_message(*, download_code: str = "dc_file", file_name: str | None = "report.xlsx", **kwargs):
+    """Build a mock DingTalk ``file`` (document) message.
+
+    dingtalk_stream does not parse ``file`` messages, so the descriptor lives on
+    the raw callback payload the handler stashes as ``_df_raw_data``.
+    """
+    msg = _make_chatbot_message(text="", message_type="file", **kwargs)
+    content: dict = {"downloadCode": download_code}
+    if file_name is not None:
+        content["fileName"] = file_name
+    msg._df_raw_data = {"msgtype": "file", "content": content}
+    return msg
+
+
+def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None):
+    monkeypatch.setattr(
+        "app.channels.dingtalk.get_paths",
+        lambda: SimpleNamespace(
+            ensure_thread_dirs=lambda thread_id, user_id=None: None,
+            sandbox_uploads_dir=lambda thread_id, user_id=None: uploads_dir,
+        ),
+    )
+    monkeypatch.setattr("app.channels.dingtalk.get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(
+        "app.channels.dingtalk.get_sandbox_provider",
+        lambda: SimpleNamespace(acquire=lambda thread_id, user_id=None: sandbox_id, get=lambda sid: sandbox),
+    )
+
+
+class TestExtractFiles:
+    def test_text_message_has_no_files(self):
+        assert DingTalkChannel._extract_files(_make_chatbot_message(text="hi")) == []
+
+    def test_picture_message(self):
+        files = DingTalkChannel._extract_files(_make_picture_message(download_code="dc_1"))
+        assert files == [{"type": "image", "download_code": "dc_1", "filename": "image.png"}]
+
+    def test_picture_message_missing_download_code_ignored(self):
+        msg = _make_chatbot_message(text="", message_type="picture")
+        msg.image_content = SimpleNamespace(download_code=None)
+        assert DingTalkChannel._extract_files(msg) == []
+
+    def test_rich_text_images(self):
+        msg = _make_chatbot_message(text="", message_type="richText")
+        msg.get_image_list = lambda: ["dc_a", "dc_b"]
+        files = DingTalkChannel._extract_files(msg)
+        assert files == [
+            {"type": "image", "download_code": "dc_a", "filename": "image_0.png"},
+            {"type": "image", "download_code": "dc_b", "filename": "image_1.png"},
+        ]
+
+    def test_rich_text_get_image_list_failure_swallowed(self):
+        msg = _make_chatbot_message(text="", message_type="richText")
+
+        def _boom():
+            raise RuntimeError("sdk failure")
+
+        msg.get_image_list = _boom
+        assert DingTalkChannel._extract_files(msg) == []
+
+    def test_file_message_from_raw_data(self):
+        files = DingTalkChannel._extract_files(_make_file_message(download_code="dc_doc", file_name="报价.xlsx"))
+        assert files == [{"type": "file", "download_code": "dc_doc", "filename": "报价.xlsx"}]
+
+    def test_file_message_default_filename(self):
+        files = DingTalkChannel._extract_files(_make_file_message(download_code="dc_doc", file_name=None))
+        assert files == [{"type": "file", "download_code": "dc_doc", "filename": "file.bin"}]
+
+    def test_file_message_without_raw_data_ignored(self):
+        msg = _make_chatbot_message(text="", message_type="file")
+        assert DingTalkChannel._extract_files(msg) == []
+
+
+class TestOnChatbotMessageFiles:
+    def test_picture_message_publishes_inbound_with_files(self):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+            channel._send_running_reply = AsyncMock()
+
+            channel._on_chatbot_message(_make_picture_message(download_code="dc_pic", sender_staff_id="u1", message_id="m1"))
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_awaited_once()
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.msg_type == InboundMessageType.CHAT
+            assert inbound.files == [{"type": "image", "download_code": "dc_pic", "filename": "image.png"}]
+
+        _run(go())
+
+    def test_file_message_publishes_inbound_with_files(self):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+            channel._send_running_reply = AsyncMock()
+
+            channel._on_chatbot_message(_make_file_message(download_code="dc_doc", file_name="data.csv", sender_staff_id="u1", message_id="m1"))
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_awaited_once()
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.files == [{"type": "file", "download_code": "dc_doc", "filename": "data.csv"}]
+
+        _run(go())
+
+    def test_message_without_text_or_files_dropped(self):
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            # picture message whose image carries no download_code -> no files, no text
+            msg = _make_chatbot_message(text="", message_type="picture")
+            msg.image_content = SimpleNamespace(download_code=None)
+            channel._on_chatbot_message(msg)
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_not_awaited()
+
+        _run(go())
+
+
+class TestReceiveFile:
+    def test_no_files_is_noop(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            msg = channel._make_inbound(chat_id="c", user_id="u", text="hi", thread_ts="m")
+            out = await channel.receive_file(msg, "t1")
+            assert out is msg
+            assert out.text == "hi"
+
+        _run(go())
+
+    def test_downloads_persists_and_prepends_path(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._client_id = "robot"
+            channel._download_by_code = AsyncMock(return_value=b"XLSXDATA")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="please translate",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc1", "filename": "quote.xlsx"}],
+            )
+            out = await channel.receive_file(msg, "thread-1", user_id="default")
+
+            assert out.files == []
+            assert (uploads / "quote.xlsx").read_bytes() == b"XLSXDATA"
+            assert f"{VIRTUAL_PATH_PREFIX}/uploads/quote.xlsx" in out.text
+            assert out.text.endswith("please translate")
+            channel._download_by_code.assert_awaited_once_with("dc1")
+
+        _run(go())
+
+    def test_pure_file_message_text_is_only_the_path(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"IMG")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "image", "download_code": "dc_i", "filename": "image.png"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/image.png"
+
+        _run(go())
+
+    def test_download_failure_skips_file(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=None)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="hi",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc1", "filename": "x.pdf"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert out.files == []
+            assert out.text == "hi"
+
+        _run(go())
+
+    def test_traversal_filename_is_sanitized(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"D")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc", "filename": "../../etc/passwd"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            written = list(uploads.iterdir())
+            assert len(written) == 1
+            assert written[0].name == "passwd"
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/passwd"
+
+        _run(go())
+
+    def test_non_local_sandbox_is_synced(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"BYTES")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            fake_sandbox = MagicMock()
+            _patch_uploads(monkeypatch, uploads, sandbox_id="aio:box1", sandbox=fake_sandbox)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc", "filename": "a.pdf"}],
+            )
+            await channel.receive_file(msg, "t1", user_id="default")
+
+            fake_sandbox.update_file.assert_called_once_with(f"{VIRTUAL_PATH_PREFIX}/uploads/a.pdf", b"BYTES")
+
+        _run(go())
+
+
+class TestDownloadByCode:
+    def test_two_step_download(self):
+        async def go():
+            from unittest.mock import patch
+
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._client_id = "robot_x"
+            channel._get_access_token = AsyncMock(return_value="tok")
+
+            class PostResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"downloadUrl": "https://dl.dingtalk/xyz"}
+
+            class GetResponse:
+                content = b"FILEBYTES"
+
+                def raise_for_status(self):
+                    pass
+
+            captured: dict = {}
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    captured["post_url"] = url
+                    captured["json"] = kwargs.get("json")
+                    return PostResponse()
+
+                async def get(self, url, **kwargs):
+                    captured["get_url"] = url
+                    return GetResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                data = await channel._download_by_code("dl_code")
+
+            assert data == b"FILEBYTES"
+            assert captured["post_url"].endswith("/v1.0/robot/messageFiles/download")
+            assert captured["json"] == {"downloadCode": "dl_code", "robotCode": "robot_x"}
+            assert captured["get_url"] == "https://dl.dingtalk/xyz"
+
+        _run(go())
+
+    def test_post_non_200_returns_none(self):
+        async def go():
+            from unittest.mock import patch
+
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._client_id = "robot_x"
+            channel._get_access_token = AsyncMock(return_value="tok")
+
+            class PostResponse:
+                status_code = 403
+                text = "forbidden"
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return PostResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                assert await channel._download_by_code("dl") is None
+
+        _run(go())
+
+    def test_missing_download_url_returns_none(self):
+        async def go():
+            from unittest.mock import patch
+
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._client_id = "robot_x"
+            channel._get_access_token = AsyncMock(return_value="tok")
+
+            class PostResponse:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {}
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *a):
+                    pass
+
+                async def post(self, url, **kwargs):
+                    return PostResponse()
+
+            with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
+                assert await channel._download_by_code("dl") is None
+
+        _run(go())
+
+
+class TestHandlerStashesRawData:
+    def test_process_stashes_raw_callback_payload(self):
+        pytest.importorskip("dingtalk_stream")
+
+        async def go():
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={})
+            captured: dict = {}
+            channel._on_chatbot_message = lambda m: captured.update(msg=m)
+            handler = _DingTalkMessageHandler(channel)
+            cb = MagicMock()
+            cb.data = {
+                "msgtype": "file",
+                "content": {"downloadCode": "dc_doc", "fileName": "a.xlsx"},
+                "senderStaffId": "u1",
+                "conversationType": "1",
+                "msgId": "m1",
+            }
+            await handler.process(cb)
+
+            msg = captured["msg"]
+            assert getattr(msg, "_df_raw_data", None) == cb.data
+            # _extract_files can now read the document descriptor from the stash.
+            assert DingTalkChannel._extract_files(msg) == [{"type": "file", "download_code": "dc_doc", "filename": "a.xlsx"}]
 
         _run(go())
