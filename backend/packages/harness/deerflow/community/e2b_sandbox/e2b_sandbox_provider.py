@@ -1,8 +1,7 @@
 """``E2BSandboxProvider`` — DeerFlow :class:`SandboxProvider` for e2b cloud.
 
-Configuration is read from :class:`SandboxConfig` (which has
-``extra="allow"``), so any keys below can appear under ``sandbox:`` in
-``config.yaml`` even though they are not declared on the model:
+Configuration is read from :class:`SandboxConfig`. E2B reports unknown
+provider fields during startup.
 
 .. code-block:: yaml
 
@@ -38,7 +37,9 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,7 @@ META_KEY_USER = "deer_flow_user"
 META_KEY_THREAD = "deer_flow_thread"
 META_KEY_PROVIDER = "deer_flow_provider"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
+E2B_EXTRA_CONFIG_KEYS = frozenset({"api_key", "domain", "home_dir", "template"})
 
 
 class E2BSandboxProvider(SandboxProvider):
@@ -105,6 +107,9 @@ class E2BSandboxProvider(SandboxProvider):
         # Remote IDs that are between tracked lifecycle states. Shutdown uses
         # this set to retain cleanup visibility during remote calls.
         self._remote_ops_in_progress: set[str] = set()
+        # Discovery can find a VM that another Gateway still uses.
+        # Shutdown closes these clients but does not destroy their VMs.
+        self._unowned_remote_ops_in_progress: set[str] = set()
         # In-flight creates that have reserved capacity but not yet committed
         # to ``_sandboxes``.  Guarded by ``_lock``.
         self._reserved_slots = 0
@@ -113,6 +118,11 @@ class E2BSandboxProvider(SandboxProvider):
         self._shutdown_called = False
 
         self._config = self._load_config()
+        acquire_workers = max(4, min(32, self._capacity_limit() + 1))
+        self._acquire_executor = ThreadPoolExecutor(
+            max_workers=acquire_workers,
+            thread_name_prefix="e2b-sandbox-acquire",
+        )
 
         atexit.register(self.shutdown)
         self._register_signal_handlers()
@@ -120,6 +130,12 @@ class E2BSandboxProvider(SandboxProvider):
     def _load_config(self) -> dict[str, Any]:
         """Read e2b options off ``SandboxConfig`` (``extra="allow"``)."""
         sandbox_config = get_app_config().sandbox
+        unknown_keys = sorted(set(getattr(sandbox_config, "model_extra", None) or {}) - E2B_EXTRA_CONFIG_KEYS)
+        if unknown_keys:
+            logger.warning(
+                "E2BSandboxProvider: unknown sandbox config fields: %s",
+                ", ".join(unknown_keys),
+            )
 
         def _opt(name: str, default: Any = None) -> Any:
             return getattr(sandbox_config, name, default)
@@ -249,7 +265,9 @@ class E2BSandboxProvider(SandboxProvider):
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
-        return await asyncio.to_thread(self.acquire, thread_id, user_id=effective_user_id)
+        loop = asyncio.get_running_loop()
+        acquire = partial(self.acquire, thread_id, user_id=effective_user_id)
+        return await loop.run_in_executor(self._acquire_executor, acquire)
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
         if thread_id:
@@ -490,12 +508,23 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         try:
-            self._reserve_capacity(thread_id, user_id, remote_id=target_id)
-        except SandboxCapacityExceededError:
-            logger.info(
-                "Discovered e2b sandbox %s, but capacity is full; not adopting it",
-                target_id,
+            self._reserve_capacity(
+                thread_id,
+                user_id,
+                remote_id=target_id,
+                remote_owned=False,
             )
+        except SandboxCapacityExceededError as error:
+            if error.reason == "shutdown":
+                logger.info(
+                    "Discovered e2b sandbox %s while the provider is shutting down; not adopting it",
+                    target_id,
+                )
+            else:
+                logger.info(
+                    "Discovered e2b sandbox %s, but capacity is full; not adopting it",
+                    target_id,
+                )
             self._safe_close_client(client)
             raise
 
@@ -510,11 +539,10 @@ class E2BSandboxProvider(SandboxProvider):
             if self._shutdown_called:
                 discard_after_shutdown = True
             else:
-                self._remote_ops_in_progress.discard(target_id)
+                self._unowned_remote_ops_in_progress.discard(target_id)
                 self._register_connected_sandbox(target_id, client, thread_id=thread_id, user_id=user_id)
                 self._commit_capacity()
         if discard_after_shutdown:
-            self._kill_client(client)
             self._safe_close_client(client)
             return None
         logger.info(
@@ -579,7 +607,14 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             self._end_transition_locked()
 
-    def _reserve_capacity(self, thread_id: str | None, user_id: str, *, remote_id: str | None = None) -> None:
+    def _reserve_capacity(
+        self,
+        thread_id: str | None,
+        user_id: str,
+        *,
+        remote_id: str | None = None,
+        remote_owned: bool = True,
+    ) -> None:
         """Acquire a capacity slot, blocking or raising as configured.
 
         Must be called before ``Sandbox.create()``.  The caller MUST call
@@ -602,6 +637,7 @@ class E2BSandboxProvider(SandboxProvider):
                         "Sandbox provider is shutting down; cannot acquire capacity",
                         replicas=int(self._config["replicas"]),
                         retry_after_seconds=30.0,
+                        reason="shutdown",
                     )
 
             # 1. Try immediate atomic reservation.
@@ -611,12 +647,14 @@ class E2BSandboxProvider(SandboxProvider):
                         "Sandbox provider is shutting down; cannot acquire capacity",
                         replicas=int(self._config["replicas"]),
                         retry_after_seconds=30.0,
+                        reason="shutdown",
                     )
                 cap = self._capacity_limit()
                 if self._total_capacity_used_locked() < cap:
                     self._reserved_slots += 1
                     if remote_id is not None:
-                        self._remote_ops_in_progress.add(remote_id)
+                        remote_ops = self._remote_ops_in_progress if remote_owned else self._unowned_remote_ops_in_progress
+                        remote_ops.add(remote_id)
                     return
 
             # 2. Try evicting a warm entry to free a slot.
@@ -628,11 +666,13 @@ class E2BSandboxProvider(SandboxProvider):
                             "Sandbox provider shut down while acquiring capacity",
                             replicas=int(self._config["replicas"]),
                             retry_after_seconds=30.0,
+                            reason="shutdown",
                         )
                     if self._total_capacity_used_locked() < cap:
                         self._reserved_slots += 1
                         if remote_id is not None:
-                            self._remote_ops_in_progress.add(remote_id)
+                            remote_ops = self._remote_ops_in_progress if remote_owned else self._unowned_remote_ops_in_progress
+                            remote_ops.add(remote_id)
                         return
                     # Slot was stolen; fall through to policy / wait.
 
@@ -643,6 +683,7 @@ class E2BSandboxProvider(SandboxProvider):
                         "Sandbox provider is shutting down; cannot acquire capacity",
                         replicas=int(self._config["replicas"]),
                         retry_after_seconds=30.0,
+                        reason="shutdown",
                     )
                 used = self._total_capacity_used_locked()
                 cap = self._capacity_limit()
@@ -709,9 +750,12 @@ class E2BSandboxProvider(SandboxProvider):
     def _complete_reserved_remote_op(self, sandbox_id: str, *, remote_destroyed: bool) -> None:
         """Finish a remote operation that owns a reserved slot."""
         with self._lock:
-            if sandbox_id not in self._remote_ops_in_progress:
+            tracked = sandbox_id in self._remote_ops_in_progress
+            tracked_unowned = sandbox_id in self._unowned_remote_ops_in_progress
+            if not tracked and not tracked_unowned:
                 return
             self._remote_ops_in_progress.discard(sandbox_id)
+            self._unowned_remote_ops_in_progress.discard(sandbox_id)
             if self._shutdown_called:
                 return
             if self._reserved_slots > 0:
@@ -773,6 +817,7 @@ class E2BSandboxProvider(SandboxProvider):
                 f"Sandbox provider shut down during sandbox creation; killed remote sandbox {sandbox_id}",
                 replicas=int(self._config["replicas"]),
                 retry_after_seconds=30.0,
+                reason="shutdown",
             )
 
         # Materialise DeerFlow's virtual path layout (/mnt/user-data/...) inside
@@ -815,6 +860,7 @@ class E2BSandboxProvider(SandboxProvider):
                 f"Sandbox provider shut down during sandbox creation; killed remote sandbox {sandbox_id}",
                 replicas=int(self._config["replicas"]),
                 retry_after_seconds=30.0,
+                reason="shutdown",
             )
 
         replicas = self._config["replicas"]
@@ -1560,26 +1606,19 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> Exception | None:
         """Kill a remote VM and return an exception for the caller to log."""
         if client is None:
-            return None
+            return RuntimeError("Cannot confirm remote VM destruction without a client")
         try:
             kill = getattr(client, "kill", None)
-            if callable(kill):
-                kill()
+            if not callable(kill):
+                return RuntimeError("Cannot confirm remote VM destruction without a callable kill method")
+            kill()
         except Exception as e:
             return e
         return None
 
     def reset(self) -> None:
-        with self._lock:
-            self._sandboxes.clear()
-            self._thread_sandboxes.clear()
-            self._thread_locks.clear()
-            self._warm_pool.clear()
-            self._eviction_tombstones.clear()
-            self._evictions_in_progress.clear()
-            self._remote_ops_in_progress.clear()
-            self._reserved_slots = 0
-            self._transitioning_slots = 0
+        """Stop this provider before the singleton releases it."""
+        self.shutdown()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -1593,10 +1632,16 @@ class E2BSandboxProvider(SandboxProvider):
             self._eviction_tombstones.clear()
             self._evictions_in_progress.clear()
             self._remote_ops_in_progress.clear()
+            self._unowned_remote_ops_in_progress.clear()
             self._thread_sandboxes.clear()
+            self._thread_locks.clear()
             self._reserved_slots = 0
             self._transitioning_slots = 0
             self._capacity_cond.notify_all()
+
+        executor = getattr(self, "_acquire_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         logger.info(
             "Shutting down E2BSandboxProvider: %d active + %d warm sandboxes",
