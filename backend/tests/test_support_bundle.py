@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import zipfile
 
 import pytest
@@ -12,6 +13,27 @@ import support_bundle
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_version_command(name, args, cwd):
+        calls.append((name, args, cwd))
+        return {"name": name, "ok": True, "stdout": "version", "stderr": ""}
+
+    monkeypatch.setattr(support_bundle, "_version_command", fake_version_command)
+
+    support_bundle.collect_environment(tmp_path)
+
+    pnpm_calls = [call for call in calls if call[0] == "pnpm"]
+    assert pnpm_calls == [
+        (
+            "pnpm",
+            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--version"],
+            tmp_path / "frontend",
+        )
+    ]
 
 
 def test_redact_data_recursively_masks_secret_like_keys():
