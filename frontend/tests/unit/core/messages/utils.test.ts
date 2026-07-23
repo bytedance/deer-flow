@@ -14,6 +14,8 @@ import {
   hasContent,
   hasReasoning,
   isAssistantMessageGroupStreaming,
+  parseUploadedFiles,
+  stripInternalMarkers,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
@@ -305,6 +307,47 @@ describe("human message internal context stripping", () => {
     } as Message;
 
     expect(getMessageCopyData(message)).toBe("Summarize this paper");
+  });
+
+  test("strips current_uploads context from copy data", () => {
+    // Mirrors the block UploadsMiddleware emits since #4174, including the
+    // trailing usage-guidance lines.
+    const message = {
+      id: "human-with-current-uploads",
+      type: "human",
+      content:
+        "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n\nTo work with these files:\n- Use `grep` to search for keywords\n  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).\n</current_uploads>\n\nMake a slide deck from this",
+    } as Message;
+
+    expect(getMessageCopyData(message)).toBe("Make a slide deck from this");
+  });
+
+  test("parses uploaded files from a current_uploads block", () => {
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n  Document outline (use `read_file` with line ranges to read sections):\n    L1: Introduction\n- data.xlsx (12.0 KB)\n  Path: /mnt/user-data/uploads/data.xlsx\n</current_uploads>\n\nSummarize";
+
+    // size is bytes (FileInMessage contract): the block's "177.6 KB" /
+    // "12.0 KB" are converted back from the human-readable form the backend
+    // emits, so formatBytes re-renders them at the original magnitude.
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "paper.docx",
+        size: Math.round(177.6 * 1024), // 181862
+        path: "/mnt/user-data/uploads/paper.docx",
+      },
+      {
+        filename: "data.xlsx",
+        size: 12 * 1024, // 12288
+        path: "/mnt/user-data/uploads/data.xlsx",
+      },
+    ]);
+  });
+
+  test("stripInternalMarkers removes current_uploads blocks on export", () => {
+    const content =
+      "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
   });
 
   test("strips slash skill activation context from display content", () => {
