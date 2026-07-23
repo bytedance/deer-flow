@@ -765,7 +765,21 @@ This is how DeerFlow handles tasks that take minutes to hours: a research task m
 
 ### Sandbox & File System
 
-When you use `E2BSandboxProvider`, `sandbox.burst_limit` applies only with `sandbox.overflow_policy: burst`. The `wait` and `reject` policies use only `sandbox.replicas`. `sandbox.replicas` limits one Gateway process. It does not limit all Gateway processes. An E2B VM keeps its capacity slot until E2B confirms its destruction. This rule covers create, reclaim, and discovery.
+`E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
+`acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
+automatically. Clients can use the structured error to schedule a retry.
+
+Use `burst` with `burst_limit` to permit bounded extra VMs. The `wait` and
+`reject` policies use only `replicas`. The `reject` policy can remove one warm
+VM before it returns an error.
+
+`replicas` limits one Gateway process. It does not limit all Gateway processes.
+E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
+default asyncio executor.
+
+An E2B VM keeps its slot until E2B confirms destruction. This rule covers
+create and reclaim operations. Discovery can find a VM from another Gateway.
+Shutdown closes an unowned discovery client without destroying its VM.
 
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
