@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import os
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config.paths import Paths
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -183,6 +187,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
     provider._remote_ops_in_progress = set()
+    provider._unowned_remote_ops_in_progress = set()
     provider._reserved_slots = 0
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
@@ -639,11 +644,58 @@ def test_kill_client_returns_exception_without_raising():
     assert p._kill_client(client) is error
 
 
-def test_kill_client_ignores_missing_or_uncallable_clients():
+def test_kill_client_reports_uncertain_cleanup_without_callable_kill():
     p = _make_provider()
 
-    assert p._kill_client(None) is None
-    assert p._kill_client(SimpleNamespace()) is None
+    assert isinstance(p._kill_client(None), RuntimeError)
+    assert isinstance(p._kill_client(SimpleNamespace()), RuntimeError)
+
+
+def test_sandbox_config_validates_e2b_capacity_fields():
+    config = SandboxConfig(
+        use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        overflow_policy="burst",
+        acquire_timeout=12,
+        burst_limit=2,
+    )
+
+    assert config.overflow_policy == "burst"
+    assert config.acquire_timeout == 12
+    assert config.burst_limit == 2
+
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+            overflow_policy="invalid",
+        )
+
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+            acquire_timeout=0,
+        )
+
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+            burst_limit=-1,
+        )
+
+
+def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    config = SandboxConfig(
+        use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        api_key="test-key",
+        overflo_policy="reject",
+    )
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+
+    with caplog.at_level("WARNING"):
+        provider._load_config()
+
+    assert "overflo_policy" in caplog.text
 
 
 def test_evict_oldest_warm_keeps_slot_when_kill_lookup_raises(monkeypatch):
@@ -1531,6 +1583,7 @@ def test_capacity_reject_policy_raises_when_full(monkeypatch):
     assert exc_info.value.replicas == 1
     assert exc_info.value.retry_after_seconds > 0
     assert exc_info.value.details["code"] == "SANDBOX_CAPACITY_EXCEEDED"
+    assert exc_info.value.details["retryable"] is True
     assert len(fake_cls.create_calls) == 1  # no second create
 
 
@@ -1547,18 +1600,20 @@ def test_capacity_reject_frees_slot_on_release(monkeypatch):
     assert sid2 != sid1
 
 
-def test_capacity_reject_evicts_warm_before_raising(monkeypatch):
-    """When at capacity, the provider evicts a warm entry before rejecting."""
+def test_capacity_reject_evicts_other_thread_warm_entry_before_create(monkeypatch):
+    """Reject policy can evict one warm VM before it rejects new capacity."""
     p = _make_provider(replicas=1, overflow_policy="reject")
-    _install_fake_sdk(monkeypatch, p)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
 
     sid1 = p.acquire("t1", user_id="u1")
     p.release(sid1)
     assert len(p._warm_pool) == 1
 
-    sid2 = p.acquire("t1", user_id="u1")
-    assert sid2 == sid1
+    sid2 = p.acquire("t2", user_id="u2")
+
+    assert sid2 != sid1
     assert len(p._warm_pool) == 0
+    assert len(fake_cls.create_calls) == 2
 
 
 def test_capacity_wait_policy_times_out(monkeypatch):
@@ -2008,13 +2063,42 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
 
 
 def test_capacity_reset_clears_reserved_slots(monkeypatch):
-    """reset() must clear _reserved_slots."""
+    """reset() ends the provider and clears reserved slots."""
     p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=30)
     _install_fake_sdk(monkeypatch, p)
 
     p._reserved_slots = 3
     p.reset()
     assert p._reserved_slots == 0
+    assert p._shutdown_called
+
+
+def test_capacity_reset_wakes_waiter_with_shutdown_error(monkeypatch):
+    p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=30)
+    _install_fake_sdk(monkeypatch, p)
+    p.acquire("t1", user_id="u1")
+    result: list[Exception] = []
+    started = threading.Event()
+
+    def wait_for_capacity():
+        started.set()
+        try:
+            p.acquire("t2", user_id="u2")
+        except Exception as error:
+            result.append(error)
+
+    waiter = threading.Thread(target=wait_for_capacity)
+    waiter.start()
+    assert started.wait(timeout=1)
+    time.sleep(0.1)
+
+    p.reset()
+    waiter.join(timeout=0.5)
+
+    assert not waiter.is_alive()
+    assert len(result) == 1
+    assert isinstance(result[0], SandboxCapacityExceededError)
+    assert result[0].reason == "shutdown"
 
 
 def test_capacity_default_config_values():
@@ -2023,6 +2107,36 @@ def test_capacity_default_config_values():
     assert p._config["overflow_policy"] == "wait"
     assert p._config["acquire_timeout"] == 30
     assert p._config["burst_limit"] == 0
+
+
+@pytest.mark.anyio
+async def test_e2b_acquire_async_uses_dedicated_executor(monkeypatch):
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    p._acquire_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="e2b-sandbox-acquire",
+    )
+    thread_names: list[str] = []
+
+    def create_client(**_kwargs):
+        thread_names.append(threading.current_thread().name)
+        return FakeClient(sandbox_id="async-e2b")
+
+    async def fail_to_thread(*_args, **_kwargs):
+        raise AssertionError("E2B acquire must not use the default asyncio executor")
+
+    fake_cls.create_factory = create_client
+    monkeypatch.setattr(asyncio, "to_thread", fail_to_thread)
+
+    try:
+        sandbox_id = await p.acquire_async("t1", user_id="u1")
+    finally:
+        p.shutdown()
+        p._acquire_executor.shutdown(wait=True, cancel_futures=True)
+
+    assert sandbox_id == "async-e2b"
+    assert thread_names == ["e2b-sandbox-acquire_0"]
 
 
 # ── Race-condition regression tests ──────────────────────────────────────
@@ -2426,6 +2540,33 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
     assert discovered_client.closed
 
 
+def test_discovery_reports_shutdown_without_killing_remote_vm(monkeypatch, caplog):
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-remote")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    fake_cls.list_return = [
+        SimpleNamespace(
+            sandbox_id=client.sandbox_id,
+            metadata={
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_user": "u1",
+                "deer_flow_thread": "t1",
+            },
+        )
+    ]
+    p._shutdown_called = True
+
+    with caplog.at_level("INFO"), pytest.raises(SandboxCapacityExceededError) as error:
+        p._discover_remote_sandbox("t1", user_id="u1")
+
+    assert error.value.reason == "shutdown"
+    assert "shutting down" in caplog.text
+    assert "capacity is full" not in caplog.text
+    assert not client.killed
+    assert client.closed
+
+
 def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
     """Discovery keeps capacity when bootstrap cleanup cannot destroy the VM."""
     p = _make_provider(replicas=1, overflow_policy="reject")
@@ -2460,8 +2601,8 @@ def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
     assert p._remote_ops_in_progress == set()
 
 
-def test_shutdown_during_discovery_bootstrap_kill_failure_tracks_vm(monkeypatch):
-    """Shutdown must see a discovered VM while bootstrap is in progress."""
+def test_shutdown_does_not_retry_kill_for_unowned_discovery_vm(monkeypatch):
+    """Shutdown does not claim an unowned discovery VM after cleanup fails."""
     p = _make_provider(replicas=1, overflow_policy="reject")
     fake_cls = _install_fake_sdk(monkeypatch, p)
     client = FakeClient(sandbox_id="discovery-bootstrap-race")
@@ -2506,13 +2647,15 @@ def test_shutdown_during_discovery_bootstrap_kill_failure_tracks_vm(monkeypatch)
     discovery.join(timeout=5)
 
     assert result == [None]
-    assert shutdown_client.killed
+    assert not shutdown_client.killed
+    assert connect_calls == 1
     assert p._eviction_tombstones == set()
     assert p._remote_ops_in_progress == set()
+    assert p._unowned_remote_ops_in_progress == set()
 
 
-def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
-    """Discovery must discard a reserved VM when shutdown starts before commit."""
+def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
+    """Shutdown closes discovery clients without killing unowned remote VMs."""
     p = _make_provider(replicas=1, overflow_policy="reject")
     fake_cls = _install_fake_sdk(monkeypatch, p)
     client = FakeClient(sandbox_id="sb-discovery-shutdown")
@@ -2532,8 +2675,13 @@ def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
     allow_commit = threading.Event()
     reserve_capacity = p._reserve_capacity
 
-    def pause_after_reserve(thread_id, user_id, *, remote_id=None):
-        reserve_capacity(thread_id, user_id, remote_id=remote_id)
+    def pause_after_reserve(thread_id, user_id, *, remote_id=None, remote_owned=True):
+        reserve_capacity(
+            thread_id,
+            user_id,
+            remote_id=remote_id,
+            remote_owned=remote_owned,
+        )
         reserved.set()
         assert allow_commit.wait(timeout=2)
 
@@ -2550,7 +2698,7 @@ def test_shutdown_during_discovery_does_not_register_or_leak_vm(monkeypatch):
     thread.join(timeout=5)
 
     assert result == [None]
-    assert client.killed
+    assert not client.killed
     assert client.closed
     assert p._sandboxes == {}
     assert p._reserved_slots == 0
