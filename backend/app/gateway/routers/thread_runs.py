@@ -23,9 +23,19 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.checkpoint_lineage import (
+    CheckpointLineageError,
+    CheckpointParentMissingError,
+    checkpoint_configurable,
+    checkpoint_messages,
+    find_checkpoint_before_message,
+    find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
+)
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -37,12 +47,12 @@ REGENERATE_HISTORY_SCAN_LIMIT = 200
 # (one per successful run in steady state) consume roughly half of history.
 REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
+_MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
+_UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
-    metadata = getattr(checkpoint_tuple, "metadata", None)
-    writes = metadata.get("writes") if isinstance(metadata, dict) else None
-    return isinstance(writes, dict) and "runtime_run_duration" in writes
+    return is_duration_only_checkpoint(checkpoint_tuple)
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -294,15 +304,11 @@ def _is_middleware_message_row(row: dict[str, Any]) -> bool:
 
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages", []) if isinstance(values, dict) else []
-    return messages if isinstance(messages, list) else []
+    return checkpoint_messages(snapshot)
 
 
 def _checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
-    config = getattr(checkpoint_tuple, "config", None) or {}
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    return dict(configurable) if isinstance(configurable, dict) else {}
+    return checkpoint_configurable(checkpoint_tuple)
 
 
 def _checkpoint_response(checkpoint_tuple: Any) -> dict[str, Any]:
@@ -356,7 +362,13 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
     return last_ai_message == target_text[: len(last_ai_message)]
 
 
-async def _find_target_run_id(thread_id: str, message_id: str, target_message: Any, request: Request) -> str:
+async def _find_target_run_id(
+    thread_id: str,
+    message_id: str,
+    target_message: Any,
+    source_human: Any,
+    request: Request,
+) -> str:
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
     for row in reversed(rows):
@@ -366,6 +378,11 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
             run_id = row.get("run_id")
             if isinstance(run_id, str) and run_id:
                 return run_id
+
+    source_run_id = _message_additional_kwargs(source_human).get("run_id")
+    if isinstance(source_run_id, str) and source_run_id:
+        return source_run_id
+
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
@@ -385,8 +402,37 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
 
 
-async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
+async def _find_base_checkpoint_before_human(
+    thread_id: str,
+    human_message_id: str,
+    request: Request,
+    *,
+    head_checkpoint: Any | None = None,
+) -> Any:
     accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    if head_checkpoint is not None:
+        try:
+            return await find_checkpoint_before_message(
+                accessor,
+                head_checkpoint,
+                human_message_id,
+                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
+            )
+        except CheckpointParentMissingError:
+            # Old checkpoints and imported histories may not have parent links.
+            # Preserve the bounded chronological fallback for those records.
+            logger.debug(
+                "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
+                sanitize_log_param(thread_id),
+                exc_info=True,
+            )
+        except CheckpointLineageError as exc:
+            logger.warning(
+                "Rejected unsafe checkpoint lineage for regenerate thread %s",
+                sanitize_log_param(thread_id),
+                exc_info=True,
+            )
+            raise HTTPException(status_code=409, detail=_UNSAFE_REGENERATE_LINEAGE_DETAIL) from exc
     try:
         raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
         checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
@@ -394,19 +440,14 @@ async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: s
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint = None
-    for checkpoint_tuple in reversed(checkpoints):
-        messages = _checkpoint_messages(checkpoint_tuple)
-        message_ids = {_message_id(message) for message in messages}
-        if human_message_id in message_ids:
-            if previous_checkpoint is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Could not find an addressable checkpoint before the target user message",
-                )
-            return previous_checkpoint
-        if _checkpoint_configurable(checkpoint_tuple).get("checkpoint_id"):
-            previous_checkpoint = checkpoint_tuple
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id)
+    if target_found:
+        if previous_checkpoint is None:
+            raise HTTPException(
+                status_code=409,
+                detail=_MISSING_REGENERATE_BASE_DETAIL,
+            )
+        return previous_checkpoint
 
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
@@ -451,8 +492,19 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
 
-    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, previous_human_id, request)
-    target_run_id = await _find_target_run_id(thread_id, message_id, target_message, request)
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(
+        thread_id,
+        previous_human_id,
+        request,
+        head_checkpoint=latest_checkpoint,
+    )
+    target_run_id = await _find_target_run_id(
+        thread_id,
+        message_id,
+        target_message,
+        previous_human,
+        request,
+    )
     checkpoint = _checkpoint_response(base_checkpoint_tuple)
     metadata = {
         "regenerate_from_message_id": message_id,
