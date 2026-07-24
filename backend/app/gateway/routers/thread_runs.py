@@ -289,10 +289,6 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
-def _is_middleware_message_row(row: dict[str, Any]) -> bool:
-    return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
-
-
 def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
     caller = str((row.get("metadata") or {}).get("caller", ""))
     return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
