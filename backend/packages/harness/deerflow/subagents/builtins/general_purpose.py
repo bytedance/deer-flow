@@ -11,8 +11,9 @@ Use this subagent when:
 - It owns one independent, non-overlapping part of genuinely parallel work
 - A bounded, context-heavy investigation should be isolated from the lead context
 
-Do NOT use merely because work is complex or multi-step, for sequential dependencies,
-or when it would duplicate repository discovery or overlap side effects.""",
+Do NOT use merely because work is complex or multi-step, or merely because it is sequential;
+a bounded dependent chain may still be delegated when specialist or context-isolation benefit
+clearly wins. Do not use when it would duplicate repository discovery or overlap side effects.""",
     system_prompt="""You are a general-purpose subagent working on a delegated task. Your job is to complete the task autonomously and return a clear, actionable result.
 
 <guidelines>

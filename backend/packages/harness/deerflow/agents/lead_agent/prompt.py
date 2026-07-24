@@ -400,9 +400,9 @@ A bounded sequential chain may still be delegated to one subagent when specialis
 
 A single subagent is justified only by material specialist or context-isolation benefit. Parallelism requires independent scopes with no output dependency. **Use the fewest subagents needed** to realize the benefit.
 
-**Hard limits:**
-- **MAXIMUM {n} `task` CALLS PER RESPONSE.** Excess calls are discarded.
-- **MAXIMUM {total} `task` CALLS PER RUN.** Count only delegations for the current user request/run; older thread history does not consume this run's allowance.
+**HARD LIMITS - NON-NEGOTIABLE:**
+- **MAXIMUM {n} `task` CALLS PER RESPONSE - NEVER emit more. VIOLATION IS A HARD ERROR.** Excess calls are discarded and their work is lost.
+- **MAXIMUM {total} `task` CALLS PER RUN - NEVER exceed it. VIOLATION IS A HARD ERROR.** Count only delegations for the current user request/run; older thread history does not consume this run's allowance.
 - Never start a batch that would exceed either limit. When a limit is reached, synthesize existing results or continue directly.
 - **Re-evaluate the remaining work after every batch.** Later batches cannot overlap earlier batches, but can still deliver material within-batch parallel savings. Recompute benefit and cost instead of automatically continuing or stopping.
 
@@ -422,6 +422,12 @@ A single subagent is justified only by material specialist or context-isolation 
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit.
+
+**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
+- **Batch 1: launch up to {n} independent scopes.**
+- Wait for the batch, then re-evaluate the remaining work and net benefit.
+- **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
+- **Synthesize all retained results** at the end.
 
 Otherwise execute directly using available tools ({direct_tool_examples}):
 
@@ -961,9 +967,9 @@ def apply_prompt_template(
 
     # Add subagent reminder to critical_reminders if enabled
     subagent_reminder = (
-        "- **Benefit-Based Delegation**: Default to direct execution. Use `task` only when expected benefit from real parallelism, "
+        "- **Benefit-Based Delegation**: Default to direct execution. Use `task` only when expected benefit from real parallel latency, "
         "specialist capability, or context isolation clearly exceeds delegation, duplicate-discovery, synthesis, conflict, and side-effect costs. "
-        f"Use the fewest subagents needed. HARD LIMITS: max {n} `task` calls per response, max {total} per run.\n"
+        f"Use the fewest subagents needed. HARD LIMITS ARE NON-NEGOTIABLE: max {n} `task` calls per response, max {total} per run; excess calls are discarded and their work is lost.\n"
         if subagent_enabled
         else ""
     )

@@ -36,7 +36,6 @@ def test_hard_vetoes_apply_to_parallel_dispatch_not_single_agent_chains(monkeypa
     assert "Delegation costs and negative signals" in section
     assert "Duplicate discovery" in section
     assert "Cheap direct path" in section
-    assert "Hard vetoes - execute directly instead" not in section
 
 
 def test_later_batches_retain_within_batch_parallel_benefit(monkeypatch) -> None:
@@ -45,8 +44,26 @@ def test_later_batches_retain_within_batch_parallel_benefit(monkeypatch) -> None
     assert "Re-evaluate the remaining work after every batch" in section
     assert "Later batches cannot overlap earlier batches" in section
     assert "material within-batch parallel savings" in section
-    assert "sequential batches lose parallel-latency benefit" not in section
     assert "Use the fewest subagents needed" in section
+
+
+def test_hard_limit_warning_is_emphatic_and_explains_lost_work(monkeypatch) -> None:
+    section = _build_section(monkeypatch)
+
+    assert "HARD LIMITS - NON-NEGOTIABLE" in section
+    assert "MAXIMUM 3 `task` CALLS PER RESPONSE - NEVER emit more" in section
+    assert "VIOLATION IS A HARD ERROR" in section
+    assert "Excess calls are discarded and their work is lost" in section
+
+
+def test_multi_batch_example_preserves_reassessment_and_synthesis(monkeypatch) -> None:
+    section = _build_section(monkeypatch)
+
+    assert "Multi-batch example (limit 3)" in section
+    assert "Batch 1: launch up to 3 independent scopes" in section
+    assert "Wait for the batch, then re-evaluate" in section
+    assert "Batch 2" in section
+    assert "Synthesize all retained results" in section
 
 
 def test_general_purpose_and_task_descriptions_match_routing_policy() -> None:
@@ -55,11 +72,10 @@ def test_general_purpose_and_task_descriptions_match_routing_policy() -> None:
 
     assert "expected benefit" in tool_description
     assert "independent" in tool_description
-    assert "multiple dependent steps" not in tool_description
     assert "Splitting dependent steps across parallel subagents" in tool_description
-    assert "Sequential work whose later steps depend on earlier results" not in tool_description
     assert "clear delegation benefit" in role_description
-    assert "Multiple dependent steps" not in role_description
+    assert "merely because it is sequential" in role_description
+    assert "bounded dependent chain may still be delegated" in role_description
 
 
 def test_bash_descriptions_require_benefit_beyond_routine_commands(monkeypatch) -> None:
@@ -69,6 +85,4 @@ def test_bash_descriptions_require_benefit_beyond_routine_commands(monkeypatch) 
     assert policy in section
     assert policy in task_tool.description
     assert policy in BASH_AGENT_CONFIG.description
-    assert "Command output is verbose and would clutter main context" not in BASH_AGENT_CONFIG.description
-    assert "Build, test, or deployment operations" not in BASH_AGENT_CONFIG.description
     assert "Execute commands one at a time when they depend on each other" in BASH_AGENT_CONFIG.system_prompt
