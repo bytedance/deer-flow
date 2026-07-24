@@ -42,7 +42,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     close_oidc_service = AsyncMock()
@@ -90,7 +90,7 @@ async def _run_lifespan_with_upload_staging_cleanup():
     close_oidc_service = AsyncMock()
     stop_channel_service = AsyncMock()
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     with (
@@ -142,7 +142,7 @@ async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool) 
     close_oidc_service = AsyncMock()
     stop_channel_service = AsyncMock()
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     manager = MagicMock()
@@ -217,7 +217,7 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
     close_oidc_service = AsyncMock()
     stop_channel_service = AsyncMock()
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     manager = MagicMock()

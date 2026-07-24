@@ -116,6 +116,17 @@ class TestValidateSkillFrontmatter:
         assert valid is False
         assert "custom-field" in msg
 
+    def test_non_string_frontmatter_key_reports_cleanly_instead_of_crashing(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: test\n42: bad\ncustom-field: bad\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "custom-field" in msg
+        assert "42" in msg
+        assert name is None
+
     def test_name_must_be_hyphen_case(self, tmp_path):
         skill_dir = _write_skill(
             tmp_path,
