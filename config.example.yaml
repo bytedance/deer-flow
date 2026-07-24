@@ -2124,9 +2124,25 @@ run_ownership:
 # Authorization Configuration
 # ============================================================================
 # Fine-grained resource authorization (RBAC and beyond). Disabled by default;
-# every authenticated user has access to all resources. Schema is present but
-# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# every authenticated user has access to all resources.
 # See RFC: https://github.com/bytedance/deer-flow/issues/4063
+#
+# authorization:
+#   enabled: true
+#   fail_closed: true            # block on provider error / unresolved identity
+#   default_role: user           # applied when user_role is None; built-in RBAC requires this role below
+#   provider:
+#     use: deerflow.authz.rbac:RbacAuthorizationProvider
+#     config:
+#       # A known role with no `tools` policy is unrestricted for tools.
+#       # Define `tools` for every role whose tool access should be constrained.
+#       roles:
+#         admin:
+#           tools: {allow: "*"}
+#         user:
+#           tools: {allow: "*", deny: ["update_agent"]}
+#         guest:
+#           tools: {allow: ["web_search", "read_file"]}
 authorization:
   enabled: false
 
