@@ -14,13 +14,14 @@ Writing a new backend:
   1. Copy this folder to ``backends/<yourname>/``.
   2. ``config.py``: declare your config knobs + ``from_backend_config`` (parse
      ``backend_config``; read ``storage_path`` from it, NOT from deer-flow).
-  3. ``<yourname>_manager.py``: rename the class; ``__init__`` parses
-     ``backend_config`` into your config; implement the 9 ABC methods against
-     your memory system.
-  4. (Optional) implement the DeerMem-internal capability methods at the bottom
-     (``create_fact`` / ``delete_fact`` / ``update_fact`` / ``reload_memory`` /
-     ``warm``) so the host gateway's ``hasattr`` probes find them and the
-     fact-CRUD / reload / warm-up UI works.
+  3. ``<yourname>_manager.py``: rename the class; declare your deps as
+     ``PrivateAttr``; ``model_post_init`` parses ``self.backend_config`` into
+     your config; implement the ABC methods against your memory system.
+  4. (Optional) override the tier-3 hooks at the bottom (``create_fact`` /
+     ``delete_fact`` / ``update_fact`` / ``reload_memory`` / ``warm``) -- they
+     have base defaults (``warm``=True, the rest raise ``NotImplementedError``)
+     so your backend only overrides the ones it supports; callers catch
+     ``NotImplementedError`` for the rest.
   5. ``__init__.py``: set ``MANAGER_CLASS = YourManager`` (relative import).
   6. ``config.yaml``: ``manager_class: <yourname>``.
 
@@ -38,7 +39,9 @@ disabling memory without touching ``enabled``, and as a baseline.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar, Literal
+
+from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` in this backend folder.
 # Change this single line (to the other agent's MemoryManager) to port.
@@ -60,17 +63,35 @@ def _empty_memory() -> dict[str, Any]:
 class NoopMemoryManager(MemoryManager):
     """Backend that stores and recalls nothing.
 
-    ``__init__`` parses ``backend_config`` into a :class:`NoopConfig` purely to
-    demonstrate the pattern -- noop ignores every field. A real backend reads
-    its knobs (storage root, model, ...) from ``self._config``.
+    ``model_post_init`` parses ``backend_config`` into a :class:`NoopConfig`
+    purely to demonstrate the pattern -- noop ignores every field. A real
+    backend reads its knobs (storage root, model, ...) from ``self._config``.
     """
 
-    def __init__(self, backend_config: dict[str, Any] | None = None) -> None:
-        super().__init__(backend_config)
-        # Parse backend_config into a typed config. Noop ignores it; a real
-        # backend uses self._config.* for storage root, model, etc. storage_path
-        # comes from here (host-injected) -- never import a deer-flow path helper.
-        self._config: NoopConfig = NoopConfig.from_backend_config(backend_config)
+    # Parsed config (PrivateAttr: not a validated/serialized field). Noop ignores
+    # every field; a real backend uses self._config.* for storage root, model,
+    # etc. storage_path comes from here (host-injected) -- never import a
+    # deer-flow path helper.
+    _config: Any = PrivateAttr(default=None)
+
+    # noop overrides search() to return [] (its "store/recall nothing" design --
+    # every read returns empty, never raises), so it is search-capable; the flag
+    # is True to match the override (the invariant requires flag == override).
+    supports_search: ClassVar[bool] = True
+
+    def model_post_init(self, __context: Any) -> None:
+        self._config = NoopConfig.from_backend_config(self.backend_config)
+
+    @classmethod
+    def from_config(
+        cls,
+        backend_config: dict[str, Any] | None = None,
+        *,
+        mode: Literal["middleware", "tool"] = "middleware",
+        **host_hooks: Any,
+    ) -> NoopMemoryManager:
+        """Noop has no dependencies to wire; ignore host_hooks."""
+        return cls(backend_config=backend_config, mode=mode)
 
     # ── Write ────────────────────────────────────────────────────────────
     def add(
@@ -124,13 +145,9 @@ class NoopMemoryManager(MemoryManager):
     ) -> dict[str, Any]:
         return _empty_memory()
 
-    def delete_memory(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_name: str | None = None,
-    ) -> None:
-        return None
+    # delete_memory / export_memory inherit the base tier-2 default (raise
+    # NotImplementedError) -- dead contract (zero callers); noop does not
+    # override them.
 
     def clear_memory(
         self,
@@ -149,59 +166,24 @@ class NoopMemoryManager(MemoryManager):
     ) -> dict[str, Any]:
         return _empty_memory()
 
-    def export_memory(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_name: str | None = None,
-    ) -> dict[str, Any]:
-        return _empty_memory()
-
     # ── Lifecycle ───────────────────────────────────────────────────────
     def shutdown_flush(self, timeout: float) -> bool:
         """Nothing is ever queued, so shutdown drain is a clean no-op success."""
         return True
 
-    # ── Optional DeerMem-internal capabilities (NOT on the ABC) ──────────
-    # The host gateway discovers these via ``hasattr(manager, "<name>")`` and
-    # returns 501 when absent. Implement the ones your backend supports so the
-    # frontend's fact-CRUD / reload / warm-up works. Signatures must match what
-    # the gateway calls. Uncomment & adapt for your backend:
+    # ── Tier 3 hooks (inherit base defaults; override if your backend supports) ──
+    # warm / reload_memory / fact CRUD are tier-3 optional hooks ON the base
+    # MemoryManager with defaults: warm=True (nothing to warm), the rest raise
+    # NotImplementedError. Noop does not support fact CRUD / reload, so it
+    # inherits the defaults (callers catch NotImplementedError -> 501 / fallback).
+    # Override the ones your backend supports; signatures must match the base
+    # (see DeerMem for full implementations):
     #
-    # def delete_fact(self, fact_id, *, user_id=None, agent_name=None) -> dict:
-    #     """Delete one memory by id (DELETE /memory/facts/{id})."""
-    #     ...  # your_store.delete(fact_id)
-    #     return self.get_memory(user_id=user_id, agent_name=agent_name)
-    #
-    # def create_fact(self, content: str, category: str = "context",
-    #                 confidence: float = 0.5, *,
-    #                 user_id: str | None = None,
-    #                 agent_name: str | None = None,
-    # ) -> tuple[dict, str | None]:
-    #     """Manually add one memory (POST /memory/facts).
-    #
-    #     Returns ``(memory_data, fact_id)`` -- NOT a bare dict. ``content`` is
-    #     positional (the memory_add tool passes it positionally); ``fact_id``
-    #     is None when a storage cap (e.g. max_facts) evicted the just-added
-    #     fact, so the caller reports "not stored" instead of a dangling id.
-    #     Signatures must match what the gateway/client/tools call (see DeerMem).
-    #     """
-    #     ...  # your_store.add(content); fact_id = your_store.last_id()
-    #     return self.get_memory(user_id=user_id, agent_name=agent_name), fact_id
-    #
-    # def update_fact(self, *, fact_id, content=None, category=None,
-    #                 confidence=None, user_id=None, agent_name=None) -> dict:
-    #     """Update one memory's text by id (PATCH /memory/facts/{id})."""
-    #     ...  # your_store.update(fact_id, content)
-    #     return self.get_memory(user_id=user_id, agent_name=agent_name)
-    #
-    # def reload_memory(self, *, user_id=None, agent_name=None) -> dict:
-    #     """Drop caches & re-read storage (POST /memory/reload).
-    #     If your backend has no cache, just delegate to get_memory(...)."""
-    #     return self.get_memory(user_id=user_id, agent_name=agent_name)
-    #
-    # def warm(self) -> None:
-    #     """Heavy one-time init at gateway startup (e.g. load a tokenizer).
-    #     Probed via hasattr; absent = skipped. Keep it fast (host guards it
-    #     with a timeout)."""
-    #     ...
+    # def create_fact(self, content, category="context", confidence=0.5, *,
+    #                 agent_name=None, user_id=None) -> tuple[dict, str | None]:
+    #     ...  # return (memory_data, fact_id); fact_id=None if a cap evicted it
+    # def delete_fact(self, fact_id, *, agent_name=None, user_id=None) -> dict: ...
+    # def update_fact(self, fact_id, content=None, category=None, confidence=None,
+    #                 *, agent_name=None, user_id=None) -> dict: ...
+    # def reload_memory(self, *, user_id=None, agent_name=None) -> dict: ...
+    # def warm(self) -> bool | None: ...   # default None (nothing to warm); override for heavy one-time init

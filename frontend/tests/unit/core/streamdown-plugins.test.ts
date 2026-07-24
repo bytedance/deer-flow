@@ -4,13 +4,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { artifactMarkdownPlugins } from "@/components/workspace/artifacts/markdown-preview-plugins";
 import { ArtifactLink } from "@/components/workspace/citations/artifact-link";
-import { SafeStreamdown, streamdownPlugins } from "@/core/streamdown";
+import {
+  SafeStreamdown,
+  streamdownPlugins,
+  toStreamdownComponents,
+} from "@/core/streamdown";
 
 function renderArtifactMarkdown(content: string) {
   return renderToStaticMarkup(
     createElement(
       SafeStreamdown,
-      { ...artifactMarkdownPlugins, components: { a: ArtifactLink } },
+      {
+        ...artifactMarkdownPlugins,
+        components: toStreamdownComponents({ a: ArtifactLink }),
+      },
       content,
     ),
   );

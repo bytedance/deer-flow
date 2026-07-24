@@ -15,12 +15,12 @@ from typing import Any
 
 from ..config import DeerMemConfig
 from .prompt import (
-    CONSOLIDATION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
-    STALENESS_REVIEW_PROMPT,
     format_conversation_for_update,
+    load_prompt,
+    load_prompt_messages,
 )
 from .storage import (
+    MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
     utc_now_iso_z,
@@ -172,13 +172,11 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
             normalized_fact["sourceError"] = normalized_source_error
 
     # Fact lifetime (expected_valid_days): optional LLM-assigned review window.
-    # Accept int/float (reject bool which subclasses int), coerce to int, keep
-    # only positive values; the creation-time cap is applied in _apply_updates.
-    raw_evd = fact.get("expected_valid_days")
-    if isinstance(raw_evd, (int, float)) and not isinstance(raw_evd, bool):
-        evd = int(raw_evd)
-        if evd > 0:
-            normalized_fact["expected_valid_days"] = evd
+    # Validated via the shared _read_expected_valid_days rule (reject bool, require
+    # finite, coerce to int, keep only positive); cap applied in _apply_updates.
+    evd = _read_expected_valid_days(fact)
+    if evd is not None:
+        normalized_fact["expected_valid_days"] = evd
 
     return normalized_fact
 
@@ -334,7 +332,7 @@ _UPLOAD_SENTENCE_RE = re.compile(
     r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
     r"|file\s+upload"
     r"|/mnt/user-data/uploads/"
-    r"|<uploaded_files>"
+    r"|<(?:uploaded_files|current_uploads)>"
     r")[^.!?]*[.!?]?\s*",
     re.IGNORECASE,
 )
@@ -393,6 +391,54 @@ def _parse_fact_datetime(raw: str) -> datetime | None:
         return None
 
 
+def _read_expected_valid_days(fact: dict[str, Any]) -> int | None:
+    """Return a fact's ``expected_valid_days`` as a positive int, or ``None``.
+
+    Accepts int/float (rejects ``bool``, which subclasses ``int``) and coerces
+    to int *before* the positivity check, mirroring the original
+    ``_normalize_memory_update_fact`` rule.  Coercing first matters for values
+    in (0, 1): ``0.5`` passes a raw ``> 0`` check but truncates to ``0``, which
+    would otherwise be returned as a (non-positive) lifetime instead of
+    ``None``.  Non-finite floats (``NaN``, ``+/-inf``) are rejected, and huge
+    ints are returned as-is rather than routed through ``float()`` (which
+    raises ``OverflowError`` for ``10**400``): Python's JSON decoder parses an
+    integer literal with no decimal point as an arbitrary-precision ``int``,
+    so a hand-edited ``memory.json`` can carry one.  An int that is too large
+    to participate in ``datetime`` arithmetic is bounded by the caller via
+    :func:`_safe_add_days` - the helper's job is type/positivity validation,
+    not datetime-range validation, because the safe bound depends on the
+    ``datetime`` it is added to, not on the value alone.  Returning ``None``
+    lets callers fall back to the global age or omit the field rather than
+    silently writing a zero/negative/non-finite lifetime.
+    """
+    raw = fact.get("expected_valid_days")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        evd = raw  # arbitrary-precision int; never routed through float()
+    elif isinstance(raw, float) and math.isfinite(raw):
+        evd = int(raw)  # coerce before the positivity guard
+    else:
+        return None
+    return evd if evd > 0 else None
+
+
+def _safe_add_days(dt: datetime, days: int) -> datetime | None:
+    """Return ``dt + timedelta(days=days)``, or ``None`` if it overflows.
+
+    A huge persisted ``expected_valid_days`` (e.g. ``10**12``) can exceed
+    ``timedelta.max.days`` or push the result past ``datetime.max`` / below
+    ``datetime.min``.  Both raise ``OverflowError``.  The staleness and
+    consolidation paths add an evd to a ``datetime`` to compute a review
+    deadline; returning ``None`` lets the caller fall back to the configured
+    global lifetime instead of aborting the whole update cycle.
+    """
+    try:
+        return dt + timedelta(days=days)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _effective_fact_staleness_age(fact: dict[str, Any], config: Any) -> int:
     """Return the effective staleness review age in days for *fact*.
 
@@ -405,10 +451,8 @@ def _effective_fact_staleness_age(fact: dict[str, Any], config: Any) -> int:
     ``staleness_age_days`` for facts that pre-date this feature or where the
     LLM did not provide an estimate.
     """
-    raw = fact.get("expected_valid_days")
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
-        return int(raw)
-    return config.staleness_age_days
+    evd = _read_expected_valid_days(fact)
+    return evd if evd is not None else config.staleness_age_days
 
 
 def _select_stale_candidates(
@@ -437,7 +481,11 @@ def _select_stale_candidates(
         if created_at is None:
             continue
         effective_age = _effective_fact_staleness_age(fact, config)
-        if created_at < now - timedelta(days=effective_age):
+        # now - timedelta(days=effective_age) can overflow datetime.min when
+        # effective_age is a huge persisted value; a window that large means the
+        # fact cannot yet be stale, so skip it rather than aborting the cycle.
+        cutoff = _safe_add_days(now, -effective_age)
+        if cutoff is not None and created_at < cutoff:
             candidates.append(fact)
     return candidates
 
@@ -445,6 +493,9 @@ def _select_stale_candidates(
 def _build_staleness_section(
     stale_candidates: list[dict[str, Any]],
     config: Any,
+    *,
+    prompts_dir: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Format the staleness review prompt section from candidate facts.
 
@@ -468,7 +519,7 @@ def _build_staleness_section(
         content = html.escape(str(fact.get("content", "")), quote=False)
         effective_age = _effective_fact_staleness_age(fact, config)
         lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short} | valid:{effective_age}d] "{content}"')
-    return STALENESS_REVIEW_PROMPT.format(stale_facts="\n".join(lines))
+    return load_prompt("staleness_review", prompts_dir=prompts_dir, agent_name=agent_name).format(stale_facts="\n".join(lines))
 
 
 # ── Consolidation helpers ───────────────────────────────────────────────
@@ -504,6 +555,9 @@ def _build_consolidation_section(
     candidates: dict[str, list[dict[str, Any]]],
     max_groups: int = 3,
     max_sources: int = 8,
+    *,
+    prompts_dir: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Format consolidation candidate groups into the prompt section.
 
@@ -525,13 +579,13 @@ def _build_consolidation_section(
             lines.append(f'- [{fid} | {conf:.2f}] "{content}"')
         shown = min(len(group), max_sources)
         parts.append(f'<consolidation_candidates category="{html.escape(cat)}" count="{shown}">\n' + "\n".join(lines) + "\n</consolidation_candidates>")
-    return CONSOLIDATION_PROMPT.format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
+    return load_prompt("consolidation", prompts_dir=prompts_dir, agent_name=agent_name).format(consolidation_groups="\n\n".join(parts), max_groups=max_groups)
 
 
 def _escape_memory_for_prompt(memory: Any) -> Any:
     """Return a copy of ``memory`` with every string leaf HTML-escaped.
 
-    ``MEMORY_UPDATE_PROMPT`` embeds the full memory state as a ``json.dumps``
+    The memory_update prompt embeds the full memory state as a ``json.dumps``
     blob inside a ``<current_memory>...</current_memory>`` block. ``json.dumps``
     escapes ``"`` and ``\\`` but leaves ``<``, ``>`` and ``&`` intact, so a
     user-influenced field - e.g. a fact ``content`` of
@@ -559,7 +613,7 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None):
+    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None, *, prompts_dir: str | None = None, callbacks: Any = None):
         """Initialize the memory updater with injected config + storage + llm (DI).
 
         Args:
@@ -567,16 +621,33 @@ class MemoryUpdater:
             storage: Memory storage instance (owned by DeerMem, injected here).
             llm: The chat model for memory extraction (owned by DeerMem, injected
                 here). None when no LLM is configured; an update raises in that case.
+            prompts_dir: Optional custom prompt-template directory forwarded to
+                ``load_prompt`` / ``load_prompt_messages``. None = bundled defaults.
+            callbacks: Optional ``MemoryCallbacks`` (owned by DeerMem, injected
+                here). ``on_memory_llm_call`` is invoked before the LLM call to
+                merge trace metadata into ``invoke_config``; None = no tracing.
         """
         self._config = config
         self._storage = storage
         self._llm = llm
+        self._prompts_dir = prompts_dir
+        self._callbacks = callbacks
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
-    def _save_memory_to_file(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> bool:
+    def _save_memory_to_file(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        expected_revision: int | None = None,
+    ) -> bool:
         """Persist memory data via the injected storage."""
-        return self._storage.save(memory_data, agent_name, user_id=user_id)
+        kwargs: dict[str, Any] = {"user_id": user_id}
+        if expected_revision is not None:
+            kwargs["expected_revision"] = expected_revision
+        return self._storage.save(memory_data, agent_name, **kwargs)
 
     def get_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Get the current memory data via the injected storage."""
@@ -588,14 +659,90 @@ class MemoryUpdater:
 
     def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
+        if not isinstance(memory_data, dict):
+            raise ValueError("memory_data")
+        memory_data = copy.deepcopy(memory_data)
+        empty = create_empty_memory()
+        for section in ("user", "history"):
+            incoming_section = memory_data.get(section, {})
+            if not isinstance(incoming_section, dict):
+                raise ValueError(f"memory_data.{section}")
+            complete_section = copy.deepcopy(empty[section])
+            for key, value in incoming_section.items():
+                if key in complete_section and isinstance(complete_section[key], dict) and isinstance(value, dict):
+                    complete_section[key].update(copy.deepcopy(value))
+                else:
+                    complete_section[key] = copy.deepcopy(value)
+            memory_data[section] = complete_section
+        if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            current = self.get_memory_data(agent_name, user_id=user_id)
+            incoming_facts = copy.deepcopy(memory_data.get("facts", []))
+            if not isinstance(incoming_facts, list) or any(not isinstance(fact, dict) for fact in incoming_facts):
+                raise ValueError("memory_data.facts")
+            for fact in incoming_facts:
+                fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+                fact["confidence"] = _coerce_source_confidence(fact)
+            current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
+            incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            self._storage.apply_changes(
+                {
+                    "upserts": incoming_facts,
+                    "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
+                    "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
+                    "summaries": {"user": copy.deepcopy(memory_data.get("user", {})), "history": copy.deepcopy(memory_data.get("history", {}))},
+                },
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(current.get("revision") or 0),
+            )
+            return self._storage.load(agent_name, user_id=user_id)
+        if agent_name is None:
+            memory_data["facts"] = []
         if not self._storage.save(memory_data, agent_name, user_id=user_id):
             raise OSError("Failed to save imported memory data")
         return self._storage.load(agent_name, user_id=user_id)
 
     def clear_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear all stored memory data and persist an empty structure."""
+        """Clear one selected agent's facts without resetting shared summaries."""
+        if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            for attempt in range(3):
+                current = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                facts = [fact for fact in current.get("facts", []) if isinstance(fact, dict)]
+                try:
+                    self._storage.apply_changes(
+                        {
+                            "deletes": [str(fact.get("id")) for fact in facts],
+                            "deleteRevisions": {str(fact.get("id")): int(fact.get("revision") or 1) for fact in facts},
+                        },
+                        agent_name=agent_name,
+                        user_id=user_id,
+                        expected_manifest_revision=int(current.get("revision") or 0),
+                    )
+                    return self.reload_memory_data(agent_name, user_id=user_id)
+                except MemoryManifestRevisionConflict:
+                    if attempt == 2:
+                        raise
+                    logger.info("Retrying scoped memory clear from a fresh snapshot after a revision conflict")
+            raise AssertionError("bounded scoped-clear retry did not return or raise")
+        current = self.get_memory_data(agent_name, user_id=user_id)
+        cleared_memory = copy.deepcopy(current)
+        cleared_memory["facts"] = []
+        if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id, expected_revision=int(current.get("revision") or 0)):
+            raise OSError("Failed to save cleared memory data")
+        return cleared_memory
+
+    def clear_all_memory_data(self, *, user_id: str | None = None) -> dict[str, Any]:
+        """Clear global summaries and every agent fact bucket for one user."""
+        if getattr(type(self._storage), "clear_all", None) is not MemoryStorage.clear_all:
+            return self._storage.clear_all(user_id=user_id)
+        current = self.get_memory_data(user_id=user_id)
         cleared_memory = create_empty_memory()
-        if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id):
+        if not self._save_memory_to_file(
+            cleared_memory,
+            user_id=user_id,
+            expected_revision=int(current.get("revision") or 0),
+        ):
             raise OSError("Failed to save cleared memory data")
         return cleared_memory
 
@@ -615,28 +762,54 @@ class MemoryUpdater:
         existence check (upstream's ``create_memory_fact_with_created_fact``),
         which the vendored copy had dropped together to avoid the dangling id.
         """
+        if agent_name is None:
+            raise ValueError("agent_name")
         normalized_content = content.strip()
         if not normalized_content:
             raise ValueError("content")
         normalized_category = category.strip() or "context"
         validated_confidence = _validate_confidence(confidence)
         now = utc_now_iso_z()
+        fact_id = f"fact_{uuid.uuid4().hex[:8]}"
+        candidate = {
+            "id": fact_id,
+            "content": normalized_content,
+            "category": normalized_category,
+            "confidence": validated_confidence,
+            "createdAt": now,
+            "source": "manual",
+        }
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            for attempt in range(3):
+                memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                updated_memory = dict(memory_data)
+                updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+                kept_ids = {str(fact.get("id")) for fact in updated_memory["facts"]}
+                deletions = [str(fact.get("id")) for fact in memory_data.get("facts", []) if str(fact.get("id")) not in kept_ids]
+                try:
+                    self._storage.apply_changes(
+                        {
+                            "upserts": [fact for fact in updated_memory["facts"] if fact.get("id") == fact_id],
+                            "upsertRevisions": {fact_id: None},
+                            "deletes": deletions,
+                            "deleteRevisions": {str(fact.get("id")): int(fact.get("revision") or 1) for fact in memory_data.get("facts", []) if str(fact.get("id")) in deletions},
+                        },
+                        agent_name=agent_name,
+                        user_id=user_id,
+                        expected_manifest_revision=int(memory_data.get("revision") or 0),
+                    )
+                    fresh_memory = self.reload_memory_data(agent_name, user_id=user_id)
+                    stored = any(fact.get("id") == fact_id for fact in fresh_memory.get("facts", []))
+                    return fresh_memory, (fact_id if stored else None)
+                except MemoryManifestRevisionConflict:
+                    if attempt == 2:
+                        raise
+                    logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
+            raise AssertionError("bounded create retry did not return or raise")
         memory_data = self.get_memory_data(agent_name, user_id=user_id)
         updated_memory = dict(memory_data)
-        facts = list(memory_data.get("facts", []))
-        fact_id = f"fact_{uuid.uuid4().hex[:8]}"
-        facts.append(
-            {
-                "id": fact_id,
-                "content": normalized_content,
-                "category": normalized_category,
-                "confidence": validated_confidence,
-                "createdAt": now,
-                "source": "manual",
-            }
-        )
-        updated_memory["facts"] = _trim_facts_to_max(facts, self._config.max_facts)
-        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+        updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), candidate], self._config.max_facts)
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
             raise OSError("Failed to save memory data after creating fact")
         # If the cap evicted the just-added (lower-confidence) fact, signal via
         # None so callers don't report a dangling id as "added".
@@ -645,19 +818,68 @@ class MemoryUpdater:
 
     def delete_memory_fact(self, fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Delete a fact by its id and persist the updated memory data."""
+        if agent_name is None:
+            raise ValueError("agent_name")
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes and hasattr(self._storage, "get_fact"):
+            deleted = self._storage.get_fact(fact_id, agent_name=agent_name, user_id=user_id)
+            if deleted is None:
+                raise KeyError(fact_id)
+            global_memory = self.get_memory_data(user_id=user_id)
+            self._storage.apply_changes(
+                {"deletes": [fact_id], "deleteRevisions": {fact_id: int(deleted.get("revision") or 1)}},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(global_memory.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
         memory_data = self.get_memory_data(agent_name, user_id=user_id)
         facts = memory_data.get("facts", [])
         updated_facts = [fact for fact in facts if fact.get("id") != fact_id]
         if len(updated_facts) == len(facts):
             raise KeyError(fact_id)
+        deleted = next(fact for fact in facts if fact.get("id") == fact_id)
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            self._storage.apply_changes(
+                {"deletes": [fact_id], "deleteRevisions": {fact_id: int(deleted.get("revision") or 1)}},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(memory_data.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
         updated_memory = dict(memory_data)
         updated_memory["facts"] = updated_facts
-        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
             raise OSError(f"Failed to save memory data after deleting fact '{fact_id}'")
         return updated_memory
 
     def update_memory_fact(self, fact_id: str, content: str | None = None, category: str | None = None, confidence: float | None = None, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Update an existing fact and persist the updated memory data."""
+        if agent_name is None:
+            raise ValueError("agent_name")
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes and hasattr(self._storage, "get_fact"):
+            updated_fact = self._storage.get_fact(fact_id, agent_name=agent_name, user_id=user_id)
+            if updated_fact is None:
+                raise KeyError(fact_id)
+            if content is not None:
+                normalized_content = content.strip()
+                if not normalized_content:
+                    raise ValueError("content")
+                updated_fact["content"] = normalized_content
+            if category is not None:
+                updated_fact["category"] = category.strip() or "context"
+            if confidence is not None:
+                updated_fact["confidence"] = _validate_confidence(confidence)
+            global_memory = self.get_memory_data(user_id=user_id)
+            self._storage.apply_changes(
+                {"upserts": [updated_fact], "upsertRevisions": {fact_id: int(updated_fact.get("revision") or 1)}},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(global_memory.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
         memory_data = self.get_memory_data(agent_name, user_id=user_id)
         updated_memory = dict(memory_data)
         updated_facts: list[dict[str, Any]] = []
@@ -680,8 +902,18 @@ class MemoryUpdater:
                 updated_facts.append(fact)
         if not found:
             raise KeyError(fact_id)
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            changed = next(fact for fact in updated_facts if fact.get("id") == fact_id)
+            self._storage.apply_changes(
+                {"upserts": [changed], "upsertRevisions": {fact_id: int(changed.get("revision") or 1)}},
+                agent_name=agent_name,
+                user_id=user_id,
+                expected_manifest_revision=int(memory_data.get("revision") or 0),
+                allow_manifest_rebase=True,
+            )
+            return self.get_memory_data(agent_name, user_id=user_id)
         updated_memory["facts"] = updated_facts
-        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id):
+        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
             raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
         return updated_memory
 
@@ -717,7 +949,7 @@ class MemoryUpdater:
         correction_detected: bool,
         reinforcement_detected: bool,
         user_id: str | None = None,
-    ) -> tuple[dict[str, Any], str] | None:
+    ) -> tuple[dict[str, Any], list[Any]] | None:
         """Load memory and build the update prompt for a conversation."""
         config = self._config
         if not messages:
@@ -738,7 +970,7 @@ class MemoryUpdater:
         if config.staleness_review_enabled:
             stale_candidates = _select_stale_candidates(current_memory, config)
             if len(stale_candidates) >= config.staleness_min_candidates:
-                staleness_section = _build_staleness_section(stale_candidates, config)
+                staleness_section = _build_staleness_section(stale_candidates, config, prompts_dir=self._prompts_dir, agent_name=agent_name)
 
         # ── Build consolidation section ──
         consolidation_section = ""
@@ -749,15 +981,18 @@ class MemoryUpdater:
                     consolidation_candidates,
                     max_groups=config.consolidation_max_groups_per_cycle,
                     max_sources=config.consolidation_max_sources,
+                    prompts_dir=self._prompts_dir,
+                    agent_name=agent_name,
                 )
 
-        prompt = MEMORY_UPDATE_PROMPT.format(
-            current_memory=json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
-            conversation=conversation_text,
-            correction_hint=correction_hint,
-            staleness_review_section=staleness_section,
-            consolidation_section=consolidation_section,
-        )
+        variables = {
+            "current_memory": json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
+            "conversation": conversation_text,
+            "correction_hint": correction_hint,
+            "staleness_review_section": staleness_section,
+            "consolidation_section": consolidation_section,
+        }
+        prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
         return current_memory, prompt
 
     def _finalize_update(
@@ -770,11 +1005,53 @@ class MemoryUpdater:
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
+        if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            for attempt in range(3):
+                # Deep-copy before in-place mutation so a failed commit cannot
+                # corrupt the cached snapshot. On a manifest conflict the
+                # complete extraction result is reapplied to a fresh document;
+                # its trim/consolidation/delete decisions are snapshot-wide and
+                # must never be replayed as disjoint point writes.
+                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+                current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
+                updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
+                change_set = {
+                    "upserts": [copy.deepcopy(fact) for fact_id, fact in updated_by_id.items() if current_by_id.get(fact_id) != fact],
+                    "upsertRevisions": {fact_id: (int(current_by_id[fact_id].get("revision") or 1) if fact_id in current_by_id else None) for fact_id, fact in updated_by_id.items() if current_by_id.get(fact_id) != fact},
+                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in updated_by_id],
+                    "deleteRevisions": {fact_id: int(current_by_id[fact_id].get("revision") or 1) for fact_id in current_by_id if fact_id not in updated_by_id},
+                }
+                summaries_changed = updated_memory.get("user", {}) != current_memory.get("user", {}) or updated_memory.get("history", {}) != current_memory.get("history", {})
+                if summaries_changed:
+                    change_set["summaries"] = {
+                        "user": copy.deepcopy(updated_memory.get("user", {})),
+                        "history": copy.deepcopy(updated_memory.get("history", {})),
+                    }
+                try:
+                    self._storage.apply_changes(
+                        change_set,
+                        agent_name=agent_name,
+                        user_id=user_id,
+                        expected_manifest_revision=int(current_memory.get("revision") or 0),
+                    )
+                    return True
+                except MemoryManifestRevisionConflict:
+                    if attempt == 2:
+                        raise
+                    current_memory = self.reload_memory_data(agent_name, user_id=user_id)
+                    logger.info("Retrying extracted memory update from a fresh snapshot after a revision conflict")
+            raise AssertionError("bounded extracted-update retry did not return or raise")
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
         updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return self._storage.save(updated_memory, agent_name, user_id=user_id)
+        return self._storage.save(
+            updated_memory,
+            agent_name,
+            user_id=user_id,
+            expected_revision=int(current_memory.get("revision") or 0),
+        )
 
     async def aupdate_memory(
         self,
@@ -820,7 +1097,7 @@ class MemoryUpdater:
 
         The update runs on a Timer / executor thread with no request ContextVar
         inheritance, so log records emitted here would otherwise lose the
-        request trace id (it only reached ``tracing_callback`` before). The
+        request trace id (it only reached the pre-LLM-call tracing hook before). The
         host-injected ``trace_context_manager`` hook (``None`` when DeerMem runs
         standalone, outside the deer-flow factory) binds ``trace_id`` for the
         duration of the call and restores the prior binding on exit. A ``None``
@@ -883,11 +1160,12 @@ class MemoryUpdater:
             if model is None:
                 raise RuntimeError("DeerMem memory update requested but no LLM is configured (set memory.backend_config.model in config).")
             invoke_config: dict[str, Any] = {"run_name": "memory_agent"}
-            # Optional observability callback (e.g. langfuse), injected via
-            # backend_config.tracing_callback. None = no tracing (langfuse is not
-            # hard-required); the host may pass a wrapper around its own tracer.
-            if self._config.tracing_callback is not None:
-                self._config.tracing_callback(
+            # Pre-LLM-call observability hook (e.g. langfuse): merge trace
+            # metadata into invoke_config before the call so a tracer emits a
+            # span at the LLM boundary. None = no tracing (langfuse not
+            # hard-required). Subsumes the former backend_config.tracing_callback.
+            if self._callbacks is not None:
+                self._callbacks.on_memory_llm_call(
                     invoke_config,
                     thread_id=thread_id,
                     user_id=user_id,
@@ -1117,6 +1395,9 @@ class MemoryUpdater:
         # Add new facts
         existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
         new_facts = update_data.get("newFacts", [])
+        # Creation-time lifetime cap shared with the consolidation path below, so
+        # both fact-creation sites apply the identical bound in one place.
+        creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
@@ -1146,14 +1427,13 @@ class MemoryUpdater:
                     normalized_source_error = source_error.strip()
                     if normalized_source_error:
                         fact_entry["sourceError"] = normalized_source_error
-                evd = fact.get("expected_valid_days")
-                if isinstance(evd, int) and not isinstance(evd, bool) and evd > 0:
+                evd = _read_expected_valid_days(fact)
+                if evd is not None:
                     # Apply the creation-time cap so the LLM cannot assign an
                     # unbounded lifetime that defers staleness review indefinitely.
                     # Extensions (staleFactsToExtend) bypass this cap via their own
                     # staleness_max_extension_days ceiling because they represent a
                     # deliberate review decision, not an unchecked initial assignment.
-                    creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
                     fact_entry["expected_valid_days"] = min(evd, creation_cap)
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
@@ -1179,6 +1459,10 @@ class MemoryUpdater:
                 fact_index = {f.get("id"): f for f in current_memory.get("facts", []) if isinstance(f, dict)}
                 max_groups = config.consolidation_max_groups_per_cycle
                 max_sources = config.consolidation_max_sources
+                # Creation-time lifetime cap shared with the newFacts path: an
+                # inherited expected_valid_days is clamped so a merge of long-lived
+                # sources cannot defer first review indefinitely.
+                creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
                 ids_consumed: set[str] = set()
                 new_consolidated: list[dict[str, Any]] = []
                 merge_count = 0
@@ -1266,6 +1550,54 @@ class MemoryUpdater:
                     source_errors = list(dict.fromkeys(e for sid in source_ids if isinstance((e := fact_index[sid].get("sourceError")), str) and e.strip()))
                     if source_errors:
                         new_fact["sourceError"] = "\n".join(source_errors)
+
+                    # Inherit expected_valid_days from the sources so the merged
+                    # fact keeps the lifetime signal of the underlying information
+                    # rather than silently degrading to the global staleness_age_days.
+                    # The merged fact is re-reviewed at the EARLIEST source review
+                    # deadline (createdAt + effective lifetime): a merge combines
+                    # details from every source, and a volatile sub-detail (e.g.
+                    # evd=7) must not inherit a stable source's 3650-day window and
+                    # escape staleness review for years - staleness KEEP/REMOVE is the
+                    # only path that re-validates a merged fact, so biasing toward the
+                    # soonest deadline keeps uncertain merges re-checked sooner.
+                    # Every source participates, including legacy facts without an
+                    # explicit evd: their effective lifetime is the configured global
+                    # staleness_age_days (matching _effective_fact_staleness_age's
+                    # read-time fallback), so a legacy source's default 90-day window
+                    # is not silently swallowed by a long-lived sibling. The deadline
+                    # is expressed relative to the merged fact's createdAt (the newest
+                    # source's), so a source already past its deadline yields a
+                    # minimal positive window (review next cycle) rather than the
+                    # global fallback, which would otherwise defer an overdue review.
+                    # Capped at the creation-time multiplier (hoisted above the loop)
+                    # like any new fact so consolidation cannot defer first review
+                    # indefinitely.
+                    # Compute each source's absolute review deadline
+                    # (createdAt + effective lifetime). A huge persisted evd can
+                    # overflow datetime arithmetic; _safe_add_days returns None
+                    # then, and the source falls back to the global lifetime's
+                    # deadline - the same treatment as a legacy (no-evd) source,
+                    # so one malformed field cannot abort the merge.
+                    global_age = config.staleness_age_days
+                    source_deadlines: list[datetime] = []
+                    for sid, dt in zip(source_ids, _source_dts):
+                        eff = _effective_fact_staleness_age(fact_index[sid], config)
+                        deadline = _safe_add_days(dt, eff)
+                        if deadline is None:
+                            deadline = _safe_add_days(dt, global_age) or _newest_dt
+                        source_deadlines.append(deadline)
+                    earliest_deadline = min(source_deadlines)
+                    # int(total_seconds() // 86400) avoids the .days toward-zero
+                    # truncation inconsistency flagged in #4143; a negative result
+                    # (a source already past its deadline) is clamped below.
+                    days_until_earliest = int((earliest_deadline - _newest_dt).total_seconds() // 86400)
+                    # A non-positive value means a source is already past its
+                    # deadline (the merge itself was the overdue review) - surface
+                    # a minimal positive window so the merged fact is re-reviewed
+                    # next cycle instead of inheriting the global fallback.
+                    inherited_evd = max(days_until_earliest, 1)
+                    new_fact["expected_valid_days"] = min(inherited_evd, creation_cap)
 
                     ids_consumed.update(source_ids)
                     new_consolidated.append(new_fact)

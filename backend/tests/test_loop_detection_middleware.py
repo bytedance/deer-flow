@@ -1083,6 +1083,53 @@ class TestToolFrequencyDetection:
         assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-A")][0]
         assert not mw._pending_warnings.get(_pending_key("thread-B"))
 
+    def test_freq_counter_cleared_on_eviction(self):
+        """LRU eviction must drop the per-tool frequency counter along with the
+        window deque. Otherwise a reused thread id resumes from a stale count
+        and its first fresh tool call is force-stopped as if the evicted calls
+        never rotated out.
+        """
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3, max_tracked_threads=2)
+        evicted = _make_runtime("thread-evicted")
+
+        # Build the thread's frequency counter up toward the hard limit.
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), evicted)
+
+        # Two other threads push it out of the LRU window (max_tracked_threads=2).
+        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-a"))
+        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-b"))
+        assert "thread-evicted" not in mw._tool_name_history
+        assert "thread-evicted" not in mw._tool_name_counter
+
+        # Thread id reused: its first fresh read_file must not force-stop.
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), evicted)
+        assert result is None
+
+    def test_freq_counter_cleared_on_reset(self):
+        """reset() must clear the per-tool frequency counter, not just the
+        window deque, so a restarted thread counts from zero.
+        """
+        # Per-thread reset.
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime("thread-A")
+        for i in range(2):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+        mw.reset(thread_id="thread-A")
+        assert "thread-A" not in mw._tool_name_counter
+        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime)
+        assert result is None
+
+        # Full reset.
+        mw2 = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime2 = _make_runtime("thread-B")
+        for i in range(2):
+            mw2._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}.py")]), runtime2)
+        mw2.reset()
+        assert not mw2._tool_name_counter
+        result = mw2._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime2)
+        assert result is None
+
     def test_multi_tool_single_response_counted(self):
         """When a single response has multiple tool calls, each is counted."""
         mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)

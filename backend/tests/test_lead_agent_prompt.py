@@ -19,6 +19,7 @@ def _set_skills_cache_state(*, skills=None, active=False, version=0):
         prompt_module._enabled_skills_refresh_active = active
         prompt_module._enabled_skills_refresh_version = version
         prompt_module._enabled_skills_refresh_event.clear()
+        prompt_module._enabled_skills_refresh_waiters.clear()
 
 
 def test_build_self_update_section_empty_for_default_agent():

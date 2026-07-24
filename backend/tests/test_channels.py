@@ -24,7 +24,6 @@ from app.channels.message_bus import (
 )
 from app.channels.store import ChannelStore
 from deerflow.skills.types import Skill, SkillCategory
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
 def test_known_channel_command_detection_only_matches_control_commands():
@@ -35,6 +34,25 @@ def test_known_channel_command_detection_only_matches_control_commands():
     assert not is_known_channel_command("/mnt/user-data/uploads/report.pdf")
     assert not is_known_channel_command("/data-analysis analyze uploads/foo.csv")
     assert not is_known_channel_command(" /new")
+
+
+def test_strip_leading_mentions_only_drops_flush_leading_mentions():
+    from app.channels.commands import is_known_channel_command, strip_leading_mentions
+
+    assert strip_leading_mentions("@bot /goal") == "/goal"
+    assert strip_leading_mentions("@_user_1 /goal ship") == "/goal ship"
+    assert strip_leading_mentions("<@U1> /status") == "/status"
+    assert strip_leading_mentions("@bot @_user_2 /help") == "/help"
+    assert strip_leading_mentions("@bot") == ""
+    assert strip_leading_mentions("") == ""
+    # No leading mention -> unchanged, including the leading-space non-command case.
+    assert strip_leading_mentions("/goal") == "/goal"
+    assert strip_leading_mentions(" /new") == " /new"
+    assert strip_leading_mentions("hello /goal") == "hello /goal"
+    # The shared classifier is deliberately NOT changed to strip mentions: Slack
+    # relies on it keeping a leading non-bot mention as chat (see Slack tests), so
+    # mention handling lives in the adapters, not here.
+    assert not is_known_channel_command("@bot /goal")
 
 
 def _make_channel_skill(tmp_path: Path, name: str, *, enabled: bool = True) -> Skill:
@@ -610,6 +628,20 @@ def _make_stream_part(event: str, data):
     return SimpleNamespace(event=event, data=data)
 
 
+def _ok_stream_events():
+    """Minimal successful streaming run: one text chunk plus a final values frame."""
+    return [
+        _make_stream_part(
+            "messages-tuple",
+            [{"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+        ),
+        _make_stream_part(
+            "values",
+            {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "Hello"}], "artifacts": []},
+        ),
+    ]
+
+
 def _make_async_iterator(items):
     async def iterator():
         for item in items:
@@ -1039,14 +1071,357 @@ class TestChannelManager:
         )
         assert ChannelManager._inbound_dedupe_key(without_workspace) is None
 
+    def test_inbound_dedupe_key_uses_chat_id_for_chat_scoped_providers_when_unbound(self):
+        """Unbound telegram/feishu/wechat must still form a dedupe key via chat_id.
+
+        Those adapters persist connection.workspace_id = chat_id, but
+        attach_connection_identity only sets msg.workspace_id when a connection
+        exists. Provider redeliveries on unbound (or not-yet-bound) chats would
+        otherwise skip the entire inbound dedupe path and run the agent N times.
+        """
+        from app.channels.manager import ChannelManager
+
+        for channel, chat_id, message_id in (
+            ("telegram", "12345", "42"),
+            ("feishu", "oc_abc", "om_1"),
+            ("wechat", "wx_user_1", "m1"),
+        ):
+            unbound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(unbound) == (channel, chat_id, chat_id, message_id)
+
+            # Bound shape (workspace already on the message) must keep the same key
+            # so bound and unbound redeliveries of the same chat share the cache.
+            bound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                workspace_id=chat_id,
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(bound) == (channel, chat_id, chat_id, message_id)
+
+    def test_inbound_dedupe_key_uses_dingtalk_conversation_id_when_unbound(self):
+        """DingTalk stamps conversation_id on every inbound; use it when unbound.
+
+        Group connections store workspace_id=conversation_id; P2P stores None.
+        Without a metadata fallback, unbound groups and all P2P traffic skipped
+        dedupe entirely (including bound P2P, whose connection.workspace_id is
+        None). conversation_id is already on the message and is the natural
+        tenant scope — same role as Slack team_id / Discord guild_id.
+        """
+        from app.channels.manager import ChannelManager
+
+        group_unbound = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="cid123",
+            user_id="staff1",
+            text="hi",
+            metadata={
+                "conversation_type": "2",
+                "conversation_id": "cid123",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(group_unbound) == ("dingtalk", "cid123", "cid123", "mid1")
+
+        p2p = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="staff1",
+            user_id="staff1",
+            text="hi",
+            # Bound P2P still has workspace_id=None on the connection record.
+            connection_id="conn1",
+            owner_user_id="owner1",
+            workspace_id=None,
+            metadata={
+                "conversation_type": "1",
+                "conversation_id": "cid_p2p",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(p2p) == ("dingtalk", "cid_p2p", "staff1", "mid1")
+
+    def test_inbound_dedupe_chat_scoped_fallback_does_not_collapse_distinct_chats(self):
+        """newly_missed guard: chat_id fallback must not cross-dedupe two chats.
+
+        Same stable message_id string in two different chats is legitimate and
+        must produce distinct keys (message_ids are only unique per chat on
+        Telegram/Feishu/WeChat).
+        """
+        from app.channels.manager import ChannelManager
+
+        a = InboundMessage(
+            channel_name="telegram",
+            chat_id="111",
+            user_id="u1",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        b = InboundMessage(
+            channel_name="telegram",
+            chat_id="222",
+            user_id="u2",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        assert ChannelManager._inbound_dedupe_key(a) == ("telegram", "111", "111", "42")
+        assert ChannelManager._inbound_dedupe_key(b) == ("telegram", "222", "222", "42")
+        assert ChannelManager._inbound_dedupe_key(a) != ChannelManager._inbound_dedupe_key(b)
+
+    @pytest.mark.parametrize(
+        ("channel", "chat_id"),
+        (
+            ("wechat", "wx_user_1"),
+            ("telegram", "12345"),
+            ("feishu", "oc_abc"),
+        ),
+    )
+    def test_dispatch_loop_dedupes_unbound_chat_scoped_redelivery(self, tmp_path, monkeypatch, channel, chat_id):
+        """Provider redelivery of an unbound chat-scoped message runs the agent once.
+
+        Shaped like wechat.py / telegram.py inbound metadata (message_id only, no
+        workspace_id / team_id) before attach_connection_identity finds a binding.
+        Parametrized across all three CHAT_SCOPED_WORKSPACE_CHANNELS so the
+        streaming dispatch path (telegram/feishu) is covered end-to-end too, not
+        only WeChat's runs.wait path.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        streaming = ChannelManager._channel_supports_streaming(channel)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=lambda *a, **kw: _make_async_iterator(_ok_stream_events()))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            # The mock the channel's dispatch path actually drives.
+            run_call = manager._client.runs.stream if streaming else manager._client.runs.wait
+
+            def _inbound(message_id: str) -> InboundMessage:
+                return InboundMessage(
+                    channel_name=channel,
+                    chat_id=chat_id,
+                    user_id="u1",
+                    text=f"hello from {channel}",
+                    metadata={"message_id": message_id},
+                )
+
+            await bus.publish_inbound(_inbound("m-1"))
+            await bus.publish_inbound(_inbound("m-1"))
+            await _wait_for(lambda: run_call.call_count == 1 and any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert run_call.call_count == 1
+
+            # Distinct message_id still processes (negative control / newly_missed).
+            await bus.publish_inbound(_inbound("m-2"))
+            await _wait_for(lambda: run_call.call_count == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert run_call.call_count == 2
+
+        _run(go())
+
+    def test_streaming_transient_failure_releases_dedupe_key(self, tmp_path, monkeypatch):
+        """Release a swallowed streaming error only after its final outbound.
+
+        _release_inbound_dedupe_key lives in _handle_message's `except Exception`
+        handler, but _handle_streaming_chat handles its own errors and never
+        re-raises — so without an explicit release the key recorded on receipt
+        survives the full dedupe TTL and the provider's redelivery (the retry
+        that would recover the failure) is silently dropped. Releasing before
+        the final outbound would let that retry overtake the terminal reply.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+            key_present_during_final_publish: list[bool] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                if msg.is_final:
+                    key = manager._inbound_dedupe_key(_inbound())
+                    key_present_during_final_publish.append(key in manager._recent_inbound_events)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            def _failing_stream(*args, **kwargs):
+                async def gen():
+                    yield _make_stream_part(
+                        "messages-tuple",
+                        [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+                    )
+                    raise ConnectionError("stream broken")
+
+                return gen()
+
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=_failing_stream)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="u1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.stream.call_count == 1
+            assert key_present_during_final_publish == [True]
+
+            # The provider redelivers the same message after the failure.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.stream.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.stream.call_count == 2
+
+        _run(go())
+
+    def test_thread_busy_releases_dedupe_key(self, tmp_path):
+        """A busy thread is transient, so its redelivery must stay reprocessable.
+
+        runs.wait's ConflictError is handled in place (busy message, no re-raise),
+        so it bypasses _handle_message's release just like the streaming path.
+        """
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.wait = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="wechat",
+                    chat_id="wx_user_1",
+                    user_id="wx_user_1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.wait.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+
+        _run(go())
+
+    def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
+        """Same invariant on the third swallow site: runs.create's busy branch."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.create = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="github",
+                    chat_id="owner/repo",
+                    user_id="dev",
+                    owner_user_id="agent-owner-1",
+                    workspace_id="owner/repo",
+                    text="hi",
+                    metadata={"message_id": "delivery-1:dev:agent"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.create.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.create.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.create.call_count == 2
+
+        _run(go())
+
     def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.
 
         PR #3584 added inbound dedupe for the IM channels; the GitHub channel
         added in PR #3754 never stamped the ``message_id`` / workspace the
-        dedupe keys on, so GitHub's native "Redeliver" button or a
-        retry-on-timeout re-ran the agent with real side effects (e.g. a
-        duplicate PR comment). The dispatcher now stamps the X-GitHub-Delivery
+        dedupe keys on, so a redelivered GitHub webhook (the native
+        "Redeliver" button, the REST API, or an operator's own recovery
+        script — GitHub does not auto-retry a failed delivery) re-ran the
+        agent with real side effects (e.g. a duplicate PR comment). The
+        dispatcher now stamps the X-GitHub-Delivery
         GUID (scoped per agent) plus the repo, so the same manager dedupe
         absorbs the replay — while a second agent bound to the same delivery,
         and a genuinely new delivery, still fire.
@@ -1055,20 +1430,25 @@ class TestChannelManager:
 
         manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
 
-        def _gh(delivery: str, agent: str = "reviewer") -> InboundMessage:
-            # Shaped exactly as app.gateway.github.dispatcher.fanout_event emits.
+        def _gh(delivery: str, agent: str = "reviewer", owner_user_id: str = "alice") -> InboundMessage:
+            # Shaped exactly as app.gateway.github.dispatcher.fanout_event
+            # emits: a 3-part (delivery, owner_user_id, agent) message_id —
+            # ``dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}"``
+            # — plus the matching ``owner_user_id`` field fanout_event sets
+            # from ``match.user_id``.
             return InboundMessage(
                 channel_name="github",
                 chat_id="zhfeng/llm-gateway",
                 user_id="alice",
+                owner_user_id=owner_user_id,
                 text="@bot please review",
                 topic_id=f"7:{agent}",
                 workspace_id="zhfeng/llm-gateway",
-                metadata={"message_id": f"{delivery}:{agent}", "agent_name": agent},
+                metadata={"message_id": f"{delivery}:{owner_user_id}:{agent}", "agent_name": agent},
             )
 
         # The dedupe key matches the other channels' 4-tuple shape.
-        assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:reviewer")
+        assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:alice:reviewer")
 
         # First delivery fires; an identical redelivery of the same GUID is dropped.
         assert manager._is_duplicate_inbound(_gh("d1")) is False
@@ -1077,6 +1457,12 @@ class TestChannelManager:
         assert manager._is_duplicate_inbound(_gh("d2")) is False
         # A second agent fanned out from the SAME delivery is not cross-deduped.
         assert manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
+        # A second user's SAME-named agent on the SAME delivery is not
+        # cross-deduped either. A helper still stamping the old 2-part
+        # (delivery, agent) id could not even express this case — it would
+        # collide with the very first assertion's "d1"+"reviewer" key and
+        # silently drop this user's run (willem-bd, PR #4104 review).
+        assert manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
 
     def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
@@ -2341,9 +2727,11 @@ class TestChannelManager:
 
             mock_client.runs.wait.assert_called_once()
             human_message = mock_client.runs.wait.call_args[1]["input"]["messages"][0]
-            assert human_message["content"].startswith("<uploaded_files>")
             assert original_text in human_message["content"]
-            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
+            # injects <current_uploads> downstream.
             assert outbound_received[0].text == "Hello from agent!"
 
         _run(go())
@@ -2406,9 +2794,10 @@ class TestChannelManager:
 
             mock_client.runs.stream.assert_called_once()
             human_message = mock_client.runs.stream.call_args[1]["input"]["messages"][0]
-            assert human_message["content"].startswith("<uploaded_files>")
             assert original_text in human_message["content"]
-            assert human_message["additional_kwargs"][ORIGINAL_USER_CONTENT_KEY] == original_text
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
 
         _run(go())
 
@@ -4924,6 +5313,411 @@ class TestFeishuChannel:
         _run(go())
 
 
+class TestFeishuSendFileSuccessChecks:
+    """``send_file`` uploads via ``_upload_image``/``_upload_file`` (which already
+    raise on a ``response.success() is False`` business failure), then sends the
+    resulting file/image message with a raw ``message.reply``/``message.create``
+    call whose response was never checked. lark-oapi signals that same kind of
+    business-level failure (invalid receiver, permission error, etc.) by
+    returning ``success()=False`` without raising, so a failed file/image send
+    logged "file sent" and returned ``True`` exactly like a real success.
+    """
+
+    def test_send_file_returns_false_on_reply_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-1"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_false_on_create_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageRequest = CreateMessageRequest
+            channel._CreateMessageRequestBody = CreateMessageRequestBody
+            channel._upload_file = AsyncMock(return_value="file-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-2"
+            channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "report.pdf"
+            path.write_bytes(b"pdf")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/report.pdf",
+                actual_path=path,
+                filename="report.pdf",
+                mime_type="application/pdf",
+                size=path.stat().st_size,
+                is_image=False,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_true_on_reply_business_success(self, tmp_path):
+        """Control case: a genuinely successful response still returns True."""
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            success_response = MagicMock()
+            success_response.success.return_value = True
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=success_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is True
+
+        _run(go())
+
+
+class TestFeishuCardSuccessChecks:
+    """Regression coverage: ``lark-oapi`` signals a *business-level* failure
+    (expired/invalid card, permission error, etc.) by returning a response
+    whose ``response.success()`` is ``False`` -- the SDK call itself does not
+    raise. This file's own ``_upload_image``/``_upload_file``/
+    ``_receive_single_file`` already guard against this by checking
+    ``response.success()``; ``_reply_card``/``_create_card``/``_update_card``/
+    ``_add_reaction`` did not, so a failed card send/update looked identical
+    to a successful one to every caller.
+    """
+
+    def test_reply_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-reply-1"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._reply_card("om-source-msg", "hello")
+            assert "log-reply-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_create_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageRequest = CreateMessageRequest
+            channel._CreateMessageRequestBody = CreateMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-create-1"
+            channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._create_card("chat-1", "hello")
+            assert "log-create-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_update_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._PatchMessageRequest = PatchMessageRequest
+            channel._PatchMessageRequestBody = PatchMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "card has expired"
+            failure_response.get_log_id.return_value = "log-update-1"
+            channel._api_client.im.v1.message.patch = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._update_card("om-running-card", "hello")
+            assert "log-update-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_add_reaction_logs_warning_on_business_failure_without_raising(self, caplog):
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+        )
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+            channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            channel._Emoji = Emoji
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "reaction not allowed"
+            failure_response.get_log_id.return_value = "log-1"
+            channel._api_client.im.v1.message_reaction.create = MagicMock(return_value=failure_response)
+
+            with caplog.at_level(logging.WARNING):
+                await channel._add_reaction("om-source-msg", "OK")
+
+            assert "99991400" in caplog.text
+
+        _run(go())
+
+    def test_final_streaming_update_falls_back_to_new_card_when_update_card_fails(self):
+        """``_send_card_message``'s ``try/except`` around ``_update_card``
+        already falls back to a brand-new card reply for a final message --
+        but that fallback could never fire while ``_update_card`` swallowed
+        business failures silently. Now that ``_update_card`` raises, the
+        fallback is reachable."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(side_effect=RuntimeError("Feishu card update failed: code=99991400, msg=card expired"))
+            channel._reply_card = AsyncMock(return_value="om-fallback-card")
+            channel._add_reaction = AsyncMock()
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="final answer",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            await channel._send_card_message(msg)
+
+            channel._update_card.assert_awaited_once_with("om-running-card", "final answer")
+            channel._reply_card.assert_awaited_once_with("om-source-msg", "final answer")
+            assert "om-source-msg" not in channel._running_card_ids
+
+        _run(go())
+
+    def test_non_final_streaming_update_failure_propagates_instead_of_silently_succeeding(self):
+        """A non-final ``_update_card`` failure must propagate out of
+        ``_send_card_message`` so ``send()``'s ``_send_with_retry`` sees it --
+        previously it never would, since ``_update_card`` had no way to raise
+        on a business-level failure."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(side_effect=RuntimeError("Feishu card update failed: code=99991400, msg=card expired"))
+            channel._reply_card = AsyncMock()
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="partial answer",
+                is_final=False,
+                thread_ts="om-source-msg",
+            )
+
+            with pytest.raises(RuntimeError, match="99991400"):
+                await channel._send_card_message(msg)
+
+            channel._reply_card.assert_not_awaited()
+            assert channel._running_card_ids["om-source-msg"] == "om-running-card"
+
+        _run(go())
+
+    def test_send_retries_after_update_card_business_failure_then_succeeds(self, monkeypatch):
+        """End-to-end through ``send()``: a non-final ``_update_card``
+        business failure must now engage ``_send_with_retry`` instead of the
+        caller believing the streaming update was delivered."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            sleep = AsyncMock()
+            monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(
+                side_effect=[
+                    RuntimeError("Feishu card update failed: code=99991400, msg=card expired"),
+                    None,
+                ]
+            )
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="partial answer",
+                is_final=False,
+                thread_ts="om-source-msg",
+            )
+
+            await channel.send(msg, _max_retries=2)
+
+            assert channel._update_card.await_count == 2
+            sleep.assert_awaited_once_with(1)
+
+        _run(go())
+
+    def test_send_retries_after_create_card_business_failure_then_succeeds(self, monkeypatch):
+        """End-to-end through ``send()`` for the no-``thread_ts`` path: a
+        business failure from ``_create_card`` (unwrapped at the tail of
+        ``_send_card_message``) must also engage ``_send_with_retry``,
+        mirroring ``test_send_retries_after_update_card_business_failure_then_succeeds``
+        for the ``_update_card`` path above."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            sleep = AsyncMock()
+            monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+            channel._create_card = AsyncMock(
+                side_effect=[
+                    RuntimeError("Feishu card creation failed: code=99991400, msg=param invalid, log_id=log-1"),
+                    None,
+                ]
+            )
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="new card message",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            await channel.send(msg, _max_retries=2)
+
+            assert channel._create_card.await_count == 2
+            sleep.assert_awaited_once_with(1)
+
+        _run(go())
+
+
 class TestWeComChannel:
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
@@ -6765,6 +7559,110 @@ class TestSlackMarkdownConversion:
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result
         assert "#" not in result
+
+    def test_converter_passes_reserved_characters_through_unchanged(self):
+        # The library itself never escapes Slack's reserved characters -- this
+        # pins that assumption so SlackChannel.send() knows it must do so itself.
+        from app.channels.slack import _slack_md_converter
+
+        result = _slack_md_converter.convert("if a < b && b > c:")
+        assert result == "if a < b && b > c:"
+
+
+# ---------------------------------------------------------------------------
+# Slack outbound text escaping tests (Slack's &/</> HTML-entity requirement)
+#
+# Slack requires callers to replace &, <, and > with their HTML entity
+# equivalents before sending message text, because an unescaped `<...>`
+# triggers Slack's own mention/link syntax (e.g. `<@USERID>`,
+# `<http://url|label>`). See:
+# https://api.slack.com/reference/surfaces/formatting#escaping
+# ---------------------------------------------------------------------------
+
+
+class TestSlackTextEscaping:
+    @staticmethod
+    def _sent_text(text: str) -> str:
+        """Send *text* through SlackChannel.send() and return the resulting
+        Slack API ``text`` kwarg, without actually hitting the network."""
+        from app.channels.slack import SlackChannel
+
+        captured: dict[str, object] = {}
+
+        async def go():
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+
+            mock_web = MagicMock()
+
+            def post_message(**kwargs):
+                captured.update(kwargs)
+                return MagicMock()
+
+            mock_web.chat_postMessage = post_message
+            ch._web_client = mock_web
+
+            msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text=text)
+            await ch.send(msg)
+
+        _run(go())
+        return captured["text"]
+
+    def test_raw_angle_brackets_and_ampersand_are_escaped(self):
+        # Realistic technical/code content containing all three reserved
+        # characters must arrive escaped, so Slack renders it as literal text
+        # instead of attempting to parse a broken mention/link.
+        sent = self._sent_text("if a < b && b > c:")
+        assert sent == "if a &lt; b &amp;&amp; b &gt; c:"
+        assert "<" not in sent
+        assert ">" not in sent
+
+    def test_bot_mention_syntax_is_neutralized_not_interpreted(self):
+        # Raw text that happens to look like a mention must not survive as
+        # live `<@...>` syntax -- Slack would otherwise try to resolve it.
+        sent = self._sent_text("please ask <@U12345> for review")
+        assert sent == "please ask &lt;@U12345&gt; for review"
+
+    def test_real_markdown_link_still_converts_without_double_escaping(self):
+        # Critical non-regression case: escaping must run BEFORE mrkdwn
+        # conversion, not after. The converter's own generated `<url|label>`
+        # syntax for a real markdown link must survive untouched -- if
+        # escaping ran after conversion instead, this would corrupt into
+        # `&lt;url|label&gt;` and Slack would render a dead link.
+        sent = self._sent_text("See [DeerFlow docs](https://example.com/docs) for more.")
+        assert "<https://example.com/docs|DeerFlow docs>" in sent
+        assert "&lt;" not in sent
+        assert "&gt;" not in sent
+
+    def test_ampersand_in_link_url_is_escaped_before_conversion(self):
+        # & must be escaped first (before < and >) so it doesn't double-escape
+        # the &amp;/&lt;/&gt; entities being introduced, and a literal '&' in a
+        # URL must still come through as &amp; per Slack's escaping rule --
+        # even inside the converter's own generated <url|label> syntax.
+        sent = self._sent_text("[Search](https://example.com?a=1&b=2)")
+        assert "<https://example.com?a=1&amp;b=2|Search>" in sent
+
+    def test_blockquote_marker_at_line_start_is_preserved(self):
+        # A ">" at the very start of a line is Slack's own blockquote marker
+        # (the mrkdwn converter passes it through unchanged), not part of the
+        # <...> mention/link syntax that & and < neutralize. Escaping it would
+        # turn a quoted line into visible "&gt;" text instead of a rendered
+        # blockquote.
+        sent = self._sent_text("> quoted text")
+        assert sent == "> quoted text"
+
+    def test_blockquote_marker_exemption_is_line_start_only(self):
+        # The line-start exemption must not widen into "never escape '>'":
+        # a "<"/"&" anywhere, and a ">" that is NOT at the start of a line,
+        # still escape -- only the leading marker is restored.
+        sent = self._sent_text("> a < b & c > d")
+        assert sent == "> a &lt; b &amp; c &gt; d"
+
+    def test_blockquote_marker_restored_on_every_line(self):
+        # The restoration must apply per-line (re.MULTILINE), not just once
+        # at the start of the whole string.
+        sent = self._sent_text("intro\n> first quote\nmiddle\n> second quote")
+        assert sent == "intro\n> first quote\nmiddle\n> second quote"
 
 
 # ---------------------------------------------------------------------------

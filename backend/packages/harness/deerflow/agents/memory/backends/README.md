@@ -25,7 +25,7 @@ Copy `noop/` to `backends/<yourname>/` and edit three files in this folder plus 
 | File | What to change |
 |---|---|
 | `backends/<yourname>/config.py` | Declare your config fields + `from_backend_config` (parse `backend_config`; read `storage_path` from it - **do not import deer-flow path helpers**) |
-| `backends/<yourname>/<yourname>_manager.py` | Rename the class; parse config in `__init__`; implement the 9 ABC methods; optionally implement fact CRUD (see [Backend Contract](#backend-contract)) |
+| `backends/<yourname>/<yourname>_manager.py` | Rename the class; parse config in `model_post_init`; implement `from_config` + the tier-1 abstracts (`add`/`get_context`); override tier-2/3 methods as needed (see [Backend Contract](#backend-contract)) |
 | `backends/<yourname>/__init__.py` | `MANAGER_CLASS = YourManager` (relative import) |
 | `config.yaml` (repo root, parent of `backend/`) | `memory.manager_class: <yourname>` + your knobs under `memory.backend_config` |
 | `packages/harness/pyproject.toml` | **Only if the backend needs external libs**: declare the dependency; add `[tool.uv.sources]` for vendored source. Otherwise `uv sync` purges it (see [Common Pitfalls](#common-pitfalls)) |
@@ -46,9 +46,15 @@ Then **restart deer-flow** - the memory manager is a process-level singleton; a 
 
 ## Backend Contract
 
-### 1. The 9 ABC methods
+### 1. The three-tier contract
 
-Implement every method on `MemoryManager` in `packages/harness/deerflow/agents/memory/manager.py`. Signatures must match (parameter names, keyword-only args). `noop` is the empty-implementation reference.
+`MemoryManager` is a pydantic `BaseModel` (not a bare ABC). Methods are tiered:
+
+- **Tier 1 (abstract)** -- `add` + `get_context`: every backend MUST implement (write + read-inject are the backend's fundamental duties; missing one is caught at instantiation).
+- **Tier 2 (management, with defaults)** -- `add_nowait` (delegates to `add`), `search` / `get_memory` / `clear_memory` / `import_memory` / `export_memory` / `delete_memory` (default `raise NotImplementedError`), `shutdown_flush` (default `True`). Override the ones your backend supports.
+- **Tier 3 (optional hooks, with defaults)** -- `warm` (default `True`), `reload_memory` / `create_fact` / `delete_fact` / `update_fact` (default raise), `on_pre_compress` / `on_turn_start` (default no-op).
+
+A new backend implements `from_config` + `add` + `get_context` and overrides only what it supports; the rest inherits defaults. Signatures must match (parameter names, keyword-only args). `noop` is the minimal reference.
 
 ### 2. Return shape (critical, easy to get wrong)
 
@@ -59,15 +65,15 @@ Implement every method on `MemoryManager` in `packages/harness/deerflow/agents/m
 
 A non-DeerMem backend maps its native records (e.g. `{"results": [...]}`) into this shape via a small adapter helper.
 
-### 3. Optional capabilities (DeerMem-internal, not on the ABC)
+### 3. Tier-3 hooks (contracted, no `hasattr` probing)
 
-The gateway probes these with `hasattr(manager, "<name>")` and returns 501 when absent:
+`create_fact` / `delete_fact` / `update_fact` / `reload_memory` / `warm` are tier-3 hooks ON the base contract (with defaults). Callers (gateway / client / tools) invoke them directly and catch `NotImplementedError` for unsupported backends -- no more `hasattr` probing.
 
-- `create_fact` / `delete_fact` / `update_fact` - the frontend's add/delete/edit-fact buttons. Signatures are in the commented block at the bottom of `noop/noop_manager.py`.
-- `reload_memory` - the frontend's reload button (delegate to `get_memory` if your backend has no cache).
-- `warm` - one-time warm-up at gateway startup (skipped if absent).
+- `create_fact` / `delete_fact` / `update_fact` - the frontend's add/delete/edit-fact buttons. Default raises (caller returns 501).
+- `reload_memory` - the frontend's reload button (caller falls back to `get_memory` on `NotImplementedError`).
+- `warm` - one-time warm-up at gateway startup (default `True` = nothing to warm).
 
-Implement the ones you support; leave the rest as 501.
+Implement the ones your backend supports; the rest inherit the default raise.
 
 ### 4. Portability (the golden rule)
 
@@ -80,14 +86,16 @@ from deerflow.agents.memory.manager import MemoryManager
 
 Change that one line (and only that line) to port the backend to another agent. **Do not import deer-flow path helpers, config singletons, or models** - get `storage_path` and everything else from `backend_config`.
 
-### 5. What the host injects into `backend_config`
+### 5. What the host provides
 
-The factory (`manager.py::get_memory_manager`) injects these for every backend:
+The factory (`manager.py::get_memory_manager`) resolves the backend class, injects `storage_path` into `backend_config`, then calls `cls.from_config(backend_config, mode=cfg.mode, **host_hooks)`. The host hooks (passed as `from_config` kwargs, NOT in `backend_config`):
 
-- `storage_path` (str) - a writable state dir (the host's `runtime_home` by default, or whatever `config.yaml` sets). **Use this as your storage root.**
-- `tracing_callback` (Callable | None) - trace your LLM calls (langfuse). Ignore if you don't trace.
-- `should_keep_hidden_message` (Callable | None) - filter `hide_from_ui` messages. Ignore if not relevant.
+- `backend_config["storage_path"]` (str) - a writable state dir (the host's `runtime_home` by default, or whatever `config.yaml` sets). **Use this as your storage root.**
+- `callbacks` (`MemoryCallbacks` | None) - observability; `on_memory_llm_call` merges trace metadata before your LLM call (langfuse). Pass it to your LLM path; ignore if you don't trace.
+- `should_keep_hidden_message` / `trace_context_manager` / `host_llm_factory` - other host hooks; consume in `from_config` if relevant.
 - Plus whatever the user puts under `config.yaml::memory.backend_config` (your backend's own knobs).
+
+Each backend's `from_config` consumes the hooks it needs (DeerMem does; noop ignores them).
 
 ## Do Not Modify
 
@@ -99,12 +107,12 @@ These are backend-agnostic. Don't touch them when swapping backends (unless you'
 | `packages/harness/deerflow/agents/middlewares/memory_middleware.py` | `after_agent` -> `manager.add` |
 | `packages/harness/deerflow/agents/memory/summarization_hook.py` | summarization -> `manager.add_nowait` |
 | `packages/harness/deerflow/agents/lead_agent/prompt.py` | `_get_memory_context` -> `manager.get_context` |
-| `app/gateway/routers/memory.py` | HTTP endpoints -> `manager.*` (hasattr-probed) |
+| `app/gateway/routers/memory.py` | HTTP endpoints -> `manager.*` (direct call + try/except `NotImplementedError`) |
 | `packages/harness/deerflow/config/memory_config.py` | shared 4 fields (`enabled` / `injection_enabled` / `manager_class` / `backend_config`) |
 | `frontend/src/components/workspace/settings/memory-settings-page.tsx` | frontend memory page (assumes DeerMem shape) |
 
 > [!NOTE]
-> The gateway and frontend are currently hard-coded to the DeerMem shape - that's why backends must return DeerMem-shape data (contract #2). Making them fully backend-agnostic is a larger refactor; see `E:\deerflow\memory\plugin\00-插件兼容性矩阵.md`.
+> The gateway and frontend are currently hard-coded to the DeerMem shape - that's why backends must return DeerMem-shape data (contract #2). Making them fully backend-agnostic is a larger refactor.
 
 ## Common Pitfalls
 
@@ -119,6 +127,5 @@ Lessons from integrating external backends:
 
 ## Reference
 
-- **Template**: `noop/` - empty implementation with full docstrings; copy and go.
-- **Design proposal**: `E:\deerflow\memory\记忆系统方案.md`.
-- **Plugin plans + compatibility matrix**: `E:\deerflow\memory\plugin\` (`00-插件兼容性矩阵.md` is the spine; defines the 9 shared contracts S1-S9).
+- **Template**: `noop/` - minimal implementation with full docstrings; copy and go.
+- **Contract + factory**: `packages/harness/deerflow/agents/memory/manager.py` (`MemoryManager` base, `MemoryCallbacks`, `get_memory_manager` factory).
