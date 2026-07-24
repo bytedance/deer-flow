@@ -44,6 +44,10 @@ the run lifecycle before any run or thread object is built.
 - Heuristically redact every field containing `token`, `key`, or `secret`.
 - Add store-specific, callback-specific, or tracing-provider-specific copies of
   the same rule.
+- Change the independent `POST /api/threads` or `PATCH /api/threads/{id}`
+  metadata contracts. Those endpoints do not admit a run, do not consume the
+  documented MCP credential path, and are outside the maintainer-selected
+  unified run admission boundary.
 - Change MCP OAuth configuration or skill `required-secrets` behavior.
 
 ## Considered Approaches
@@ -93,8 +97,11 @@ the beginning of the run lifecycle, before:
 
 1. `RunManager.create_or_reject()`;
 2. `ThreadMetaStore.create()` or any thread status mutation;
-3. `build_run_config()` callback metadata construction;
-4. agent task creation.
+3. `build_run_config()`, which copies `body.metadata` into the LangChain
+   runnable config's `metadata` mapping;
+4. LangChain callback dispatch and `RunJournal.on_chain_start()`, whose
+   `run.start` event persists that runnable metadata;
+5. agent task creation.
 
 The Gateway will translate the dedicated validation error into HTTP 422 with a
 message directing callers to `config.context.secrets`. Because scheduled
@@ -103,6 +110,12 @@ validator.
 
 No store or callback changes are needed for newly-admitted requests: a rejected
 value never reaches those layers.
+
+The thread persistence named above is the thread upsert performed as part of
+`start_run()`. Independent thread create/patch endpoints are not alternate run
+admission paths and are not changed by this fix. Adding silent stripping there
+would create a second policy behavior without addressing the documented run
+credential path.
 
 ### Supported MCP secret flow
 
@@ -123,11 +136,19 @@ removes the entire `context.secrets` container and therefore all nested values.
 Admission rejection cannot repair records created before the fix. Historical
 output handling is deliberately separate:
 
-- run response serialization calls the shared metadata redactor;
-- thread and checkpoint-history response models with a `metadata` field use the
-  same redactor during serialization;
-- the run-events API redacts each event's `metadata` with the same helper before
-  returning it.
+- `_record_to_response` in `thread_runs.py` redacts `RunRecord.metadata` before
+  constructing `RunResponse`;
+- `ThreadResponse` in `threads.py` redacts stored thread metadata for create,
+  get, patch, and search responses;
+- `ThreadStateResponse` in `threads.py` redacts checkpoint metadata returned by
+  the state API;
+- `HistoryEntry` in `threads.py` redacts each checkpoint tuple's metadata
+  returned by the history API;
+- `list_run_events` in `thread_runs.py` redacts each event row's `metadata`
+  before returning it. This explicitly covers historical `run.start` events
+  whose value followed the indirect
+  `body.metadata → config["metadata"] → callback metadata → RunEventStore`
+  path.
 
 These paths must not mutate `RunRecord`, thread-store rows, checkpoint tuples,
 or RunEventStore rows. Database and backup cleanup remains an operator action.
@@ -143,6 +164,10 @@ or RunEventStore rows. Database and backup cleanup remains an operator action.
 - tell affected operators to rotate the credential and remove retained values
   from databases, event stores, logs, snapshots, and backups according to their
   retention policy.
+
+After an upgrade or container restart, retained records are hidden only at the
+listed API output boundaries. Restarting does not delete or rewrite the stored
+credential; rotation and cleanup remain required.
 
 The root README will carry a concise user-facing security note. The backend
 AGENTS guide will record the admission and historical-output boundaries so
@@ -168,6 +193,8 @@ expected reason.
    - assert HTTP 422;
    - assert `RunManager.create_or_reject`, thread-store writes, and
      `run_agent()` were not called.
+   - call `launch_scheduled_thread_run()` with the same legacy metadata and
+     assert the shared `start_run()` admission rejects it before persistence.
 2. Ordinary metadata:
    - include `token_usage` and other non-secret fields;
    - assert the run, thread, callback config, and API representation retain
@@ -180,6 +207,8 @@ expected reason.
 4. Historical output:
    - construct legacy run, thread/checkpoint, and RunEvent records containing
      `auth_token`;
+   - use a historical `run.start` event to cover the indirect callback metadata
+     path;
    - assert API serialization hides the exact field;
    - assert the underlying objects still contain it, proving no implicit data
      migration occurred.
