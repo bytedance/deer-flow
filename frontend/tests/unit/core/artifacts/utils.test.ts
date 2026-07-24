@@ -223,4 +223,33 @@ describe("artifact URL helpers", () => {
       ]),
     ).toBe("https://example.com/image.png");
   });
+
+  test("builds encoded write-file URLs without undefined query parameters", async () => {
+    const { buildWriteFileArtifactURL } = await loadFreshArtifactUtils();
+    const filepath = "/mnt/user-data/outputs/a b#c?%20.md";
+    expect(
+      buildWriteFileArtifactURL({
+        filepath: "/mnt/user-data/outputs/report.md",
+        messageId: "ai-1",
+        toolCallId: "call-1",
+      }),
+    ).toBe(
+      "write-file:/mnt/user-data/outputs/report.md?message_id=ai-1&tool_call_id=call-1",
+    );
+
+    const withIds = new URL(
+      buildWriteFileArtifactURL({
+        filepath,
+        messageId: "message #1",
+        toolCallId: "call ?1",
+      }),
+    );
+    expect(decodeURIComponent(withIds.pathname)).toBe(filepath);
+    expect(withIds.searchParams.get("message_id")).toBe("message #1");
+    expect(withIds.searchParams.get("tool_call_id")).toBe("call ?1");
+
+    const withoutIds = buildWriteFileArtifactURL({ filepath });
+    expect(withoutIds).not.toContain("undefined");
+    expect(new URL(withoutIds).search).toBe("");
+  });
 });

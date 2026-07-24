@@ -494,6 +494,7 @@ class TestModeGating:
     def test_lead_agent_deduplicates_memory_tools_after_appending(self, monkeypatch):
         """Configured tools should not duplicate tool-mode memory tools."""
         from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.config.authorization_config import AuthorizationConfig
         from deerflow.config.memory_config import MemoryConfig
 
         monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
@@ -516,6 +517,7 @@ class TestModeGating:
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
             database=SimpleNamespace(checkpoint_channel_mode="full"),
+            authorization=AuthorizationConfig(enabled=False),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)
@@ -527,6 +529,7 @@ class TestModeGating:
     def test_lead_agent_preserves_non_memory_duplicate_tool_names(self, monkeypatch):
         """Memory-tool collision handling should not drop unrelated duplicate tools."""
         from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.config.authorization_config import AuthorizationConfig
         from deerflow.config.memory_config import MemoryConfig
 
         monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
@@ -549,6 +552,7 @@ class TestModeGating:
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
             database=SimpleNamespace(checkpoint_channel_mode="full"),
+            authorization=AuthorizationConfig(enabled=False),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)

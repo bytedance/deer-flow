@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.base import empty_checkpoint, uuid6
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime import RunStatus
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
@@ -25,6 +28,38 @@ def _checkpoint(checkpoint_id: str, messages: list[object], *, metadata: dict | 
         checkpoint={"channel_values": {"messages": messages}},
         metadata=metadata or {},
     )
+
+
+async def _put_memory_checkpoint(
+    checkpointer: InMemorySaver,
+    thread_id: str,
+    messages: list[object],
+    *,
+    step: int,
+    parent_config: dict | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = str(uuid6())
+    checkpoint["channel_values"] = {"messages": messages}
+    checkpoint["channel_versions"] = {"messages": step}
+    checkpoint_metadata = {
+        "step": step,
+        "source": "loop",
+        "writes": {"test": {"messages": messages}},
+        "parents": {},
+    }
+    checkpoint_metadata.update(metadata or {})
+    return await checkpointer.aput(
+        parent_config or {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+        checkpoint,
+        checkpoint_metadata,
+        {"messages": step},
+    )
+
+
+async def _collect_checkpoints(checkpointer: InMemorySaver, config: dict) -> list:
+    return [checkpoint async for checkpoint in checkpointer.alist(config)]
 
 
 class FakeCheckpointer:
@@ -72,19 +107,26 @@ class FakeAccessor:
             values=dict(checkpoint.checkpoint.get("channel_values", {})),
             config=checkpoint.config,
             metadata=checkpoint.metadata,
+            parent_config=getattr(checkpoint, "parent_config", None),
         )
 
-    async def aget(self, _config):
-        if self.checkpointer.materialized_latest is not None:
-            return self.checkpointer.materialized_latest
-        raw = self.checkpointer.latest or (self.checkpointer.history[0] if self.checkpointer.history else None)
+    async def aget(self, config):
+        materialized_latest = getattr(self.checkpointer, "materialized_latest", None)
+        if materialized_latest is not None and not config.get("configurable", {}).get("checkpoint_id"):
+            return materialized_latest
+        raw = await self.checkpointer.aget_tuple(config)
         return self._from_raw(raw) if raw is not None else SimpleNamespace(values={}, config={}, metadata={})
 
-    async def ahistory(self, _config, *, limit=None):
-        self.checkpointer.alist_limits.append(limit)
-        history = self.checkpointer.materialized_history
+    async def ahistory(self, config, *, limit=None):
+        alist_limits = getattr(self.checkpointer, "alist_limits", None)
+        if alist_limits is not None:
+            alist_limits.append(limit)
+        history = getattr(self.checkpointer, "materialized_history", None)
         if history is None:
-            history = [self._from_raw(item) for item in self.checkpointer.history]
+            if hasattr(self.checkpointer, "history"):
+                history = [self._from_raw(item) for item in self.checkpointer.history]
+            else:
+                history = [self._from_raw(item) async for item in self.checkpointer.alist(config, limit=limit)]
         return history[:limit]
 
 
@@ -354,6 +396,110 @@ def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
     assert regenerated_human["additional_kwargs"] == {"files": [{"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"}]}
 
 
+def test_prepare_regenerate_payload_does_not_mutate_legacy_single_checkpoint_branch():
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    checkpointer = InMemorySaver()
+    source_thread_id = "source-thread"
+    branch_thread_id = "legacy-branch"
+    source_run_id = "source-run"
+    human = HumanMessage(id="human-1", content="question", additional_kwargs={"run_id": source_run_id})
+    ai = AIMessage(id="ai-1", content="answer")
+
+    async def _seed() -> str:
+        source_base_config = await _put_memory_checkpoint(checkpointer, source_thread_id, [], step=0)
+        after_human = await _put_memory_checkpoint(
+            checkpointer,
+            source_thread_id,
+            [human],
+            step=1,
+            parent_config=source_base_config,
+        )
+        source_head_config = await _put_memory_checkpoint(
+            checkpointer,
+            source_thread_id,
+            [human, ai],
+            step=2,
+            parent_config=after_human,
+        )
+        source_head = await checkpointer.aget_tuple(source_head_config)
+        assert source_head is not None
+
+        legacy_head = copy.deepcopy(source_head.checkpoint)
+        legacy_head_id = str(uuid6())
+        legacy_head["id"] = legacy_head_id
+        legacy_metadata = copy.deepcopy(source_head.metadata)
+        legacy_metadata.update(
+            {
+                "source": "branch",
+                "deerflow_branch": True,
+                "branch_parent_thread_id": source_thread_id,
+                "branch_parent_checkpoint_id": source_head_config["configurable"]["checkpoint_id"],
+                "branch_parent_message_id": "ai-1",
+            }
+        )
+        await checkpointer.aput(
+            {"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}},
+            legacy_head,
+            legacy_metadata,
+            dict(legacy_head["channel_versions"]),
+        )
+        return legacy_head_id
+
+    legacy_head_id = asyncio.run(_seed())
+    request = _request(checkpointer, FakeEventStore([]))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_prepare_regenerate_payload(branch_thread_id, "ai-1", request))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not find an addressable checkpoint before the target user message"
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.config["configurable"]["checkpoint_id"] == legacy_head_id
+    branch_history = asyncio.run(_collect_checkpoints(checkpointer, {"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}}))
+    assert [item.config["configurable"]["checkpoint_id"] for item in branch_history] == [legacy_head_id]
+
+
+def test_prepare_regenerate_payload_rejects_legacy_branch_when_source_checkpoint_is_missing():
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    checkpointer = InMemorySaver()
+    branch_thread_id = "legacy-orphan"
+    human = HumanMessage(id="human-1", content="question", additional_kwargs={"run_id": "source-run"})
+    ai = AIMessage(id="ai-1", content="answer")
+
+    async def _seed() -> None:
+        await _put_memory_checkpoint(
+            checkpointer,
+            branch_thread_id,
+            [human, ai],
+            step=1,
+            metadata={
+                "source": "branch",
+                "deerflow_branch": True,
+                "branch_parent_thread_id": "deleted-source",
+                "branch_parent_checkpoint_id": "missing-checkpoint",
+                "branch_parent_message_id": "ai-1",
+            },
+        )
+
+    asyncio.run(_seed())
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            _prepare_regenerate_payload(
+                branch_thread_id,
+                "ai-1",
+                _request(checkpointer, FakeEventStore([])),
+            )
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not find an addressable checkpoint before the target user message"
+    branch_history = asyncio.run(_collect_checkpoints(checkpointer, {"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}}))
+    assert len(branch_history) == 1
+
+
 def test_prepare_regenerate_uses_materialized_history_when_raw_messages_are_omitted():
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 
@@ -400,6 +546,124 @@ def test_prepare_regenerate_uses_materialized_history_when_raw_messages_are_omit
     assert response.metadata["regenerate_checkpoint_id"] == "ckpt-base"
     assert response.input["messages"][0]["id"] == "human-1"
     assert checkpointer.alist_limits == [400]
+
+
+def test_prepare_regenerate_rejects_cyclic_lineage_without_chronological_fallback():
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+
+    def linked_snapshot(checkpoint_id: str, messages: list[object], parent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            values={"messages": messages},
+            config={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": checkpoint_id,
+                }
+            },
+            metadata={},
+            parent_config={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": parent_id,
+                }
+            },
+        )
+
+    head = linked_snapshot("head", [human, ai], "cycle")
+    cycle = linked_snapshot("cycle", [human], "head")
+    wrong_sibling_base = linked_snapshot("wrong-sibling", [], "root")
+    by_id = {"head": head, "cycle": cycle}
+
+    async def aget(config):
+        return by_id[config["configurable"]["checkpoint_id"]]
+
+    accessor = SimpleNamespace(
+        aget=aget,
+        ahistory=AsyncMock(return_value=[head, wrong_sibling_base]),
+    )
+    builder = AsyncMock(
+        return_value=(
+            accessor,
+            {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
+        )
+    )
+
+    with patch.object(thread_runs, "build_thread_checkpoint_state_accessor", builder):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                thread_runs._find_base_checkpoint_before_human(
+                    "thread-1",
+                    "human-1",
+                    _request(FakeCheckpointer([]), FakeEventStore([])),
+                    head_checkpoint=head,
+                )
+            )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not safely resolve the checkpoint before the target user message"
+    accessor.ahistory.assert_not_awaited()
+
+
+def test_prepare_regenerate_rejects_dangling_parent_without_chronological_fallback():
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    head = SimpleNamespace(
+        values={"messages": [human, ai]},
+        config={
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "head",
+            }
+        },
+        metadata={},
+        parent_config={
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "missing",
+            }
+        },
+    )
+    missing = SimpleNamespace(
+        values={},
+        config=head.parent_config,
+        metadata=None,
+        created_at=None,
+        parent_config=None,
+    )
+    accessor = SimpleNamespace(
+        aget=AsyncMock(return_value=missing),
+        ahistory=AsyncMock(return_value=[head, _snapshot("wrong-sibling", [])]),
+    )
+    builder = AsyncMock(
+        return_value=(
+            accessor,
+            {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}},
+        )
+    )
+
+    with patch.object(thread_runs, "build_thread_checkpoint_state_accessor", builder):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                thread_runs._find_base_checkpoint_before_human(
+                    "thread-1",
+                    "human-1",
+                    _request(FakeCheckpointer([]), FakeEventStore([])),
+                    head_checkpoint=head,
+                )
+            )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Could not safely resolve the checkpoint before the target user message"
+    accessor.ahistory.assert_not_awaited()
 
 
 def test_prepare_regenerate_payload_rejects_non_latest_assistant():
@@ -457,6 +721,30 @@ def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_m
 
     assert response.target_run_id == "run-latest"
     assert response.metadata["regenerate_from_run_id"] == "run-latest"
+
+
+def test_prepare_regenerate_payload_uses_server_stamped_human_run_id_without_parent_events():
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    human = HumanMessage(id="human-1", content="question", additional_kwargs={"run_id": "parent-run"})
+    ai = AIMessage(id="ai-1", content="answer")
+    base = _checkpoint("ckpt-base", [])
+    after_human = _checkpoint("ckpt-human", [human])
+    latest = _checkpoint(
+        "ckpt-ai",
+        [human, ai],
+        metadata={
+            "deerflow_branch": True,
+            "branch_parent_thread_id": "parent-thread",
+            "branch_parent_checkpoint_id": "parent-checkpoint",
+        },
+    )
+    checkpointer = FakeCheckpointer([latest, after_human, base])
+    event_store = FakeEventStore([])
+
+    response = asyncio.run(_prepare_regenerate_payload("thread-1", "ai-1", _request(checkpointer, event_store)))
+
+    assert response.target_run_id == "parent-run"
 
 
 def test_prepare_regenerate_payload_rejects_unverified_run_fallback_when_events_are_missing():
