@@ -150,7 +150,7 @@ class E2BSandboxProvider(SandboxProvider):
         idle_timeout = max(0, min(int(idle_timeout), MAX_E2B_TIMEOUT))
 
         replicas = _opt("replicas")
-        replicas = DEFAULT_REPLICAS if replicas is None else max(1, int(replicas))
+        replicas = DEFAULT_REPLICAS if replicas is None else int(replicas)
 
         overflow_policy = _opt("overflow_policy") or DEFAULT_OVERFLOW_POLICY
         if overflow_policy not in ("wait", "reject", "burst"):
@@ -811,10 +811,39 @@ class E2BSandboxProvider(SandboxProvider):
 
         sandbox_id: str = getattr(client, "sandbox_id", None) or str(uuid.uuid4())[:8]
         if not self._track_reserved_remote_op(sandbox_id):
-            self._kill_client(client)
+            kill_error = self._kill_client(client)
+            cleanup_confirmed = kill_error is None
             self._safe_close_client(client)
+            if kill_error is not None:
+                with self._lock:
+                    self._remote_ops_in_progress.add(sandbox_id)
+                try:
+                    retry_client = self._reconnect_client(sandbox_cls, sandbox_id)
+                except Exception as reconnect_error:
+                    logger.warning(
+                        "Failed to reconnect e2b sandbox %s after shutdown cleanup failed: %s",
+                        sandbox_id,
+                        reconnect_error,
+                    )
+                else:
+                    retry_error = self._kill_client(retry_client)
+                    self._safe_close_client(retry_client)
+                    if retry_error is None:
+                        cleanup_confirmed = True
+                        with self._lock:
+                            self._remote_ops_in_progress.discard(sandbox_id)
+                    else:
+                        logger.warning(
+                            "Failed to kill e2b sandbox %s after reconnecting during shutdown: %s",
+                            sandbox_id,
+                            retry_error,
+                        )
+            if cleanup_confirmed:
+                message = f"Sandbox provider shut down during sandbox creation; cleaned up remote sandbox {sandbox_id}"
+            else:
+                message = f"Sandbox provider shut down during sandbox creation; could not confirm cleanup for remote sandbox {sandbox_id}"
             raise SandboxCapacityExceededError(
-                f"Sandbox provider shut down during sandbox creation; killed remote sandbox {sandbox_id}",
+                message,
                 replicas=int(self._config["replicas"]),
                 retry_after_seconds=30.0,
                 reason="shutdown",
@@ -1502,21 +1531,22 @@ class E2BSandboxProvider(SandboxProvider):
         """Complete one release while the thread transition lock is held.
 
         The active slot becomes a *transitioning* slot the moment the sandbox
-        is removed from ``_sandboxes``.  It stays counted through output sync,
-        timeout refresh, and client close.  If the provider shut down during
-        the transition, the VM is killed rather than parked in ``_warm_pool``.
-        The transitioning slot is released exactly once in the ``finally``
-        block regardless of which exit path is taken.
+        is removed from ``_sandboxes``. It stays counted through output sync
+        and timeout refresh. The transition ends when the VM enters its
+        destination or destruction completes. Shutdown kills the VM instead
+        of parking it in ``_warm_pool``.
         """
         sandbox: E2BSandbox | None = None
         seed: str | None = None
         removed_keys: list[tuple[str, str]] = []
+        transition_slot_held = False
 
         with self._lock:
             sandbox = self._sandboxes.pop(sandbox_id, None)
             if sandbox is None:
                 return
             self._begin_transition_locked()
+            transition_slot_held = True
             removed_keys = [key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id]
             for key in removed_keys:
                 self._thread_sandboxes.pop(key, None)
@@ -1569,6 +1599,8 @@ class E2BSandboxProvider(SandboxProvider):
                 if not should_kill:
                     self._warm_pool[sandbox_id] = (seed or "", time.time())
                     self._warm_pool.move_to_end(sandbox_id)
+                    self._end_transition_locked()
+                    transition_slot_held = False
                     logger.info("Released e2b sandbox %s to warm pool", sandbox_id)
 
             if should_kill:
@@ -1586,7 +1618,8 @@ class E2BSandboxProvider(SandboxProvider):
             except Exception as e:
                 logger.warning("Error closing e2b sandbox %s during release: %s", sandbox_id, e)
         finally:
-            self._free_transitioning_slot()
+            if transition_slot_held:
+                self._free_transitioning_slot()
 
     def _kill_and_close(self, sandbox: E2BSandbox) -> None:
         if error := self._kill_client(getattr(sandbox, "_client", None)):

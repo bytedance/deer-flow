@@ -786,6 +786,8 @@ default asyncio executor.
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
 Shutdown closes an unowned discovery client without destroying its VM.
+Release stops counting a transition when the VM enters the warm pool.
+Shutdown races retry remote cleanup after a transient kill failure.
 Reset destroys tracked active and warm E2B VMs. The old provider instance
 cannot accept new acquisitions.
 

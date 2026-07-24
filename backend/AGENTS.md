@@ -478,9 +478,13 @@ copying a raw checkpoint because delta state is not self-contained in one tuple.
   one Gateway process. It does not provide multi-process capacity control.
   Uncertain cleanup keeps a tombstone slot. Shutdown tracks owned remote
   operation IDs. Discovery can find a VM from another Gateway. Shutdown closes
-  an unowned discovery client without destroying its VM. `reset()` uses full
-  shutdown semantics. It destroys tracked active and warm VMs. It wakes
-  capacity waiters. Callers cannot reuse the old provider instance.
+  an unowned discovery client without destroying its VM. Release ends its
+  transition count when the VM enters the warm pool. Local client cleanup does
+  not consume a second slot. A create that returns after shutdown retries one
+  failed kill through a new client. An unconfirmed remote ID stays tracked.
+  `reset()` uses full shutdown semantics. It destroys tracked active and warm
+  VMs. It wakes capacity waiters. Callers cannot reuse the old provider
+  instance.
   - **Cross-instance ownership store** (`aio_sandbox/ownership/`, #4206): gateway instances sharing a container backend coordinate container ownership through a pluggable lease store, selected by `sandbox.ownership.type` (`memory` | `redis`) and resolved like `stream_bridge` (`factory.py`, lazy per-branch import, `redis` optional extra, `DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL` env escape hatch; a set `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` implies a multi-instance deployment and infers `redis`). `memory` is single-instance only and declares `supports_cross_process = False`.
     - **A lease answers "who reaps this container", not "who may use it".** That splits the interface in two: `take()` transfers ownership on the **acquire** path (a container is deterministic per user/thread, so consecutive turns legitimately land on different instances — a conditional claim there would strand the thread until the previous lease expired), while `claim()` succeeds only if the container is unowned or already ours and gates every **adopt/reap** path. `release()` never clears a peer's lease.
     - **A lease carries a state, and that is what makes the destroy window safe.** `own:` = responsible for this container; `del:` = tearing it down (`claim(..., for_destroy=True)`). `take()` is refused against a `del:` lease, so a container cannot be re-acquired between a destroy path's claim and its container stop. Without the two states an unconditional `take()` would silently overwrite the destroyer's claim and the peer's stop would land on a container the new owner had already handed to an agent — i.e. #4206 again. That pairing is what replaced the previous same-host `flock` guard, which is gone; Redis makes the scope genuinely multi-instance instead of same-host. A destroyer that dies mid-stop leaves a `del:` marker that lapses with the TTL. On the acquire path a refused take raises `SandboxBeingDestroyedError`: the reuse/reclaim paths drop the container and cold-start, and the discover path propagates (falling through to create would collide with the not-yet-removed container name).

@@ -74,9 +74,10 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider and BoxliteProvider shared options:
+    AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
-        replicas: Maximum active + warm sandboxes/VMs per gateway process (default: 3). When the limit is reached, warm/least-recently-used sandboxes are evicted to make room; active sandboxes are not forcibly stopped.
+        replicas: Positive provider capacity per gateway process. Each provider
+            defines which lifecycle states count toward this limit.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
@@ -110,7 +111,7 @@ class SandboxConfig(BaseModel):
     replicas: int | None = Field(
         default=None,
         gt=0,
-        description="Maximum active, warm, reserved, and transitioning sandboxes per gateway process. Capacity policy controls full-provider behavior.",
+        description="Positive provider capacity per gateway process. Each provider defines which lifecycle states count toward this limit.",
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",

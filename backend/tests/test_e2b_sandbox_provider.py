@@ -681,6 +681,12 @@ def test_sandbox_config_validates_e2b_capacity_fields():
             burst_limit=-1,
         )
 
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+            replicas=0,
+        )
+
 
 def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
@@ -2299,6 +2305,82 @@ def test_capacity_create_aborted_by_shutdown_kills_vm(monkeypatch):
     assert created_client.killed, "VM must be killed when shutdown aborts create"
 
 
+def test_capacity_create_aborted_by_shutdown_retries_failed_kill(monkeypatch):
+    """A transient kill failure must not orphan a VM created during shutdown."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    created_client = FakeClient(sandbox_id="sb-shutdown-retry")
+    created_client.kill = MagicMock(side_effect=RuntimeError("control plane unavailable"))
+    retry_client = FakeClient(sandbox_id=created_client.sandbox_id)
+    fake_cls.connect_factory = lambda _sid, **_kwargs: retry_client
+    create_returned = threading.Event()
+    allow_create_return = threading.Event()
+
+    def intercept_create(**_kwargs):
+        create_returned.set()
+        assert allow_create_return.wait(timeout=2)
+        return created_client
+
+    fake_cls.create_factory = intercept_create
+    result: list[Exception] = []
+
+    def do_acquire():
+        try:
+            p.acquire("t1", user_id="u1")
+        except Exception as error:
+            result.append(error)
+
+    acquire_thread = threading.Thread(target=do_acquire)
+    acquire_thread.start()
+    assert create_returned.wait(timeout=1)
+
+    p.shutdown()
+    allow_create_return.set()
+    acquire_thread.join(timeout=5)
+
+    assert len(result) == 1
+    assert isinstance(result[0], SandboxCapacityExceededError)
+    assert retry_client.killed
+    assert retry_client.closed
+
+
+def test_capacity_create_aborted_by_shutdown_tracks_uncertain_cleanup(monkeypatch):
+    """A persistent cleanup failure must keep the remote VM ID visible."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    created_client = FakeClient(sandbox_id="sb-shutdown-uncertain")
+    created_client.kill = MagicMock(side_effect=RuntimeError("control plane unavailable"))
+    fake_cls.connect_factory = lambda _sid, **_kwargs: (_ for _ in ()).throw(RuntimeError("network unavailable"))
+    create_returned = threading.Event()
+    allow_create_return = threading.Event()
+
+    def intercept_create(**_kwargs):
+        create_returned.set()
+        assert allow_create_return.wait(timeout=2)
+        return created_client
+
+    fake_cls.create_factory = intercept_create
+    result: list[Exception] = []
+
+    def do_acquire():
+        try:
+            p.acquire("t1", user_id="u1")
+        except Exception as error:
+            result.append(error)
+
+    acquire_thread = threading.Thread(target=do_acquire)
+    acquire_thread.start()
+    assert create_returned.wait(timeout=1)
+
+    p.shutdown()
+    allow_create_return.set()
+    acquire_thread.join(timeout=5)
+
+    assert len(result) == 1
+    assert "could not confirm cleanup" in str(result[0])
+    assert p._remote_ops_in_progress == {created_client.sandbox_id}
+
+
 def test_capacity_concurrent_different_threads_only_one_creates(monkeypatch):
     """replicas=1. Two threads for different users/threads → exactly 1 create."""
     p = _make_provider(replicas=1, overflow_policy="reject")
@@ -2431,6 +2513,36 @@ def test_shutdown_during_release_close_kills_published_warm_vm(monkeypatch):
     release_thread.join(timeout=5)
 
     assert shutdown_client.killed
+
+
+def test_release_keeps_parked_vm_reclaimable_during_client_close(monkeypatch):
+    """A concurrent acquire must not evict a VM because release counts it twice."""
+    p = _make_provider(replicas=2, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    first_client = FakeClient(sandbox_id="sb-first")
+    second_client = FakeClient(sandbox_id="sb-second")
+    created_clients = iter((first_client, second_client))
+    fake_cls.create_factory = lambda **_kwargs: next(created_clients)
+
+    first_sid = p.acquire("t1", user_id="u1")
+    close_started = threading.Event()
+    allow_close = threading.Event()
+
+    def slow_close():
+        close_started.set()
+        assert allow_close.wait(timeout=2)
+        first_client.closed = True
+
+    first_client.close = slow_close
+    release_thread = threading.Thread(target=p.release, args=(first_sid,))
+    release_thread.start()
+    assert close_started.wait(timeout=1)
+
+    assert p.acquire("t2", user_id="u2") == "sb-second"
+    allow_close.set()
+    release_thread.join(timeout=5)
+
+    assert p.acquire("t1", user_id="u1") == first_sid
 
 
 def test_shutdown_during_reclaim_does_not_register_active(monkeypatch):
