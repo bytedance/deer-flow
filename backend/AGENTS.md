@@ -294,7 +294,10 @@ tool graph or subagent executor during state/schema imports.
   deferred tombstone compaction. It preserves public `add_messages` behavior,
   including duplicate IDs, replacement position, removal errors,
   `REMOVE_ALL_MESSAGES`, null-write errors, and missing-ID allocation order,
-  without rescanning the accumulated state for every write.
+  without rescanning the accumulated state for every write. Keep this
+  full-parity contract covered by differential tests: LangGraph's private
+  `_messages_delta_reducer` is also linear, but intentionally omits some of
+  those public `add_messages` semantics and cannot be substituted directly.
 
 **Runtime Configuration** (via `config.configurable`):
 - `thinking_enabled` - Enable model's extended thinking

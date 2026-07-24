@@ -289,12 +289,19 @@ def _index_messages(
 
 
 def _raise_null_write(has_messages: bool) -> None:
+    # ``add_messages(left, None)`` reports only ``left`` when the accumulated
+    # message list is non-empty; with an empty list, it reports only ``right``.
     received = "left" if has_messages else "right"
     raise ValueError(f"Must specify non-null arguments for both 'left' and 'right'. Only received: '{received}'.")
 
 
 def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list[AnyMessage]:
-    """Fold DeltaChannel writes with ``add_messages`` semantics in linear time."""
+    """Fold DeltaChannel writes with ``add_messages`` semantics in linear time.
+
+    LangGraph's private ``_messages_delta_reducer`` is also linear, but does
+    not preserve the public reducer's full coercion, ID, removal, and
+    ``REMOVE_ALL_MESSAGES`` behavior.
+    """
     if not writes:
         return list(state)
     if writes[0] is None:

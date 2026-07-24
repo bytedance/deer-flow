@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage, ToolMessageChunk
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
@@ -54,7 +54,7 @@ def _message_merge_cases(draw):
         st.tuples(
             st.just("message"),
             st.sampled_from(message_ids),
-            st.sampled_from(["user", "assistant"]),
+            st.sampled_from(["user", "assistant", "ai_chunk", "tool_chunk"]),
             st.text(max_size=12),
         ),
         st.tuples(
@@ -71,6 +71,10 @@ def _message_merge_cases(draw):
         for kind, message_id, role, content in raw_write:
             if kind == "remove":
                 write.append(RemoveMessage(id=message_id))
+            elif role == "ai_chunk":
+                write.append(AIMessageChunk(id=message_id, content=content))
+            elif role == "tool_chunk":
+                write.append(ToolMessageChunk(id=message_id, content=content, tool_call_id=f"call-{message_id}"))
             else:
                 write.append({"role": role, "content": content, "id": message_id})
         writes.append(write)
