@@ -639,19 +639,22 @@ export function mergeTransientHistoryBridge(
 export function mergeTransientHistoryBridgeOrder(
   currentOrder: readonly string[],
   capturedMessages: Message[],
-): string[] {
+): readonly string[] {
   const capturedOrder = dedupeMessagesByIdentity(capturedMessages)
     .map(messageIdentity)
     .filter(isNonEmptyString);
-  const merged = [...currentOrder];
+  // Clone lazily and return the input when nothing is appended: this runs per
+  // render while the bridge is active, and a fresh array would invalidate the
+  // coalesced render memo on every chunk (#4409 Phase 1).
+  let merged: string[] | null = null;
   const seen = new Set(currentOrder);
   for (const identity of capturedOrder) {
     if (!seen.has(identity)) {
       seen.add(identity);
-      merged.push(identity);
+      (merged ??= [...currentOrder]).push(identity);
     }
   }
-  return merged;
+  return merged ?? currentOrder;
 }
 
 export function resolveThreadTransientHistoryBridge(
@@ -1408,7 +1411,7 @@ export function useThreadStream({
   // Full identity order of each captured checkpoint. Confirmed bridge entries
   // are pruned from the message buffer, but remain here as non-rendering
   // anchors so an older rescue can be placed before a newest-first page.
-  const transientHistoryOrderRef = useRef<string[]>([]);
+  const transientHistoryOrderRef = useRef<readonly string[]>([]);
   const transientHistoryThreadIdRef = useRef<string | null>(null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
