@@ -33,7 +33,7 @@ The Lead Agent does not hardcode a specific workflow. It uses the model's reason
 
 The Lead Agent is built on **LangGraph** and **LangChain Agent** primitives. Specifically:
 
-- [`create_agent`](https://python.langchain.com/docs/concepts/agents/) from `langchain.agents` wraps the LLM into a tool-calling agent loop.
+- [`create_agent`](https://docs.langchain.com/oss/python/langchain/agents) from `langchain.agents` wraps the LLM into a tool-calling agent loop.
 - LangGraph manages the `ThreadState` and provides the checkpointing, streaming, and graph execution model.
 - A **middleware chain** wraps every turn of the agent loop, providing cross-cutting capabilities like memory, summarization, and clarification.
 

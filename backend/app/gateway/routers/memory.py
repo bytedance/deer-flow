@@ -1,12 +1,12 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
@@ -65,16 +65,44 @@ class Fact(BaseModel):
     id: str = Field(..., description="Unique identifier for the fact")
     content: str = Field(..., description="Fact content")
     category: str = Field(default="context", description="Fact category")
+    categoryExtension: str | None = Field(default=None, description="Extension category when category is 'other'")
+    topics: list[str] | None = Field(default=None, description="Retrieval-oriented topic labels")
     confidence: float = Field(default=0.5, description="Confidence score (0-1)")
     createdAt: str = Field(default="", description="Creation timestamp")
-    source: str = Field(default="unknown", description="Source thread ID")
+    source: str = Field(default="unknown", description="Legacy source string; structured metadata remains internal to storage")
     sourceError: str | None = Field(default=None, description="Optional description of the prior mistake or wrong approach")
+    schemaVersion: int | None = Field(default=None, description="Per-fact schema version")
+    status: str | None = Field(default=None, description="Fact lifecycle status")
+    scope: dict[str, str | None] | None = Field(default=None, description="Canonical user/agent scope")
+    revision: int | None = Field(default=None, description="Fact optimistic revision")
+    updatedAt: str | None = Field(default=None, description="Last fact update timestamp")
+    consolidatedAt: str | None = None
+    consolidatedFrom: list[str] | None = None
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _legacy_source_string(cls, value: Any) -> str:
+        """Keep the HTTP contract stable while Markdown stores rich metadata."""
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, dict):
+            return "unknown"
+        source_type = value.get("type")
+        thread_id = value.get("threadId")
+        if source_type == "conversation" and isinstance(thread_id, str) and thread_id:
+            return thread_id
+        if isinstance(source_type, str) and source_type:
+            return source_type
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+        return "unknown"
 
 
 class MemoryResponse(BaseModel):
     """Response model for memory data."""
 
     version: str = Field(default="1.0", description="Memory schema version")
+    revision: int | None = Field(default=None, description="Manifest revision")
     lastUpdated: str = Field(default="", description="Last update timestamp")
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
@@ -85,27 +113,55 @@ def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
     """Convert updater validation errors into stable API responses."""
     if exc.args and exc.args[0] == "confidence":
         detail = "Invalid confidence value; must be between 0 and 1."
+    elif exc.args and exc.args[0] == "agent_name":
+        detail = "An agent name is required for fact operations; user-global memory stores summaries only."
     else:
         detail = "Memory fact content cannot be empty."
     return HTTPException(status_code=400, detail=detail)
 
 
-def _require_capability(name: str, *, label: str):
-    """Return a DeerMem-internal capability (bound method) or raise 501.
+def _map_memory_manager_error(exc: MemoryConflictError | MemoryCorruptionError) -> HTTPException:
+    """Map backend-neutral manager errors without importing a storage plugin."""
+    if isinstance(exc, MemoryConflictError):
+        return HTTPException(status_code=409, detail="Memory changed concurrently; reload and retry.")
+    return HTTPException(status_code=500, detail="Stored memory data is corrupted.")
 
-    ``reload_memory`` / ``create_fact`` / ``delete_fact`` / ``update_fact`` are
-    not on the ``MemoryManager`` ABC -- they are DeerMem-internal. Probe with
-    ``hasattr`` rather than importing DeerMem, so this router has no hard
-    dependency on the default backend: a non-DeerMem (or removed) backend
-    simply lacks the attribute and the endpoint returns 501.
+
+def _unsupported_501(manager: object, label: str) -> HTTPException:
+    """501 for an unsupported memory operation.
+
+    Tier-3 hooks (``reload_memory`` / ``create_fact`` / ``delete_fact`` /
+    ``update_fact``) and tier-2 management ops (``get_memory`` / ``clear_memory``
+    / ``import_memory``) all default to ``raise NotImplementedError``; backends
+    that support them override, unsupported ones inherit the raise. Before the
+    contract change these were ``@abstractmethod`` (every backend implemented
+    them, so the endpoints could never raise); now a minimal backend (only
+    ``add`` + ``get_context``) inherits the raise, so endpoints invoke the
+    method directly and catch ``NotImplementedError`` -> this 501. There is no
+    global ``NotImplementedError`` handler, so an uncaught raise is a raw 500.
     """
-    manager = get_memory_manager()
-    if not hasattr(manager, name):
-        raise HTTPException(
-            status_code=501,
-            detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
-        )
-    return getattr(manager, name)
+    return HTTPException(
+        status_code=501,
+        detail=f"Operation '{label}' not supported by memory backend '{type(manager).__name__}'.",
+    )
+
+
+def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -> dict[str, Any]:
+    """Read the full memory doc; 501 if the backend doesn't expose one.
+
+    ``get_memory`` is tier-2 (default ``raise NotImplementedError``); a minimal
+    backend doesn't expose a full doc. The standalone read endpoints (GET
+    /memory, /memory/export, /memory/status) and the /memory/reload fallback all
+    route reads through here so an unsupported backend gets a clean 501 instead
+    of a raw 500. ``label`` is the operation name in the 501 detail (the
+    endpoint's verb, e.g. "get memory" / "export memory" / "reload memory").
+    """
+    try:
+        return manager.get_memory(user_id=user_id)
+    except NotImplementedError:
+        raise _unsupported_501(manager, label) from None
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
 
 
 class FactCreateRequest(BaseModel):
@@ -183,7 +239,8 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         }
         ```
     """
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory")
     return MemoryResponse(**memory_data)
 
 
@@ -205,14 +262,18 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     """
     user_id = _resolve_memory_user_id(http_request)
     manager = get_memory_manager()
-    if hasattr(manager, "reload_memory"):
+    try:
         memory_data = manager.reload_memory(user_id=user_id)
-    else:
-        # Non-DeerMem backends have no reload concept; return current memory.
-        # (Asymmetry vs fact CRUD, which raises 501 when unsupported: reload is a
-        # read-only refresh, so degrading to get_memory is safe and still useful;
-        # silently no-op'ing a write would hide data loss, so writes fail loud.)
-        memory_data = manager.get_memory(user_id=user_id)
+    except NotImplementedError:
+        # Non-DeerMem backends have no reload concept; fall back to get_memory
+        # (read-only refresh, so degrading is safe and still useful -- vs fact
+        # CRUD writes, which fail loud at 501 since silently no-op'ing a write
+        # would hide data loss). If get_memory is also unsupported (a minimal
+        # backend with no full doc), surface 501 rather than a raw 500: reads
+        # degrade only when there is a doc to degrade to.
+        memory_data = _get_memory_or_501(manager, user_id, "reload memory")
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     return MemoryResponse(**memory_data)
 
 
@@ -225,8 +286,13 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
 )
 async def clear_memory(http_request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
+    manager = get_memory_manager()
     try:
-        memory_data = get_memory_manager().clear_memory(user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.clear_memory(user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "clear memory") from None
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to clear memory data.") from exc
 
@@ -242,16 +308,20 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
 )
 async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
     """Create a single fact manually."""
+    manager = get_memory_manager()
     try:
-        create_fact = _require_capability("create_fact", label="create fact")
-        memory_data, fact_id = create_fact(
+        memory_data, fact_id = manager.create_fact(
             content=request.content,
             category=request.category,
             confidence=request.confidence,
             user_id=_resolve_memory_user_id(http_request),
         )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "create fact") from None
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
 
@@ -270,11 +340,15 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
 )
 async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
+    manager = get_memory_manager()
     try:
-        delete_fact = _require_capability("delete_fact", label="delete fact")
-        memory_data = delete_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.delete_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "delete fact") from None
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to delete memory fact.") from exc
 
@@ -290,19 +364,23 @@ async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> Me
 )
 async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
     """Partially update a single fact manually."""
+    manager = get_memory_manager()
     try:
-        update_fact = _require_capability("update_fact", label="update fact")
-        memory_data = update_fact(
+        memory_data = manager.update_fact(
             fact_id=fact_id,
             content=request.content,
             category=request.category,
             confidence=request.confidence,
             user_id=_resolve_memory_user_id(http_request),
         )
+    except NotImplementedError:
+        raise _unsupported_501(manager, "update fact") from None
     except ValueError as exc:
         raise _map_memory_fact_value_error(exc) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
 
@@ -318,7 +396,8 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
 )
 async def export_memory(http_request: Request) -> MemoryResponse:
     """Export the current memory data."""
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
     return MemoryResponse(**memory_data)
 
 
@@ -331,8 +410,13 @@ async def export_memory(http_request: Request) -> MemoryResponse:
 )
 async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
     """Import and persist memory data."""
+    manager = get_memory_manager()
     try:
-        memory_data = get_memory_manager().import_memory(request.model_dump(), user_id=_resolve_memory_user_id(http_request))
+        memory_data = manager.import_memory(request.model_dump(exclude_none=True), user_id=_resolve_memory_user_id(http_request))
+    except NotImplementedError:
+        raise _unsupported_501(manager, "import memory") from None
+    except (MemoryConflictError, MemoryCorruptionError) as exc:
+        raise _map_memory_manager_error(exc) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to import memory data.") from exc
 
@@ -402,7 +486,8 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
         Combined memory configuration and current data.
     """
     config = get_memory_config()
-    memory_data = get_memory_manager().get_memory(user_id=_resolve_memory_user_id(http_request))
+    manager = get_memory_manager()
+    memory_data = _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory status")
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

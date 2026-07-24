@@ -14,6 +14,8 @@ import {
   hasContent,
   hasReasoning,
   isAssistantMessageGroupStreaming,
+  parseUploadedFiles,
+  stripInternalMarkers,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
@@ -305,6 +307,47 @@ describe("human message internal context stripping", () => {
     } as Message;
 
     expect(getMessageCopyData(message)).toBe("Summarize this paper");
+  });
+
+  test("strips current_uploads context from copy data", () => {
+    // Mirrors the block UploadsMiddleware emits since #4174, including the
+    // trailing usage-guidance lines.
+    const message = {
+      id: "human-with-current-uploads",
+      type: "human",
+      content:
+        "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n\nTo work with these files:\n- Use `grep` to search for keywords\n  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).\n</current_uploads>\n\nMake a slide deck from this",
+    } as Message;
+
+    expect(getMessageCopyData(message)).toBe("Make a slide deck from this");
+  });
+
+  test("parses uploaded files from a current_uploads block", () => {
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n  Document outline (use `read_file` with line ranges to read sections):\n    L1: Introduction\n- data.xlsx (12.0 KB)\n  Path: /mnt/user-data/uploads/data.xlsx\n</current_uploads>\n\nSummarize";
+
+    // size is bytes (FileInMessage contract): the block's "177.6 KB" /
+    // "12.0 KB" are converted back from the human-readable form the backend
+    // emits, so formatBytes re-renders them at the original magnitude.
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "paper.docx",
+        size: Math.round(177.6 * 1024), // 181862
+        path: "/mnt/user-data/uploads/paper.docx",
+      },
+      {
+        filename: "data.xlsx",
+        size: 12 * 1024, // 12288
+        path: "/mnt/user-data/uploads/data.xlsx",
+      },
+    ]);
+  });
+
+  test("stripInternalMarkers removes current_uploads blocks on export", () => {
+    const content =
+      "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
+
+    expect(stripInternalMarkers(content)).toBe("Export me");
   });
 
   test("strips slash skill activation context from display content", () => {
@@ -722,6 +765,105 @@ describe("orphan tool messages", () => {
     const t2 = allMessages.find((m) => m.id === "t-2");
     expect(t2).toBeDefined();
     expect(t2?.type).toBe("tool");
+  });
+
+  test("opens a processing group for a leading orphan tool message", () => {
+    // History pagination cuts by event seq, not turn boundaries, so the first
+    // loaded page can begin mid-turn with tool results whose AI tool-call
+    // message sits on an unloaded older page (#4399). They must stay visible
+    // in a processing group, not be dropped with a console error per render.
+    const messages = [
+      {
+        id: "t-lead-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-1",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "t-lead-2",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old-2",
+        content: "second output",
+      },
+      { id: "ai-1", type: "ai", content: "Done." },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual([
+      "assistant:processing",
+      "assistant",
+    ]);
+    // Both leading orphans cluster into the same processing group.
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead-1",
+      "t-lead-2",
+    ]);
+  });
+
+  test("leading orphan absorbs the following real AI turn into one processing group", () => {
+    // A leading orphan followed by a real tool-call turn must accumulate into
+    // a single processing group via the assistant:processing branch, not
+    // strand the orphan as a separate empty group beside the real turn.
+    const messages = [
+      {
+        id: "t-lead",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-old",
+        content: "output from unloaded turn",
+      },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "running",
+        tool_calls: [{ id: "call-1", name: "bash", args: {} }],
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output-1",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    // One processing group holds the orphan, the AI turn, and its tool result.
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual([
+      "t-lead",
+      "ai-1",
+      "t-1",
+    ]);
+  });
+
+  test("tool message preceded only by hidden messages gets a group", () => {
+    // messages is non-empty, but every earlier message is hidden from the UI —
+    // groups is still empty when the tool message arrives.
+    const messages = [
+      {
+        id: "hidden-1",
+        type: "human",
+        content:
+          "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>",
+      },
+      {
+        id: "t-1",
+        type: "tool",
+        name: "bash",
+        tool_call_id: "call-1",
+        content: "output",
+      },
+    ] as Message[];
+
+    const groups = getMessageGroups(messages);
+
+    expect(groups.map((g) => g.type)).toEqual(["assistant:processing"]);
+    expect(groups[0]?.messages.map((m) => m.id)).toEqual(["t-1"]);
   });
 
   test("replayed tool with same tool_call_id is not lost (duplicate stream events)", () => {

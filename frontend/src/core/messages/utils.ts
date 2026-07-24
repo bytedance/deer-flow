@@ -92,13 +92,27 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
           if (lastGroup) {
             lastGroup.messages.push(message);
           } else {
-            // groups is empty (shouldn't happen — the outer for loop is guarded
-            // by `messages.length === 0 -> return []`), but keep the diagnostic
-            // just in case.
-            console.error(
-              "Unexpected tool message with no preceding group",
-              message,
-            );
+            // Leading orphan: `groups` is empty when this tool message
+            // arrives. Two paths reach here: (1) history pagination cuts by
+            // event seq, not turn boundaries, so the first loaded page begins
+            // mid-turn with a tool result whose AI tool-call sits on an
+            // unloaded older page (#4399); (2) the tool message is preceded
+            // only by hidden control messages. Open a processing group so it
+            // stays visible instead of being dropped with a per-render console
+            // error.
+            //
+            // Only case (1) self-heals — loading the older page re-groups the
+            // tool under its real turn. Case (2), and any truly orphaned tool
+            // with no AI antecedent, has no page to load: the group persists
+            // and renders as an empty ChainOfThought shell (convertToSteps
+            // emits steps only for `type === "ai"`). That empty shell is an
+            // accepted degradation — still a net win over dropping the result
+            // and firing console.error every render.
+            groups.push({
+              id: message.id,
+              type: "assistant:processing",
+              messages: [message],
+            });
           }
         }
       }
@@ -582,7 +596,10 @@ export interface FileInMessage {
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(/<(uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
+    .replace(
+      /<(current_uploads|uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g,
+      "",
+    )
     .trim();
 }
 
@@ -592,7 +609,8 @@ export function stripUploadedFilesTag(content: string): string {
  *
  * These markers are *not* user copy — they come from:
  *
- * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``UploadsMiddleware`` → ``<current_uploads>`` (``<uploaded_files>``
+ *   before #4174; still emitted by IM channels and present in history)
  * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
@@ -606,6 +624,7 @@ export function stripUploadedFilesTag(content: string): string {
  * its ``hide_from_ui`` flag set.
  */
 export const INTERNAL_MARKER_TAGS = [
+  "current_uploads",
   "uploaded_files",
   "slash_skill_activation",
   "system-reminder",
@@ -632,9 +651,32 @@ export function stripInternalMarkers(content: string): string {
   return content.replace(INTERNAL_MARKER_RE, "").trim();
 }
 
+// The upload context block renders sizes as human-readable strings
+// (uploads_middleware.py::_format_file_entry emits "<n> KB" / "<n> MB",
+// mirroring formatBytes). Convert them back to bytes so the parsed
+// FileInMessage.size honours its bytes contract and chips re-render at the
+// original magnitude instead of e.g. treating "177.6 KB" as 177 bytes.
+function parseHumanReadableSize(raw: string): number {
+  const match = /([\d.]+)\s*(B|KB|MB|GB|TB)?/i.exec(raw.trim());
+  if (!match) return 0;
+  const value = parseFloat(match[1] ?? "");
+  if (!Number.isFinite(value)) return 0;
+  const multipliers: Record<string, number> = {
+    B: 1,
+    KB: 1024,
+    MB: 1024 ** 2,
+    GB: 1024 ** 3,
+    TB: 1024 ** 4,
+  };
+  const unit = (match[2] ?? "B").toUpperCase();
+  return Math.round(value * (multipliers[unit] ?? 1));
+}
+
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  // Match <uploaded_files>...</uploaded_files> tag
-  const uploadedFilesRegex = /<uploaded_files>([\s\S]*?)<\/uploaded_files>/;
+  // Match the upload context block; the tag name depends on backend version
+  // (<current_uploads> since #4174, <uploaded_files> before / on IM paths).
+  const uploadedFilesRegex =
+    /<(current_uploads|uploaded_files)>([\s\S]*?)<\/\1>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
@@ -642,7 +684,7 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
     return [];
   }
 
-  const uploadedFilesContent = match[1];
+  const uploadedFilesContent = match[2];
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
@@ -663,7 +705,7 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
   while ((fileMatch = fileRegex.exec(uploadedFilesContent ?? "")) !== null) {
     files.push({
       filename: fileMatch[1].trim(),
-      size: parseInt(fileMatch[2].trim(), 10) ?? 0,
+      size: parseHumanReadableSize(fileMatch[2]),
       path: fileMatch[3].trim(),
     });
   }

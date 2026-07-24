@@ -36,11 +36,22 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+CheckpointChannelMode = Literal["full", "delta"]
+
 
 class DatabaseConfig(BaseModel):
     backend: Literal["memory", "sqlite", "postgres"] = Field(
         default="memory",
         description=("Storage backend for both checkpointer and application data. 'memory' for development (no persistence across restarts), 'sqlite' for single-node deployment, 'postgres' for production multi-node deployment."),
+    )
+    checkpoint_channel_mode: CheckpointChannelMode = Field(
+        default="full",
+        description=(
+            "Checkpoint representation for accumulating channels. "
+            "'full' preserves full-value message checkpoints; 'delta' uses "
+            "LangGraph DeltaChannel for messages. Restart is required, and all "
+            "processes sharing one checkpoint database must use the same value."
+        ),
     )
     sqlite_dir: str = Field(
         default=".deer-flow/data",
@@ -111,5 +122,30 @@ class DatabaseConfig(BaseModel):
             elif url.startswith("postgres://"):
                 # libpq's short alias: accepted by the psycopg checkpointer, but not a SQLAlchemy dialect.
                 url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+            return url
+        raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")
+
+    @property
+    def app_sync_sqlalchemy_url(self) -> str:
+        """SQLAlchemy *synchronous* URL for the application ORM data.
+
+        Used by the ``agent_storage.backend: db`` store, whose consumers (the
+        LangGraph graph factory, the setup/update tools) are synchronous and may
+        run on the event loop or in a separate process from the gateway, where an
+        async engine cannot be driven. Points at the same database file/server as
+        :meth:`app_sqlalchemy_url`; only the driver differs (both drivers —
+        stdlib sqlite3 and psycopg — ship with the app, so this adds no
+        dependency).
+        """
+        if self.backend == "sqlite":
+            return f"sqlite:///{self.sqlite_path}"
+        if self.backend == "postgres":
+            url = self.postgres_url
+            if url.startswith("postgresql+asyncpg://"):
+                url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
             return url
         raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")

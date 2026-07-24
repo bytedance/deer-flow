@@ -140,12 +140,15 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
   type SlashSuggestion,
 } from "./input-box-helpers";
@@ -289,6 +292,7 @@ export function InputBox({
   threadId,
   draftThreadId = threadId,
   draftAgentName,
+  defaultModelName,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -317,6 +321,13 @@ export function InputBox({
   threadId: string;
   draftThreadId?: string;
   draftAgentName?: string | null;
+  /**
+   * The active custom agent's configured default model, if any. Used as the
+   * auto-selection fallback so an agent chat honors the agent's own default
+   * model instead of silently snapping to the first configured model
+   * (issue #4336). ``null`` / undefined = no agent default → use models[0].
+   */
+  defaultModelName?: string | null;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -543,7 +554,13 @@ export function InputBox({
       return;
     }
     const currentModel = models.find((m) => m.name === context.model_name);
-    const fallbackModel = currentModel ?? models[0]!;
+    // Prefer the active agent's configured default model over models[0] as the
+    // auto-selection fallback, so an agent chat respects the agent's own
+    // default instead of snapping to the first model (issue #4336).
+    const agentDefaultModel = defaultModelName
+      ? models.find((m) => m.name === defaultModelName)
+      : undefined;
+    const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
     const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, supportsThinking);
@@ -557,7 +574,7 @@ export function InputBox({
       model_name: nextModelName,
       mode: nextMode,
     });
-  }, [context, models, onContextChange]);
+  }, [context, models, defaultModelName, onContextChange]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -1145,6 +1162,19 @@ export function InputBox({
         status,
       });
       if (submitAction.kind === "goal") {
+        if (
+          submitAction.command.kind === "set" &&
+          isGoalObjectiveTooLong(submitAction.command.objective)
+        ) {
+          toast.error(
+            t.inputBox.goalTooLong.replace("{max}", () =>
+              String(MAX_GOAL_OBJECTIVE_CHARS),
+            ),
+          );
+          // Reject so the composer keeps the user's text for editing instead of
+          // clearing it (PromptInput only preserves input on a rejected submit).
+          return Promise.reject(new Error("goal-too-long"));
+        }
         promptHistoryIndexRef.current = null;
         promptHistoryDraftRef.current = "";
         setFollowups([]);
@@ -1184,6 +1214,7 @@ export function InputBox({
       selectedSlashSkill,
       status,
       submitThreadMessage,
+      t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
     ],
   );
@@ -1241,6 +1272,10 @@ export function InputBox({
 
   const slashSkillQuery = useMemo(
     () => getLeadingSlashSkillQuery(textInput.value ?? ""),
+    [textInput.value],
+  );
+  const goalObjectiveCounter = useMemo(
+    () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
   const skillSuggestions = useMemo(
@@ -2457,7 +2492,8 @@ export function InputBox({
                       " " + t.inputBox.reasoningEffortMinimal}
                     {context.reasoning_effort === "low" &&
                       " " + t.inputBox.reasoningEffortLow}
-                    {context.reasoning_effort === "medium" &&
+                    {(context.reasoning_effort === "medium" ||
+                      !context.reasoning_effort) &&
                       " " + t.inputBox.reasoningEffortMedium}
                     {context.reasoning_effort === "high" &&
                       " " + t.inputBox.reasoningEffortHigh}
@@ -2566,6 +2602,24 @@ export function InputBox({
             )}
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
+            {goalObjectiveCounter && (
+              <span
+                aria-label={t.inputBox.goalLengthCounter
+                  .replace("{length}", () =>
+                    String(goalObjectiveCounter.length),
+                  )
+                  .replace("{max}", () => String(goalObjectiveCounter.max))}
+                className={cn(
+                  "shrink-0 text-xs tabular-nums",
+                  goalObjectiveCounter.overLimit
+                    ? "text-destructive font-medium"
+                    : "text-muted-foreground",
+                )}
+                data-testid="goal-length-counter"
+              >
+                {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
+              </span>
+            )}
             <ModelSelector
               open={modelDialogOpen}
               onOpenChange={setModelDialogOpen}
@@ -2634,6 +2688,15 @@ export function InputBox({
             <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />
           </div>
         )}
+
+      <p
+        className={cn(
+          "text-muted-foreground/67 z-10 px-4 text-center text-xs leading-4",
+          !isWelcomeMode && "absolute top-full right-0 left-0",
+        )}
+      >
+        {t.inputBox.disclaimer}
+      </p>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>

@@ -45,12 +45,19 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
 from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
 from deerflow.models import create_chat_model
+from deerflow.runtime.checkpoint_mode import (
+    INTERNAL_CHECKPOINT_MODE_KEY,
+    freeze_checkpoint_channel_mode,
+    frozen_checkpoint_channel_mode,
+    inject_checkpoint_mode,
+)
 from deerflow.skills.types import Skill
 from deerflow.tracing import build_tracing_callbacks
 
@@ -71,6 +78,22 @@ _WEBHOOK_CHANNELS: frozenset[str] = frozenset({"github"})
 def _default_max_total_subagents(app_config: object) -> int:
     subagents_config = getattr(app_config, "subagents", None)
     return getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
+
+
+def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
+    """Resolve a runtime option with ``request > agent config > default`` precedence.
+
+    ``key in cfg`` (not ``cfg.get(key)``) distinguishes "request omitted the
+    field" from "request set it to a falsy value", so a request-supplied
+    ``thinking_enabled: false`` is honored instead of falling through to the
+    agent default. ``agent_value`` is used only when it is not ``None`` (a
+    custom agent's unset field means "do not override" — issue #4336).
+    """
+    if key in cfg:
+        return cfg[key]
+    if agent_value is not None:
+        return agent_value
+    return default
 
 
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
@@ -251,6 +274,7 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    authorization_provider=None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -271,12 +295,22 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        authorization_provider: Provider already resolved for assembly-time
+            filtering. Reused by the execution-time authorization middleware.
 
     Returns:
         List of middleware instances.
     """
     resolved_app_config = app_config or get_app_config()
-    middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+    runtime_middleware_kwargs = {
+        "app_config": resolved_app_config,
+        "lazy_init": True,
+    }
+    if authorization_provider is not None:
+        runtime_middleware_kwargs["authorization_provider"] = authorization_provider
+    if authorization_provider is not None and deferred_setup is not None:
+        runtime_middleware_kwargs["deferred_setup"] = deferred_setup
+    middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
@@ -453,7 +487,27 @@ def make_lead_agent(config: RunnableConfig):
     """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
-    return _make_lead_agent(config, app_config=runtime_app_config or get_app_config())
+    if not isinstance(runtime_app_config, AppConfig):
+        runtime_app_config = get_app_config()
+    # Mode selection precedence, pinned by test_checkpoint_mode.py:
+    # - First freeze: the app config owns the process mode; a client-supplied
+    #   configurable key is ignored so a direct LangGraph request cannot
+    #   reconfigure (or crash) a fresh process.
+    # - Once frozen: an internally injected key (run worker / gateway) or the
+    #   app config must match the frozen mode; ``freeze_checkpoint_channel_mode``
+    #   fails closed on any mismatch, so neither a forged key nor a config.yaml
+    #   change can silently reconfigure the process.
+    frozen_mode = frozen_checkpoint_channel_mode()
+    if frozen_mode is None:
+        requested_mode = runtime_app_config.database.checkpoint_channel_mode
+    else:
+        requested_mode = (config.get("configurable", {}) or {}).get(
+            INTERNAL_CHECKPOINT_MODE_KEY,
+            runtime_app_config.database.checkpoint_channel_mode,
+        )
+    mode = freeze_checkpoint_channel_mode(requested_mode)
+    inject_checkpoint_mode(config, mode)
+    return _make_lead_agent(config, app_config=runtime_app_config)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
@@ -464,6 +518,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     cfg = _get_runtime_config(config)
     resolved_app_config = app_config
+    mode = (config.get("configurable", {}) or {}).get(
+        INTERNAL_CHECKPOINT_MODE_KEY,
+        resolved_app_config.database.checkpoint_channel_mode,
+    )
 
     # Extract user_id for user-scoped skill loading.
     # LangGraph gateway injects user_id into config["configurable"];
@@ -473,8 +531,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     runtime_user_id = cfg.get("user_id")
     resolved_user_id = str(runtime_user_id) if runtime_user_id else get_effective_user_id()
 
-    thinking_enabled = cfg.get("thinking_enabled", True)
-    reasoning_effort = cfg.get("reasoning_effort", None)
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -488,6 +544,19 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
+
+    # thinking / reasoning precedence: request > custom agent default > runtime
+    # default (issue #4336). See ``_resolve_runtime_option`` for the falsy-vs-unset
+    # handling.
+    agent_thinking = getattr(agent_config, "thinking_enabled", None) if agent_config else None
+    agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
+    thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
+    reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
+
+    # Per-agent sampling overrides (temperature / max_tokens) layered on top of
+    # the resolved model profile (issue #4336). None when the agent set none.
+    agent_model_settings = getattr(agent_config, "model_settings", None) if agent_config else None
+    agent_model_overrides = agent_model_settings.model_dump(exclude_none=True) if agent_model_settings else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
@@ -565,27 +634,41 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         configured_tools = raw_tools
         if non_interactive:
             configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        authorization_candidates = [*configured_tools]
+        if skill_setup.describe_skill_tool:
+            authorization_candidates.append(skill_setup.describe_skill_tool)
+        if should_use_memory_tools(resolved_app_config.memory):
+            _append_memory_tools_without_name_conflicts(authorization_candidates)
+        configured_tool_ids = {id(tool) for tool in configured_tools}
+        authorized_tools, _authz_provider = apply_tool_authorization(
+            authorization_candidates,
+            context=cfg,
+            app_config=resolved_app_config,
+        )
+        configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+        late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
         final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+        final_tools.extend(late_tools)
         mcp_routing_middleware = build_mcp_routing_middleware(
             final_tools,
             setup,
             top_k=resolved_app_config.tool_search.auto_promote_top_k,
         )
-        if skill_setup.describe_skill_tool:
-            final_tools.append(skill_setup.describe_skill_tool)
-        if should_use_memory_tools(resolved_app_config.memory):
-            _append_memory_tools_without_name_conflicts(final_tools)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
-            middleware=build_middlewares(
-                config,
-                model_name=model_name,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
+            middleware=normalize_middleware_state_schemas(
+                build_middlewares(
+                    config,
+                    model_name=model_name,
+                    available_skills=set(_BOOTSTRAP_SKILL_NAMES),
+                    app_config=resolved_app_config,
+                    deferred_setup=setup,
+                    mcp_routing_middleware=mcp_routing_middleware,
+                    user_id=resolved_user_id,
+                    authorization_provider=_authz_provider,
+                ),
+                mode,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -597,7 +680,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
             ),
-            state_schema=ThreadState,
+            state_schema=get_thread_state_schema(mode),
         )
 
     # Custom agents can update their own SOUL.md / config via update_agent.
@@ -631,29 +714,43 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     configured_tools = raw_tools + extra_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    authorization_candidates = [*configured_tools]
+    if skill_setup.describe_skill_tool:
+        authorization_candidates.append(skill_setup.describe_skill_tool)
+    if should_use_memory_tools(resolved_app_config.memory):
+        _append_memory_tools_without_name_conflicts(authorization_candidates)
+    configured_tool_ids = {id(tool) for tool in configured_tools}
+    authorized_tools, _authz_provider = apply_tool_authorization(
+        authorization_candidates,
+        context=cfg,
+        app_config=resolved_app_config,
+    )
+    configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+    late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+    final_tools.extend(late_tools)
     mcp_routing_middleware = build_mcp_routing_middleware(
         final_tools,
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
-    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(configured_tools, deferred_names=setup.deferred_names)
-    if skill_setup.describe_skill_tool:
-        final_tools.append(skill_setup.describe_skill_tool)
-    if should_use_memory_tools(resolved_app_config.memory):
-        _append_memory_tools_without_name_conflicts(final_tools)
+    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
         tools=final_tools,
-        middleware=build_middlewares(
-            config,
-            model_name=model_name,
-            agent_name=agent_name,
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            deferred_setup=setup,
-            mcp_routing_middleware=mcp_routing_middleware,
-            user_id=resolved_user_id,
+        middleware=normalize_middleware_state_schemas(
+            build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=agent_name,
+                available_skills=available_skills,
+                app_config=resolved_app_config,
+                deferred_setup=setup,
+                mcp_routing_middleware=mcp_routing_middleware,
+                user_id=resolved_user_id,
+                authorization_provider=_authz_provider,
+            ),
+            mode,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -667,5 +764,5 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
         ),
-        state_schema=ThreadState,
+        state_schema=get_thread_state_schema(mode),
     )
