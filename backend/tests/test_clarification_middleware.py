@@ -486,6 +486,21 @@ class TestClarificationToolSchema:
         # mode — a standalone multi-select question is a one-field form.
         assert "multi_select" not in schema
 
+    def test_fields_item_schema_is_typed(self):
+        """The provider-facing schema must expose the field item shape (typed
+        via ClarificationFormField), not an opaque object relying on the
+        docstring alone."""
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+        parameters = convert_to_openai_tool(ask_clarification_tool)["function"]["parameters"]
+        items = parameters["properties"]["fields"]["anyOf"][0]["items"]
+
+        assert items["required"] == ["name"]
+        assert sorted(items["properties"].keys()) == ["label", "name", "options", "placeholder", "required", "type"]
+        assert items["properties"]["type"]["enum"] == ["text", "textarea", "number", "select", "multi_select", "checkbox", "date"]
+
 
 class TestClarificationCommandIdempotency:
     """Clarification tool-call retries should not duplicate messages in state."""

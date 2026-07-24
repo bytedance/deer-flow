@@ -1,6 +1,22 @@
-from typing import Any, Literal
+from typing import Literal, Required, TypedDict
 
 from langchain.tools import tool
+
+
+class ClarificationFormField(TypedDict, total=False):
+    """One form field definition for a structured clarification card.
+
+    The model-visible schema documents the item shape; runtime validation
+    still happens defensively in ``ClarificationMiddleware`` because the
+    middleware intercepts the call before tool execution.
+    """
+
+    name: Required[str]
+    label: str
+    type: Literal["text", "textarea", "number", "select", "multi_select", "checkbox", "date"]
+    required: bool
+    options: list[str]
+    placeholder: str
 
 
 @tool("ask_clarification", parse_docstring=True, return_direct=True)
@@ -15,7 +31,7 @@ def ask_clarification_tool(
     ],
     context: str | None = None,
     options: list[str] | None = None,
-    fields: list[dict[str, Any]] | None = None,
+    fields: list[ClarificationFormField] | None = None,
 ) -> str:
     """Ask the user for clarification when you need more information to proceed.
 
