@@ -121,6 +121,14 @@ class RbacAuthorizationProvider:
                 compiled = self._compile_resource_policy(role_name, resource_key, resource_policy)
                 self._policies[(role_name, resource_key)] = compiled
 
+    def validate_role(self, role: str, *, field: str = "role") -> None:
+        """Fail fast when an operator-configured role is not defined."""
+        role = _require_non_empty_string(role, field=field)
+        if role not in self._known_roles:
+            if field == "role":
+                raise ValueError(f"Unknown role '{role}'; known roles: {sorted(self._known_roles)}")
+            raise ValueError(f"{field} '{role}' is not defined; known roles: {sorted(self._known_roles)}")
+
     @staticmethod
     def _compile_resource_policy(
         role_name: str,
@@ -194,8 +202,7 @@ class RbacAuthorizationProvider:
         if role is None or role == "":
             raise ValueError("Principal has no role; cannot evaluate RBAC policy")
 
-        if role not in self._known_roles:
-            raise ValueError(f"Unknown role '{role}'; known roles: {sorted(self._known_roles)}")
+        self.validate_role(role)
 
         resource = _require_non_empty_string(resource, field=resource_field)
         resource_key = _RESOURCE_POLICY_KEYS.get(resource, resource)

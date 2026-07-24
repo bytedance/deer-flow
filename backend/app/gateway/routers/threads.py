@@ -25,7 +25,14 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_run_manager
+from app.gateway.checkpoint_lineage import (
+    CheckpointLineageError,
+    CheckpointParentMissingError,
+    find_checkpoint_before_message,
+    find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
+)
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     build_checkpoint_state_accessor,
@@ -54,6 +61,7 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     write_thread_goal,
 )
+from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.runs.worker import valid_duration_entry
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
@@ -89,6 +97,7 @@ _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_HISTORY_SCAN_LIMIT = 200
+_BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -158,13 +167,26 @@ def _matches_branch_target(messages: list[Any], target_message_ids: set[str]) ->
     return not any(_is_branch_visible_message(message) for message in messages[target_end_index + 1 :])
 
 
+def _branch_target_human_message(messages: list[Any], target_message_ids: set[str]) -> Any | None:
+    index_by_id = {_message_id(message): index for index, message in enumerate(messages) if _message_id(message)}
+    if not target_message_ids.issubset(index_by_id.keys()):
+        return None
+    target_start_index = min(index_by_id[message_id] for message_id in target_message_ids)
+    return next(
+        (message for message in reversed(messages[:target_start_index]) if _message_type(message) == "human" and _is_branch_visible_message(message)),
+        None,
+    )
+
+
 async def _find_branch_checkpoint(
     accessor: Any,
     config: dict[str, Any],
     target_message_ids: set[str],
 ) -> Any:
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
+            if is_duration_only_checkpoint(snapshot):
+                continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
     except _CHECKPOINT_MODE_ERRORS as exc:
@@ -183,7 +205,9 @@ async def _branch_targets_latest_turn(
 ) -> bool:
     """Return whether the target turn is the final visible turn."""
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
+            if is_duration_only_checkpoint(snapshot):
+                continue
             messages = _checkpoint_messages(snapshot)
             if not messages:
                 continue
@@ -196,6 +220,57 @@ async def _branch_targets_latest_turn(
             exc_info=True,
         )
     return False
+
+
+async def _find_branch_replay_base(
+    accessor: Any,
+    config: dict[str, Any],
+    snapshot: Any,
+    target_human_id: str,
+) -> Any | None:
+    """Resolve a replay base while preserving unlinked legacy histories."""
+
+    try:
+        return await find_checkpoint_before_message(
+            accessor,
+            snapshot,
+            target_human_id,
+            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
+        )
+    except CheckpointParentMissingError:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.debug(
+            "Could not resolve parent lineage for branch thread %s; falling back to history scan",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+    except CheckpointLineageError as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.warning(
+            "Rejected unsafe checkpoint lineage for branch thread %s",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=409, detail="This turn can no longer be branched from.") from exc
+
+    try:
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except Exception as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
+
+    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id)
+    if not target_found:
+        logger.warning(
+            "Could not locate branch user message %s in chronological history for thread %s",
+            sanitize_log_param(target_human_id),
+            sanitize_log_param(config.get("configurable", {}).get("thread_id", "")),
+        )
+    return replay_base
 
 
 def _ignore_branch_user_data(directory: str, names: list[str]) -> set[str]:
@@ -415,6 +490,9 @@ class ThreadBranchResponse(BaseModel):
     parent_checkpoint_id: str
     branched_from_message_id: str
     workspace_clone_mode: str
+    # "seeded" | "skipped_empty" | "failed" — whether the parent history was
+    # copied into the branch's run-event feed (see branch_thread).
+    history_seed_mode: str
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +774,16 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     parent_checkpoint_id = _checkpoint_id(snapshot)
     if not parent_checkpoint_id:
         raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
+    target_human = _branch_target_human_message(_checkpoint_messages(snapshot), target_message_ids)
+    target_human_id = _message_id(target_human)
+    if not target_human_id:
+        raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
+    replay_base_tuple = await _find_branch_replay_base(
+        source_accessor,
+        source_config,
+        snapshot,
+        target_human_id,
+    )
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -736,20 +824,39 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     branch_reducer_fields = graph_reducer_channels(getattr(branch_accessor, "graph", None))
     if branch_reducer_fields is None:
         branch_reducer_fields = THREAD_STATE_REDUCER_FIELDS
-    branch_values = {}
-    for key, value in dict(snapshot.values).items():
-        if key in branch_reducer_fields:
-            branch_values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
-        else:
-            branch_values[key] = value
-    new_config.setdefault("metadata", {}).update(
-        {
-            **branch_metadata,
-            "source": "branch",
-        }
-    )
+
+    def branch_values(source_snapshot: Any) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for key, value in dict(source_snapshot.values).items():
+            if key in branch_reducer_fields:
+                values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
+            else:
+                values[key] = value
+        return values
+
+    # Stamp both synthetic checkpoints with the branch-creation time because
+    # serializers fall back to metadata when snapshot.created_at is absent.
+    checkpoint_metadata_updates = {
+        **branch_metadata,
+        "source": "branch",
+        "updated_at": now,
+        "created_at": now,
+    }
+    new_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
     try:
-        await branch_accessor.aupdate(new_config, branch_values, as_node="branch")
+        head_config = new_config
+        if replay_base_tuple is not None:
+            head_config = await branch_accessor.aupdate(
+                new_config,
+                branch_values(replay_base_tuple),
+                as_node="branch",
+            )
+            head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
+        await branch_accessor.aupdate(
+            head_config,
+            branch_values(snapshot),
+            as_node="branch",
+        )
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
     except Exception:
@@ -768,6 +875,29 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
+    # The thread feed (GET /messages, /messages/page) reads the run-event
+    # store, not checkpoints, and a fresh branch has no run_events — so the
+    # inherited history would vanish from the UI as soon as the branch's
+    # first run refreshes the feed (#4380 problem 2). Seed the branch's
+    # run_events from the same checkpoint snapshot the branch was created
+    # from. Best-effort: on failure the branch stays usable, with history
+    # visible only through the checkpoint overlay until it is re-branched.
+    try:
+        seed_events = build_branch_history_seed_events(
+            _checkpoint_messages(snapshot),
+            thread_id=new_thread_id,
+            run_id=f"branch-seed-{new_thread_id}",
+            parent_thread_id=thread_id,
+        )
+        if seed_events:
+            await get_run_event_store(request).put_batch(seed_events)
+            history_seed_mode = "seeded"
+        else:
+            history_seed_mode = "skipped_empty"
+    except Exception:
+        logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
+        history_seed_mode = "failed"
+
     if branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:
@@ -778,6 +908,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         parent_checkpoint_id=parent_checkpoint_id,
         branched_from_message_id=body.message_id,
         workspace_clone_mode=workspace_clone_mode,
+        history_seed_mode=history_seed_mode,
     )
 
 

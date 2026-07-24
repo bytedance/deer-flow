@@ -520,6 +520,9 @@ class SubagentExecutor:
             "deferred_setup": deferred_setup,
             "agent_name": self.config.name,
         }
+        authz_provider = getattr(self, "_authz_provider", None)
+        if authz_provider is not None:
+            middleware_kwargs["authorization_provider"] = authz_provider
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -650,6 +653,27 @@ class SubagentExecutor:
         # Load skills as conversation items (Codex pattern)
         skills = await self._load_skills()
         filtered_tools = self._apply_skill_allowed_tools(skills)
+
+        # Apply authorization Layer 1: filter tools before deferred assembly
+        # so denied tools can never enter the DeferredToolCatalog.
+        from deerflow.authz.tool_filter import apply_tool_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        authz_context = {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
+        filtered_tools, self._authz_provider = apply_tool_authorization(
+            filtered_tools,
+            context=authz_context,
+            app_config=resolved_app_config,
+        )
+
         # Assemble deferred tool_search AFTER policy filtering (fail-closed),
         # mirroring the lead path so subagents stop binding full MCP schemas.
         # The generated tool_search helper is intentionally not subject to the

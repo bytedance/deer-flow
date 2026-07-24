@@ -629,9 +629,10 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
+        self.checkpoint_exists = tup is not None
         self.config = getattr(tup, "config", None) or config
         checkpoint = getattr(tup, "checkpoint", None) or {}
         self.values = dict(checkpoint.get("channel_values") or {})
