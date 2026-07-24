@@ -1130,13 +1130,28 @@ class RunManager:
                     # Still owned by a local task — skip
                     continue
 
+            try:
+                claimed = await self._call_store_with_retry(
+                    "claim_for_takeover",
+                    record.run_id,
+                    lambda: self._store.claim_for_takeover(
+                        record.run_id,
+                        grace_seconds=grace_seconds,
+                        error=error,
+                    ),
+                )
+            except Exception:
+                logger.warning("Failed to claim orphaned run %s for reconciliation", record.run_id, exc_info=True)
+                continue
+            if not claimed:
+                logger.info(
+                    "Skipped orphaned run %s recovery because the takeover claim no longer matched",
+                    record.run_id,
+                )
+                continue
             record.status = RunStatus.error
             record.error = error
             record.updated_at = now
-            persisted = await self._persist_status(record, RunStatus.error, error=error)
-            if not persisted:
-                logger.warning("Skipped orphaned run %s recovery because error status was not persisted", record.run_id)
-                continue
             recovered.append(record)
 
         if recovered:
