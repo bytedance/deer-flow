@@ -25,7 +25,22 @@ _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 
 @dataclass(frozen=True)
 class SummarizationEvent:
-    """Context emitted before conversation history is summarized away."""
+    """Context emitted once a replacement summary exists, before messages are removed.
+
+    Hooks fire only after summary creation succeeds with a genuinely non-empty
+    body: a failed summary LLM call (``None``) or a blank/whitespace-only
+    response (also normalized to ``None``) aborts compaction without
+    dispatching, so a retry on the next trigger cycle cannot enqueue duplicate
+    work (#4346).
+
+    This hook guarantees at-most-once flush per summary generation attempt. It
+    does NOT guarantee idempotency across durable-commit retries: if the
+    checkpoint write (e.g. the manual ``/compact`` caller's ``accessor.aupdate()``)
+    fails or the request is cancelled after ``acompact_state()`` returns, a retry
+    will re-flush the same batch. Callers requiring full durable-commit
+    idempotency should track checkpoint identity in the memory queue; that is a
+    separate concern and intentionally out of scope here.
+    """
 
     messages_to_summarize: tuple[AnyMessage, ...]
     preserved_messages: tuple[AnyMessage, ...]
@@ -46,7 +61,7 @@ class ContextCompactionResult:
 
 @runtime_checkable
 class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+    """Hook invoked after the replacement summary exists, before state removal."""
 
     def __call__(self, event: SummarizationEvent) -> None: ...
 
@@ -125,7 +140,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            return response.text.strip()
+            return self._nonempty_summary(getattr(response, "text", None))
         except Exception:
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
@@ -142,10 +157,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 prompt,
                 config={"metadata": {"lc_source": "summarization"}},
             )
-            return response.text.strip()
+            return self._nonempty_summary(getattr(response, "text", None))
         except Exception:
             logger.exception("Summary generation failed; skipping compaction this turn")
             return None
+
+    @staticmethod
+    def _nonempty_summary(text: Any) -> str | None:
+        """Normalize a model response's text; a blank/whitespace-only body is a failure.
+
+        Committing ``""`` as a summary would fire the before_summarization hooks
+        and remove all prior history for an empty replacement, so an empty body
+        is treated as generation failure (leave state unchanged) rather than a
+        valid summary. Same guard as #4361's ``_nonempty_summary``.
+        """
+        stripped = text.strip() if isinstance(text, str) else ""
+        return stripped or None
 
     @staticmethod
     def _summary_count_message(summary_text: str) -> HumanMessage:
@@ -308,10 +335,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             return None
+        # Dispatch only once the replacement summary exists: firing earlier would
+        # flush the same messages into durable memory again on the retry after a
+        # failed summary LLM call (#4346).
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -330,10 +360,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             return None
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),

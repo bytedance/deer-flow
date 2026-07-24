@@ -1,4 +1,4 @@
-"""Hooks fired before summarization removes messages from state."""
+"""Hooks fired after a replacement summary exists, before state removal."""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
 def memory_flush_hook(event: SummarizationEvent) -> None:
-    """Flush messages about to be summarized into the memory queue.
+    """Flush messages about to be compacted into the memory queue.
 
-    Thin, backend-agnostic entry: only the ``enabled`` + ``thread_id`` gate
-    and ``user_id`` resolution live here. The backend (via
+    Dispatched only after the replacement summary exists, so a failed summary
+    LLM call never enqueues the same messages twice across trigger retries
+    (#4346). Thin, backend-agnostic entry: only the ``enabled`` + ``thread_id``
+    gate and ``user_id`` resolution live here. The backend (via
     ``manager.add_nowait``) does the filtering, human/AI validation, and
     correction/reinforcement detection.
     """
