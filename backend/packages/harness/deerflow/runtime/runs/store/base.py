@@ -99,6 +99,15 @@ class RunStore(abc.ABC):
     async def delete(self, run_id: str) -> None:
         pass
 
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
+        """Release an admitted thread operation for its recorded owner.
+
+        The default keeps legacy stores compatible: older implementations only
+        accepted ``run_id``. User-aware stores should override this method so
+        cleanup never depends on ambient request context.
+        """
+        await self.delete(run_id)
+
     @abc.abstractmethod
     async def update_model_name(
         self,
@@ -189,13 +198,15 @@ class RunStore(abc.ABC):
         *,
         grace_seconds: int,
         error: str,
+        stop_reason: str | None = None,
     ) -> bool:
         """Atomically mark an expired-lease active run as ``error``.
 
         Only rows whose lease has expired past *grace_seconds* (or whose
         lease is NULL — pre-ownership data) are updated.  The conditional
         WHERE closes the race between the caller's stale read of the lease
-        and a concurrent heartbeat renewal by the owning worker.
+        and a concurrent heartbeat renewal by the owning worker. When
+        provided, *stop_reason* is persisted in the same atomic update.
 
         Returns ``False`` when:
           - the run is no longer ``pending`` / ``running``,
@@ -214,7 +225,6 @@ class RunStore(abc.ABC):
         """Return active runs whose lease has expired (or is NULL for pre-ownership rows)."""
         pass
 
-    @abc.abstractmethod
     async def create_thread_operation_atomic(
         self,
         run_id: str,
@@ -234,7 +244,66 @@ class RunStore(abc.ABC):
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
+        The default implementation preserves compatibility with stores that
+        still implement the former ``create_run_atomic`` interface. Legacy
+        stores support only normal run rows; internal operation kinds require
+        an implementation of this method.
+
         Returns ``(new_run_dict, claimed_run_dicts)``.
         Raises ``IntegrityError`` on conflict for ``reject`` strategy.
         """
-        pass
+        legacy_impl = type(self).create_run_atomic
+        if legacy_impl is RunStore.create_run_atomic:
+            raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
+        if operation_kind != "run":
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        return await self.create_run_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+            multitask_strategy=multitask_strategy,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            model_name=model_name,
+            metadata=metadata,
+            kwargs=kwargs,
+            created_at=created_at,
+            grace_seconds=grace_seconds,
+        )
+
+    async def create_run_atomic(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        owner_worker_id: str,
+        lease_expires_at: str | None,
+        multitask_strategy: str = "reject",
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        grace_seconds: int = 10,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Deprecated compatibility alias for normal-run admission."""
+        operation_impl = type(self).create_thread_operation_atomic
+        if operation_impl is RunStore.create_thread_operation_atomic:
+            raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
+        return await self.create_thread_operation_atomic(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+            operation_kind="run",
+            multitask_strategy=multitask_strategy,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            model_name=model_name,
+            metadata=metadata,
+            kwargs=kwargs,
+            created_at=created_at,
+            grace_seconds=grace_seconds,
+        )

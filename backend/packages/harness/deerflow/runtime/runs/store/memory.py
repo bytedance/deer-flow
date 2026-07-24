@@ -130,7 +130,7 @@ class MemoryRunStore(RunStore):
             self._runs[run_id]["model_name"] = model_name
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
-    async def delete(self, run_id):
+    async def delete(self, run_id, *, user_id=None):
         run = self._runs.pop(run_id, None)
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
@@ -229,6 +229,7 @@ class MemoryRunStore(RunStore):
         *,
         grace_seconds: int,
         error: str,
+        stop_reason: str | None = None,
     ) -> bool:
         from deerflow.utils.time import is_lease_expired
 
@@ -242,6 +243,8 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = "error"
         run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

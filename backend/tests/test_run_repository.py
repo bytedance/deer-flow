@@ -29,6 +29,9 @@ async def _cleanup():
 
 
 class _CustomRunStoreWithoutProgress(RunStore):
+    def __init__(self):
+        self.legacy_atomic_calls = 0
+
     async def put(self, *args, **kwargs):
         return None
 
@@ -65,7 +68,8 @@ class _CustomRunStoreWithoutProgress(RunStore):
     async def list_inflight_with_expired_lease(self, *args, **kwargs):
         return []
 
-    async def create_thread_operation_atomic(self, *args, **kwargs):
+    async def create_run_atomic(self, *args, **kwargs):
+        self.legacy_atomic_calls += 1
         return {}, []
 
     async def claim_for_takeover(self, *args, **kwargs):
@@ -77,6 +81,28 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
 
     await store.update_run_progress("r1", total_tokens=1)
+
+
+@pytest.mark.anyio
+async def test_legacy_create_run_atomic_store_remains_compatible():
+    store = _CustomRunStoreWithoutProgress()
+
+    await store.create_thread_operation_atomic(
+        "r1",
+        thread_id="t1",
+        owner_worker_id="worker-1",
+        lease_expires_at=None,
+    )
+
+    assert store.legacy_atomic_calls == 1
+    with pytest.raises(NotImplementedError, match="cannot create non-run"):
+        await store.create_thread_operation_atomic(
+            "checkpoint-write-1",
+            thread_id="t1",
+            owner_worker_id="worker-1",
+            lease_expires_at=None,
+            operation_kind=ThreadOperationKind.checkpoint_write,
+        )
 
 
 class TestRunRepository:
@@ -727,6 +753,24 @@ class TestRunRepository:
         assert await repo.list_by_thread("thread-T") == []
         admitted = await run_worker.create_or_reject("thread-T")
         assert admitted.status == RunStatus.pending
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_reservation_release_uses_record_user_without_ambient_context(self, tmp_path):
+        """Release must not depend on the request ContextVar still being set."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+
+        async with manager.reserve_thread_operation(
+            "thread-T",
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id="reservation-owner",
+        ):
+            inflight = await repo.list_inflight()
+            assert len(inflight) == 1
+            assert inflight[0]["user_id"] == "reservation-owner"
+
+        assert await repo.list_inflight() == []
         await _cleanup()
 
     @pytest.mark.anyio

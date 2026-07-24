@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -68,7 +69,7 @@ class FailingTakeoverRunStore(MemoryRunStore):
         super().__init__()
         self.takeover_attempts = 0
 
-    async def claim_for_takeover(self, run_id, *, grace_seconds, error):
+    async def claim_for_takeover(self, run_id, *, grace_seconds, error, stop_reason=None):
         self.takeover_attempts += 1
         raise sqlite3.OperationalError("database is locked")
 
@@ -102,8 +103,15 @@ class AlwaysMissingCompletionRunStore(MemoryRunStore):
 class FailingDeleteRunStore(MemoryRunStore):
     """Run store that cannot release a persisted thread-operation row."""
 
-    async def delete(self, run_id):
+    async def delete(self, run_id, *, user_id=None):
         raise RuntimeError("delete failed")
+
+
+class LostLeaseRunStore(MemoryRunStore):
+    """Run store that reports a reservation was taken over."""
+
+    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        return False
 
 
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
@@ -134,6 +142,38 @@ async def test_reservation_delete_failure_preserves_body_error_and_clears_local_
     assert manager._runs_by_thread == {}
     assert len(await store.list_inflight()) == 1
     assert "leaving it for orphan reconciliation" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_reservation_body_is_cancelled_when_lease_is_lost():
+    store = LostLeaseRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    entered = asyncio.Event()
+
+    async def hold_reservation() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold_reservation())
+    await entered.wait()
+
+    await manager._renew_leases()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not await manager.has_inflight("thread-1")
+    assert await store.list_inflight() == []
 
 
 @pytest.mark.anyio
@@ -603,6 +643,25 @@ async def test_list_by_thread_merges_store_runs_newest_first():
 
     assert [run.run_id for run in runs] == [memory_record.run_id, "old-store"]
     assert runs[0] is memory_record
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run():
+    """A local row must not consume the store query's newest-run limit."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old_memory = await manager.create("thread-1")
+    old_memory.created_at = "2026-01-01T00:00:00+00:00"
+    await store.put(
+        "new-store",
+        thread_id="thread-1",
+        status="success",
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+
+    runs = await manager.list_by_thread("thread-1", limit=1)
+
+    assert [run.run_id for run in runs] == ["new-store"]
 
 
 @pytest.mark.anyio

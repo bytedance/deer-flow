@@ -143,7 +143,7 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复将 orphan run 标记为 error 后也会发布 `END_SENTINEL`，避免重连的 SSE 客户端只收到心跳。注意：TTL 是 Redis 内存安全网（防止 key 泄漏），不是 subscriber 终止机制——如果 worker 和 gateway 同时挂掉，已连接的 SSE 客户端在 TTL 过期后仍无法收到 END 信号，需要依赖客户端侧超时。完整的跨 pod subscriber 终止需要 worker 存活检测（liveness），当前版本不包含此功能。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。store-only SSE 与 `/wait` consumer 不能把普通 durable terminal status 当成流已完成，否则可能跳过延迟发布的 error 等尾部事件；只有 `orphan_recovered` 信号能在 heartbeat 时触发 END fallback，因为此时 producer 已被确认失联。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 
