@@ -28,6 +28,7 @@ from app.gateway.internal_auth import (
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -56,6 +57,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
+from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -123,18 +125,6 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
 # ---------------------------------------------------------------------------
 # Input / config helpers
 # ---------------------------------------------------------------------------
-
-
-def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
-    """Normalize the stream_mode parameter to a list.
-
-    Default matches what ``useStream`` expects: values + messages-tuple.
-    """
-    if raw is None:
-        return ["values"]
-    if isinstance(raw, str):
-        return [raw]
-    return raw if raw else ["values"]
 
 
 def _strip_external_message_metadata(message: Any) -> Any:
@@ -884,7 +874,7 @@ async def apply_checkpoint_to_run_config(
 
 
 async def start_run(
-    body: Any,
+    body: RunCreateRequest,
     thread_id: str,
     request: Request,
 ) -> RunRecord:
@@ -893,13 +883,13 @@ async def start_run(
     Parameters
     ----------
     body : RunCreateRequest
-        The validated request body (typed as Any to avoid circular import
-        with the router module that defines the Pydantic model).
+        The validated request body shared by HTTP and internal launch paths.
     thread_id : str
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
@@ -1019,8 +1009,6 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
-        stream_modes = normalize_stream_modes(body.stream_mode)
-
         task = asyncio.create_task(
             run_agent(
                 bridge,
@@ -1070,10 +1058,7 @@ async def launch_scheduled_thread_run(
             ),
             cookies={},
         )
-    # SimpleNamespace stands in for the Pydantic run-request body that the
-    # HTTP path parses. If start_run gains a new body.* attribute that it reads
-    # directly, add the matching field here so the scheduler path stays in sync.
-    body = SimpleNamespace(
+    body = RunCreateRequest(
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
@@ -1093,10 +1078,10 @@ async def launch_scheduled_thread_run(
         stream_subgraphs=False,
         stream_resumable=None,
         on_disconnect="continue",
-        on_completion="keep",
+        on_completion=None,
         multitask_strategy="reject",
         after_seconds=None,
-        if_not_exists="reject",
+        if_not_exists="create",
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)

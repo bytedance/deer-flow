@@ -34,6 +34,7 @@ from app.gateway.checkpoint_lineage import (
 )
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
@@ -76,29 +77,6 @@ def compute_run_durations(runs) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
-
-
-class RunCreateRequest(BaseModel):
-    assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
-    input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
-    command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
-    metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
-    config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
-    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
-    webhook: str | None = Field(default=None, description="Completion callback URL")
-    checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
-    checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
-    interrupt_before: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt before")
-    interrupt_after: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt after")
-    stream_mode: list[str] | str | None = Field(default=None, description="Stream mode(s)")
-    stream_subgraphs: bool = Field(default=False, description="Include subgraph events")
-    stream_resumable: bool | None = Field(default=None, description="SSE resumable mode")
-    on_disconnect: Literal["cancel", "continue"] = Field(default="cancel", description="Behaviour on SSE disconnect")
-    on_completion: Literal["delete", "keep"] = Field(default="keep", description="Delete temp thread on completion")
-    multitask_strategy: Literal["reject", "rollback", "interrupt", "enqueue"] = Field(default="reject", description="Concurrency strategy")
-    after_seconds: float | None = Field(default=None, description="Delayed execution")
-    if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
-    feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
 
 
 class RegeneratePrepareRequest(BaseModel):
