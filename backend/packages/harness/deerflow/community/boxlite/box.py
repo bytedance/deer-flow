@@ -29,7 +29,7 @@ from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     from boxlite import SimpleBox
 
@@ -57,32 +57,80 @@ class BoxliteBox(Sandbox):
             per-call ``env`` (request-scoped secrets).
     """
 
+    TERMINAL_ERROR_MARKERS = (
+        "vsock",
+        "disconnected",
+        "broken pipe",
+        "connection reset",
+        "connection refused",
+        "no such box",
+        "box has been stopped",
+        "engine reported an error",
+    )
+    RETRYABLE_ERROR_MARKERS = (
+        "transport not ready",
+        "retry later",
+        "temporarily unavailable",
+        "resource busy",
+    )
+
     def __init__(
         self,
         id: str,
         box: SimpleBox,
-        run: Callable[[Awaitable[T]], T],
+        run: Callable[..., T],
         *,
         default_env: dict[str, str] | None = None,
+        on_terminal_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(id)
         self._box = box
         self._run = run
         self._default_env = dict(default_env or {})
+        self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
         self._closed = False
 
+    @classmethod
+    def _is_terminal_box_failure(cls, error: Exception) -> bool:
+        if isinstance(error, (BrokenPipeError, ConnectionError, EOFError)):
+            return True
+        if not isinstance(error, RuntimeError | OSError):
+            return False
+        msg = str(error).lower()
+        if any(marker in msg for marker in cls.RETRYABLE_ERROR_MARKERS):
+            return False
+        return any(marker in msg for marker in cls.TERMINAL_ERROR_MARKERS)
+
     # ── bridge helpers ──────────────────────────────────────────────────
 
-    def _exec(self, *argv: str, env: dict[str, str] | None = None):
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("sandbox has been closed")
-            box = self._box
-        return self._run(box.exec(*argv, env=env))
+    def _exec(
+        self,
+        *argv: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ):
+        try:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("sandbox has been closed")
+                box = self._box
+            return self._run(box.exec(*argv, env=env, timeout=timeout), timeout=timeout)
+        except Exception as e:
+            if self._on_terminal_failure is not None and self._is_terminal_box_failure(e):
+                try:
+                    self._on_terminal_failure(self.id, str(e))
+                except Exception:
+                    logger.exception("Terminal BoxLite failure callback errored for %s", self.id)
+            raise
 
-    def _sh(self, script: str, env: dict[str, str] | None = None):
-        return self._exec("sh", "-lc", script, env=env)
+    def _sh(
+        self,
+        script: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ):
+        return self._exec("sh", "-lc", script, env=env, timeout=timeout)
 
     def close(self) -> None:
         with self._lock:
@@ -93,6 +141,11 @@ class BoxliteBox(Sandbox):
             self._run(self._box.stop())
         except Exception as e:
             logger.warning("Error stopping BoxLite box %s: %s", self.id, e)
+
+    @property
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
     # ── path safety (mirrors community/e2b_sandbox) ─────────────────────
 
@@ -124,15 +177,18 @@ class BoxliteBox(Sandbox):
         DeerFlow passes a bash command *string*; BoxLite's ``exec`` takes argv, so
         it runs through ``sh -lc``. Per-call ``env`` is layered over the static
         config environment and scoped to this command only.
+
+        *timeout* bounds both layers: BoxLite's SDK ``exec(timeout=...)`` handles
+        command timeout inside the VM, and the event-loop bridge receives the
+        same value so ``run_coroutine_threadsafe(...).result(timeout)`` cannot
+        block the caller forever if the SDK future itself never resolves.
         """
         _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
+        if self.is_closed:
+            return "Error: sandbox has been closed"
         merged_env = {**self._default_env, **(env or {})} or None
-        with self._lock:
-            if self._closed:
-                return "Error: sandbox has been closed"
-            box = self._box
         try:
-            result = self._run(box.exec("sh", "-lc", command, env=merged_env, timeout=timeout))
+            result = self._exec("sh", "-lc", command, env=merged_env, timeout=timeout)
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"

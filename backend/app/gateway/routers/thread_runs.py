@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -21,16 +23,37 @@ from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.checkpoint_lineage import (
+    CheckpointLineageError,
+    CheckpointParentMissingError,
+    checkpoint_configurable,
+    checkpoint_messages,
+    find_checkpoint_before_message,
+    find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
+)
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.services import sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import RunRecord, RunStatus, serialize_channel_values_for_api
+from app.gateway.run_models import RunCreateRequest
+from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.utils import sanitize_log_param
+from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
 REGENERATE_HISTORY_SCAN_LIMIT = 200
+# Doubled to keep ~200 effective checkpoints when duration-only checkpoints
+# (one per successful run in steady state) consume roughly half of history.
+REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
+THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
+_MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
+_UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
+
+
+def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
+    return is_duration_only_checkpoint(checkpoint_tuple)
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -56,29 +79,6 @@ def compute_run_durations(runs) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-class RunCreateRequest(BaseModel):
-    assistant_id: str | None = Field(default=None, description="Agent / assistant to use")
-    input: dict[str, Any] | None = Field(default=None, description="Graph input (e.g. {messages: [...]})")
-    command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
-    metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
-    config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
-    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.)")
-    webhook: str | None = Field(default=None, description="Completion callback URL")
-    checkpoint_id: str | None = Field(default=None, description="Resume from checkpoint")
-    checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
-    interrupt_before: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt before")
-    interrupt_after: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt after")
-    stream_mode: list[str] | str | None = Field(default=None, description="Stream mode(s)")
-    stream_subgraphs: bool = Field(default=False, description="Include subgraph events")
-    stream_resumable: bool | None = Field(default=None, description="SSE resumable mode")
-    on_disconnect: Literal["cancel", "continue"] = Field(default="cancel", description="Behaviour on SSE disconnect")
-    on_completion: Literal["delete", "keep"] = Field(default="keep", description="Delete temp thread on completion")
-    multitask_strategy: Literal["reject", "rollback", "interrupt", "enqueue"] = Field(default="reject", description="Concurrency strategy")
-    after_seconds: float | None = Field(default=None, description="Delayed execution")
-    if_not_exists: Literal["reject", "create"] = Field(default="create", description="Thread creation policy")
-    feedback_keys: list[str] | None = Field(default=None, description="LangSmith feedback keys")
-
-
 class RegeneratePrepareRequest(BaseModel):
     message_id: str = Field(..., min_length=1, description="Assistant message id to regenerate")
 
@@ -88,6 +88,12 @@ class RegeneratePrepareResponse(BaseModel):
     checkpoint: dict[str, Any]
     metadata: dict[str, Any]
     target_run_id: str
+
+
+class ThreadMessagesPageResponse(BaseModel):
+    data: list[dict[str, Any]]
+    has_more: bool
+    next_before_seq: int | None = None
 
 
 class RunResponse(BaseModel):
@@ -108,6 +114,7 @@ class RunResponse(BaseModel):
     subagent_tokens: int = 0
     middleware_tokens: int = 0
     message_count: int = 0
+    stop_reason: str | None = None
 
 
 class ThreadTokenUsageModelBreakdown(BaseModel):
@@ -145,6 +152,54 @@ def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     return f"Run {run_id} is not cancellable (status: {record.status.value})"
 
 
+def _compute_retry_after(lease_expires_at: str | None, grace_seconds: int) -> int | None:
+    """Return seconds until the lease expires + grace, for ``Retry-After``.
+
+    Returns ``None`` when the lease is NULL or unparseable so the caller
+    can decide whether to send a generic 409 without the header.
+
+    The ``max(1, ...)`` floor means a lease just about to expire yields
+    ``Retry-After: 1``.  This is a lower bound, not a recommended poll
+    interval — clients that honour this header should apply minimum
+    backoff / jitter rather than retrying every second.
+    """
+    if lease_expires_at is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(lease_expires_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return None
+    remaining = (dt - datetime.now(UTC)).total_seconds() + grace_seconds
+    return max(1, int(remaining))
+
+
+async def _raise_lease_valid_elsewhere(
+    run_id: str,
+    run_mgr,  # RunManager (avoid import for testability)
+    record: RunRecord,
+) -> None:
+    """Re-fetch the lease and raise HTTP 409 + Retry-After.
+
+    ``record.lease_expires_at`` may be stale (fetched at request start while
+    the owner renewed between our read and the conditional UPDATE). Re-read
+    from the store to get the fresh value so ``Retry-After`` is accurate.
+    """
+    fresh = await run_mgr.get(run_id)
+    if fresh is not None:
+        record = fresh
+    retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
+    headers: dict[str, str] = {}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    raise HTTPException(
+        status_code=409,
+        detail=f"Run {run_id} is active on another worker; retry after lease expiry.",
+        headers=headers,
+    )
+
+
 def _record_to_response(record: RunRecord) -> RunResponse:
     return RunResponse(
         run_id=record.run_id,
@@ -164,6 +219,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         subagent_tokens=record.subagent_tokens,
         middleware_tokens=record.middleware_tokens,
         message_count=record.message_count,
+        stop_reason=record.stop_reason,
     )
 
 
@@ -221,17 +277,16 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
-def _checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
-    channel_values = checkpoint.get("channel_values", {}) if isinstance(checkpoint, dict) else {}
-    messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
-    return messages if isinstance(messages, list) else []
+def _is_middleware_message_row(row: dict[str, Any]) -> bool:
+    return str((row.get("metadata") or {}).get("caller", "")).startswith("middleware:")
+
+
+def _checkpoint_messages(snapshot: Any) -> list[Any]:
+    return checkpoint_messages(snapshot)
 
 
 def _checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
-    config = getattr(checkpoint_tuple, "config", None) or {}
-    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-    return dict(configurable) if isinstance(configurable, dict) else {}
+    return checkpoint_configurable(checkpoint_tuple)
 
 
 def _checkpoint_response(checkpoint_tuple: Any) -> dict[str, Any]:
@@ -285,7 +340,13 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
     return last_ai_message == target_text[: len(last_ai_message)]
 
 
-async def _find_target_run_id(thread_id: str, message_id: str, target_message: Any, request: Request) -> str:
+async def _find_target_run_id(
+    thread_id: str,
+    message_id: str,
+    target_message: Any,
+    source_human: Any,
+    request: Request,
+) -> str:
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
     for row in reversed(rows):
@@ -295,6 +356,11 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
             run_id = row.get("run_id")
             if isinstance(run_id, str) and run_id:
                 return run_id
+
+    source_run_id = _message_additional_kwargs(source_human).get("run_id")
+    if isinstance(source_run_id, str) and source_run_id:
+        return source_run_id
+
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
@@ -314,28 +380,52 @@ async def _find_target_run_id(thread_id: str, message_id: str, target_message: A
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
 
 
-async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: str, request: Request) -> Any:
-    checkpointer = get_checkpointer(request)
-    base_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+async def _find_base_checkpoint_before_human(
+    thread_id: str,
+    human_message_id: str,
+    request: Request,
+    *,
+    head_checkpoint: Any | None = None,
+) -> Any:
+    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    if head_checkpoint is not None:
+        try:
+            return await find_checkpoint_before_message(
+                accessor,
+                head_checkpoint,
+                human_message_id,
+                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
+            )
+        except CheckpointParentMissingError:
+            # Old checkpoints and imported histories may not have parent links.
+            # Preserve the bounded chronological fallback for those records.
+            logger.debug(
+                "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
+                sanitize_log_param(thread_id),
+                exc_info=True,
+            )
+        except CheckpointLineageError as exc:
+            logger.warning(
+                "Rejected unsafe checkpoint lineage for regenerate thread %s",
+                sanitize_log_param(thread_id),
+                exc_info=True,
+            )
+            raise HTTPException(status_code=409, detail=_UNSAFE_REGENERATE_LINEAGE_DETAIL) from exc
     try:
-        checkpoints = [item async for item in checkpointer.alist(base_config, limit=REGENERATE_HISTORY_SCAN_LIMIT)]
+        raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
+        checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint = None
-    for checkpoint_tuple in reversed(checkpoints):
-        messages = _checkpoint_messages(checkpoint_tuple)
-        message_ids = {_message_id(message) for message in messages}
-        if human_message_id in message_ids:
-            if previous_checkpoint is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Could not find an addressable checkpoint before the target user message",
-                )
-            return previous_checkpoint
-        if _checkpoint_configurable(checkpoint_tuple).get("checkpoint_id"):
-            previous_checkpoint = checkpoint_tuple
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id)
+    if target_found:
+        if previous_checkpoint is None:
+            raise HTTPException(
+                status_code=409,
+                detail=_MISSING_REGENERATE_BASE_DETAIL,
+            )
+        return previous_checkpoint
 
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
@@ -351,14 +441,14 @@ async def _find_base_checkpoint_before_human(thread_id: str, human_message_id: s
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    checkpointer = get_checkpointer(request)
-    latest_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
-        latest_checkpoint = await checkpointer.aget_tuple(latest_config)
+        latest_checkpoint = await accessor.aget(latest_config)
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
-    if latest_checkpoint is None:
+    latest_checkpoint_id = _checkpoint_configurable(latest_checkpoint).get("checkpoint_id")
+    if not latest_checkpoint_id:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} has no checkpoint")
 
     messages = _checkpoint_messages(latest_checkpoint)
@@ -380,8 +470,19 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
 
-    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, previous_human_id, request)
-    target_run_id = await _find_target_run_id(thread_id, message_id, target_message, request)
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(
+        thread_id,
+        previous_human_id,
+        request,
+        head_checkpoint=latest_checkpoint,
+    )
+    target_run_id = await _find_target_run_id(
+        thread_id,
+        message_id,
+        target_message,
+        previous_human,
+        request,
+    )
     checkpoint = _checkpoint_response(base_checkpoint_tuple)
     metadata = {
         "regenerate_from_message_id": message_id,
@@ -461,14 +562,16 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed:
-        checkpointer = get_checkpointer(request)
-        config = {"configurable": {"thread_id": thread_id}}
         try:
-            checkpoint_tuple = await checkpointer.aget_tuple(config)
-            if checkpoint_tuple is not None:
-                checkpoint = getattr(checkpoint_tuple, "checkpoint", {}) or {}
-                channel_values = checkpoint.get("channel_values", {})
-                return serialize_channel_values_for_api(channel_values)
+            accessor, config = build_checkpoint_state_accessor(
+                request,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+            snapshot = await accessor.aget(config)
+            snapshot_config = snapshot.config or {}
+            if snapshot_config.get("configurable", {}).get("checkpoint_id"):
+                return serialize_channel_values_for_api(snapshot.values)
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
@@ -512,24 +615,34 @@ async def cancel_run(
     - action=rollback: Stop execution, revert to pre-run checkpoint state
     - wait=true: Block until the run fully stops, return 204
     - wait=false: Return immediately with 202
+
+    In multi-worker deployments, a cancel landing on a non-owning worker
+    can take over the run when the owner's lease has expired.  When the
+    lease is still valid a 409 + ``Retry-After`` header is returned.
     """
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    cancelled = await run_mgr.cancel(run_id, action=action)
-    if not cancelled:
-        raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+    outcome = await run_mgr.cancel(run_id, action=action)
 
-    if wait and record.task is not None:
-        try:
-            await record.task
-        except asyncio.CancelledError:
-            pass
-        return Response(status_code=204)
+    # Success paths — the run was either cancelled locally or taken over
+    # from a dead worker.
+    if outcome in (CancelOutcome.cancelled, CancelOutcome.taken_over):
+        if wait and record.task is not None:
+            try:
+                await record.task
+            except asyncio.CancelledError:
+                pass
+            return Response(status_code=204)
+        return Response(status_code=202)
 
-    return Response(status_code=202)
+    if outcome == CancelOutcome.lease_valid_elsewhere:
+        await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
+
+    # not_cancellable, not_active_locally, unknown
+    raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
 
 
 @router.get("/{thread_id}/runs/{run_id}/join")
@@ -586,8 +699,16 @@ async def stream_existing_run(
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
-        cancelled = await run_mgr.cancel(run_id, action=action)
-        if not cancelled:
+        outcome = await run_mgr.cancel(run_id, action=action)
+        if outcome == CancelOutcome.taken_over:
+            # The run was on another worker and is now marked ``error`` in the
+            # store.  There is no local stream to drain — return immediately so
+            # the client doesn't hang on an SSE subscription this worker can
+            # never serve.
+            return Response(status_code=202)
+        if outcome != CancelOutcome.cancelled:
+            if outcome == CancelOutcome.lease_valid_elsewhere:
+                await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
         if wait and record.task is not None:
             try:
@@ -617,9 +738,9 @@ async def stream_existing_run(
 async def list_thread_messages(
     thread_id: str,
     request: Request,
-    limit: int = Query(default=50, le=200),
-    before_seq: int | None = Query(default=None),
-    after_seq: int | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=1),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
     event_store = get_run_event_store(request)
@@ -679,6 +800,139 @@ async def list_thread_messages(
     return messages
 
 
+async def _scan_thread_message_page(
+    thread_id: str,
+    *,
+    limit: int,
+    before_seq: int | None,
+    request: Request,
+    user_id: str | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
+    event_store = get_run_event_store(request)
+    run_mgr = get_run_manager(request)
+    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
+    visible_desc: list[dict[str, Any]] = []
+    scan_before = before_seq
+
+    while len(visible_desc) < limit + 1:
+        raw = await event_store.list_messages(
+            thread_id,
+            limit=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+            before_seq=scan_before,
+            user_id=user_id,
+        )
+        if not raw:
+            break
+
+        invalid_seq_rows = [row for row in raw if not isinstance(row.get("seq"), int)]
+        if invalid_seq_rows:
+            logger.error(
+                "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s row_count=%d invalid_count=%d",
+                thread_id,
+                scan_before,
+                len(raw),
+                len(invalid_seq_rows),
+            )
+            raise RuntimeError("Run event message rows are missing sequence values")
+
+        for row in reversed(raw):
+            if _is_middleware_message_row(row) or row.get("run_id") in superseded_run_ids:
+                continue
+            visible_desc.append(row)
+            if len(visible_desc) == limit + 1:
+                break
+
+        raw_seqs = [row["seq"] for row in raw]
+        next_scan_before = min(raw_seqs)
+        if scan_before is not None and next_scan_before >= scan_before:
+            logger.error(
+                "Thread message scan cursor did not advance: thread_id=%s scan_before=%s next_scan_before=%s row_count=%d",
+                thread_id,
+                scan_before,
+                next_scan_before,
+                len(raw),
+            )
+            raise RuntimeError("Run event message scan did not advance its cursor")
+        scan_before = next_scan_before
+        if len(raw) < THREAD_MESSAGE_PAGE_SCAN_BATCH:
+            break
+
+    has_more = len(visible_desc) > limit
+    return list(reversed(visible_desc[:limit])), has_more
+
+
+async def _enrich_thread_message_page(
+    thread_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    request: Request,
+    user_id: str | None,
+) -> list[dict[str, Any]]:
+    """Attach run-scoped duration and feedback without mutating store rows."""
+    data = deepcopy(rows)
+    if not data:
+        return data
+
+    run_ids = {row["run_id"] for row in data if isinstance(row.get("run_id"), str)}
+    run_mgr = get_run_manager(request)
+    records = await run_mgr.get_many_by_thread(thread_id, run_ids, user_id=user_id)
+    run_durations = compute_run_durations(records.values())
+
+    event_store = get_run_event_store(request)
+    last_ai_seq_by_run = await event_store.get_last_visible_ai_seq_by_run(thread_id, run_ids, user_id=user_id)
+    feedback_map: dict[str, dict] = {}
+    feedback_run_ids = {run_id for row in data if isinstance((run_id := row.get("run_id")), str) and row.get("seq") == last_ai_seq_by_run.get(run_id)}
+    if feedback_run_ids:
+        feedback_repo = get_feedback_repo(request)
+        feedback_map = await feedback_repo.list_by_run_ids(thread_id, feedback_run_ids, user_id=user_id)
+
+    for row in data:
+        run_id = row.get("run_id")
+        row["feedback"] = None
+        if row.get("seq") == last_ai_seq_by_run.get(run_id):
+            feedback = feedback_map.get(run_id)
+            if feedback:
+                row["feedback"] = {
+                    "feedback_id": feedback["feedback_id"],
+                    "rating": feedback["rating"],
+                    "comment": feedback.get("comment"),
+                }
+
+        content = row.get("content")
+        if isinstance(content, dict) and content.get("type") == "ai" and run_id in run_durations:
+            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[run_id]
+    return data
+
+
+@router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_thread_messages_page(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_seq: int | None = Query(default=None, ge=1),
+) -> ThreadMessagesPageResponse:
+    """Return a backward page ordered by the thread-global event sequence."""
+    if "after_seq" in request.query_params:
+        raise HTTPException(status_code=422, detail="after_seq is not supported by this backward-only endpoint")
+
+    user_id = await get_current_user(request)
+    rows, has_more = await _scan_thread_message_page(
+        thread_id,
+        limit=limit,
+        before_seq=before_seq,
+        request=request,
+        user_id=user_id,
+    )
+    data = await _enrich_thread_message_page(thread_id, rows, request=request, user_id=user_id)
+    return ThreadMessagesPageResponse(
+        data=data,
+        has_more=has_more,
+        next_before_seq=data[0]["seq"] if has_more else None,
+    )
+
+
 @router.get("/{thread_id}/runs/{run_id}/messages")
 @require_permission("runs", "read", owner_check=True)
 async def list_run_messages(
@@ -686,8 +940,8 @@ async def list_run_messages(
     run_id: str,
     request: Request,
     limit: int = Query(default=50, le=200, ge=1),
-    before_seq: int | None = Query(default=None),
-    after_seq: int | None = Query(default=None),
+    before_seq: int | None = Query(default=None, ge=1),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> dict:
     """Return paginated messages for a specific run.
 
@@ -730,8 +984,8 @@ async def list_run_events(
     request: Request,
     event_types: str | None = Query(default=None),
     task_id: str | None = Query(default=None),
-    limit: int = Query(default=500, le=2000),
-    after_seq: int | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+    after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return the full event stream for a run (debug/audit).
 

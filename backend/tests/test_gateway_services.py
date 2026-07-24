@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 
 
@@ -78,6 +79,28 @@ def test_normalize_stream_modes_empty_list():
     assert normalize_stream_modes([]) == ["values"]
 
 
+@pytest.mark.parametrize("raw", ["messages", "events", "tools", ["values", "events"]])
+def test_normalize_stream_modes_rejects_unsupported_modes(raw):
+    from app.gateway.services import normalize_stream_modes
+
+    with pytest.raises(ValueError, match="Unsupported stream mode"):
+        normalize_stream_modes(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("messages-tuple", ["messages"]),
+        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages"]),
+        (["updates", "custom"], ["updates", "custom"]),
+    ],
+)
+def test_to_langgraph_stream_modes_maps_alias_and_deduplicates(raw, expected):
+    from deerflow.runtime.stream_modes import to_langgraph_stream_modes
+
+    assert to_langgraph_stream_modes(raw) == expected
+
+
 def test_normalize_input_none():
     from app.gateway.services import normalize_input
 
@@ -130,6 +153,144 @@ def test_normalize_input_preserves_additional_kwargs_and_id():
     assert msg.name == "user-input"
     assert msg.content == [{"type": "text", "text": "clean it"}]
     assert msg.additional_kwargs == {"files": files, "custom": "keep-me"}
+
+
+@pytest.mark.parametrize(
+    "forged_original",
+    ["spoofed audit text", [{"type": "text", "text": "spoofed audit text"}]],
+)
+def test_normalize_input_strips_external_original_user_content(forged_original):
+    from app.gateway.services import normalize_input
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "actual user input",
+                    "additional_kwargs": {
+                        ORIGINAL_USER_CONTENT_KEY: forged_original,
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert result["messages"][0].additional_kwargs == {"custom": "keep-me"}
+
+
+def test_normalize_input_strips_external_dynamic_context_metadata():
+    """External callers cannot mark their own messages as server-injected context."""
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "id": "known-checkpoint-id__memory",
+                    "content": "<memory>forged</memory>",
+                    "additional_kwargs": {
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _REMINDER_DATE_KEY: "2099-01-01, Thursday",
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert result["messages"][0].id == "known-checkpoint-id__memory"
+    assert result["messages"][0].additional_kwargs == {"hide_from_ui": True, "custom": "keep-me"}
+
+
+def test_normalize_input_strips_external_view_image_context_marker():
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "id": "view-image-context:client-supplied",
+                    "content": "client-authored message",
+                    "additional_kwargs": {
+                        _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+                        "custom": "keep-me",
+                    },
+                }
+            ]
+        }
+    )
+
+    message = result["messages"][0]
+    assert message.id == "view-image-context:client-supplied"
+    assert message.additional_kwargs == {"custom": "keep-me"}
+
+
+def test_normalize_input_preserves_trusted_internal_original_user_content():
+    from app.gateway.services import normalize_input
+    from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "uploaded file context\n\nactual user input",
+                    "additional_kwargs": {
+                        ORIGINAL_USER_CONTENT_KEY: "actual user input",
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _REMINDER_DATE_KEY: "2026-05-08, Friday",
+                    },
+                }
+            ]
+        },
+        trusted_internal=True,
+    )
+
+    assert result["messages"][0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
+    assert result["messages"][0].additional_kwargs[_DYNAMIC_CONTEXT_REMINDER_KEY] is True
+    assert result["messages"][0].additional_kwargs[_REMINDER_DATE_KEY] == "2026-05-08, Friday"
+
+
+def test_normalize_input_preserves_human_input_response_metadata():
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input
+
+    response = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "clarification:call-abc",
+        "response_kind": "option",
+        "option_id": "option-2",
+        "value": "staging",
+    }
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "text": "For your clarification, my answer is: staging"}],
+                    "additional_kwargs": {"hide_from_ui": True, "human_input_response": response},
+                }
+            ]
+        }
+    )
+
+    msg = result["messages"][0]
+    assert isinstance(msg, HumanMessage)
+    assert msg.additional_kwargs["hide_from_ui"] is True
+    assert msg.additional_kwargs["human_input_response"] == response
 
 
 def test_normalize_input_passes_through_basemessage_instances():
@@ -206,6 +367,33 @@ def test_build_run_config_with_overrides():
     assert config["configurable"]["model_name"] == "gpt-4"
     assert config["tags"] == ["test"]
     assert config["metadata"]["user"] == "alice"
+
+
+def test_build_run_config_route_thread_id_overrides_client_configurable():
+    from app.gateway.services import build_run_config
+
+    config = build_run_config(
+        "route-thread",
+        {"configurable": {"thread_id": "caller-thread"}},
+        None,
+    )
+
+    assert config["configurable"]["thread_id"] == "route-thread"
+
+
+@pytest.mark.parametrize("section", ["configurable", "context"])
+def test_build_run_config_strips_external_checkpoint_mode_override(section):
+    from app.gateway.services import build_run_config
+    from deerflow.runtime.checkpoint_mode import INTERNAL_CHECKPOINT_MODE_KEY
+
+    config = build_run_config(
+        "thread-1",
+        {section: {INTERNAL_CHECKPOINT_MODE_KEY: "delta", "model_name": "gpt-4"}},
+        None,
+    )
+
+    assert INTERNAL_CHECKPOINT_MODE_KEY not in config[section]
+    assert config[section]["model_name"] == "gpt-4"
 
 
 def test_build_run_config_context_path_still_sets_configurable_thread_id(_stub_app_config):
@@ -364,6 +552,76 @@ def test_resolve_agent_factory_returns_make_lead_agent():
     assert resolve_agent_factory("lead_agent") is make_lead_agent
     assert resolve_agent_factory("finalis") is make_lead_agent
     assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_id", "includes_checkpoint_id"),
+    [(None, False), ("checkpoint-1", True)],
+)
+def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_persistence(
+    _stub_app_config,
+    checkpoint_id,
+    includes_checkpoint_id,
+):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+    from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY, INTERNAL_CHECKPOINT_MODE_KEY
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    captured = {}
+
+    def fake_factory(*, config):
+        captured["config"] = config
+        return graph
+
+    checkpointer = object()
+    store = object()
+    ctx = SimpleNamespace(
+        checkpointer=checkpointer,
+        store=store,
+        checkpoint_channel_mode="delta",
+        app_config=get_app_config(),
+    )
+    request = SimpleNamespace(
+        state=SimpleNamespace(checkpoint_channel_mode="full"),
+    )
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=fake_factory) as resolve,
+    ):
+        accessor, config = build_checkpoint_state_accessor(
+            request,
+            thread_id="thread-1",
+            assistant_id="Research_Agent",
+            checkpoint_id=checkpoint_id,
+        )
+
+    resolve.assert_called_once_with("Research_Agent")
+    assert captured["config"] is config
+    assert accessor.graph is graph
+    assert accessor.checkpointer is checkpointer
+    assert accessor.mode == "delta"
+    assert graph.checkpointer is checkpointer
+    assert graph.store is store
+    assert config["configurable"]["thread_id"] == "thread-1"
+    assert config["configurable"]["checkpoint_ns"] == ""
+    assert config["configurable"]["agent_name"] == "research-agent"
+    assert config["context"]["agent_name"] == "research-agent"
+    assert config["context"]["app_config"] is ctx.app_config
+    assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "delta"
+    assert config["metadata"][CHECKPOINT_MODE_METADATA_KEY] == "delta"
+    assert INTERNAL_CHECKPOINT_MODE_KEY not in config["context"]
+    assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
+    if checkpoint_id is not None:
+        assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
@@ -558,6 +816,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode": True,
         "subagent_enabled": True,
         "max_concurrent_subagents": 5,
+        "max_total_subagents": 8,
         "thread_id": "should-be-ignored",
     }
 
@@ -569,6 +828,7 @@ def test_context_merges_into_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "max_total_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -580,6 +840,7 @@ def test_context_merges_into_configurable():
     assert config["configurable"]["is_plan_mode"] is True
     assert config["configurable"]["subagent_enabled"] is True
     assert config["configurable"]["max_concurrent_subagents"] == 5
+    assert config["configurable"]["max_total_subagents"] == 8
     assert config["configurable"]["reasoning_effort"] == "high"
     assert config["configurable"]["mode"] == "ultra"
     # thread_id from context should NOT override the one from build_run_config
@@ -607,6 +868,16 @@ def test_merge_run_context_overrides_propagates_to_runtime_context():
     assert config["context"]["is_bootstrap"] is True
     # Non-whitelisted keys are not forwarded.
     assert "thread_id" not in config["context"]
+
+
+def test_merge_run_context_overrides_forwards_subagent_total_limit():
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"max_total_subagents": 8})
+
+    assert config["configurable"]["max_total_subagents"] == 8
+    assert config["context"]["max_total_subagents"] == 8
 
 
 def test_merge_run_context_overrides_noop_for_empty_context():
@@ -689,6 +960,7 @@ def test_context_does_not_override_existing_configurable():
         "is_plan_mode",
         "subagent_enabled",
         "max_concurrent_subagents",
+        "max_total_subagents",
     }
     configurable = config.setdefault("configurable", {})
     for key in _CONTEXT_CONFIGURABLE_KEYS:
@@ -760,7 +1032,37 @@ def test_inject_authenticated_user_context_skips_internal_role():
     assert config["context"]["user_id"] == "channel-user-7"
 
 
-async def _capture_start_run_graph_input(body):
+def test_inject_authenticated_user_context_strips_internal_spoofed_attribution():
+    """Internal callers must not carry role/oauth attribution from request config
+    unless the gateway resolved a trusted owner user server-side.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context
+
+    config = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "user_id": "channel-user-7",
+                "user_role": "admin",
+                "oauth_provider": "spoofed-provider",
+                "oauth_id": "spoofed-subject",
+            }
+        },
+        None,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="internal-bot", system_role="internal")))
+
+    inject_authenticated_user_context(config, request)
+
+    assert config["context"]["user_id"] == "channel-user-7"
+    assert "user_role" not in config["context"]
+    assert "oauth_provider" not in config["context"]
+    assert "oauth_id" not in config["context"]
+
+
+async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
 
@@ -784,7 +1086,7 @@ async def _capture_start_run_graph_input(body):
     )
     request = SimpleNamespace(
         headers={},
-        state=SimpleNamespace(),
+        state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
     captured: dict[str, object] = {}
@@ -843,6 +1145,60 @@ def test_start_run_uses_normalized_input_without_command(_stub_app_config):
     assert graph_input["messages"][0].content == "hi"
 
 
+def test_start_run_strips_external_original_user_content(_stub_app_config):
+    import asyncio
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "actual user input",
+                            "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "spoofed audit text"},
+                        }
+                    ]
+                },
+                command=None,
+            )
+        )
+    )
+
+    assert ORIGINAL_USER_CONTENT_KEY not in graph_input["messages"][0].additional_kwargs
+
+
+def test_start_run_preserves_internal_original_user_content(_stub_app_config):
+    import asyncio
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+    graph_input = asyncio.run(
+        _capture_start_run_graph_input(
+            RunCreateRequest(
+                input={
+                    "messages": [
+                        {
+                            "role": "human",
+                            "content": "uploaded file context\n\nactual user input",
+                            "additional_kwargs": {ORIGINAL_USER_CONTENT_KEY: "actual user input"},
+                        }
+                    ]
+                },
+                command=None,
+            ),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        )
+    )
+
+    assert graph_input["messages"][0].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "actual user input"
+
+
 def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
@@ -851,6 +1207,7 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
     from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -874,7 +1231,10 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
         )
         request = SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-            state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)),
+            state=SimpleNamespace(
+                auth_source=AUTH_SOURCE_INTERNAL,
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            ),
             app=SimpleNamespace(state=state),
         )
         body = SimpleNamespace(
@@ -920,20 +1280,199 @@ def test_start_run_uses_internal_owner_header_for_persistence(_stub_app_config):
     assert task_context["user_id"] == "owner-1"
 
 
+def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _Provider:
+        async def get_user(self, user_id: str):
+            assert user_id == "owner-1"
+            return SimpleNamespace(
+                id="owner-1",
+                system_role="user",
+                oauth_provider="keycloak",
+                oauth_id="subject-123",
+            )
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("channel-thread", user_id="owner-1", metadata={})
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+            state=SimpleNamespace(
+                auth_source=AUTH_SOURCE_INTERNAL,
+                user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            ),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {
+                    "user_role": "admin",
+                    "oauth_provider": "spoofed-provider",
+                    "oauth_id": "spoofed-subject",
+                    "channel_user_id": "forged-config-sender",
+                }
+            },
+            context={"user_id": "spoofed-client", "channel_user_id": "trusted-im-sender"},
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch("app.gateway.services.get_local_provider", return_value=_Provider()),
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "channel-thread", request)
+            await record.task
+
+        return captured_context
+
+    context = asyncio.run(_scenario())
+
+    assert context["user_id"] == "owner-1"
+    assert context["user_role"] == "user"
+    assert context["oauth_provider"] == "keycloak"
+    assert context["oauth_id"] == "subject-123"
+    assert context["channel_user_id"] == "trusted-im-sender"
+    assert context["is_internal"] is True
+
+
+def test_start_run_session_caller_anti_forgery(_stub_app_config):
+    """A session (non-internal) caller cannot forge is_internal, authz_attributes,
+    or channel_user_id via body.config. Exercises the real start_run path, not
+    a replay, so ordering or gating drift would be caught."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        await thread_store.create("thread-session-authz", user_id="u1", metadata={})
+        run_manager = RunManager(store=MemoryRunStore())
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=run_manager,
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(
+                auth_source="session",
+                user=SimpleNamespace(id="u1", system_role="user"),
+            ),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "hi"}]},
+            metadata={},
+            config={
+                "context": {
+                    "is_internal": True,
+                    "authz_attributes": {"forged": True},
+                    "channel_user_id": "forged-sender",
+                },
+                "configurable": {
+                    "is_internal": True,
+                    "authz_attributes": {"forged": True},
+                },
+            },
+            context=None,
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            record = await start_run(body, "thread-session-authz", request)
+            await record.task
+
+        return captured_context
+
+    context = asyncio.run(_scenario())
+
+    # is_internal must be False (server-derived from auth_source="session")
+    assert context["is_internal"] is False
+    # authz_attributes must be stripped (no Gateway-side producer)
+    assert "authz_attributes" not in context
+    # channel_user_id must not survive from body.config for a session caller
+    assert context.get("channel_user_id") is None
+
+
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
+    from app.gateway.routers.thread_runs import RunCreateRequest
     from app.gateway.services import launch_scheduled_thread_run
 
     async def _scenario():
         captured: dict[str, object] = {}
 
         async def fake_start_run(body, thread_id, request):
+            captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
             captured["metadata"] = body.metadata
+            captured["if_not_exists"] = body.if_not_exists
+            captured["on_completion"] = body.on_completion
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -950,8 +1489,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     captured, result = asyncio.run(_scenario())
 
     assert captured["thread_id"] == "thread-scheduled"
+    assert isinstance(captured["body"], RunCreateRequest)
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert captured["if_not_exists"] == "create"
+    assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
 
 
@@ -1085,3 +1627,366 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_non_interactive():
     via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True}}, None)
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
+
+
+# --- Authorization identity anti-forgery tests ---
+
+
+def _make_request_with_auth_source(auth_source: str | None, *, user_id="u1", system_role="user"):
+    """Build a minimal fake request with the given auth_source."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            auth_source=auth_source,
+            user=SimpleNamespace(id=user_id, system_role=system_role) if user_id else None,
+        ),
+    )
+
+
+def _assemble_authz_run_config(request_config: dict, request, *, body_context: dict | None = None):
+    """Replay the real start_run config sequence for authz identity tests."""
+    from app.gateway.services import (
+        build_run_config,
+        inject_authenticated_user_context,
+        merge_run_context_overrides,
+        strip_internal_context_keys,
+    )
+
+    is_internal = request.state.auth_source == AUTH_SOURCE_INTERNAL
+    config = build_run_config("thread-authz", request_config, None)
+    merge_run_context_overrides(config, body_context, internal=is_internal)
+    if not is_internal:
+        strip_internal_context_keys(config)
+    inject_authenticated_user_context(config, request, request_context=body_context)
+    return config
+
+
+class TestInjectAuthenticatedUserContextAuthz:
+    """Verify is_internal and authz_attributes anti-forgery in inject_authenticated_user_context."""
+
+    def test_clears_forged_is_internal_from_context_section(self):
+        """Client forges is_internal=True via body.config['context'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"context": {"is_internal": True}}, request)
+        # The forged value must be replaced by the server-side value (False for session)
+        assert config["context"]["is_internal"] is False
+
+    def test_clears_forged_is_internal_from_configurable_section(self):
+        """Client forges is_internal=True via body.config['configurable'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"configurable": {"is_internal": True}}, request)
+        assert "is_internal" not in config["configurable"]
+        assert config["context"]["is_internal"] is False
+
+    def test_clears_forged_authz_attributes_from_context_section(self):
+        """Client forges authz_attributes via body.config['context'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {"context": {"authz_attributes": [("forged", True)]}},
+            request,
+        )
+        assert "authz_attributes" not in config["context"]
+
+    def test_clears_forged_authz_attributes_from_configurable_section(self):
+        """Client forges authz_attributes via body.config['configurable'] → must be cleared."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({"configurable": {"authz_attributes": {"forged": True}}}, request)
+        assert "authz_attributes" not in config["configurable"]
+
+    def test_internal_auth_source_writes_is_internal_true(self):
+        """Internal caller gets is_internal=True."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source(AUTH_SOURCE_INTERNAL))
+        assert config["context"]["is_internal"] is True
+
+    def test_session_auth_source_writes_is_internal_false(self):
+        """Session caller gets is_internal=False."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
+        assert config["context"]["is_internal"] is False
+
+    def test_user_none_still_writes_is_internal(self):
+        """Even when user_id is None (early return path), is_internal is written."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        # user=None triggers the first early return, but is_internal must still be set
+        inject_authenticated_user_context(config, _make_request_with_auth_source("session", user_id=None))
+        assert config["context"]["is_internal"] is False
+
+    def test_user_none_internal_source_writes_true(self):
+        """When auth_source is internal but user is None, is_internal is still True."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": {}, "configurable": {}}
+        inject_authenticated_user_context(config, _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, user_id=None))
+        assert config["context"]["is_internal"] is True
+
+    def test_internal_caller_attributes_also_cleared(self):
+        """Even internal callers can't forge authz_attributes."""
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config({"context": {"authz_attributes": {"forged": True}}}, request)
+        assert "authz_attributes" not in config["context"]
+        assert config["context"]["is_internal"] is True
+
+    def test_session_body_context_cannot_inject_channel_user_id(self):
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {},
+            request,
+            body_context={"channel_user_id": "forged-sender"},
+        )
+        assert "channel_user_id" not in config["context"]
+
+    def test_session_config_sections_cannot_inject_channel_user_id(self):
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config(
+            {
+                "context": {"channel_user_id": "forged-context-sender"},
+                "configurable": {"channel_user_id": "forged-configurable-sender"},
+            },
+            request,
+        )
+        assert "channel_user_id" not in config["context"]
+        assert "channel_user_id" not in config["configurable"]
+
+    def test_internal_body_context_preserves_channel_user_id(self):
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config(
+            {},
+            request,
+            body_context={"channel_user_id": "trusted-im-sender"},
+        )
+        assert config["context"]["channel_user_id"] == "trusted-im-sender"
+
+    def test_internal_config_sections_cannot_override_channel_user_id(self):
+        request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL)
+        config = _assemble_authz_run_config(
+            {
+                "context": {"channel_user_id": "forged-context-sender"},
+                "configurable": {"channel_user_id": "forged-configurable-sender"},
+            },
+            request,
+            body_context={"channel_user_id": "trusted-im-sender"},
+        )
+        assert config["context"]["channel_user_id"] == "trusted-im-sender"
+        assert "channel_user_id" not in config["configurable"]
+
+    def test_non_dict_context_raises_type_error(self):
+        """Non-dict runtime context must raise TypeError, not silently skip."""
+        from app.gateway.services import inject_authenticated_user_context
+
+        config = {"context": "not a dict"}
+        with pytest.raises(TypeError, match="run context must be a mapping"):
+            inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
+
+
+@pytest.mark.asyncio
+async def test_run_agent_invalid_stream_mode_finalizes_run_before_graph_invocation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-invalid-stream-mode")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    agent_factory = MagicMock()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id}},
+        stream_modes=["events"],
+    )
+    await asyncio.sleep(0)
+
+    assert record.status == RunStatus.error
+    assert record.error == "Unsupported stream mode(s): events"
+    agent_factory.assert_not_called()
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "error",
+        {
+            "message": "Unsupported stream mode(s): events",
+            "name": "UnsupportedStreamModeError",
+        },
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    replacement = await run_manager.create_or_reject(record.thread_id)
+    assert replacement.run_id != record.run_id
+
+
+@pytest.mark.asyncio
+async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from deerflow.runtime.checkpoint_mode import (
+        CHECKPOINT_MODE_METADATA_KEY,
+        INTERNAL_CHECKPOINT_MODE_KEY,
+    )
+    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    checkpointer = AsyncMock()
+    checkpointer.aget_tuple.return_value = SimpleNamespace(
+        metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"},
+        checkpoint={"channel_values": {}},
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    run_manager = SimpleNamespace(
+        wait_for_prior_finalizing=AsyncMock(),
+        set_status=AsyncMock(),
+    )
+    record = RunRecord(
+        run_id="run-checkpoint-mode",
+        thread_id="thread-delta",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    agent_factory = MagicMock()
+    config = {
+        "configurable": {
+            "thread_id": record.thread_id,
+            INTERNAL_CHECKPOINT_MODE_KEY: "delta",
+        },
+        "metadata": {CHECKPOINT_MODE_METADATA_KEY: "delta"},
+    }
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode="full",
+        ),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config=config,
+    )
+
+    assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
+    assert CHECKPOINT_MODE_METADATA_KEY not in config["metadata"]
+    agent_factory.assert_not_called()
+    run_manager.set_status.assert_any_await(
+        record.run_id,
+        RunStatus.error,
+        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, call
+
+    from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY
+    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    checkpointer = AsyncMock()
+    checkpointer.aget_tuple.side_effect = [
+        SimpleNamespace(
+            metadata={},
+            checkpoint={"channel_values": {"messages": ["latest full"]}},
+        ),
+        SimpleNamespace(
+            metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"},
+            checkpoint={"channel_values": {}},
+        ),
+    ]
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    run_manager = SimpleNamespace(
+        wait_for_prior_finalizing=AsyncMock(),
+        set_status=AsyncMock(),
+    )
+    record = RunRecord(
+        run_id="run-selected-checkpoint-mode",
+        thread_id="thread-selected-delta",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    agent_factory = MagicMock()
+    selected_config = {
+        "configurable": {
+            "thread_id": record.thread_id,
+            "checkpoint_ns": "branch",
+            "checkpoint_id": "delta-checkpoint",
+            "checkpoint_map": {"": "delta-checkpoint"},
+        }
+    }
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            checkpoint_channel_mode="full",
+        ),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config=selected_config,
+    )
+
+    agent_factory.assert_not_called()
+    assert checkpointer.aget_tuple.await_args_list[:2] == [
+        call(
+            {
+                "configurable": {
+                    "thread_id": record.thread_id,
+                    "checkpoint_ns": "",
+                }
+            }
+        ),
+        call(
+            {
+                "configurable": {
+                    "thread_id": record.thread_id,
+                    "checkpoint_ns": "branch",
+                    "checkpoint_id": "delta-checkpoint",
+                    "checkpoint_map": {"": "delta-checkpoint"},
+                }
+            }
+        ),
+    ]
+    run_manager.set_status.assert_any_await(
+        record.run_id,
+        RunStatus.error,
+        error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
+    )

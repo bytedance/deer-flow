@@ -6,8 +6,11 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   SUBAGENT_ERROR_KEY,
+  SUBAGENT_MODEL_NAME_KEY,
   SUBAGENT_RESULT_BRIEF_KEY,
   SUBAGENT_STATUS_KEY,
+  SUBAGENT_STOP_REASON_KEY,
+  SUBAGENT_TOKEN_USAGE_KEY,
   derivePendingSubtaskStatus,
   hasSubtaskToolResult,
   parseSubtaskResult,
@@ -15,6 +18,7 @@ import {
 
 interface ContractFile {
   valid_status_values: string[];
+  valid_stop_reason_values: string[];
 }
 
 const CONTRACT_PATH = resolve(
@@ -145,6 +149,28 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
     expect(parsed.status).toBe("completed");
   });
 
+  it("restores terminal model and token usage metadata", () => {
+    expect(
+      parseSubtaskResult("Task Succeeded. Result: done", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_MODEL_NAME_KEY]: "claude-3-7-sonnet",
+        [SUBAGENT_TOKEN_USAGE_KEY]: {
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+        },
+      }),
+    ).toMatchObject({
+      status: "completed",
+      modelName: "claude-3-7-sonnet",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+      },
+    });
+  });
+
   it("collapses cancelled / timed_out / polling_timed_out to failed for the card UI", () => {
     for (const backendStatus of [
       "cancelled",
@@ -156,6 +182,65 @@ describe("parseSubtaskResult — structured additional_kwargs (preferred path)",
       });
       expect(parsed.status).toBe("failed");
     }
+  });
+
+  it("renders legacy max_turns_reached (checkpointed under #3949) as a terminal failed pill, not spinning in_progress", () => {
+    // Phase 1 wrote `subagent_status: "max_turns_reached"` into ToolMessage
+    // additional_kwargs, which is checkpointed in thread history. Phase 2 (#3980)
+    // stopped producing it, but old turns still carry it. Without the deprecated
+    // alias, readStructuredStatus returns null while hasStructuredSubagentMetadata
+    // stays true (sibling keys present) -> parseSubtaskResult returns
+    // { status: "in_progress" } and the card spins forever. The alias keeps it
+    // terminal, matching how Phase 1 itself rendered the value.
+    const parsed = parseSubtaskResult("ignored content", {
+      [SUBAGENT_STATUS_KEY]: "max_turns_reached",
+      [SUBAGENT_ERROR_KEY]: "Reached max_turns=150",
+      [SUBAGENT_RESULT_BRIEF_KEY]: "investigated 3 of 5 sources",
+    });
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toBe("Reached max_turns=150");
+    // result only attaches for the completed pill; legacy data renders as failed.
+    expect(parsed.result).toBeUndefined();
+  });
+
+  it("surfaces stop_reason on a capped run while keeping a normal pill status", () => {
+    // bytedance/deer-flow#3875 Phase 2: a token-capped run produced a final
+    // answer, so it is `completed` with the cap on the additive
+    // `subagent_stop_reason` field. The card stays green; stopReason carries
+    // the cap detail for a future badge, and the recovered partial result
+    // lives on subagent_result_brief.
+    const parsed = parseSubtaskResult("ignored content", {
+      [SUBAGENT_STATUS_KEY]: "completed",
+      [SUBAGENT_RESULT_BRIEF_KEY]: "investigated 3 of 5 sources",
+      [SUBAGENT_STOP_REASON_KEY]: "token_capped",
+    });
+    expect(parsed.status).toBe("completed");
+    expect(parsed.result).toBe("investigated 3 of 5 sources");
+    expect(parsed.stopReason).toBe("token_capped");
+  });
+
+  it("surfaces stop_reason on a turn-capped run that produced no usable result", () => {
+    // No usable partial -> the backend stamps `failed` + turn_capped. The card
+    // goes red; stopReason still carries the cap so a future badge can say so.
+    const parsed = parseSubtaskResult("ignored content", {
+      [SUBAGENT_STATUS_KEY]: "failed",
+      [SUBAGENT_ERROR_KEY]: "Reached max_turns=150",
+      [SUBAGENT_STOP_REASON_KEY]: "turn_capped",
+    });
+    expect(parsed.status).toBe("failed");
+    expect(parsed.error).toBe("Reached max_turns=150");
+    expect(parsed.stopReason).toBe("turn_capped");
+  });
+
+  it("ignores an unknown subagent_stop_reason value", () => {
+    // An unrecognized stop_reason is dropped so a stale frontend never renders
+    // a bogus cap badge.
+    const parsed = parseSubtaskResult("ignored content", {
+      [SUBAGENT_STATUS_KEY]: "completed",
+      [SUBAGENT_STOP_REASON_KEY]: "future_cap_kind",
+    });
+    expect(parsed.status).toBe("completed");
+    expect(parsed.stopReason).toBeUndefined();
   });
 
   it("uses subagent_error when supplied", () => {
@@ -257,6 +342,17 @@ describe("parseSubtaskResult — shared contract fixture", () => {
         [SUBAGENT_STATUS_KEY]: status,
       });
       expect(parsed.status).toBe(expectedCardStatus(status));
+    });
+  }
+
+  for (const stopReason of CONTRACT.valid_stop_reason_values) {
+    it(`carries stop_reason through unchanged: ${stopReason}`, () => {
+      const parsed = parseSubtaskResult("ignored content", {
+        [SUBAGENT_STATUS_KEY]: "completed",
+        [SUBAGENT_RESULT_BRIEF_KEY]: "partial work",
+        [SUBAGENT_STOP_REASON_KEY]: stopReason,
+      });
+      expect(parsed.stopReason).toBe(stopReason);
     });
   }
 });

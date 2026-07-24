@@ -213,6 +213,16 @@ class TestWriteGate:
         handler.assert_called_once()
         assert result.status != "error"
 
+    def test_blocked_write_has_deerflow_tool_meta(self):
+        from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+        mw = _middleware({self.PATH: "v1"})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        meta = (result.additional_kwargs or {}).get(TOOL_META_KEY)
+        assert meta is not None, "blocked write must carry deerflow_tool_meta"
+        assert meta["recoverable_by_model"] is True
+
 
 class TestAsyncPaths:
     PATH = "/mnt/user-data/outputs/report.md"
@@ -228,6 +238,22 @@ class TestAsyncPaths:
 
         result = asyncio.run(mw.awrap_tool_call(request, handler))
         assert result.status == "error"
+
+    def test_async_blocked_write_has_deerflow_tool_meta(self):
+        import asyncio
+
+        from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+        mw = _middleware({self.PATH: "v1"})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+
+        async def handler(_request):
+            raise AssertionError("handler must not run when blocked")
+
+        result = asyncio.run(mw.awrap_tool_call(request, handler))
+        meta = (result.additional_kwargs or {}).get(TOOL_META_KEY)
+        assert meta is not None, "async blocked write must carry deerflow_tool_meta"
+        assert meta["recoverable_by_model"] is True
 
     def test_async_read_stamps_mark(self):
         import asyncio

@@ -87,6 +87,10 @@ export type MockAPIOptions = {
     max_file_size: number;
     max_total_size: number;
   };
+  features?: {
+    agentsApiEnabled?: boolean;
+    browserControlEnabled?: boolean;
+  };
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -126,6 +130,16 @@ function visibleInputMessages(messages: unknown[]) {
   return messages.filter((message) => !isHiddenInputMessage(message));
 }
 
+function mockMessageRunId(message: unknown, fallback: string) {
+  if (typeof message === "object" && message !== null) {
+    const runId = Reflect.get(message, "run_id");
+    if (typeof runId === "string" && runId.length > 0) {
+      return runId;
+    }
+  }
+  return fallback;
+}
+
 function visibleRunInputMessages(route: Route) {
   try {
     const body = route.request().postDataJSON() as {
@@ -135,6 +149,25 @@ function visibleRunInputMessages(route: Route) {
   } catch {
     return [];
   }
+}
+
+function messageId(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null) {
+    return undefined;
+  }
+  const raw = Reflect.get(message, "id");
+  return typeof raw === "string" ? raw : undefined;
+}
+
+function branchMessagesFromTurn(messages: unknown[], targetIds: Set<string>) {
+  let targetEndIndex = -1;
+  for (const [index, message] of messages.entries()) {
+    const id = messageId(message);
+    if (id && targetIds.has(id)) {
+      targetEndIndex = Math.max(targetEndIndex, index);
+    }
+  }
+  return targetEndIndex >= 0 ? messages.slice(0, targetEndIndex + 1) : messages;
 }
 
 function mockStreamMessages(route?: Route, inputMessages?: unknown[]) {
@@ -224,6 +257,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     max_files: 10,
     max_file_size: 50 * 1024 * 1024,
     max_total_size: 100 * 1024 * 1024,
+  };
+  const featureFlags = {
+    agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
+    browserControlEnabled: options?.features?.browserControlEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -672,8 +709,78 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   void page.route(/\/api\/threads\/[^/]+$/, (route) => {
     if (route.request().method() === "DELETE") {
+      const threadId = decodeURIComponent(
+        new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
+      );
+      // Mirror the gateway's `require_existing=True` ownership guard: deleting
+      // an already-removed thread 404s. `useDeleteThread` first deletes via the
+      // LangGraph route (which drops the thread_meta row) and then hits this
+      // route, so this reproduces the real double-delete 404 the frontend must
+      // treat as idempotent success.
+      if (!threads.some((thread) => thread.thread_id === threadId)) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `Thread ${threadId} not found` }),
+        });
+      }
+      threads = threads.filter((thread) => thread.thread_id !== threadId);
       return route.fulfill({
         status: 204,
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route(/\/api\/threads\/[^/]+\/branches$/, (route) => {
+    if (route.request().method() === "POST") {
+      const pathParts = new URL(route.request().url()).pathname.split("/");
+      const sourceThreadId = decodeURIComponent(pathParts.at(-2) ?? "");
+      const sourceThread = threads.find(
+        (thread) => thread.thread_id === sourceThreadId,
+      );
+      const body = route.request().postDataJSON() as {
+        message_id?: string;
+        message_ids?: string[];
+        title?: string;
+      };
+      const targetIds = new Set(
+        [body.message_id, ...(body.message_ids ?? [])].filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        ),
+      );
+      let sourceTitle = sourceThread?.title?.trim();
+      if (sourceThread?.metadata?.deerflow_branch === true) {
+        sourceTitle = sourceTitle?.replace(/^(Branch:\s*)+/i, "").trim();
+      }
+      const title = body.title ?? sourceTitle;
+
+      upsertThread({
+        thread_id: MOCK_THREAD_ID_2,
+        title,
+        updated_at: new Date().toISOString(),
+        metadata: {
+          deerflow_branch: true,
+          branch_parent_thread_id: sourceThreadId,
+          branch_parent_message_id: body.message_id,
+          branch_parent_checkpoint_id: "mock-checkpoint",
+        },
+        messages: branchMessagesFromTurn(
+          sourceThread?.messages ?? [],
+          targetIds,
+        ),
+      });
+
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          thread_id: MOCK_THREAD_ID_2,
+          parent_thread_id: sourceThreadId,
+          parent_checkpoint_id: "mock-checkpoint",
+          branched_from_message_id: body.message_id,
+          workspace_clone_mode: "current_thread_best_effort",
+        }),
       });
     }
     return route.fallback();
@@ -862,31 +969,33 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  void page.route(
-    /\/api\/threads\/([^/]+)\/runs\/([^/]+)\/messages/,
-    (route) => {
-      if (route.request().method() === "GET") {
-        const url = route.request().url();
-        const matchingThread = threads.find((t) =>
-          url.includes(`/api/threads/${t.thread_id}/runs/`),
-        );
-        return route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            data: (matchingThread?.messages ?? []).map((message, index) => ({
-              run_id: `run-${matchingThread?.thread_id ?? "unknown"}`,
-              content: message,
-              metadata: { caller: "lead_agent" },
-              created_at: `2025-01-01T00:00:${String(index).padStart(2, "0")}Z`,
-            })),
-            hasMore: false,
-          }),
-        });
-      }
-      return route.fallback();
-    },
-  );
+  void page.route(/\/api\/threads\/([^/]+)\/messages\/page/, (route) => {
+    if (route.request().method() === "GET") {
+      const url = route.request().url();
+      const matchingThread = threads.find((t) =>
+        url.includes(`/api/threads/${t.thread_id}/messages/page`),
+      );
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: (matchingThread?.messages ?? []).map((message, index) => ({
+            run_id: mockMessageRunId(
+              message,
+              `run-${matchingThread?.thread_id ?? "unknown"}`,
+            ),
+            seq: index + 1,
+            content: message,
+            metadata: { caller: "lead_agent" },
+            created_at: `2025-01-01T00:00:${String(index).padStart(2, "0")}Z`,
+          })),
+          has_more: false,
+          next_before_seq: null,
+        }),
+      });
+    }
+    return route.fallback();
+  });
 
   // Run stream — returns a minimal SSE response with an AI message
   const handleMockRunStream = (route: Route) => {
@@ -928,7 +1037,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  // Feature flags — frontend gates UI (e.g. agents) on these. Default to
+  // Feature flags — frontend gates UI (e.g. agents/browser) on these. Default to
   // enabled so existing tests exercise the normal path; tests that need the
   // disabled state override this route after calling mockLangGraphAPI.
   void page.route("**/api/features", (route) => {
@@ -936,7 +1045,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ agents_api: { enabled: true } }),
+        body: JSON.stringify({
+          agents_api: { enabled: featureFlags.agentsApiEnabled },
+          browser_control: { enabled: featureFlags.browserControlEnabled },
+        }),
       });
     }
     return route.fallback();

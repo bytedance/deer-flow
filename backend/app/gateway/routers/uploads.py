@@ -379,7 +379,13 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                md_path = await convert_file_to_markdown(file_path)
+                # Reserve the companion .md name in this request's seen set
+                # before writing so conversion cannot silently truncate another
+                # uploaded or derived file (same invariant as form-part dedupe).
+                provisional_md_name = Path(safe_filename).with_suffix(".md").name
+                unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
+                md_output = file_path.with_name(unique_md_name)
+                md_path = await convert_file_to_markdown(file_path, output_path=md_output)
                 if md_path:
                     written_paths.append(md_path)
                     md_virtual_path = upload_virtual_path(md_path.name)
@@ -391,6 +397,11 @@ async def upload_files(
                     file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
                     file_info["markdown_virtual_path"] = md_virtual_path
                     file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                else:
+                    # Conversion failed and wrote nothing, so release the claim;
+                    # holding it would rename a later same-stem upload against
+                    # a name nothing occupies.
+                    seen_filenames.discard(unique_md_name)
 
             uploaded_files.append(file_info)
 

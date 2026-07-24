@@ -51,6 +51,22 @@ export const zhCN: Translations = {
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
     regenerate: "重新生成",
+    branch: "分叉",
+    showArtifacts: "查看此对话的文件",
+    browser: "浏览器",
+    showBrowser: "打开浏览器面板",
+  },
+
+  runDuration: {
+    reasoning: "思考过程",
+    working: "执行中…",
+    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    description: "任务总耗时，包括模型推理、工具调用和等待时间。",
+    lessThanSecond: "不足 1 秒",
+    hours: (value) => `${value} 小时`,
+    minutes: (value) => `${value} 分`,
+    seconds: (value) => `${value} 秒`,
+    separator: " ",
   },
 
   // Home
@@ -104,15 +120,37 @@ export const zhCN: Translations = {
     largeUnavailable: "文件过大，已省略 diff。",
     sensitiveUnavailable: "敏感路径，已隐藏内容。",
     truncatedUnavailable: "变更集过大，已省略 diff。",
+    symlinkUnavailable: "符号链接变更，无法展示 diff。",
     truncatedSummary: "部分变更已被截断。",
   },
 
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
+    disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    inputPolish: "优化输入",
+    inputPolishing: "正在优化输入...",
+    inputPolishNoChanges: "当前输入已经足够清晰。",
+    inputPolishFailed: "优化输入失败。",
+    inputPolishUndo: "撤销优化",
+    inputPolishCancel: "取消优化",
+    voiceInputStartLabel: "语音输入",
+    voiceInputStopLabel: "停止语音输入",
+    voiceInputStart:
+      "语音输入。DeerFlow 只接收转写文本，音频由浏览器或系统语音服务处理。",
+    voiceInputStop: "停止语音输入",
+    voiceInputListening: "正在聆听... 点击停止语音输入。",
+    voiceInputUnsupported:
+      "当前浏览器不支持语音输入。建议使用 Chrome 或 Edge。",
+    voiceInputPermissionDenied: "麦克风权限被拒绝。请允许麦克风访问后重试。",
+    voiceInputMicrophoneUnavailable: "未检测到麦克风。请检查设备输入后重试。",
+    voiceInputUnsupportedLanguage: "当前浏览器不支持该语言的语音输入。",
+    voiceInputNetworkError: "无法连接浏览器语音识别服务。",
+    voiceInputNoSpeech: "没有检测到语音，请重试。",
+    voiceInputFailed: "语音输入失败，请重试。",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
@@ -142,6 +180,7 @@ export const zhCN: Translations = {
     followupConfirmReplace: "替换并发送",
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
     goalCommandDescription: "设置、查看或清除当前目标",
+    compactCommandDescription: "压缩早期上下文，保留完整聊天记录",
     goalLabel: "目标",
     goalContinuing: "续跑中 {count}/{max}",
     goalContinuationTooltip:
@@ -151,6 +190,12 @@ export const zhCN: Translations = {
     goalNone: "当前没有目标。",
     goalActive: "当前目标：{goal}",
     goalFailed: "目标命令执行失败。",
+    goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
+    goalLengthCounter: "目标长度：{length}/{max} 字符",
+    compactSuccess:
+      "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
+    compactSkipped: "当前上下文还不需要压缩。",
+    compactFailed: "上下文压缩失败。",
     suggestions: [
       {
         suggestion: "写作",
@@ -391,6 +436,24 @@ export const zhCN: Translations = {
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
+    settings: "模型设置",
+    settingsTitle: "模型设置",
+    settingsDescription:
+      "为该智能体选择默认模型和生成参数，修改在下一条消息生效。",
+    settingsModel: "默认模型",
+    settingsModelDefault: "使用全局默认",
+    settingsTemperature: "温度",
+    settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
+    settingsMaxTokens: "最大输出 token",
+    settingsMaxTokensPlaceholder: "继承模型配置",
+    settingsThinking: "思考模式",
+    settingsThinkingOn: "开启",
+    settingsThinkingOff: "关闭",
+    settingsReasoningEffort: "推理强度",
+    settingsInherit: "继承",
+    settingsSaved: "模型设置已保存",
+    settingsInvalidTemperature: "温度必须在 0 到 2 之间",
+    settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
   },
 
   // Breadcrumb
@@ -417,6 +480,8 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    branchCreated: "已创建分叉对话",
+    branchFailed: "创建分叉对话失败。",
   },
 
   // Chats
@@ -432,6 +497,11 @@ export const zhCN: Translations = {
     title: "侧边对话",
     open: "打开侧边对话",
     close: "关闭侧边对话",
+    delete: "删除侧边对话",
+    deleteConfirm:
+      "确定要删除该侧边对话吗？此操作不可撤销。如果只是想隐藏，请使用顶部的侧边对话开关。",
+    deleteSuccess: "侧边对话已删除",
+    deleteFailed: "删除侧边对话失败。",
     addToConversation: "添加到对话",
     askInSideChat: "在侧边聊天中提问",
     reference: "引用",
@@ -510,6 +580,26 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    browserNavigate: (url: string) => `在浏览器中打开 ${url}`,
+    browserNavigateGeneric: "在浏览器中打开页面",
+    browserClick: "在浏览器中点击元素",
+    browserType: "在浏览器中输入内容",
+    browserSnapshot: "在浏览器中读取页面",
+    browserGetText: "在浏览器中读取页面文本",
+    browserBack: "在浏览器中返回上一页",
+    browserScreenshot: "浏览器截图",
+    browserClose: "关闭浏览器",
+  },
+
+  humanInput: {
+    answered: "已回答",
+    pending: "发送中...",
+    readOnly: "只读",
+    otherLabel: "其他回答",
+    otherPlaceholder: "输入其他回答...",
+    submit: "提交",
+    emptyError: "请输入回答后再提交。",
+    answeredValue: (value: string) => `已回答：${value}`,
   },
 
   uploads: {
@@ -545,6 +635,7 @@ export const zhCN: Translations = {
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
     unavailableShort: "未返回用量",
+    collecting: "统计中",
     note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，可能与平台账单页不完全一致。",
     presets: {
       off: "关闭",
@@ -751,6 +842,9 @@ export const zhCN: Translations = {
     emailPlaceholder: "you@example.com",
     password: "密码",
     passwordPlaceholder: "•••••••",
+    rememberMe: "保持登录",
+    rememberMeDescription:
+      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",

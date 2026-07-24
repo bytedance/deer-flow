@@ -50,7 +50,16 @@ def _escape_context_text(value: object) -> str:
     return escape(" ".join(str(value).split()), quote=False)
 
 
-def _status_guidance(status: str) -> str:
+def _status_guidance(status: str, stop_reason: str | None = None) -> str:
+    if stop_reason:
+        # A guardrail cap ended this run early (#3875 Phase 2): the status is
+        # still completed/failed, and ``stop_reason`` carries *why* it stopped
+        # (token_capped / turn_capped / loop_capped). The old contract surfaced
+        # this as a separate ``max_turns_reached`` status; the additive
+        # ``stop_reason`` field replaced it so v1 consumers keep working.
+        if status == "completed":
+            return "hit a guardrail cap with a partial result; reuse the partial result, retry with a tighter scope, or raise the per-agent budget (max_turns / token_budget)"
+        return "hit a guardrail cap with no usable result; retry with a tighter scope or raise the per-agent budget (max_turns / token_budget)"
     if status == "in_progress":
         return "already delegated; do NOT delegate again; wait for or build on the result"
     if status == "completed":
@@ -123,6 +132,9 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         if structured is None:
             continue
         entry["status"] = structured["status"]
+        stop_reason = structured.get("stop_reason")
+        if stop_reason:
+            entry["stop_reason"] = stop_reason
         result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -144,7 +156,7 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     status = _escape_context_text(entry["status"])
     description = _escape_context_text(entry["description"])
     subagent_type = _escape_context_text(entry["subagent_type"])
-    guidance = _status_guidance(entry["status"])
+    guidance = _status_guidance(entry["status"], entry.get("stop_reason"))
     line = f"- [{status}] {description} (via {subagent_type}; {guidance})"
     result_brief = entry.get("result_brief")
     if result_brief:

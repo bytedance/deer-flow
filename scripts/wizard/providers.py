@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -26,6 +26,9 @@ class LLMProvider:
     auth_hint: str | None = None
     base_url_prompt: str | None = None
     model_prompt: str | None = None
+    # For generic OpenAI-compatible gateways the wizard cannot infer whether the
+    # user-supplied model supports thinking/reasoning, so prompt for it explicitly.
+    ask_thinking_support: bool = False
 
     def extra_config_for(self, model_name: str) -> dict:
         """Return extra_config for a selected model, applying per-model overrides.
@@ -94,6 +97,22 @@ ANTHROPIC_THINKING_CONFIG = {
 }
 
 
+def with_thinking_support(provider: LLMProvider, supports_thinking: bool) -> LLMProvider:
+    """Return a copy of *provider* with thinking-capability flags applied.
+
+    For generic OpenAI-compatible gateways the wizard cannot infer whether the
+    user-supplied model supports thinking/reasoning. When the user confirms
+    support we also wire the common OpenAI-compatible enable/disable toggles so
+    the runtime can switch thinking on and off; otherwise we record the
+    capability as unsupported. The shared provider definition is never mutated.
+    """
+    if supports_thinking:
+        extra_config = {**provider.extra_config, **OPENAI_COMPAT_THINKING_CONFIG}
+    else:
+        extra_config = {**provider.extra_config, "supports_thinking": False}
+    return replace(provider, extra_config=extra_config)
+
+
 LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="volcengine",
@@ -111,6 +130,49 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "supports_vision": True,
             "supports_reasoning_effort": True,
             **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+    ),
+    LLMProvider(
+        name="volcengine_codingplan",
+        display_name="Volcengine Coding Plan",
+        description="One key, multi-vendor models (Doubao/GLM/DeepSeek/Kimi/MiniMax)",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=[
+            "doubao-seed-2.0-code",
+            "doubao-seed-2.0-pro",
+            "doubao-seed-2.0-lite",
+            "doubao-seed-code",
+            "minimax-m2.7",
+            "minimax-m3",
+            "glm-5.2",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "kimi-k2.6",
+            "kimi-k2.7-code",
+        ],
+        default_model="glm-5.2",
+        env_var="VOLCENGINE_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "supports_vision": True,
+            "supports_reasoning_effort": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+        model_vision_overrides={
+            "doubao-seed-2.0-code": True,
+            "doubao-seed-2.0-pro": True,
+            "doubao-seed-2.0-lite": True,
+            "doubao-seed-code": True,
+            "minimax-m2.7": False,
+            "minimax-m3": True,
+            "glm-5.2": False,
+            "deepseek-v4-flash": False,
+            "deepseek-v4-pro": False,
+            "kimi-k2.6": False,
+            "kimi-k2.7-code": False,
         },
     ),
     LLMProvider(
@@ -462,6 +524,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         package="langchain-openai",
         base_url_prompt="Base URL (e.g. https://api.openai.com/v1)",
         model_prompt="Model name",
+        ask_thinking_support=True,
     ),
 ]
 

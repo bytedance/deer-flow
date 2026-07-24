@@ -61,6 +61,14 @@ class TestMergeDelegations:
 
         assert out == [{**_entry("a", "completed"), "result_sha256": "x"}]
 
+    def test_same_id_preserves_original_run_id_when_update_omits_it(self):
+        existing = [{**_entry("a", "in_progress"), "run_id": "run-1"}]
+        new = [_entry("a", "completed")]
+
+        out = merge_delegations(existing, new)
+
+        assert out[0]["run_id"] == "run-1"
+
     def test_over_cap_keeps_most_recent_entries(self):
         from deerflow.agents import thread_state as thread_state_module
 
@@ -180,6 +188,37 @@ class TestExtractDelegations:
 
         assert out[0]["status"] == "failed"
         assert out[0]["result_brief"] == "structured boom"
+
+    def test_capped_task_carries_partial_result_in_brief(self):
+        """#3875 Phase 2: a turn-capped delegation that produced usable partial
+        work surfaces as ``completed`` + ``stop_reason=turn_capped``, so the
+        recovered partial result lands in ``result_brief`` — the lead's durable
+        context shows the work produced before the budget ran out, not just the
+        cap reason. (Previously this was a ``max_turns_reached`` status enum;
+        the additive ``stop_reason`` field replaced it so v1 consumers keep
+        working.)"""
+        msgs = [
+            _ai_task_call("call_capped", "deep research"),
+            ToolMessage(
+                content="Task Succeeded (capped: turn budget). Result: investigated 3 of 5 sources",
+                tool_call_id="call_capped",
+                id="tm_capped",
+                additional_kwargs={
+                    "subagent_status": "completed",
+                    "subagent_result_brief": "investigated 3 of 5 sources",
+                    "subagent_result_sha256": "a" * 64,
+                    "subagent_stop_reason": "turn_capped",
+                },
+            ),
+        ]
+
+        out = extract_delegations(msgs)
+
+        assert out[0]["status"] == "completed"
+        # result_brief wins, so the partial work is what the lead sees.
+        assert "investigated 3 of 5 sources" in out[0]["result_brief"]
+        assert out[0]["result_sha256"] == "a" * 64
+        assert out[0]["stop_reason"] == "turn_capped"
 
     def test_terminal_looking_content_without_structured_metadata_keeps_dispatch_in_progress(self):
         msgs = [
@@ -325,6 +364,27 @@ class TestRenderDelegationLedger:
         assert "general-purpose" in out
         assert "auth uses JWT" in out
         assert "completed" in out
+
+    def test_renders_capped_completion_with_cap_guidance(self):
+        """#3875 Phase 2: a capped completion renders model-facing guidance that
+        the result is partial (so the lead reuses it knowingly), instead of the
+        clean-completion "reuse this result" wording that would hide the cap."""
+        entries = [
+            {
+                **_entry("call_capped", "completed", description="deep research"),
+                "result_brief": "investigated 3 of 5 sources",
+                "result_sha256": "x" * 64,
+                "result_ref": "tm_capped",
+                "stop_reason": "turn_capped",
+            }
+        ]
+
+        out = render_delegation_ledger(entries)
+
+        assert "guardrail cap" in out
+        assert "partial result" in out
+        # The clean-completion wording is NOT used for a capped run.
+        assert "reuse this result" not in out
 
     def test_failed_and_cancelled_entries_are_rendered_as_retryable_attempts_not_reusable_results(self):
         entries = [

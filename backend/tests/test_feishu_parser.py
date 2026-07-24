@@ -328,7 +328,13 @@ def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
         assert inbound.metadata["message_id"] == "msg_file_1"
         assert inbound.metadata["topic_id"] == "msg_file_1"
         assert inbound.metadata["batched_message_ids"] == ["msg_file_1", "msg_file_2"]
-        channel._ensure_running_card_started.assert_called_once_with("msg_file_1")
+        channel._ensure_running_card_started.assert_called_once()
+        assert channel._ensure_running_card_started.call_args.args == ("msg_file_1",)
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args.kwargs["metadata"]["batched_message_ids"] == [
+            "msg_file_1",
+            "msg_file_2",
+        ]
         assert [call.args for call in channel._add_reaction.call_args_list] == [
             ("msg_file_1", "OK"),
             ("msg_file_2", "OK"),
@@ -390,6 +396,8 @@ def test_feishu_file_batch_window_expiry_starts_new_topic(monkeypatch):
         assert second.files == [{"file_key": "file_b"}]
         assert channel._ensure_running_card_started.call_args_list[0].args == ("msg_file_1",)
         assert channel._ensure_running_card_started.call_args_list[1].args == ("msg_file_2",)
+        assert channel._ensure_running_card_started.call_args_list[0].kwargs["metadata"]["message_id"] == "msg_file_1"
+        assert channel._ensure_running_card_started.call_args_list[1].kwargs["metadata"]["message_id"] == "msg_file_2"
 
     _run(go())
 
@@ -671,3 +679,53 @@ def test_feishu_treats_unknown_slash_text_as_chat(text):
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"].value == "chat", f"{text!r} should be classified as CHAT"
+
+
+@pytest.mark.parametrize("text", ["@_user_1 /goal ship it", "@bot  /status", "@_user_1 @_user_2 /new"])
+def test_feishu_leading_mention_before_command_classifies_and_strips(text):
+    """Feishu group chats deliver "@bot /goal" with the mention left in the text
+    (im.message.group_at_msg requires @bot). It must classify as COMMAND and the
+    inbound must carry the bare command so ChannelManager parses it."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": text})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "command", f"{text!r} should be classified as COMMAND"
+        assert not mock_make_inbound.call_args[1]["text"].startswith("@"), "leading mention must be stripped for dispatch"
+
+
+def test_feishu_leading_mention_before_chat_keeps_mention():
+    """A mentioned non-command stays CHAT and keeps the mention so the agent still
+    sees who was addressed (only the command path is stripped)."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": "@_user_1 please summarise this"})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "chat"
+        assert mock_make_inbound.call_args[1]["text"] == "@_user_1 please summarise this"

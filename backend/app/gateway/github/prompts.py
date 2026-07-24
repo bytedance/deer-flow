@@ -130,9 +130,26 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
     number = pr.get("number")
     parent_block = _render_parent_context(pr, "pull request")
     review = payload.get("review") or {}
+    review_id = review.get("id")
     state = review.get("state") or "(unknown state)"
     author = (review.get("user") or {}).get("login") or "(unknown)"
     body = _truncate(review.get("body"))
+    # This payload carries only the review's own top-level summary. Any
+    # inline comments the reviewer left arrive as SEPARATE
+    # `pull_request_review_comment` webhook deliveries, and the dispatcher
+    # suppresses those as redundant fan-out for a binding that (like this
+    # one) also listens for `pull_request_review` on this repo — see
+    # `dispatcher.py::_is_redundant_review_comment`. That suppression is
+    # only genuinely redundant if the agent actually recovers the inline
+    # content from here, so tell it how (PR #4131 review, Concern 1,
+    # zhfeng): without this, the filter and the prompt were working against
+    # each other — the filter suppressed the only events that carried the
+    # inline content, and nothing ever told the agent to go get it. Omitted
+    # when `review.id` (or the PR number) is missing/malformed so the
+    # instruction never renders a broken `gh api` path.
+    fetch_hint = ""
+    if review_id is not None and number is not None:
+        fetch_hint = f"This review's inline comments are not included in this message. Before deciding what to do, fetch them with `gh api repos/{repo}/pulls/{number}/reviews/{review_id}/comments`.\n\n"
     return (
         f"A pull request review was submitted on #{number} in {repo}.\n\n"
         f"{parent_block}\n"
@@ -140,6 +157,7 @@ def _pr_review_prompt(payload: dict[str, Any]) -> str:
         f"  Reviewer: {author}\n"
         f"  State: {state}\n\n"
         f"  Body:\n{body or '(no review body)'}\n\n"
+        f"{fetch_hint}"
         f"Decide what action (if any) to take in response to this review, in the context "
         f"of the parent pull request above. Your final assistant message is for the run "
         f"log only — it will NOT be posted to GitHub. If you want to reply (or push a fix), "

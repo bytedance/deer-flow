@@ -10,7 +10,6 @@ import {
   useCallback,
   useMemo,
   useState,
-  useEffect,
   type ImgHTMLAttributes,
 } from "react";
 
@@ -24,6 +23,7 @@ import {
   Reasoning,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -31,7 +31,10 @@ import {
   upsertFeedback,
   type FeedbackData,
 } from "@/core/api/feedback";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  resolveArtifactURL,
+  resolveMessageImageURL,
+} from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -42,8 +45,12 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { readReferenceMessageContexts } from "@/core/sidecar";
+import {
+  parseSlashSkillReference,
+  resolveSlashSkillDisplay,
+} from "@/core/skills";
+import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +58,7 @@ import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
+import { SlashSkillChip } from "../slash-skill-chip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -129,17 +137,17 @@ export function MessageListItem({
   feedback,
   runId,
   threadId,
+  artifactPaths = [],
   showCopyButton = true,
-  turnStartTime,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  artifactPaths?: readonly string[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
-  turnStartTime?: number | null;
 }) {
   const isHuman = message.type === "human";
   return (
@@ -152,8 +160,8 @@ export function MessageListItem({
         message={message}
         isLoading={isLoading}
         threadId={threadId}
+        artifactPaths={artifactPaths}
         runId={runId}
-        turnStartTime={turnStartTime}
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -187,10 +195,12 @@ function MessageImage({
   src,
   alt,
   threadId,
+  artifactPaths,
   maxWidth = "90%",
   ...props
 }: React.ImgHTMLAttributes<HTMLImageElement> & {
   threadId: string;
+  artifactPaths: readonly string[];
   maxWidth?: string;
 }) {
   if (!src) return null;
@@ -198,88 +208,109 @@ function MessageImage({
   const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
 
   if (typeof src !== "string") {
-    return <img className={imgClassName} src={src} alt={alt} {...props} />;
+    return (
+      <img
+        className={imgClassName}
+        src={src}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        {...props}
+      />
+    );
   }
 
-  const url = src.startsWith("/mnt/") ? resolveArtifactURL(src, threadId) : src;
+  const url = resolveMessageImageURL(src, threadId, artifactPaths);
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
+      <img
+        className={imgClassName}
+        src={url}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        {...props}
+      />
     </a>
   );
 }
 
-const clientTurnDurations = new Map<string, number>();
+function HumanMessageText({ content }: { content: string }) {
+  // `parseSlashSkillReference` is a pure regex gate (no data subscription), so
+  // the overwhelmingly common plain-text human message never subscribes to the
+  // skills query. Only a message that literally looks like a `/skill …`
+  // activation mounts `HumanSlashSkillText`, which owns the `useSkills()`
+  // lookup. This keeps a skill-enabled toggle from re-rendering every human
+  // turn — only the few slash-candidate turns react to catalog changes.
+  const reference = useMemo(() => parseSlashSkillReference(content), [content]);
+
+  if (!reference) {
+    return <div className="break-words whitespace-pre-wrap">{content}</div>;
+  }
+
+  return <HumanSlashSkillText content={content} />;
+}
+
+function HumanSlashSkillText({ content }: { content: string }) {
+  const { skills } = useSkills();
+  const slashSkill = resolveSlashSkillDisplay(content, skills);
+
+  if (!slashSkill) {
+    return <div className="break-words whitespace-pre-wrap">{content}</div>;
+  }
+
+  return (
+    <div className="flex max-w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <SlashSkillChip name={slashSkill.name} />
+      {slashSkill.remainingText && (
+        <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">
+          {slashSkill.remainingText}
+        </span>
+      )}
+    </div>
+  );
+}
 
 function MessageContent_({
   className,
   message,
   isLoading = false,
   threadId,
+  artifactPaths,
   runId,
-  turnStartTime,
 }: {
   className?: string;
   message: Message;
   isLoading?: boolean;
   threadId: string;
+  artifactPaths: readonly string[];
   runId?: string;
-  turnStartTime?: number | null;
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const { t } = useI18n();
   const isHuman = message.type === "human";
-  const rawTurnDuration = message.additional_kwargs?.turn_duration as
-    | number
-    | undefined;
-
-  const [cachedDuration, setCachedDuration] = useState<number | undefined>(
-    () =>
-      message.id
-        ? clientTurnDurations.get(`${threadId}:${message.id}`)
-        : undefined,
+  const getReasoningMessage = useCallback(
+    (isStreaming: boolean) =>
+      isStreaming ? (
+        <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
+      ) : (
+        t.runDuration.reasoning
+      ),
+    [t.runDuration.reasoning],
   );
-  const turnDuration = rawTurnDuration ?? cachedDuration;
-
-  useEffect(() => {
-    if (rawTurnDuration !== undefined && message.id) {
-      clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
-      setCachedDuration(rawTurnDuration);
-    }
-  }, [rawTurnDuration, message.id, threadId]);
-
-  const handleDurationChange = useCallback(
-    (d: number | undefined) => {
-      if (d !== undefined && message.id) {
-        clientTurnDurations.set(`${threadId}:${message.id}`, d);
-        setCachedDuration(d);
-      }
-    },
-    [message.id, threadId],
-  );
-
-  useEffect(() => {
-    return () => {
-      for (const key of clientTurnDurations.keys()) {
-        if (key.startsWith(`${threadId}:`)) {
-          clientTurnDurations.delete(key);
-        }
-      }
-    };
-  }, [threadId]);
-
-  const [wasLoading, setWasLoading] = useState(isLoading);
-  useEffect(() => {
-    if (isLoading) setWasLoading(true);
-  }, [isLoading]);
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
-        <MessageImage {...props} threadId={threadId} maxWidth="90%" />
+        <MessageImage
+          {...props}
+          threadId={threadId}
+          artifactPaths={artifactPaths}
+          maxWidth="90%"
+        />
       ),
       a: createMarkdownLinkComponent(threadId),
     }),
-    [threadId],
+    [artifactPaths, threadId],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -288,8 +319,11 @@ function MessageContent_({
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+      if (
+        rawContent.includes("<current_uploads>") ||
+        rawContent.includes("<uploaded_files>")
+      ) {
+        // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
         return parseUploadedFiles(rawContent);
       }
       return null;
@@ -343,13 +377,8 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning
-          isStreaming={isLoading}
-          startTimeProp={turnStartTime}
-          duration={turnDuration}
-          onTurnDurationChange={handleDurationChange}
-        >
-          <ReasoningTrigger />
+        <Reasoning isStreaming={isLoading}>
+          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
           <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
         </Reasoning>
       </AIElementMessageContent>
@@ -378,9 +407,7 @@ function MessageContent_({
         {filesList}
         {contentToDisplay && (
           <AIElementMessageContent className="w-full max-w-full">
-            <div className="break-words whitespace-pre-wrap">
-              {contentToDisplay}
-            </div>
+            <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         )}
       </div>
@@ -390,24 +417,15 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {!isHuman &&
-        (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
-          <Reasoning
-            isStreaming={isLoading}
-            startTimeProp={turnStartTime}
-            duration={turnDuration}
-            onTurnDurationChange={handleDurationChange}
-          >
-            <ReasoningTrigger hasContent={!!reasoningContent} />
-            {reasoningContent && (
-              <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-            )}
-          </Reasoning>
-        )}
+      {reasoningContent && (
+        <Reasoning isStreaming={isLoading}>
+          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
+          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
+        </Reasoning>
+      )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />
@@ -556,6 +574,8 @@ function RichFileCard({
         <img
           src={fileUrl}
           alt={file.filename}
+          loading="lazy"
+          decoding="async"
           className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
         />
       </a>

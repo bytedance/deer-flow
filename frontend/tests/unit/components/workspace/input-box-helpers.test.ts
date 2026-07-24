@@ -3,14 +3,20 @@ import { describe, expect, it } from "@rstest/core";
 import {
   abortGoalRequest,
   beginGoalRequest,
+  canPolishInput,
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
+  parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
   type SlashSuggestion,
@@ -62,6 +68,112 @@ describe("parseGoalCommand", () => {
   });
 });
 
+describe("isGoalObjectiveTooLong", () => {
+  it("allows objectives up to the limit", () => {
+    expect(isGoalObjectiveTooLong("a")).toBe(false);
+    expect(isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS))).toBe(
+      false,
+    );
+  });
+
+  it("flags objectives past the limit", () => {
+    expect(
+      isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1)),
+    ).toBe(true);
+  });
+
+  it("mirrors the backend limit of 4000 characters", () => {
+    expect(MAX_GOAL_OBJECTIVE_CHARS).toBe(4000);
+  });
+
+  it("counts interior whitespace because the backend validates raw request length", () => {
+    const interiorPastLimit = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(interiorPastLimit.length).toBe(MAX_GOAL_OBJECTIVE_CHARS + 3);
+    expect(isGoalObjectiveTooLong(interiorPastLimit)).toBe(true);
+  });
+
+  it("uses the parsed objective after command boundary whitespace is trimmed", () => {
+    const command = parseGoalCommand(
+      `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+    );
+    expect(command).toEqual({
+      kind: "set",
+      objective: "a".repeat(MAX_GOAL_OBJECTIVE_CHARS),
+    });
+    if (command?.kind !== "set") {
+      throw new Error("expected a /goal set command");
+    }
+    expect(isGoalObjectiveTooLong(command.objective)).toBe(false);
+  });
+});
+
+describe("getGoalObjectiveCounter", () => {
+  it("returns null for non-goal or non-set inputs", () => {
+    expect(getGoalObjectiveCounter("hello")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal clear")).toBeNull();
+  });
+
+  it("stays hidden while the objective is comfortably under the limit", () => {
+    expect(getGoalObjectiveCounter("/goal ship it")).toBeNull();
+    const justBelowThreshold = "a".repeat(
+      GOAL_OBJECTIVE_COUNTER_VISIBLE_AT - 1,
+    );
+    expect(getGoalObjectiveCounter(`/goal ${justBelowThreshold}`)).toBeNull();
+  });
+
+  it("appears once the objective reaches the visibility threshold", () => {
+    const atThreshold = "a".repeat(GOAL_OBJECTIVE_COUNTER_VISIBLE_AT);
+    expect(getGoalObjectiveCounter(`/goal ${atThreshold}`)).toEqual({
+      length: GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
+  });
+
+  it("marks the counter over the limit and measures raw parsed length", () => {
+    const overLimit = "a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 5);
+    expect(getGoalObjectiveCounter(`/goal ${overLimit}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 5,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    // Interior whitespace is preserved in the request body, so it must count
+    // toward the same raw max_length enforced by the backend binding.
+    const padded = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(getGoalObjectiveCounter(`/goal ${padded}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 3,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    expect(
+      getGoalObjectiveCounter(
+        `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+      ),
+    ).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
+  });
+});
+
+describe("parseCompactCommand", () => {
+  it("matches compact commands", () => {
+    expect(parseCompactCommand("/compact")).toBe(true);
+    expect(parseCompactCommand(" /context compact ")).toBe(true);
+    expect(parseCompactCommand("/CONTEXT   COMPACT")).toBe(true);
+  });
+
+  it("rejects non-compact commands", () => {
+    expect(parseCompactCommand("/compact now")).toBe(false);
+    expect(parseCompactCommand("/context")).toBe(false);
+    expect(parseCompactCommand("compact")).toBe(false);
+  });
+});
+
 describe("getInputSubmitAction", () => {
   it("handles /goal commands before the streaming stop shortcut", () => {
     expect(
@@ -106,6 +218,33 @@ describe("getInputSubmitAction", () => {
     ).toEqual({ kind: "message" });
   });
 
+  it("handles compact commands", () => {
+    expect(
+      getInputSubmitAction({
+        text: "/compact",
+        fileCount: 0,
+        status: "ready",
+      }),
+    ).toEqual({ kind: "compact" });
+    expect(
+      getInputSubmitAction({
+        text: "/context compact",
+        fileCount: 0,
+        status: "ready",
+      }),
+    ).toEqual({ kind: "compact" });
+  });
+
+  it("does not treat compact commands with attachments as compact", () => {
+    expect(
+      getInputSubmitAction({
+        text: "/compact",
+        fileCount: 1,
+        status: "ready",
+      }),
+    ).toEqual({ kind: "message" });
+  });
+
   it("ignores empty ready submits", () => {
     expect(
       getInputSubmitAction({
@@ -114,6 +253,32 @@ describe("getInputSubmitAction", () => {
         status: "ready",
       }),
     ).toEqual({ kind: "empty" });
+  });
+});
+
+describe("canPolishInput", () => {
+  it("requires non-empty input", () => {
+    expect(canPolishInput("")).toBe(false);
+    expect(canPolishInput("   ")).toBe(false);
+  });
+
+  it("allows ordinary text and slash skill prompts", () => {
+    expect(canPolishInput("make this clearer")).toBe(true);
+    expect(canPolishInput("/web-dev build a polished page")).toBe(true);
+    expect(canPolishInput("/goalkeeper do thing")).toBe(true);
+    expect(canPolishInput("/helper explain this")).toBe(true);
+    // `/help` is not a real builtin command in the composer, so it stays
+    // eligible like any other slash skill prompt.
+    expect(canPolishInput("/help")).toBe(true);
+    expect(canPolishInput("/help me")).toBe(true);
+  });
+
+  it("blocks reserved builtin commands", () => {
+    expect(canPolishInput("/goal")).toBe(false);
+    expect(canPolishInput("/goal ship this feature")).toBe(false);
+    expect(canPolishInput("/goal clear")).toBe(false);
+    expect(canPolishInput("/compact")).toBe(false);
+    expect(canPolishInput("/context compact")).toBe(false);
   });
 });
 
@@ -242,6 +407,21 @@ describe("goal request lifecycle", () => {
       isAbortError(Object.assign(new Error("aborted"), { name: "AbortError" })),
     ).toBe(true);
     expect(isAbortError(new Error("other"))).toBe(false);
+  });
+
+  it("supports compact request staleness guards with the same lifecycle", () => {
+    const state = createGoalRequestState();
+    const compact = beginGoalRequest(state, "thread-1");
+
+    const replacement = beginGoalRequest(state, "thread-1");
+
+    expect(compact.controller.signal.aborted).toBe(true);
+    expect(isCurrentGoalRequest(state, compact, "thread-1")).toBe(false);
+    expect(isCurrentGoalRequest(state, replacement, "thread-1")).toBe(true);
+
+    finishGoalRequest(state, replacement);
+
+    expect(isCurrentGoalRequest(state, replacement, "thread-1")).toBe(false);
   });
 });
 

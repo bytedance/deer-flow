@@ -8,6 +8,7 @@ import {
   MessageSquareTextIcon,
   PaperclipIcon,
   RocketIcon,
+  Trash2Icon,
   XIcon,
   ZapIcon,
 } from "lucide-react";
@@ -36,10 +37,25 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  buildHumanInputResponseText,
+  hasOpenHumanInputRequest,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "@/core/messages/human-input";
+import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
@@ -50,6 +66,7 @@ import {
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
+  useDeleteThread,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -137,6 +154,9 @@ export function SidecarPanel({ className }: { className?: string }) {
   const { models, tokenUsageEnabled } = useModels();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [creatingThread, setCreatingThread] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const { mutateAsync: deleteThread, isPending: isDeleting } =
+    useDeleteThread();
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
@@ -189,6 +209,14 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const hasPendingReferences = sidecar.activeReferences.length > 0;
   const hasSidecarThread = Boolean(sidecar.sidecarThreadId);
+  const hasOpenHumanInputCard = useMemo(
+    () =>
+      hasOpenHumanInputRequest(
+        thread.messages,
+        (message) => !isHiddenFromUIMessage(message),
+      ),
+    [thread.messages],
+  );
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
@@ -198,6 +226,8 @@ export function SidecarPanel({ className }: { className?: string }) {
     creatingThread ||
     Boolean(queuedSubmit) ||
     isUploading ||
+    hasOpenHumanInputCard ||
+    (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
@@ -327,6 +357,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       message: PromptInputMessage,
       references: SidecarReference[],
       onSent?: () => void,
+      additionalKwargs?: Record<string, unknown>,
     ) => {
       const contexts = references.map((reference) => reference.context);
       const parentConversation = buildParentConversationContext(
@@ -350,11 +381,43 @@ export function SidecarPanel({ className }: { className?: string }) {
           ...(contexts.length > 0
             ? buildReferenceMessageMetadata(contexts)
             : {}),
+          ...additionalKwargs,
         },
         onSent,
       });
     },
     [parentThread.messages, sendMessage, sidecar.parentThreadId],
+  );
+
+  const handleSubmitHumanInput = useCallback(
+    async (request: HumanInputRequest, response: HumanInputResponse) => {
+      if (!sidecar.sidecarThreadId) {
+        return false;
+      }
+
+      let sent = false;
+      const pendingReferences = [...sidecar.activeReferences];
+      await submitToSidecarThread(
+        sidecar.sidecarThreadId,
+        {
+          text: buildHumanInputResponseText(request, response),
+          files: [],
+        },
+        pendingReferences,
+        () => {
+          sent = true;
+          if (pendingReferences.length > 0) {
+            sidecar.clearActiveReferences();
+          }
+        },
+        {
+          hide_from_ui: true,
+          human_input_response: response,
+        },
+      );
+      return sent;
+    },
+    [sidecar, submitToSidecarThread],
   );
 
   useEffect(() => {
@@ -437,6 +500,39 @@ export function SidecarPanel({ className }: { className?: string }) {
     ],
   );
 
+  const discardDraftAndClose = useCallback(() => {
+    sidecar.clearActiveReferences();
+    sidecar.setSidecarThreadId(null);
+    sidecar.close();
+  }, [sidecar]);
+
+  const handleDelete = useCallback(async () => {
+    const threadId = sidecar.sidecarThreadId;
+    // Guard: the trash button only opens this dialog once a thread exists, so a
+    // missing id here means the draft was cleared underneath us — just close.
+    if (!threadId) {
+      discardDraftAndClose();
+      setDeleteDialogOpen(false);
+      return;
+    }
+    try {
+      await deleteThread({ threadId });
+      discardDraftAndClose();
+      setDeleteDialogOpen(false);
+      toast.success(t.sidecar.deleteSuccess);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t.sidecar.deleteFailed,
+      );
+    }
+  }, [
+    deleteThread,
+    discardDraftAndClose,
+    sidecar.sidecarThreadId,
+    t.sidecar.deleteFailed,
+    t.sidecar.deleteSuccess,
+  ]);
+
   return (
     <div
       className={cn("flex size-full min-h-0 flex-col", className)}
@@ -454,12 +550,30 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
+        {hasSidecarThread && (
+          <Tooltip content={t.sidecar.delete}>
+            <Button
+              aria-label={t.sidecar.delete}
+              className="text-muted-foreground hover:text-destructive"
+              data-testid="sidecar-delete-button"
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              <Trash2Icon />
+            </Button>
+          </Tooltip>
+        )}
         <Tooltip content={t.common.close}>
           <Button
             aria-label={t.common.close}
+            className="text-muted-foreground hover:text-foreground"
+            data-testid="sidecar-close-button"
             size="icon-sm"
             variant="ghost"
-            onClick={() => sidecar.close()}
+            onClick={() =>
+              hasSidecarThread ? sidecar.close() : discardDraftAndClose()
+            }
           >
             <XIcon />
           </Button>
@@ -478,8 +592,14 @@ export function SidecarPanel({ className }: { className?: string }) {
             loadMoreHistory={loadMoreHistory}
             isHistoryLoading={isHistoryLoading}
             tokenUsageInlineMode={tokenUsageInlineMode}
+            sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
+            onSubmitHumanInput={
+              sidecar.isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                ? undefined
+                : handleSubmitHumanInput
+            }
           />
         ) : (
           <ConversationEmptyState
@@ -557,6 +677,55 @@ export function SidecarPanel({ className }: { className?: string }) {
           </PromptInput>
         </PromptInputProvider>
       </div>
+
+      <Dialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => {
+          // While the delete is in flight the only way out is the (disabled)
+          // Cancel button, so ignore overlay/Esc/close-button dismissals that
+          // would otherwise hide the dialog and imply the delete was cancelled.
+          if (!open && isDeleting) {
+            return;
+          }
+          setDeleteDialogOpen(open);
+        }}
+      >
+        <DialogContent
+          showCloseButton={!isDeleting}
+          onEscapeKeyDown={(event) => {
+            if (isDeleting) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (isDeleting) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t.sidecar.delete}</DialogTitle>
+            <DialogDescription>{t.sidecar.deleteConfirm}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={isDeleting}
+            >
+              {t.common.cancel}
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="sidecar-delete-confirm-button"
+              onClick={() => void handleDelete()}
+              disabled={isDeleting}
+            >
+              {isDeleting ? t.common.loading : t.common.delete}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -4,7 +4,7 @@ import json
 import logging
 from collections.abc import Callable
 from hashlib import sha256
-from typing import override
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -44,6 +44,60 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
         return f"clarification:{digest}"
 
+    def _normalize_options(self, raw_options: Any) -> list[str]:
+        """Normalize tool-provided options into displayable string values."""
+        options = raw_options
+
+        # Some models (e.g. Qwen3-Max) serialize array parameters as JSON strings
+        # instead of native arrays. Deserialize and normalize so `options`
+        # is always a list for the rendering logic below.
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except (json.JSONDecodeError, TypeError):
+                options = [options]
+
+        if options is None:
+            return []
+        if not isinstance(options, list):
+            options = [options]
+
+        return [str(option) for option in options]
+
+    def _build_human_input_payload(self, args: dict[str, Any], *, tool_call_id: str, request_id: str) -> dict[str, Any]:
+        """Build the structured UI payload while keeping ToolMessage.content as fallback."""
+        options = self._normalize_options(args.get("options", []))
+        clarification_type = str(args.get("clarification_type", "missing_info"))
+
+        payload: dict[str, Any] = {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": request_id,
+            "clarification_type": clarification_type,
+            "question": str(args.get("question") or ""),
+            "input_mode": "choice_with_other" if options else "free_text",
+        }
+
+        if tool_call_id:
+            payload["tool_call_id"] = tool_call_id
+
+        if "context" in args:
+            context = args.get("context")
+            payload["context"] = None if context is None else str(context)
+
+        if options:
+            payload["options"] = [
+                {
+                    "id": f"option-{index}",
+                    "label": option,
+                    "value": option,
+                }
+                for index, option in enumerate(options, 1)
+            ]
+
+        return payload
+
     def _is_chinese(self, text: str) -> bool:
         """Check if text contains Chinese characters.
 
@@ -67,21 +121,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
-        options = args.get("options", [])
-
-        # Some models (e.g. Qwen3-Max) serialize array parameters as JSON strings
-        # instead of native arrays. Deserialize and normalize so `options`
-        # is always a list for the rendering logic below.
-        if isinstance(options, str):
-            try:
-                options = json.loads(options)
-            except (json.JSONDecodeError, TypeError):
-                options = [options]
-
-        if options is None:
-            options = []
-        elif not isinstance(options, list):
-            options = [options]
+        options = self._normalize_options(args.get("options", []))
 
         # Type-specific icons
         type_icons = {
@@ -174,13 +214,17 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")
 
+        request_id = self._stable_message_id(tool_call_id, formatted_message)
+        human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id)
+
         # Create a ToolMessage with the formatted question
         # This will be added to the message history
         tool_message = ToolMessage(
-            id=self._stable_message_id(tool_call_id, formatted_message),
+            id=request_id,
             content=formatted_message,
             tool_call_id=tool_call_id,
             name="ask_clarification",
+            artifact={"human_input": human_input_payload},
         )
 
         # Return a Command that:

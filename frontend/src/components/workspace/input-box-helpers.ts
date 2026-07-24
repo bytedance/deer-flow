@@ -1,9 +1,56 @@
 import type { Skill } from "@/core/skills";
+export {
+  SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
+  findSuggestionTemplatePlaceholder,
+} from "@/core/suggestions/placeholders";
 
 export const MAX_SKILL_SUGGESTIONS = 6;
 
-export const SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN =
-  /\[(?:主题|来源|topic|source)\]/i;
+// Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
+// max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so
+// the composer can reject an over-length `/goal <objective>` before issuing the
+// PUT request and show a friendly error instead of surfacing a raw HTTP 422.
+export const MAX_GOAL_OBJECTIVE_CHARS = 4000;
+
+export function isGoalObjectiveTooLong(objective: string): boolean {
+  return objective.length > MAX_GOAL_OBJECTIVE_CHARS;
+}
+
+// The live composer counter stays hidden until the objective approaches the
+// limit, so it only surfaces when the user is at risk of being rejected rather
+// than adding permanent noise to the footer.
+export const GOAL_OBJECTIVE_COUNTER_VISIBLE_AT = Math.floor(
+  MAX_GOAL_OBJECTIVE_CHARS * 0.9,
+);
+
+export type GoalObjectiveCounter = {
+  length: number;
+  max: number;
+  overLimit: boolean;
+};
+
+// Derive the live counter for the composer footer from the same parsed
+// objective string sent to the API. Returns null unless the input is a
+// `/goal <objective>` set command whose raw length has reached the visibility
+// threshold, so the counter only appears for the case the limit actually
+// applies to.
+export function getGoalObjectiveCounter(
+  value: string,
+): GoalObjectiveCounter | null {
+  const command = parseGoalCommand(value);
+  if (command?.kind !== "set") {
+    return null;
+  }
+  const length = command.objective.length;
+  if (length < GOAL_OBJECTIVE_COUNTER_VISIBLE_AT) {
+    return null;
+  }
+  return {
+    length,
+    max: MAX_GOAL_OBJECTIVE_CHARS,
+    overLimit: length > MAX_GOAL_OBJECTIVE_CHARS,
+  };
+}
 
 export type SlashSuggestion = {
   name: string;
@@ -18,6 +65,7 @@ export type GoalCommand =
 
 export type InputSubmitAction =
   | { kind: "goal"; command: GoalCommand }
+  | { kind: "compact" }
   | { kind: "stop" }
   | { kind: "empty" }
   | { kind: "message" };
@@ -98,18 +146,6 @@ export function isAbortError(error: unknown): boolean {
       error !== null &&
       Reflect.get(error, "name") === "AbortError")
   );
-}
-
-export function findSuggestionTemplatePlaceholder(text: string) {
-  const match = SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN.exec(text);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    start: match.index,
-    end: match.index + match[0].length,
-  };
 }
 
 export function getLeadingSlashSkillQuery(value: string): string | null {
@@ -195,6 +231,21 @@ export function parseGoalCommand(value: string): GoalCommand | null {
   return { kind: "set", objective: args };
 }
 
+export function parseCompactCommand(value: string): boolean {
+  return /^\/(?:compact|context\s+compact)\s*$/i.test(value.trim());
+}
+
+export function canPolishInput(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  // Reserved builtin command lines are routed to their own handlers, not the
+  // LLM, so they must not be rewritten. Reuse the same parsers the composer
+  // uses to dispatch them instead of maintaining a third parallel list.
+  return parseGoalCommand(trimmed) === null && !parseCompactCommand(trimmed);
+}
+
 export function getInputSubmitAction({
   text,
   fileCount,
@@ -207,6 +258,9 @@ export function getInputSubmitAction({
   const goalCommand = parseGoalCommand(text);
   if (goalCommand && fileCount === 0) {
     return { kind: "goal", command: goalCommand };
+  }
+  if (parseCompactCommand(text) && fileCount === 0) {
+    return { kind: "compact" };
   }
   if (status === "streaming") {
     return { kind: "stop" };

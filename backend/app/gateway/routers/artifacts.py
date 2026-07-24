@@ -9,7 +9,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.gateway.authz import require_permission
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.config.paths import make_safe_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -121,11 +123,14 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
     """Worker-thread body for the regular branch of ``get_artifact``.
 
     Stat probes, MIME sniffing (``mimetypes`` lazily stats the system MIME
-    database on first use), and full-file reads are all blocking filesystem IO.
-    Returns a ``(kind, mime_type, payload)`` plan the handler turns into a
-    response on the loop: ``("file", mime, None)`` (let ``FileResponse`` stream
-    it), ``("text", mime, str)``, or ``("bytes", mime, bytes)``. Behavior/error
-    codes match the previous inline logic.
+    database on first use), and text reads are blocking filesystem IO. Returns
+    a ``(kind, mime_type, payload)`` plan the handler turns into a response on
+    the loop: ``("file", mime, None)`` (attachment / forced-download active
+    content, streamed by ``FileResponse``), ``("inline_file", mime, None)``
+    (inline binary preview — also streamed by ``FileResponse`` so the client
+    can issue byte-``Range`` requests, e.g. to seek within audio/video
+    artifacts instead of always replaying from byte 0), or ``("text", mime,
+    str)``. Behavior/error codes match the previous inline logic.
     """
     if not actual_path.exists():
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
@@ -139,7 +144,10 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
         return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
     if is_text_file_by_content(actual_path):
         return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
-    return ("bytes", mime_type, actual_path.read_bytes())
+    # Binary inline preview (images, audio, video, PDFs, ...): stream via
+    # FileResponse instead of buffering the whole file in memory, so it also
+    # gets FileResponse's built-in byte-Range handling (see get_artifact).
+    return ("inline_file", mime_type, None)
 
 
 @router.get(
@@ -181,6 +189,16 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
         - Active web content such as `.html`, `.xhtml`, and `.svg` artifacts is always downloaded
     """
+    # Trusted internal callers may act on behalf of a thread's owner via the
+    # owner-user-id header (honored only after the internal token validates).
+    # The header carries the raw platform owner id, while runs store files
+    # under the make_safe_user_id bucket (the same normalization the channel
+    # file pipeline and the memory router apply), so resolution uses the
+    # normalized id. Browser/API callers get None here and fall back to the
+    # effective user.
+    raw_owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else None
+
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
         # Split the path at ".skill/" to get the ZIP file path and internal path
@@ -189,7 +207,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, skill_file_path)
+        actual_skill_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, skill_file_path, user_id=owner_user_id)
 
         # Offload the stat probes + ZIP open/extract + MIME sniff (blocking filesystem IO).
         content, mime_type = await asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path)
@@ -209,7 +227,7 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path)
+    actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path, user_id=owner_user_id)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
@@ -223,7 +241,20 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         # execution in the application origin when users open generated artifacts.
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
 
+    if kind == "inline_file":
+        # FileResponse (unlike a fully-buffered Response) honors byte-Range
+        # requests. Browsers issue these when seeking an <audio>/<video>
+        # element backed by a remote URL; serving the same bytes through a
+        # plain Response ignores Range headers and always replays from byte
+        # 0, which is why dragging an audio/video artifact's progress bar
+        # reset playback to the start instead of jumping to the new position.
+        return FileResponse(
+            path=actual_path,
+            media_type=mime_type,
+            headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)},
+        )
+
     if kind == "text":
         return PlainTextResponse(content=payload, media_type=mime_type)
 
-    return Response(content=payload, media_type=mime_type, headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)})
+    raise AssertionError(f"Unhandled artifact response kind: {kind!r}")

@@ -1,3 +1,4 @@
+import { CalendarClock } from "lucide-react";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -8,9 +9,11 @@ export function ThreadScheduledTasksLink({ threadId }: { threadId: string }) {
   return (
     <Button variant="outline" size="sm" asChild>
       <Link
+        aria-label={t.sidebar.scheduledTasks}
         href={`/workspace/scheduled-tasks?thread_id=${encodeURIComponent(threadId)}`}
       >
-        {t.sidebar.scheduledTasks}
+        <CalendarClock />
+        <span className="hidden sm:inline">{t.sidebar.scheduledTasks}</span>
       </Link>
     </Button>
   );

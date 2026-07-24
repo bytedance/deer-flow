@@ -52,6 +52,8 @@ services:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
       - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      # Per-user data base directory for user-scoped skill mounts
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
@@ -62,6 +64,9 @@ services:
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
       # which is unreachable from inside the container
       - K8S_API_SERVER=https://host.docker.internal:26443
+      # Optional: set PROVISIONER_API_KEY in .env to enable provisioner auth.
+      # The same value must be set on the gateway side via config.yaml sandbox.provisioner_api_key.
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     env_file:
       - ../.env
     extra_hosts:
@@ -91,7 +96,7 @@ services:
       - |
         set -e
         cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
         exec nginx -g 'daemon off;'
     depends_on:
       - frontend
@@ -155,8 +160,10 @@ services:
       # Preserve the .venv built during Docker image build — mounting the full backend/
       # directory above would otherwise shadow it with the (empty) host directory.
       - gateway-venv:/app/backend/.venv
-      - ../config.yaml:/app/config.yaml
-      - ../extensions_config.json:/app/extensions_config.json
+      # Mount the project directory instead of its mutable config files individually.
+      # Host editors commonly replace files on save; a directory bind keeps those
+      # replacements visible inside Docker Desktop/WSL containers.
+      - ../:/app/project
       - ../skills:/app/skills
       - ../logs:/app/logs
       # Use a Docker-managed uv cache volume instead of a host bind mount.
@@ -178,6 +185,8 @@ services:
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/app/backend/.deer-flow
+      - DEER_FLOW_CONFIG_PATH=/app/project/config.yaml
+      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/project/extensions_config.json
       - DEER_FLOW_STREAM_BRIDGE_REDIS_URL=${DEER_FLOW_STREAM_BRIDGE_REDIS_URL:-redis://redis:6379/0}
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
@@ -185,6 +194,9 @@ services:
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
+      # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal

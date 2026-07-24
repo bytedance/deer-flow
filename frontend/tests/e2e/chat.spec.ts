@@ -2,6 +2,25 @@ import { expect, test } from "@playwright/test";
 
 import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
 
+function textFromMessageContent(content: unknown) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  return content
+    .map((block) =>
+      typeof block === "object" &&
+      block !== null &&
+      "text" in block &&
+      typeof block.text === "string"
+        ? block.text
+        : "",
+    )
+    .join("");
+}
+
 test.describe("Chat workspace", () => {
   test.beforeEach(async ({ page }) => {
     mockLangGraphAPI(page);
@@ -15,6 +34,18 @@ test.describe("Chat workspace", () => {
     await expect(page.getByRole("button", { name: /load more/i })).toBeHidden();
   });
 
+  test("shows the localized AI disclaimer", async ({ page }) => {
+    await page.goto("/workspace/chats/new");
+    await page.evaluate(() => {
+      document.cookie = "locale=zh-CN; path=/; SameSite=Lax";
+    });
+    await page.reload();
+
+    await expect(
+      page.getByText("内容由AI生成，重要信息请务必核查", { exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
   test("can type a message in the input box", async ({ page }) => {
     await page.goto("/workspace/chats/new");
 
@@ -25,7 +56,381 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("Hello, DeerFlow!");
   });
 
+  test("restores a draft after reload and clears it after sending", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Keep this unfinished draft");
+
+    await page.reload();
+
+    const restoredTextarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(restoredTextarea).toHaveValue("Keep this unfinished draft");
+    await restoredTextarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "",
+    );
+  });
+
+  test("restores a repeated draft that matches the last sent prompt", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Repeat this request");
+    await textarea.press("Enter");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(textarea).toHaveValue("");
+
+    await textarea.fill("Repeat this request");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Repeat this request");
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "Repeat this request",
+    );
+  });
+
+  test("restores a selected slash skill draft after reload", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("/dat");
+    await textarea.press("Enter");
+
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await skillInput.fill("Analyze the latest results");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Analyze the latest results");
+
+    await page.reload();
+
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", {
+        name: /how can i assist you/i,
+      }),
+    ).toHaveText("Analyze the latest results");
+  });
+
+  test("continues without draft persistence when sessionStorage is blocked", async ({
+    page,
+  }) => {
+    let submittedText: string | undefined;
+    await page.addInitScript(() => {
+      const realSessionStorage = window.sessionStorage;
+      Reflect.set(window, "__blockComposerDraftStorage", false);
+      Object.defineProperty(window, "sessionStorage", {
+        configurable: true,
+        get() {
+          if (Reflect.get(window, "__blockComposerDraftStorage") === true) {
+            throw new DOMException("Blocked", "SecurityError");
+          }
+          return realSessionStorage;
+        },
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      submittedText = textFromMessageContent(content);
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await page.evaluate(() => {
+      Reflect.set(window, "__blockComposerDraftStorage", true);
+    });
+    await textarea.fill("Send while storage is blocked");
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Send while storage is blocked");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("does not rewrite an accepted attachment draft from a stale debounce", async ({
+    page,
+  }) => {
+    let releaseUpload!: () => void;
+    const uploadHeld = new Promise<void>((resolve) => {
+      releaseUpload = resolve;
+    });
+    let submittedText: string | undefined;
+
+    await page.route("**/api/threads/*/uploads", async (route) => {
+      await uploadHeld;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Uploaded",
+          files: [
+            {
+              filename: "notes.txt",
+              size: 12,
+              path: "notes.txt",
+              virtual_path: "/mnt/user-data/uploads/notes.txt",
+              artifact_url: "/api/threads/test/uploads/notes.txt",
+              extension: ".txt",
+            },
+          ],
+        }),
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      submittedText = textFromMessageContent(content);
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("fake notes"),
+    });
+    await textarea.fill("Send this immediately");
+    await textarea.press("Enter");
+
+    await page.waitForTimeout(500);
+    expect(
+      await page.evaluate(() =>
+        Object.values(window.sessionStorage).join("\n"),
+      ),
+    ).not.toContain("Send this immediately");
+
+    releaseUpload();
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Send this immediately");
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await page.reload();
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
+      "",
+    );
+  });
+
+  test("polishes draft input before sending", async ({ page }) => {
+    let polishRequest: { text?: string; model_name?: string } | undefined;
+    let submittedText: string | undefined;
+    let finishPolish!: () => void;
+    const polishCanFinish = new Promise<void>((resolve) => {
+      finishPolish = resolve;
+    });
+
+    await page.route("**/api/input-polish", async (route) => {
+      polishRequest = route.request().postDataJSON() as {
+        text?: string;
+        model_name?: string;
+      };
+      await polishCanFinish;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      });
+    });
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect
+      .poll(() => polishRequest?.text, { timeout: 10_000 })
+      .toBe("summarize report");
+    expect(polishRequest?.model_name).toBeUndefined();
+    await expect(textarea).toBeDisabled();
+    await expect(page.getByText("Polishing input...")).toBeVisible();
+
+    finishPolish();
+
+    await expect(textarea).toHaveValue(
+      "Please summarize the uploaded report clearly.",
+    );
+    await expect(textarea).toBeEnabled();
+    await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+      "Undo polish",
+    );
+
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe("Please summarize the uploaded report clearly.");
+  });
+
+  test("undoes polished draft from the polish button", async ({ page }) => {
+    await page.route("**/api/input-polish", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect(textarea).toHaveValue(
+      "Please summarize the uploaded report clearly.",
+    );
+
+    const polishButton = page.getByTestId("polish-input-button");
+    await expect(polishButton).toHaveAccessibleName("Undo polish");
+    await polishButton.click();
+
+    await expect(textarea).toHaveValue("summarize report");
+    await expect(polishButton).toHaveAccessibleName("Polish input");
+  });
+
+  test("cancels an in-flight polish request", async ({ page }) => {
+    // Hold the polish response open so the request stays in flight while we
+    // exercise the cancel affordance.
+    let releasePolish!: () => void;
+    const polishHeld = new Promise<void>((resolve) => {
+      releasePolish = resolve;
+    });
+    await page.route("**/api/input-polish", async (route) => {
+      await polishHeld;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          rewritten_text: "Please summarize the uploaded report clearly.",
+          changed: true,
+        }),
+      });
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("summarize report");
+    await page.getByTestId("polish-input-button").click();
+
+    await expect(page.getByText("Polishing input...")).toBeVisible();
+    await expect(textarea).toBeDisabled();
+
+    await page.getByTestId("cancel-polish-input-button").click();
+
+    // Cancelling aborts the request, re-enables the composer, and leaves the
+    // original draft untouched (no rewrite applied).
+    await expect(page.getByText("Polishing input...")).toBeHidden();
+    await expect(textarea).toBeEnabled();
+    await expect(textarea).toHaveValue("summarize report");
+    await expect(page.getByTestId("polish-input-button")).toHaveAccessibleName(
+      "Polish input",
+    );
+
+    releasePolish();
+  });
+
   test("suggests matching skills after a leading slash", async ({ page }) => {
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
     await page.goto("/workspace/chats/new");
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
@@ -41,7 +446,18 @@ test.describe("Chat workspace", () => {
 
     await textarea.press("Enter");
 
-    await expect(textarea).toHaveValue("/data-analysis ");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await expect(skillInput).toBeVisible();
+
+    await skillInput.fill("summarize this dataset");
+    await skillInput.press("Enter");
+
+    await expect
+      .poll(() => submittedText)
+      .toBe("/data-analysis summarize this dataset");
   });
 
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
@@ -146,7 +562,10 @@ test.describe("Chat workspace", () => {
     await textarea.press("ArrowDown");
     await textarea.press("Enter");
 
-    await expect(textarea).toHaveValue("/frontend-design ");
+    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(
+      page.getByRole("textbox", { name: /how can i assist you/i }),
+    ).toBeVisible();
   });
 
   test("keeps Shift+Enter as newline while skill suggestions are visible", async ({

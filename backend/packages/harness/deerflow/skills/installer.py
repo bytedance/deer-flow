@@ -15,6 +15,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
+from deerflow.skills.security_static_scanner import (
+    StaticFinding,
+    StaticScanBlockedError,
+    StaticScannerError,
+    enforce_static_scan,
+    scan_archive_preflight,
+    skill_scan_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +52,31 @@ class SkillAlreadyExistsError(ValueError):
 class SkillSecurityScanError(ValueError):
     """Raised when a skill archive fails security scanning."""
 
+    findings: list[StaticFinding]
+    skill_name: str | None
+
+    def __init__(self, message: str, *, findings: list[StaticFinding] | None = None, skill_name: str | None = None) -> None:
+        super().__init__(message)
+        self.findings = [dict(finding) for finding in (findings or [])]
+        self.skill_name = skill_name
+
 
 def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
-    """Return True if the zip member path is absolute or attempts directory traversal."""
+    """Return True if the zip member path is absolute, attempts directory
+    traversal, or contains a colon.
+
+    A colon has no legitimate use in a relative archive member path — zip
+    entries always use ``/`` separators, and a real Windows drive prefix
+    (``C:\\...``) is already rejected above as absolute. But on Windows/NTFS,
+    a colon anywhere else in a path (e.g. ``scripts/run.sh:hidden.txt``)
+    addresses an Alternate Data Stream on the preceding path component
+    instead of creating a new file: it silently attaches extra content to
+    ``scripts/run.sh`` rather than creating a sibling file. That stream is
+    invisible to ``Path.rglob()`` / ``os.walk()``-based listing, so it would
+    let an archive smuggle content past directory-based security scanning
+    while the content still lands on disk. Reject outright rather than
+    trying to allow-list "safe" colon positions.
+    """
     name = info.filename
     if not name:
         return False
@@ -59,6 +89,8 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     if PureWindowsPath(name).is_absolute():
         return True
     if ".." in path.parts:
+        return True
+    if ":" in name:
         return True
     return False
 
@@ -102,6 +134,7 @@ def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
     max_total_size: int = 512 * 1024 * 1024,
+    max_entries: int = 4096,
 ) -> None:
     """Safely extract a skill archive with security protections.
 
@@ -109,15 +142,28 @@ def safe_extract_skill_archive(
     - Reject absolute paths and directory traversal (..).
     - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
+    - Enforce a hard limit on member count (zip bomb defence by entry count —
+      a huge number of tiny/empty members can be cheap to store yet still
+      slow to extract, independent of total size).
     - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
 
     Raises:
-        ValueError: If unsafe members, executable binaries, or size limit exceeded.
+        ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     total_written = 0
 
-    for info in zip_ref.infolist():
+    infos = zip_ref.infolist()
+    if len(infos) > max_entries:
+        # Early-abort before any per-member work below — mirrors the same
+        # early-abort in skillscan/orchestrator.py::scan_archive_preflight
+        # (its comment: "a huge member count is a bounded DoS vector even
+        # when the total size is small"). That scan is optional
+        # (skill_scan.enabled); this check must hold unconditionally since
+        # it lives in the extraction path every install goes through.
+        raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
+
+    for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
 
@@ -200,7 +246,11 @@ def _move_staged_skill_into_reserved_target(staging_target: Path, target: Path) 
             shutil.rmtree(target)
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool) -> None:
+def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[StaticFinding]:
+    return [finding for finding in findings if finding.get("file") in {rel_path, None}]
+
+
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -209,7 +259,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location)
+        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -225,15 +275,43 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for {location}: invalid scanner decision {decision!r}")
 
 
+def scan_archive_preflight_or_raise(archive_path: Path, *, app_config=None) -> None:
+    if not skill_scan_enabled(app_config):
+        return
+    result = scan_archive_preflight(archive_path)
+    if result["blocked"]:
+        critical = [finding for finding in result["findings"] if finding["severity"] == "CRITICAL"]
+        raise SkillSecurityScanError(
+            f"Static security scan blocked unsafe skill archive: {format_static_archive_findings(critical)}",
+            findings=critical,
+            skill_name=None,
+        )
+
+
+def format_static_archive_findings(findings: list[StaticFinding]) -> str:
+    return "; ".join(f"{finding['rule_id']} ({finding['severity']}) at {finding.get('file') or '<archive>'}: {finding['message']}" for finding in findings)
+
+
+async def _scan_static_skill_archive_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
+    try:
+        return await asyncio.to_thread(enforce_static_scan, skill_dir, skill_name=skill_name, app_config=app_config)
+    except StaticScanBlockedError as e:
+        raise SkillSecurityScanError(str(e), findings=e.findings, skill_name=e.skill_name) from e
+    except StaticScannerError as e:
+        raise SkillSecurityScanError(f"Static security scan failed for skill '{skill_name}': {e}", skill_name=skill_name) from e
+
+
 def _collect_scannable_files(skill_dir: Path) -> list[Path]:
     """Enumerate archive files for scanning (blocking; run off the event loop)."""
     return [candidate for candidate in sorted(skill_dir.rglob("*")) if candidate.is_file()]
 
 
-async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str) -> None:
+async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
     """Run the skill security scanner against all installable text and script files."""
+    static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
+
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False)
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
 
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
@@ -241,10 +319,24 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
             continue
         if path.name == "SKILL.md":
             raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': nested SKILL.md is not allowed at {skill_name}/{rel_path.as_posix()}")
+        rel_path_posix = rel_path.as_posix()
         if await _is_code_file(path, rel_path):
-            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=True)
+            await _scan_skill_file_or_raise(
+                skill_dir,
+                path,
+                skill_name,
+                executable=True,
+                static_findings=_findings_for_file(static_findings, rel_path_posix),
+            )
         elif _should_scan_support_file(rel_path):
-            await _scan_skill_file_or_raise(skill_dir, path, skill_name, executable=False)
+            await _scan_skill_file_or_raise(
+                skill_dir,
+                path,
+                skill_name,
+                executable=False,
+                static_findings=_findings_for_file(static_findings, rel_path_posix),
+            )
+    return static_findings
 
 
 def _run_async_install(coro):

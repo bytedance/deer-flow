@@ -6,6 +6,7 @@ from pathlib import Path
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.storage import user_should_see_legacy_skills
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +311,7 @@ class LocalSandboxProvider(SandboxProvider):
             skills_container_path = config.skills.container_path
             user_custom_path = paths.user_custom_skills_dir(effective_user_id)
             legacy_skills_path = config.skills.get_skills_path() / "custom"
-            user_has_no_custom_skills = not any(p.is_dir() and not p.name.startswith(".") for p in user_custom_path.iterdir()) if user_custom_path.exists() else True
-            if user_has_no_custom_skills and legacy_skills_path.exists() and any((legacy_skills_path / d / "SKILL.md").exists() for d in legacy_skills_path.iterdir() if d.is_dir() and not d.name.startswith(".")):
+            if user_should_see_legacy_skills(effective_user_id, host_path=str(config.skills.get_skills_path())) and legacy_skills_path.exists():
                 mappings.append(
                     PathMapping(
                         container_path=f"{skills_container_path}/legacy",

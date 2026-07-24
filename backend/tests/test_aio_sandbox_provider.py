@@ -45,14 +45,33 @@ def test_host_thread_dir_rejects_invalid_thread_id(tmp_path):
 
 
 def _make_provider(tmp_path):
-    """Build a minimal AioSandboxProvider instance without starting the idle checker."""
+    """Build a minimal AioSandboxProvider instance without starting the idle checker.
+
+    ``tmp_path`` is accepted and ignored: ownership no longer lives on disk. Each
+    provider gets its own in-process ownership store, so it owns every sandbox it
+    tracks — cross-instance behaviour is covered in
+    ``test_sandbox_orphan_reconciliation.py`` (shared store) and
+    ``test_sandbox_ownership_store.py`` (store contract).
+    """
+    from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
-        provider._config = {}
+        provider._config = {"idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
+        provider._local_teardown = set()
+        provider._acquire_epoch = {}
+        provider._acquire_epoch_counter = 0
+        provider._acquire_inflight = {}
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
+        provider._renewal_stop = MagicMock()
+        provider._renewal_thread = None
+        provider._owner_id = "test-worker"
+        provider._ownership_config = SandboxOwnershipConfig()
+        provider._ownership = MemoryOwnershipStore(owner_id="test-worker", ttl_seconds=600)
     return provider
 
 
@@ -368,11 +387,12 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: True)
 
     try:
         backend.create("thread-42", "sandbox-42")
@@ -384,6 +404,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "sandbox_id": "sandbox-42",
         "thread_id": "thread-42",
         "user_id": "user-7",
+        "include_legacy_skills": True,
     }
 
 
@@ -400,16 +421,18 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
         def json(self):
             return {"sandbox_url": "http://sandbox.local"}
 
-    def _post(url, json, timeout):  # noqa: A002 - mirrors requests.post kwarg
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
     monkeypatch.setattr(remote_mod, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: False)
 
     backend.create("thread-42", "sandbox-42", user_id="ou-user")
 
     assert posted["json"]["user_id"] == "ou-user"
+    assert posted["json"]["include_legacy_skills"] is False
 
 
 # ── Sandbox client teardown (#2872) ──────────────────────────────────────────
@@ -426,6 +449,10 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     }
     provider._thread_sandboxes = {}
     provider._last_activity = {sandbox_id: 0.0}
+    provider._local_teardown = set()
+    provider._acquire_epoch = {}
+    provider._acquire_epoch_counter = 0
+    provider._acquire_inflight = {}
     provider._shutdown_called = False
     provider._idle_checker_thread = None
     provider._backend = SimpleNamespace(destroy=MagicMock())
@@ -626,3 +653,73 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
 
     assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
     provider._backend.destroy.assert_called_once()
+
+
+def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):
+    """AIO active-idle cleanup must remain local while warm expiry uses the shared lifecycle."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandboxes = {"active-old": MagicMock()}
+    provider._sandbox_infos = {
+        "active-old": aio_mod.SandboxInfo(sandbox_id="active-old", sandbox_url="http://active-old"),
+    }
+    provider._thread_sandboxes = {("default", "thread-old"): "active-old"}
+    provider._last_activity = {"active-old": 0.0}
+    provider._warm_pool = {
+        "warm-old": (
+            aio_mod.SandboxInfo(sandbox_id="warm-old", sandbox_url="http://warm-old"),
+            0.0,
+        )
+    }
+
+    calls = []
+    # The idle path destroys through `_destroy_tracked`, not `destroy()`: its
+    # "still idle?" re-check has to run in the same critical section that
+    # reserves the teardown, so it is passed down as a predicate. Asserting on
+    # `destroy` here would pass vacuously — it is no longer on this path.
+    provider._destroy_tracked = MagicMock(side_effect=lambda _sandbox_id, **_kw: calls.append("active"))
+    provider._reap_expired_warm = MagicMock(side_effect=lambda _idle_timeout: calls.append("warm"))
+
+    provider._cleanup_idle_sandboxes(1.0)
+
+    assert provider._destroy_tracked.call_count == 1
+    assert provider._destroy_tracked.call_args.args == ("active-old",)
+    # The gate must actually be a live predicate, not a constant-true placeholder.
+    assert provider._destroy_tracked.call_args.kwargs["still_reapable"]() is True
+    provider._reap_expired_warm.assert_called_once_with(1.0)
+    assert calls == ["active", "warm"]
+
+
+def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path, monkeypatch):
+    """Replica enforcement must destroy the oldest warm SandboxInfo before creating another."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._config = {"replicas": 2}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+
+    oldest_info = aio_mod.SandboxInfo(sandbox_id="warm-oldest", sandbox_url="http://warm-oldest")
+    newest_info = aio_mod.SandboxInfo(sandbox_id="warm-newest", sandbox_url="http://warm-newest")
+    created_info = aio_mod.SandboxInfo(sandbox_id="created", sandbox_url="http://created")
+    provider._warm_pool = {
+        "warm-newest": (newest_info, 20.0),
+        "warm-oldest": (oldest_info, 10.0),
+    }
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=created_info),
+        destroy=MagicMock(),
+    )
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id, *, user_id=None: [])
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: True)
+
+    sandbox_id = provider._create_sandbox(None, "created", user_id="default")
+
+    assert sandbox_id == "created"
+    provider._backend.destroy.assert_called_once_with(oldest_info)
+    assert "warm-oldest" not in provider._warm_pool
+    assert provider._warm_pool == {"warm-newest": (newest_info, 20.0)}
+    assert provider._sandbox_infos["created"] is created_info

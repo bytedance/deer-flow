@@ -47,11 +47,47 @@ class LangfuseTracingConfig(BaseModel):
             raise ValueError(f"Langfuse tracing is enabled but required settings are missing: {', '.join(missing)}")
 
 
+# Manual mirror of monocle_apptrace's supported exporters, kept local so a typo
+# fails at startup with a clear message instead of an opaque upstream error.
+# Update this tuple when a monocle_apptrace bump adds or renames an exporter.
+_MONOCLE_EXPORTERS = ("file", "console", "okahu", "s3", "blob", "gcs")
+
+
+class MonocleTracingConfig(BaseModel):
+    """Configuration for Monocle telemetry."""
+
+    enabled: bool = Field(...)
+    exporters: str = Field(...)
+    okahu_api_key: str | None = Field(...)
+
+    @property
+    def is_enabled(self) -> bool:
+        # Unlike the siblings' is_configured, no credential check here: that is
+        # exporter-dependent and lives in validate(), run at Gateway startup.
+        return self.enabled
+
+    @property
+    def exporter_list(self) -> list[str]:
+        """The configured exporters, parsed once so validation and setup agree."""
+        return [e.strip() for e in self.exporters.split(",") if e.strip()]
+
+    def validate(self) -> None:
+        if not self.enabled:
+            return
+        selected = self.exporter_list
+        unknown = [e for e in selected if e not in _MONOCLE_EXPORTERS]
+        if unknown:
+            raise ValueError(f"MONOCLE_EXPORTERS has unknown exporter(s): {', '.join(unknown)}. Allowed: {', '.join(_MONOCLE_EXPORTERS)}.")
+        if "okahu" in selected and not self.okahu_api_key:
+            raise ValueError("Monocle 'okahu' exporter is selected but OKAHU_API_KEY is not set.")
+
+
 class TracingConfig(BaseModel):
     """Tracing configuration for supported providers."""
 
     langsmith: LangSmithTracingConfig = Field(...)
     langfuse: LangfuseTracingConfig = Field(...)
+    monocle: MonocleTracingConfig = Field(...)
 
     @property
     def is_configured(self) -> bool:
@@ -125,6 +161,11 @@ def get_tracing_config() -> TracingConfig:
                 secret_key=_first_env_value("LANGFUSE_SECRET_KEY"),
                 host=_first_env_value("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
             ),
+            monocle=MonocleTracingConfig(
+                enabled=_env_flag_preferred("MONOCLE_TRACING"),
+                exporters=_first_env_value("MONOCLE_EXPORTERS") or "file",
+                okahu_api_key=_first_env_value("OKAHU_API_KEY"),
+            ),
         )
         return _tracing_config
 
@@ -147,6 +188,16 @@ def validate_enabled_tracing_providers() -> None:
 def is_tracing_enabled() -> bool:
     """Check if any tracing provider is enabled and fully configured."""
     return get_tracing_config().is_configured
+
+
+def is_monocle_tracing_enabled() -> bool:
+    """Whether Monocle OTel observability is enabled (via ``MONOCLE_TRACING``).
+
+    Kept separate from :func:`get_enabled_tracing_providers` because Monocle is a
+    process-global instrumentor activated at startup, not a per-run LangChain
+    callback.
+    """
+    return get_tracing_config().monocle.is_enabled
 
 
 def reset_tracing_config() -> None:

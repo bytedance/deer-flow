@@ -39,6 +39,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
 from deerflow.sandbox.tools import read_current_file_content
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,9 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             with self._lock_for(request, path):
                 blocked = self._check_write_gate(request)
                 if blocked is not None:
-                    return blocked
+                    # Stamp deerflow_tool_meta so ToolProgressMiddleware can classify
+                    # the blocked write even though it bypasses ToolErrorHandlingMiddleware.
+                    return normalize_tool_result(blocked)
                 return handler(request)
         if name in _READ_TOOLS:
             path = self._requested_path(request)
@@ -138,7 +141,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             try:
                 blocked = await asyncio.to_thread(self._check_write_gate, request)
                 if blocked is not None:
-                    return blocked
+                    return normalize_tool_result(blocked)
                 return await handler(request)
             finally:
                 lock.release()

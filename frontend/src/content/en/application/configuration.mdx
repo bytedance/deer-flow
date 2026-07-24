@@ -222,11 +222,19 @@ For Docker or scripted starts, set `UV_EXTRAS=postgres` before installing or bui
 ```yaml
 memory:
   enabled: true
-  storage_path: memory.json
-  debounce_seconds: 30
-  max_facts: 100
   injection_enabled: true
-  max_injection_tokens: 2000
+  manager_class: deermem          # backend selector: deermem | noop | dotted path
+  mode: middleware                 # middleware (default) | tool (experimental)
+  backend_config:                  # DeerMem-private knobs (the backend self-interprets these)
+    storage_path: ""               # empty = deer-flow base_dir (per-user memory under it)
+    debounce_seconds: 30
+    max_facts: 100
+    fact_confidence_threshold: 0.7
+    max_injection_tokens: 2000
+    # model:                       # LLM for extraction; omit all fields = use the app default model
+    #   provider: openai
+    #   model: gpt-4o-mini
+    #   api_key: $OPENAI_API_KEY
 ```
 
 ## Frontend environment variables

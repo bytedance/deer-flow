@@ -12,7 +12,9 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailProvider, GuardrailReason, GuardrailRequest
+from deerflow.runtime.events.catalog import MIDDLEWARE_GUARDRAIL_TAG
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,9 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             oauth_id=context.get("oauth_id"),
             run_id=context.get("run_id"),
             tool_call_id=request.tool_call.get("id"),
+            channel_user_id=context.get("channel_user_id"),
+            is_internal=context.get("is_internal") is True,
+            authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:
@@ -108,14 +113,14 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
 
         try:
             journal.record_middleware(
-                tag="guardrail",
+                tag=MIDDLEWARE_GUARDRAIL_TAG,
                 name=type(self).__name__,
                 hook="wrap_tool_call",
                 action=action,
                 changes=changes,
             )
         except Exception:  # noqa: BLE001
-            logger.debug("Failed to record middleware:guardrail event", exc_info=True)
+            logger.warning("Failed to record middleware:guardrail event", exc_info=True)
 
     @override
     def wrap_tool_call(

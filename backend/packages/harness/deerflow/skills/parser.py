@@ -24,15 +24,10 @@ def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> st
 
         # mark.line is 0-based within the front-matter body; +1 makes it
         # 1-based, +1 more accounts for the leading `---` fence that the
-        # front-matter regex strips before yaml.safe_load sees it. The
-        # result matches the line number an author sees in their editor.
+        # front-matter regex strips before yaml.safe_load sees it.
         file_line_number = mark.line + 2
         lines.append(f"  line {file_line_number}: {offending}")
 
-        # Targeted hint for the most common authoring mistake: an unquoted
-        # scalar value whose body contains ``: ``. We only surface the hint
-        # when we are confident it applies, to avoid misleading authors who
-        # hit unrelated YAML errors.
         if getattr(exc, "problem", "") == "mapping values are not allowed here" and ":" in offending:
             key, _, value = offending.partition(":")
             value = value.strip()
@@ -137,21 +132,19 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
     try:
         content = skill_file.read_text(encoding="utf-8")
 
-        # Extract YAML front-matter block between leading ``---`` fences.
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
+        # Keep parser diagnostics richer than the pure helper's host-path-free
+        # error string; tests and authoring UX depend on the line-specific hint.
+        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
         if not front_matter_match:
             return None
-
         front_matter_text = front_matter_match.group(1)
-
         try:
             metadata = yaml.safe_load(front_matter_text)
         except yaml.YAMLError as exc:
             logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
             return None
-
         if not isinstance(metadata, dict):
-            logger.error("Front-matter in %s is not a YAML mapping", skill_file)
+            logger.error("Invalid SKILL.md front-matter in %s: Frontmatter must be a YAML dictionary", skill_file)
             return None
 
         # Extract required fields.  Both must be non-empty strings.

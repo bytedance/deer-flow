@@ -3,8 +3,10 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
-import shutil
+from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
+
+from deerflow.constants import BROWSER_FRAMES_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -21,6 +23,10 @@ EXCLUDED_DIR_NAMES = {
     ".cache",
     ".next",
     ".venv",
+    # Transient per-step browser screenshots: live progress feedback surfaced in
+    # the browser panel + inline thumbnails, not workspace deliverables. Shared
+    # constant with the browser tools so the name cannot drift out of sync.
+    BROWSER_FRAMES_DIRNAME,
     "__pycache__",
     "build",
     "dist",
@@ -74,6 +80,7 @@ SENSITIVE_PATH_PATTERNS = (
 )
 
 SAMPLE_BYTES = 4096
+_UTF16_BOMS = (BOM_UTF16_LE, BOM_UTF16_BE)
 
 
 def is_sensitive_workspace_path(path: str) -> bool:
@@ -120,7 +127,18 @@ def scan_workspace_roots(
                     )
 
                 host_file = Path(dirpath) / filename
-                if host_file.is_symlink() or not host_file.is_file():
+                if host_file.is_symlink():
+                    # A symlink must never be followed for stat/content purposes: its
+                    # target can point anywhere on the host (including outside the
+                    # scanned root), so it is recorded as a metadata-only stub -
+                    # mirroring how binary/large/sensitive-looking files are handled
+                    # below - instead of being silently omitted from the snapshot.
+                    symlink_snapshot = _snapshot_symlink(root, host_file)
+                    if symlink_snapshot is not None:
+                        files[symlink_snapshot.path] = symlink_snapshot
+                        scanned += 1
+                    continue
+                if not host_file.is_file():
                     continue
 
                 snapshot = _snapshot_file(
@@ -193,16 +211,19 @@ def _snapshot_file(
         reason = "large"
     elif not should_include_text:
         text = None
-    elif text_cache_dir is not None:
-        text_path = str(_cache_text_file(host_file, virtual_path, text_cache_dir))
     else:
         try:
-            text = host_file.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            binary = True
-            reason = "binary"
+            raw = host_file.read_bytes()
         except OSError:
             return None
+        decoded = _decode_text_bytes(raw)
+        if decoded is None:
+            binary = True
+            reason = "binary"
+        elif text_cache_dir is not None:
+            text_path = str(_cache_text_file(decoded, virtual_path, text_cache_dir))
+        else:
+            text = decoded
 
     return FileSnapshot(
         path=virtual_path,
@@ -218,10 +239,45 @@ def _snapshot_file(
     )
 
 
-def _cache_text_file(source: Path, virtual_path: str, cache_dir: Path) -> Path:
+def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
+    # Deliberately never follows the link (no read_bytes()/open() on the target):
+    # the target may point anywhere on the host, including outside the scanned
+    # root, so stat'ing or reading through it here would risk exposing arbitrary
+    # host file content/metadata as if it belonged to the workspace.
+    try:
+        stat = host_file.lstat()
+        size = stat.st_size
+        mtime_ns = stat.st_mtime_ns
+        relative = host_file.relative_to(root.host_path).as_posix()
+        virtual_path = f"{root.virtual_prefix}/{relative}"
+        sensitive = is_sensitive_workspace_path(virtual_path)
+    except OSError:
+        return None
+
+    try:
+        target = os.readlink(host_file)
+    except OSError:
+        target = None
+
+    return FileSnapshot(
+        path=virtual_path,
+        root=root.name,
+        size=size,
+        mtime_ns=mtime_ns,
+        sha256=None,
+        binary=False,
+        sensitive=sensitive,
+        text=None,
+        content_unavailable_reason="symlink",
+        symlink=True,
+        symlink_target=target,
+    )
+
+
+def _cache_text_file(text: str, virtual_path: str, cache_dir: Path) -> Path:
     cache_name = hashlib.sha256(virtual_path.encode("utf-8")).hexdigest()
     target = cache_dir / cache_name
-    shutil.copyfile(source, target)
+    target.write_text(text, encoding="utf-8")
     return target
 
 
@@ -238,11 +294,36 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _decode_text_bytes(data: bytes) -> str | None:
+    for encoding in ("utf-8-sig", "utf-8"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    if data.startswith(_UTF16_BOMS):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+
+    return None
+
+
+def _sample_decodes_as_text(sample: bytes, encoding: str) -> bool:
+    try:
+        decoder = getincrementaldecoder(encoding)()
+        decoder.decode(sample, final=False)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _looks_binary(sample: bytes) -> bool:
+    if sample.startswith(_UTF16_BOMS) and _sample_decodes_as_text(sample, "utf-16"):
+        return False
     if b"\x00" in sample:
         return True
-    try:
-        sample.decode("utf-8")
-    except UnicodeDecodeError:
-        return True
-    return False
+    if _sample_decodes_as_text(sample, "utf-8"):
+        return False
+    return True
