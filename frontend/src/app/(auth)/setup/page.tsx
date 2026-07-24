@@ -17,6 +17,8 @@ import {
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 
+import { decideSetupModeFromSetupStatus } from "./setup-status-helpers";
+
 type SetupMode = "loading" | "init_admin" | "change_password";
 
 export default function SetupPage() {
@@ -44,19 +46,24 @@ export default function SetupPage() {
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
     } else if (!isAuthenticated) {
-      // Check if the system has no users yet
+      // Check if the system has no users yet. Fail-safe to init_admin on
+      // any non-ok response (e.g. 429 rate-limited) so the operator can
+      // still reach first-boot setup — see #2999.
       void fetchSetupStatus()
         .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
-          if (data.needs_setup) {
-            setMode("init_admin");
-          } else {
+          if (
+            decideSetupModeFromSetupStatus(true, data.needs_setup) ===
+            "redirect_login"
+          ) {
             // System already set up and user is not logged in — go to login
             router.replace("/login");
+          } else {
+            setMode("init_admin");
           }
         })
         .catch(() => {
-          if (!cancelled) router.replace("/login");
+          if (!cancelled) setMode("init_admin");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
