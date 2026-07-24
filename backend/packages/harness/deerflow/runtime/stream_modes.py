@@ -6,7 +6,6 @@ from typing import Literal, get_args
 
 type RunStreamMode = Literal[
     "values",
-    "messages",
     "messages-tuple",
     "updates",
     "debug",

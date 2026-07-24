@@ -1078,7 +1078,7 @@ async def launch_scheduled_thread_run(
         stream_subgraphs=False,
         stream_resumable=None,
         on_disconnect="continue",
-        on_completion="keep",
+        on_completion=None,
         multitask_strategy="reject",
         after_seconds=None,
         if_not_exists="create",

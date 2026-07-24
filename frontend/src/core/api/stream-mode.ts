@@ -1,6 +1,5 @@
 const SUPPORTED_RUN_STREAM_MODES = new Set([
   "values",
-  "messages",
   "messages-tuple",
   "updates",
   "debug",
@@ -29,7 +28,7 @@ export function warnUnsupportedStreamModes(
   }
 
   warn(
-    `[deer-flow] Dropped unsupported LangGraph stream mode(s): ${unseenModes.join(", ")}`,
+    `[deer-flow] Rejected unsupported LangGraph stream mode(s): ${unseenModes.join(", ")}`,
   );
 }
 
@@ -62,27 +61,15 @@ export function sanitizeRunStreamOptions<T>(options: T): T {
   }
 
   const requestedModes = Array.isArray(streamMode) ? streamMode : [streamMode];
-  const sanitizedModes = requestedModes.filter((mode) =>
-    SUPPORTED_RUN_STREAM_MODES.has(mode),
-  );
-
-  if (sanitizedModes.length === requestedModes.length) {
-    return sanitizedOptions;
-  }
-
   const droppedModes = requestedModes.filter(
     (mode) => !SUPPORTED_RUN_STREAM_MODES.has(mode),
   );
-  warnUnsupportedStreamModes(droppedModes);
-
-  if (sanitizedModes.length === 0) {
+  if (droppedModes.length > 0) {
+    warnUnsupportedStreamModes(droppedModes);
     throw new Error(
-      `[deer-flow] No supported LangGraph stream modes remain after rejecting: ${droppedModes.join(", ")}`,
+      `[deer-flow] Unsupported LangGraph stream mode(s): ${droppedModes.join(", ")}`,
     );
   }
 
-  return {
-    ...sanitizedOptions,
-    streamMode: Array.isArray(streamMode) ? sanitizedModes : sanitizedModes[0],
-  };
+  return sanitizedOptions;
 }

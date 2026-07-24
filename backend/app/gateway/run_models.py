@@ -30,7 +30,7 @@ class RunCreateRequest(BaseModel):
     stream_subgraphs: bool = Field(default=False, description="Include subgraph events")
     stream_resumable: None = Field(default=None, description="Compatibility placeholder; resumable SSE is not supported")
     on_disconnect: Literal["cancel", "continue"] = Field(default="cancel", description="Behaviour on SSE disconnect")
-    on_completion: Literal["keep"] = Field(default="keep", description="Compatibility default; temporary threads are kept")
+    on_completion: None = Field(default=None, description="Compatibility placeholder; completion behavior is not supported")
     multitask_strategy: Literal["reject", "rollback", "interrupt"] = Field(default="reject", description="Concurrency strategy")
     after_seconds: None = Field(default=None, description="Compatibility placeholder; delayed execution is not supported")
     if_not_exists: Literal["create"] = Field(default="create", description="Compatibility default; missing threads are created")
@@ -48,13 +48,13 @@ class RunCreateRequest(BaseModel):
     )
     @classmethod
     def reject_unsupported_run_options(cls, value: Any, info: ValidationInfo) -> Any:
-        if info.field_name in {"on_completion", "multitask_strategy", "if_not_exists"} and not isinstance(value, str):
+        if info.field_name in {"multitask_strategy", "if_not_exists"} and not isinstance(value, str):
             return value
 
         supported_defaults = {
             "webhook": None,
             "stream_resumable": None,
-            "on_completion": "keep",
+            "on_completion": None,
             "multitask_strategy": {"reject", "rollback", "interrupt"},
             "after_seconds": None,
             "if_not_exists": "create",

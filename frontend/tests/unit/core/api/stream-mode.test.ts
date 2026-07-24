@@ -2,24 +2,12 @@ import { expect, test } from "@rstest/core";
 
 import { sanitizeRunStreamOptions } from "@/core/api/stream-mode";
 
-test("drops unsupported stream modes from array payloads", () => {
-  const sanitized = sanitizeRunStreamOptions({
-    streamMode: [
-      "values",
-      "messages-tuple",
-      "custom",
-      "updates",
-      "events",
-      "tools",
-    ],
-  });
-
-  expect(sanitized.streamMode).toEqual([
-    "values",
-    "messages-tuple",
-    "custom",
-    "updates",
-  ]);
+test("rejects mixed supported and unsupported stream modes", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: ["values", "events", "tools"],
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): events, tools");
 });
 
 test("rejects payloads when every requested stream mode is unsupported", () => {
@@ -27,13 +15,21 @@ test("rejects payloads when every requested stream mode is unsupported", () => {
     sanitizeRunStreamOptions({
       streamMode: ["events", "tools"],
     }),
-  ).toThrow("No supported LangGraph stream modes remain");
+  ).toThrow("Unsupported LangGraph stream mode(s): events, tools");
 
   expect(() =>
     sanitizeRunStreamOptions({
       streamMode: "tools",
     }),
-  ).toThrow("No supported LangGraph stream modes remain");
+  ).toThrow("Unsupported LangGraph stream mode(s): tools");
+});
+
+test("rejects messages because the Gateway only supports messages-tuple framing", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: "messages",
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): messages");
 });
 
 test("keeps payloads without streamMode untouched", () => {
@@ -55,13 +51,13 @@ test("strips streamResumable before sending run options to the API", () => {
   });
 });
 
-test("sanitizes streamResumable and mixed stream modes together", () => {
+test("sanitizes streamResumable while preserving valid stream modes", () => {
   const sanitized = sanitizeRunStreamOptions({
     streamResumable: true,
-    streamMode: ["values", "events"],
+    streamMode: ["values", "custom"],
   });
 
   expect(sanitized).toEqual({
-    streamMode: ["values"],
+    streamMode: ["values", "custom"],
   });
 });

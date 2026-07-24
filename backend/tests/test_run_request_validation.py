@@ -12,7 +12,6 @@ from app.gateway.routers import runs
 
 SUPPORTED_STREAM_MODES = {
     "values",
-    "messages",
     "messages-tuple",
     "updates",
     "debug",
@@ -34,6 +33,9 @@ def client() -> TestClient:
     [
         ("webhook", "https://example.com/callback"),
         ("stream_resumable", False),
+        ("on_completion", "complete"),
+        ("on_completion", "continue"),
+        ("on_completion", "keep"),
         ("on_completion", "delete"),
         ("after_seconds", 1.5),
         ("if_not_exists", "reject"),
@@ -65,6 +67,7 @@ def test_run_request_rejects_each_unsupported_option_with_exact_422(
 @pytest.mark.parametrize(
     "stream_mode",
     [
+        "messages",
         "events",
         "tools",
         ["values", "events"],
@@ -101,14 +104,14 @@ def test_run_request_keeps_supported_modes_and_compatibility_defaults() -> None:
         stream_mode=list(SUPPORTED_STREAM_MODES),
         webhook=None,
         stream_resumable=None,
-        on_completion="keep",
+        on_completion=None,
         after_seconds=None,
         if_not_exists="create",
         feedback_keys=None,
     )
 
     assert set(body.stream_mode or []) == SUPPORTED_STREAM_MODES
-    assert body.on_completion == "keep"
+    assert body.on_completion is None
     assert body.if_not_exists == "create"
 
 
@@ -128,7 +131,6 @@ def test_malformed_option_types_remain_validation_errors(client: TestClient, pay
 @pytest.mark.parametrize(
     "field",
     [
-        "on_completion",
         "multitask_strategy",
         "if_not_exists",
     ],
@@ -203,6 +205,6 @@ def test_openapi_run_option_schema_exposes_only_supported_values() -> None:
     assert schema["additionalProperties"] is False
     for field in ("webhook", "stream_resumable", "after_seconds", "feedback_keys"):
         assert properties[field]["type"] == "null"
-    assert properties["on_completion"]["const"] == "keep"
+    assert properties["on_completion"]["type"] == "null"
     assert properties["if_not_exists"]["const"] == "create"
     assert properties["multitask_strategy"]["enum"] == ["reject", "rollback", "interrupt"]

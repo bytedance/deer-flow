@@ -79,7 +79,7 @@ def test_normalize_stream_modes_empty_list():
     assert normalize_stream_modes([]) == ["values"]
 
 
-@pytest.mark.parametrize("raw", ["events", "tools", ["values", "events"]])
+@pytest.mark.parametrize("raw", ["messages", "events", "tools", ["values", "events"]])
 def test_normalize_stream_modes_rejects_unsupported_modes(raw):
     from app.gateway.services import normalize_stream_modes
 
@@ -91,7 +91,7 @@ def test_normalize_stream_modes_rejects_unsupported_modes(raw):
     ("raw", "expected"),
     [
         ("messages-tuple", ["messages"]),
-        (["values", "messages-tuple", "messages", "values"], ["values", "messages"]),
+        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages"]),
         (["updates", "custom"], ["updates", "custom"]),
     ],
 )
@@ -1472,6 +1472,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
             captured["context"] = body.context
             captured["metadata"] = body.metadata
             captured["if_not_exists"] = body.if_not_exists
+            captured["on_completion"] = body.on_completion
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -1492,6 +1493,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
     assert captured["if_not_exists"] == "create"
+    assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
 
 
