@@ -820,7 +820,11 @@ export function useCoalescedStreamMessages(
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      // Keep the snapshot current so the next stream starts from a fresh base.
+      // Keep the snapshot current so the next stream starts from a fresh base,
+      // and drop the flush baseline so the leading edge is per stream rather
+      // than per hook instance: a run starting within one interval of the
+      // previous one must not have its first frame deferred.
+      lastFlushRef.current = Number.NEGATIVE_INFINITY;
       publish();
       return;
     }
