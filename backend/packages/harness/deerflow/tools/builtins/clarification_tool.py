@@ -61,10 +61,14 @@ def ask_clarification_tool(
         context: Optional context explaining why clarification is needed. Helps the user understand the situation.
         options: Optional list of choices (for approach_choice or suggestion types). Present clear options for the user to choose from.
         fields: Optional form field definitions for collecting multiple values in one card; takes precedence over `options`.
-            Each field is an object with `name` (unique identifier, required), `label` (display text, defaults to name),
-            `type` (one of: text, textarea, number, select, multi_select, checkbox, date; defaults to text),
-            `required` (boolean, defaults to false), `options` (list of strings, required for select/multi_select types),
-            and `placeholder` (optional hint text).
+            Each field is an object with `name` (unique identifier, required; avoid JavaScript prototype names like
+            `constructor` or `toString`), `label` (display text, defaults to name), `type` (one of: text, textarea,
+            number, select, multi_select, checkbox, date; defaults to text), `required` (boolean, defaults to false),
+            `options` (list of strings, required for select/multi_select types), and `placeholder` (optional hint text).
+            A `checkbox` field is a boolean that defaults to "no"; set `required` on a checkbox only for
+            must-agree/consent semantics (the user has to tick it to submit). Keep forms bounded: at most 16 fields,
+            24 options per field, and 200 characters per name/label/option/placeholder — exceeding a limit degrades
+            the whole request to a plain-text question.
     """
     # This is a placeholder implementation
     # The actual logic is handled by ClarificationMiddleware which intercepts this tool call

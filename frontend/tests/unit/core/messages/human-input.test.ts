@@ -4,12 +4,14 @@ import { expect, test } from "@rstest/core";
 import {
   buildHumanInputFormSummary,
   buildHumanInputResponseText,
+  buildInitialHumanInputFormValues,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
   deriveHumanInputThreadState,
   extractHumanInputRequest,
   extractHumanInputResponse,
   hasOpenHumanInputRequest,
+  readHumanInputFormValue,
   shouldClearPendingHumanInputOnThreadError,
 } from "@/core/messages/human-input";
 
@@ -324,6 +326,110 @@ test("builds a readable form summary submitted as a v1 text response", () => {
     response_kind: "text",
     value: "Amount: 300; Category: travel; Receipts: A-1, A-2",
   });
+});
+
+test("rejects form fields with reserved prototype names", () => {
+  for (const reserved of ["__proto__", "constructor", "toString"]) {
+    expect(
+      extractHumanInputRequest(
+        toolMessage({
+          ...formPayload,
+          fields: [
+            { name: reserved, label: "Amount", type: "number", required: true },
+          ],
+        }),
+      ),
+    ).toBeNull();
+  }
+});
+
+test("readHumanInputFormValue ignores inherited prototype properties", () => {
+  const values: Record<string, string> = { amount: "300" };
+
+  expect(readHumanInputFormValue(values, "amount")).toBe("300");
+  expect(readHumanInputFormValue(values, "toString")).toBeUndefined();
+  expect(readHumanInputFormValue(values, "constructor")).toBeUndefined();
+  expect(readHumanInputFormValue(values, "__proto__")).toBeUndefined();
+});
+
+test("buildInitialHumanInputFormValues seeds checkbox fields to false", () => {
+  const request = extractHumanInputRequest(
+    toolMessage({
+      ...formPayload,
+      fields: [
+        { name: "amount", label: "Amount", type: "number", required: true },
+        { name: "urgent", label: "Urgent", type: "checkbox", required: false },
+      ],
+    }),
+  )!;
+
+  expect(buildInitialHumanInputFormValues(request.fields ?? [])).toEqual({
+    urgent: false,
+  });
+});
+
+test("summary renders an untouched checkbox as an explicit no", () => {
+  const request = extractHumanInputRequest(
+    toolMessage({
+      ...formPayload,
+      fields: [
+        { name: "amount", label: "Amount", type: "number", required: true },
+        { name: "urgent", label: "Urgent", type: "checkbox", required: false },
+      ],
+    }),
+  )!;
+  const values = {
+    amount: "300",
+    ...buildInitialHumanInputFormValues(request.fields ?? []),
+  };
+
+  expect(buildHumanInputFormSummary(request, values)).toBe(
+    "Amount: 300; Urgent: no",
+  );
+});
+
+test("a visible plain human reply closes an open request (legacy fallback)", () => {
+  // An old (v1-only) frontend renders a v2 request as plain text and the user
+  // answers through the normal composer — the reply has no response metadata.
+  // After upgrading, the request must not stay open and lock the composer.
+  const state = deriveHumanInputThreadState([
+    toolMessage(formPayload),
+    {
+      type: "human",
+      content: "金额 300，类别差旅",
+    } as unknown as Message,
+  ]);
+
+  expect(state.latestOpenRequestId).toBeNull();
+  const answered = state.answeredResponses.get("clarification:call-form");
+  expect(answered?.response_kind).toBe("text");
+  expect(answered?.value).toBe("金额 300，类别差旅");
+  expect(hasOpenHumanInputRequest([toolMessage(formPayload)])).toBe(true);
+});
+
+test("a visible human message before the request does not close it", () => {
+  const state = deriveHumanInputThreadState([
+    {
+      type: "human",
+      content: "帮我提交报销",
+    } as unknown as Message,
+    toolMessage(formPayload),
+  ]);
+
+  expect(state.latestOpenRequestId).toBe("clarification:call-form");
+});
+
+test("hidden non-response messages do not close an open request", () => {
+  const state = deriveHumanInputThreadState([
+    toolMessage(formPayload),
+    {
+      type: "human",
+      content: "internal context",
+      additional_kwargs: { hide_from_ui: true },
+    } as unknown as Message,
+  ]);
+
+  expect(state.latestOpenRequestId).toBe("clarification:call-form");
 });
 
 test("derives answered state for a form request answered by text", () => {

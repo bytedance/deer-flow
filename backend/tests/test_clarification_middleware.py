@@ -320,26 +320,26 @@ class TestFormPayload:
         assert payload["fields"][0]["type"] == "text"
         assert "options" not in payload["fields"][0]
 
-    def test_invalid_field_entries_are_dropped(self, middleware):
-        payload = middleware._build_human_input_payload(
-            {
-                "question": "Details please",
-                "clarification_type": "missing_info",
-                "fields": [
-                    "not-a-dict",
-                    {"label": "no name"},
-                    {"name": "   "},
-                    {"name": "amount", "type": "number"},
-                ],
-            },
-            tool_call_id="call-abc",
-            request_id="clarification:call-abc",
-        )
+    def test_any_invalid_field_entry_degrades_whole_form(self, middleware):
+        """Atomic validation: a structurally broken entry must not silently
+        vanish from an otherwise-rendered form — the whole form degrades."""
+        for bad_entry in ["not-a-dict", {"label": "no name"}, {"name": "   "}]:
+            payload = middleware._build_human_input_payload(
+                {
+                    "question": "Details please",
+                    "clarification_type": "missing_info",
+                    "fields": [bad_entry, {"name": "amount", "type": "number"}],
+                    "options": ["dev", "prod"],
+                },
+                tool_call_id="call-abc",
+                request_id="clarification:call-abc",
+            )
 
-        assert payload["input_mode"] == "form"
-        assert [field["name"] for field in payload["fields"]] == ["amount"]
+            assert payload["version"] == 1
+            assert payload["input_mode"] == "choice_with_other"
+            assert "fields" not in payload
 
-    def test_duplicate_field_names_keep_first(self, middleware):
+    def test_duplicate_field_names_degrade_whole_form(self, middleware):
         payload = middleware._build_human_input_payload(
             {
                 "question": "Details please",
@@ -353,23 +353,97 @@ class TestFormPayload:
             request_id="clarification:call-abc",
         )
 
-        assert payload["fields"] == [{"name": "amount", "label": "amount", "type": "number", "required": False}]
+        assert payload["version"] == 1
+        assert payload["input_mode"] == "free_text"
+        assert "fields" not in payload
 
-    def test_all_invalid_fields_fall_back_to_legacy_modes(self, middleware):
+    def test_reserved_prototype_field_names_degrade_whole_form(self, middleware):
+        """`__proto__`/`constructor`/... collide with JS Object.prototype in the
+        frontend form-value store and must be rejected server-side."""
+        for reserved in ["__proto__", "constructor", "toString", "hasOwnProperty"]:
+            payload = middleware._build_human_input_payload(
+                {
+                    "question": "Details please",
+                    "clarification_type": "missing_info",
+                    "fields": [{"name": reserved, "type": "text"}],
+                },
+                tool_call_id="call-abc",
+                request_id="clarification:call-abc",
+            )
+
+            assert payload["input_mode"] == "free_text", reserved
+            assert "fields" not in payload
+
+    def test_field_options_are_trimmed_deduped_and_blank_dropped(self, middleware):
+        """Backend must never emit blank option labels — the frontend parser
+        rejects the whole payload on them."""
         payload = middleware._build_human_input_payload(
             {
                 "question": "Details please",
                 "clarification_type": "missing_info",
-                "fields": ["bad", {"label": "no name"}],
-                "options": ["dev", "prod"],
+                "fields": [{"name": "category", "type": "select", "options": [" travel ", "", "  ", "travel", "meals"]}],
             },
             tool_call_id="call-abc",
             request_id="clarification:call-abc",
         )
 
-        assert payload["version"] == 1
-        assert payload["input_mode"] == "choice_with_other"
+        assert [option["label"] for option in payload["fields"][0]["options"]] == ["travel", "meals"]
+
+    def test_field_count_over_cap_degrades_whole_form(self, middleware):
+        fields = [{"name": f"field_{i}", "type": "text"} for i in range(17)]
+        payload = middleware._build_human_input_payload(
+            {"question": "Details please", "clarification_type": "missing_info", "fields": fields},
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
         assert "fields" not in payload
+
+    def test_option_count_over_cap_degrades_whole_form(self, middleware):
+        options = [f"option-{i}" for i in range(25)]
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "category", "type": "select", "options": options}],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
+        assert "fields" not in payload
+
+    def test_overlong_field_text_degrades_whole_form(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [{"name": "amount", "label": "x" * 201, "type": "number"}],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
+        assert "fields" not in payload
+
+    def test_top_level_options_are_trimmed_and_blank_dropped(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Which env?",
+                "clarification_type": "approach_choice",
+                "options": [" dev ", "", "prod", "dev"],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["options"] == [
+            {"id": "option-1", "label": "dev", "value": "dev"},
+            {"id": "option-2", "label": "prod", "value": "prod"},
+        ]
 
     def test_field_placeholder_is_preserved(self, middleware):
         payload = middleware._build_human_input_payload(

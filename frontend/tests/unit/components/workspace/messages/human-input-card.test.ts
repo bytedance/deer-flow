@@ -126,6 +126,33 @@ describe("HumanInputCard", () => {
     expect(html.split("DesignPriority").length - 1).toBe(1);
   });
 
+  it("associates form labels with controls and marks required fields", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Please provide the expense details.",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          { name: "amount", label: "Amount", type: "number", required: true },
+          { name: "note", label: "Note", type: "textarea", required: false },
+        ],
+      },
+    });
+
+    // Every visible label is linked to its control via htmlFor/id.
+    const htmlForIds = [...html.matchAll(/<label[^>]*for="([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(htmlForIds.length).toBe(2);
+    for (const id of htmlForIds) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('aria-required="true"');
+  });
+
   it("findMissingRequiredFields flags empty required values only", () => {
     const fields = [
       {

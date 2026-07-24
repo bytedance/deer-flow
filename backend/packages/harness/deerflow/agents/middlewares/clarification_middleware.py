@@ -20,6 +20,34 @@ logger = logging.getLogger(__name__)
 FORM_FIELD_TYPES = frozenset({"text", "textarea", "number", "select", "multi_select", "checkbox", "date"})
 _OPTION_FIELD_TYPES = frozenset({"select", "multi_select"})
 
+# Field names that collide with JavaScript Object.prototype properties. The
+# frontend stores form values in a plain object keyed by field name, so these
+# would read inherited prototype members instead of user input.
+_RESERVED_FIELD_NAMES = frozenset(
+    {
+        "__proto__",
+        "constructor",
+        "prototype",
+        "toString",
+        "toLocaleString",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "__defineGetter__",
+        "__defineSetter__",
+        "__lookupGetter__",
+        "__lookupSetter__",
+    }
+)
+
+# Hard caps so a runaway model cannot publish an unbounded form. Exceeding a
+# cap is a structural error: the whole form degrades to the legacy modes
+# instead of silently truncating business fields.
+MAX_FORM_FIELDS = 16
+MAX_FIELD_OPTIONS = 24
+MAX_FIELD_TEXT_CHARS = 200
+
 
 class ClarificationMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -67,7 +95,18 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if not isinstance(options, list):
             options = [options]
 
-        return [str(option) for option in options]
+        # Trim, drop blanks, and dedupe (order-preserving): the frontend parser
+        # rejects the whole payload on blank option labels, so they must never
+        # be emitted.
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for option in options:
+            text = str(option).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return normalized
 
     @staticmethod
     def _normalize_bool(raw: Any) -> bool:
@@ -81,8 +120,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     def _normalize_fields(self, raw_fields: Any) -> list[dict[str, Any]]:
         """Normalize tool-provided form fields into the validated v2 field schema.
 
-        Invalid entries are dropped rather than failing the whole card: a
-        partially-usable form still beats degrading to free text.
+        Validation is atomic: any structurally broken entry (non-dict, bad or
+        reserved or duplicate name, over-cap counts/lengths) invalidates the
+        whole form so the card can never render "complete" while silently
+        missing a required business field. Benign issues keep their local
+        degradation: unknown types and option-less selects become ``text``.
         """
         fields = raw_fields
         if isinstance(fields, str):
@@ -92,28 +134,34 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 return []
         if not isinstance(fields, list):
             return []
+        if len(fields) > MAX_FORM_FIELDS:
+            return []
 
         normalized: list[dict[str, Any]] = []
         seen_names: set[str] = set()
         for entry in fields:
             if not isinstance(entry, dict):
-                continue
+                return []
             raw_name = entry.get("name")
             if not isinstance(raw_name, str) or not raw_name.strip():
-                continue
+                return []
             name = raw_name.strip()
-            if name in seen_names:
-                continue
+            if name in _RESERVED_FIELD_NAMES or name in seen_names or len(name) > MAX_FIELD_TEXT_CHARS:
+                return []
             seen_names.add(name)
 
             raw_label = entry.get("label")
             label = raw_label.strip() if isinstance(raw_label, str) and raw_label.strip() else name
+            if len(label) > MAX_FIELD_TEXT_CHARS:
+                return []
 
             field_type = entry.get("type")
             if field_type not in FORM_FIELD_TYPES:
                 field_type = "text"
 
             options = self._normalize_options(entry.get("options")) if field_type in _OPTION_FIELD_TYPES else []
+            if len(options) > MAX_FIELD_OPTIONS or any(len(option) > MAX_FIELD_TEXT_CHARS for option in options):
+                return []
             if field_type in _OPTION_FIELD_TYPES and not options:
                 field_type = "text"
 
@@ -134,6 +182,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 ]
             placeholder = entry.get("placeholder")
             if isinstance(placeholder, str) and placeholder.strip():
+                if len(placeholder.strip()) > MAX_FIELD_TEXT_CHARS:
+                    return []
                 field["placeholder"] = placeholder.strip()
             normalized.append(field)
 

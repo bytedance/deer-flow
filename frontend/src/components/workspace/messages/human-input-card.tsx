@@ -22,8 +22,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputFormSummary,
+  buildInitialHumanInputFormValues,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
+  readHumanInputFormValue,
   type HumanInputField,
   type HumanInputFormValue,
   type HumanInputOption,
@@ -65,8 +67,12 @@ export function findMissingRequiredFields(
   fields: HumanInputField[],
   values: Record<string, HumanInputFormValue>,
 ) {
+  // Own-property reads only: field names like "toString" must never resolve
+  // to inherited Object.prototype members and satisfy required validation.
   return fields.filter(
-    (field) => field.required && isEmptyFieldValue(values[field.name]),
+    (field) =>
+      field.required &&
+      isEmptyFieldValue(readHumanInputFormValue(values, field.name)),
   );
 }
 
@@ -75,24 +81,39 @@ function FormFieldInput({
   value,
   disabled,
   selectPlaceholder,
+  controlId,
+  labelId,
+  invalid,
+  errorId,
   onChange,
 }: {
   field: HumanInputField;
   value: HumanInputFormValue | undefined;
   disabled: boolean;
   selectPlaceholder: string;
+  controlId: string;
+  labelId: string;
+  invalid: boolean;
+  errorId?: string;
   onChange: (value: HumanInputFormValue) => void;
 }) {
   const stringValue = typeof value === "string" ? value : "";
+  const ariaProps = {
+    "aria-required": field.required || undefined,
+    "aria-invalid": invalid || undefined,
+    "aria-describedby": invalid ? errorId : undefined,
+  };
 
   if (field.type === "textarea") {
     return (
       <Textarea
+        id={controlId}
         className="min-h-20 resize-y text-sm"
         disabled={disabled}
         placeholder={field.placeholder}
         value={stringValue}
         onChange={(event) => onChange(event.target.value)}
+        {...ariaProps}
       />
     );
   }
@@ -104,7 +125,12 @@ function FormFieldInput({
         value={stringValue === "" ? undefined : stringValue}
         onValueChange={(next) => onChange(next)}
       >
-        <SelectTrigger className="w-full">
+        <SelectTrigger
+          id={controlId}
+          className="w-full"
+          aria-labelledby={labelId}
+          {...ariaProps}
+        >
           <SelectValue placeholder={field.placeholder ?? selectPlaceholder} />
         </SelectTrigger>
         <SelectContent>
@@ -121,7 +147,14 @@ function FormFieldInput({
   if (field.type === "multi_select") {
     const selectedValues = Array.isArray(value) ? value : [];
     return (
-      <div className="flex flex-wrap gap-2">
+      <div
+        id={controlId}
+        className="flex flex-wrap gap-2"
+        role="group"
+        aria-labelledby={labelId}
+        aria-invalid={invalid || undefined}
+        aria-describedby={invalid ? errorId : undefined}
+      >
         {(field.options ?? []).map((option) => {
           const selected = selectedValues.includes(option.value);
           return (
@@ -163,6 +196,7 @@ function FormFieldInput({
 
   return (
     <Input
+      id={controlId}
       className="text-sm"
       disabled={disabled}
       placeholder={field.placeholder}
@@ -175,6 +209,7 @@ function FormFieldInput({
       }
       value={stringValue}
       onChange={(event) => onChange(event.target.value)}
+      {...ariaProps}
     />
   );
 }
@@ -200,9 +235,14 @@ export function HumanInputCard({
   const [isComposing, setIsComposing] = useState(false);
   const [formValues, setFormValues] = useState<
     Record<string, HumanInputFormValue>
-  >({});
+  >(() => buildInitialHumanInputFormValues(request.fields ?? []));
+  const [invalidFieldNames, setInvalidFieldNames] = useState<Set<string>>(
+    () => new Set(),
+  );
   const titleId = useId();
   const textInputId = useId();
+  const formFieldIdBase = useId();
+  const formErrorId = `${formFieldIdBase}-error`;
   const isForm = request.input_mode === "form";
   const allowText =
     request.input_mode === "free_text" ||
@@ -237,12 +277,22 @@ export function HumanInputCard({
 
   const handleFormValueChange = (name: string, value: HumanInputFormValue) => {
     setError("");
+    setInvalidFieldNames((previous) => {
+      if (!previous.has(name)) {
+        return previous;
+      }
+      const next = new Set(previous);
+      next.delete(name);
+      return next;
+    });
     setFormValues((previous) => ({ ...previous, [name]: value }));
   };
 
   const handleFormSubmit = (event: { preventDefault(): void }) => {
     event.preventDefault();
-    if (findMissingRequiredFields(fields, formValues).length > 0) {
+    const missing = findMissingRequiredFields(fields, formValues);
+    if (missing.length > 0) {
+      setInvalidFieldNames(new Set(missing.map((field) => field.name)));
       setError(t.humanInput.requiredError);
       return;
     }
@@ -281,7 +331,9 @@ export function HumanInputCard({
   const submitFooter = (
     <div className="flex min-h-9 flex-wrap items-center justify-between gap-2">
       {error ? (
-        <p className="text-destructive text-sm">{error}</p>
+        <p className="text-destructive text-sm" id={formErrorId} role="alert">
+          {error}
+        </p>
       ) : answeredResponse ? (
         <p className="text-muted-foreground text-sm" aria-live="polite">
           {t.humanInput.answeredValue(answeredResponse.value)}
@@ -353,44 +405,59 @@ export function HumanInputCard({
 
           {isForm ? (
             <form className="space-y-4" onSubmit={handleFormSubmit}>
-              {fields.map((field) =>
-                field.type === "checkbox" ? (
-                  <Button
-                    key={field.name}
-                    className="flex w-fit items-center justify-start font-normal"
-                    aria-pressed={formValues[field.name] === true}
-                    disabled={isDisabled}
-                    type="button"
-                    variant="ghost"
-                    onClick={() =>
-                      handleFormValueChange(
-                        field.name,
-                        formValues[field.name] !== true,
-                      )
-                    }
-                  >
-                    <span
-                      className={cn(
-                        "border-border flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                        formValues[field.name] === true &&
-                          "border-primary bg-primary text-primary-foreground",
-                      )}
-                      aria-hidden
+              {fields.map((field, index) => {
+                const controlId = `${formFieldIdBase}-${index}`;
+                const labelId = `${controlId}-label`;
+                const fieldValue = readHumanInputFormValue(
+                  formValues,
+                  field.name,
+                );
+                const invalid = invalidFieldNames.has(field.name);
+
+                if (field.type === "checkbox") {
+                  const checked = fieldValue === true;
+                  return (
+                    <Button
+                      key={field.name}
+                      id={controlId}
+                      className="flex w-fit items-center justify-start font-normal"
+                      aria-pressed={checked}
+                      aria-invalid={invalid || undefined}
+                      aria-describedby={invalid ? formErrorId : undefined}
+                      disabled={isDisabled}
+                      type="button"
+                      variant="ghost"
+                      onClick={() =>
+                        handleFormValueChange(field.name, !checked)
+                      }
                     >
-                      {formValues[field.name] === true ? (
-                        <CheckIcon className="size-3" />
-                      ) : null}
-                    </span>
-                    {field.label}
-                    {field.required ? (
-                      <span className="text-destructive" aria-hidden>
-                        *
+                      <span
+                        className={cn(
+                          "border-border flex size-4 shrink-0 items-center justify-center rounded-sm border",
+                          checked &&
+                            "border-primary bg-primary text-primary-foreground",
+                        )}
+                        aria-hidden
+                      >
+                        {checked ? <CheckIcon className="size-3" /> : null}
                       </span>
-                    ) : null}
-                  </Button>
-                ) : (
+                      {field.label}
+                      {field.required ? (
+                        <span className="text-destructive" aria-hidden>
+                          *
+                        </span>
+                      ) : null}
+                    </Button>
+                  );
+                }
+
+                return (
                   <div key={field.name} className="space-y-1.5">
-                    <label className="text-sm leading-5 font-medium">
+                    <label
+                      className="text-sm leading-5 font-medium"
+                      htmlFor={controlId}
+                      id={labelId}
+                    >
                       {field.label}
                       {field.required ? (
                         <span className="text-destructive ml-0.5" aria-hidden>
@@ -399,17 +466,21 @@ export function HumanInputCard({
                       ) : null}
                     </label>
                     <FormFieldInput
+                      controlId={controlId}
                       disabled={isDisabled}
+                      errorId={formErrorId}
                       field={field}
+                      invalid={invalid}
+                      labelId={labelId}
                       selectPlaceholder={t.humanInput.selectPlaceholder}
-                      value={formValues[field.name]}
+                      value={fieldValue}
                       onChange={(value) =>
                         handleFormValueChange(field.name, value)
                       }
                     />
                   </div>
-                ),
-              )}
+                );
+              })}
               {submitFooter}
             </form>
           ) : null}

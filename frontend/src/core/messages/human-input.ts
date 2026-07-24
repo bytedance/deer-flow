@@ -104,6 +104,49 @@ function isHumanInputMode(value: unknown): value is HumanInputMode {
   );
 }
 
+// Field names that collide with JavaScript Object.prototype members. Form
+// values live in a plain object keyed by field name, so these would resolve
+// to inherited properties instead of user input.
+const RESERVED_FIELD_NAMES = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+]);
+
+export function readHumanInputFormValue(
+  values: Record<string, HumanInputFormValue>,
+  name: string,
+): HumanInputFormValue | undefined {
+  return Object.prototype.hasOwnProperty.call(values, name)
+    ? values[name]
+    : undefined;
+}
+
+export function buildInitialHumanInputFormValues(
+  fields: HumanInputField[],
+): Record<string, HumanInputFormValue> {
+  // Checkboxes are booleans that default to an explicit "no" — without the
+  // seed an untouched checkbox would be indistinguishable from an unanswered
+  // field and silently vanish from the submitted summary.
+  const values: Record<string, HumanInputFormValue> = {};
+  for (const field of fields) {
+    if (field.type === "checkbox") {
+      values[field.name] = false;
+    }
+  }
+  return values;
+}
+
 function isHumanInputFieldType(value: unknown): value is HumanInputFieldType {
   return (
     value === "text" ||
@@ -167,6 +210,7 @@ function parseFields(value: unknown): HumanInputField[] | undefined {
     const required = field.required;
     if (
       !isNonEmptyString(name) ||
+      RESERVED_FIELD_NAMES.has(name) ||
       !isNonEmptyString(label) ||
       !isHumanInputFieldType(type) ||
       (required !== undefined && typeof required !== "boolean")
@@ -336,20 +380,38 @@ export function extractHumanInputResponse(
   return parseHumanInputResponse(additionalKwargs.human_input_response);
 }
 
+function extractPlainMessageText(message: Message): string {
+  const content: unknown = message.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        isRecord(part) && part.type === "text" && typeof part.text === "string"
+          ? part.text
+          : "",
+      )
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
 export function deriveHumanInputThreadState(
   messages: Message[],
   isVisibleMessage: (message: Message) => boolean = (message) =>
     message.additional_kwargs?.hide_from_ui !== true,
 ): HumanInputThreadState {
   const answeredResponses = new Map<string, HumanInputResponse>();
-  const seenRequestIds = new Set<string>();
+  const seenRequests = new Map<string, HumanInputRequest>();
   const requestOrder: string[] = [];
 
   for (const message of messages) {
     if (isVisibleMessage(message)) {
       const request = extractHumanInputRequest(message);
       if (request) {
-        seenRequestIds.add(request.request_id);
+        seenRequests.set(request.request_id, request);
         requestOrder.push(request.request_id);
       }
     }
@@ -357,10 +419,33 @@ export function deriveHumanInputThreadState(
     const response = extractHumanInputResponse(message);
     if (
       response &&
-      seenRequestIds.has(response.request_id) &&
+      seenRequests.has(response.request_id) &&
       !answeredResponses.has(response.request_id)
     ) {
       answeredResponses.set(response.request_id, response);
+      continue;
+    }
+
+    // Legacy-frontend fallback: a v1-only frontend renders a v2 request as
+    // plain text and the user answers through the normal composer, so the
+    // reply carries no human_input_response metadata. Treat any visible plain
+    // human message as closing every request opened before it — otherwise an
+    // upgraded frontend would see the request as still open and lock the
+    // composer forever.
+    if (message.type === "human" && isVisibleMessage(message) && !response) {
+      for (const [requestId, request] of seenRequests) {
+        if (answeredResponses.has(requestId)) {
+          continue;
+        }
+        answeredResponses.set(requestId, {
+          version: 1,
+          kind: "human_input_response",
+          source: request.source,
+          request_id: requestId,
+          response_kind: "text",
+          value: extractPlainMessageText(message) || "-",
+        });
+      }
     }
   }
 
@@ -427,7 +512,7 @@ export function buildHumanInputFormSummary(
   const fields = request.fields ?? [];
   const parts: string[] = [];
   for (const field of fields) {
-    const value = values[field.name];
+    const value = readHumanInputFormValue(values, field.name);
     if (isEmptyFormValue(value)) {
       continue;
     }
