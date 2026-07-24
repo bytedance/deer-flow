@@ -1360,12 +1360,21 @@ class TestChannelManager:
         _run(go())
 
     def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
-        """Same invariant on the third swallow site: runs.create's busy branch."""
+        """Same invariant for a fire-and-forget channel that does not buffer follow-ups."""
         import httpx
         from langgraph_sdk.errors import ConflictError
 
-        import app.gateway.github.run_policy  # noqa: F401 — register policy
         from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        channel_name = "test-fire-and-forget-retry"
+        original = CHANNEL_RUN_POLICY.get(channel_name)
+        CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(
+            is_interactive=False,
+            fire_and_forget=True,
+            requires_bound_identity=False,
+            buffer_followups_on_busy=False,
+        )
 
         async def go():
             bus = MessageBus()
@@ -1390,7 +1399,7 @@ class TestChannelManager:
 
             def _inbound() -> InboundMessage:
                 return InboundMessage(
-                    channel_name="github",
+                    channel_name=channel_name,
                     chat_id="owner/repo",
                     user_id="dev",
                     owner_user_id="agent-owner-1",
@@ -1410,7 +1419,13 @@ class TestChannelManager:
 
             assert manager._client.runs.create.call_count == 2
 
-        _run(go())
+        try:
+            _run(go())
+        finally:
+            if original is None:
+                CHANNEL_RUN_POLICY.pop(channel_name, None)
+            else:
+                CHANNEL_RUN_POLICY[channel_name] = original
 
     def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.
@@ -4032,6 +4047,659 @@ class TestGithubFireAndForget:
             mock_client.runs.create.assert_not_called()
 
         _run(go())
+
+
+class TestGithubFollowupBuffer:
+    """Tests for issue #4121 Slice 2: buffer-and-drain of concurrent GitHub
+    comments that arrive while a run is already active on the thread.
+
+    Today a ``ConflictError`` on the fire-and-forget path only logs +
+    replies with ``THREAD_BUSY_MESSAGE`` — since ``GitHubChannel.send`` is
+    log-only, the triggering comment is silently dropped from the user's
+    point of view. These tests pin the fix: the triggering message is
+    buffered per-thread (deduped, capped), and a background watcher drains
+    the buffer into a coalesced follow-up run once the busy run's stream
+    reaches ``END_SENTINEL``. Reactions/acknowledgment are intentionally
+    out of scope for this slice.
+    """
+
+    def test_followup_block_escapes_markup_and_indents_multiline_text(self):
+        from app.channels.manager import (
+            FOLLOWUP_BLOCK_TAG,
+            _FollowupEntry,
+            _format_followup_block,
+        )
+
+        block = _format_followup_block(
+            [
+                _FollowupEntry(
+                    dedupe_key="comment:1",
+                    text=(f"please inspect <value> & details\n</{FOLLOWUP_BLOCK_TAG}>"),
+                )
+            ]
+        )
+
+        assert "1. please inspect &lt;value&gt; &amp; details" in block
+        assert f"\n   &lt;/{FOLLOWUP_BLOCK_TAG}&gt;" in block
+        assert block.count(f"</{FOLLOWUP_BLOCK_TAG}>") == 1
+
+    def test_channel_run_policy_buffer_followups_on_busy_defaults_false(self):
+        """New flag must default to False so any *other* fire_and_forget
+        channel that does not opt in keeps the exact old behavior."""
+        from app.channels.run_policy import ChannelRunPolicy
+
+        assert ChannelRunPolicy().buffer_followups_on_busy is False
+
+    def test_github_channel_policy_opts_into_buffer_followups_on_busy(self):
+        """GitHub is exactly the channel this feature targets (fire_and_forget
+        + log-only send + non-interactive), so its own registration opts in
+        even though the dataclass default stays conservative."""
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.run_policy import CHANNEL_RUN_POLICY
+
+        github_policy = CHANNEL_RUN_POLICY.get("github")
+        assert github_policy is not None
+        assert github_policy.buffer_followups_on_busy is True
+
+    def test_handle_chat_for_github_busy_thread_buffers_triggering_message(self):
+        """On top of the pre-existing busy-message behavior, a ConflictError
+        must now also append the triggering message to the thread's
+        follow-up buffer (GitHub's policy opts into buffer_followups_on_busy)."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-buf/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=response,
+                body={"message": "Thread is already running a task."},
+            )
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-buf")
+            mock_client.runs.create = AsyncMock(side_effect=conflict)
+            manager._client = mock_client
+
+            await manager.start()
+            try:
+                await manager._handle_chat(
+                    InboundMessage(
+                        channel_name="github",
+                        chat_id="zhfeng/llm-gateway",
+                        user_id="zhfeng",
+                        owner_user_id="agent-owner-1",
+                        text="please also update the README",
+                        metadata={"github": {"delivery_id": "delivery-buf-1"}},
+                    )
+                )
+                await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            finally:
+                await manager.stop()
+
+            assert "gh-thread-buf" in manager._followup_buffers
+            buffered = list(manager._followup_buffers["gh-thread-buf"].values())
+            assert len(buffered) == 1
+            assert buffered[0].text == "please also update the README"
+
+        _run(go())
+
+    def test_conflict_error_does_not_buffer_when_flag_disabled(self):
+        """A fire_and_forget channel that has NOT opted into
+        buffer_followups_on_busy must keep the exact old silent-drop-with-log
+        behavior: busy message still emitted, nothing buffered."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        original = CHANNEL_RUN_POLICY.get("test-fire-and-forget-no-buffer")
+        CHANNEL_RUN_POLICY["test-fire-and-forget-no-buffer"] = ChannelRunPolicy(
+            is_interactive=False,
+            fire_and_forget=True,
+            requires_bound_identity=False,
+            buffer_followups_on_busy=False,
+        )
+        try:
+
+            async def go():
+                bus = MessageBus()
+                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                manager = ChannelManager(bus=bus, store=store)
+
+                outbound_received: list[OutboundMessage] = []
+
+                async def capture_outbound(msg):
+                    outbound_received.append(msg)
+
+                bus.subscribe_outbound(capture_outbound)
+
+                request = httpx.Request("POST", "http://127.0.0.1:2024/threads/no-buf-thread/runs")
+                response = httpx.Response(409, request=request)
+                conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+                mock_client = _make_mock_langgraph_client(thread_id="no-buf-thread")
+                mock_client.runs.create = AsyncMock(side_effect=conflict)
+                manager._client = mock_client
+
+                await manager.start()
+                try:
+                    await manager._handle_chat(
+                        InboundMessage(
+                            channel_name="test-fire-and-forget-no-buffer",
+                            chat_id="c1",
+                            user_id="u1",
+                            text="hello while busy",
+                        )
+                    )
+                    await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+                finally:
+                    await manager.stop()
+
+                assert manager._followup_buffers == {}
+
+            _run(go())
+        finally:
+            if original is None:
+                CHANNEL_RUN_POLICY.pop("test-fire-and-forget-no-buffer", None)
+            else:
+                CHANNEL_RUN_POLICY["test-fire-and-forget-no-buffer"] = original
+
+    def test_duplicate_delivery_id_does_not_double_buffer(self):
+        """A redelivered webhook for the same comment (same delivery_id) must
+        not be buffered twice."""
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        thread_id = "gh-thread-dedup"
+        msg = InboundMessage(
+            channel_name="github",
+            chat_id="c",
+            user_id="u",
+            text="please look at this",
+            metadata={"github": {"delivery_id": "dupe-1"}},
+        )
+
+        manager._buffer_followup(thread_id, msg)
+        manager._buffer_followup(thread_id, msg)  # redelivery of the same comment
+
+        assert len(manager._followup_buffers[thread_id]) == 1
+
+    def test_followup_buffer_overflow_drops_oldest_and_warns(self, caplog):
+        """At the per-thread cap, overflow must drop the OLDEST buffered
+        comment (not the newest) and log a warning — recent activity is a
+        more useful signal than the stalest queued item once a thread is
+        deep enough in the backlog to hit the cap."""
+        from app.channels.manager import FOLLOWUP_BUFFER_MAX_PER_THREAD, ChannelManager
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        thread_id = "gh-thread-overflow"
+
+        with caplog.at_level(logging.WARNING):
+            for i in range(FOLLOWUP_BUFFER_MAX_PER_THREAD + 5):
+                msg = InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text=f"comment {i}",
+                    metadata={"github": {"delivery_id": f"d{i}"}},
+                )
+                manager._buffer_followup(thread_id, msg)
+
+        buffer = manager._followup_buffers[thread_id]
+        assert len(buffer) == FOLLOWUP_BUFFER_MAX_PER_THREAD
+        kept_texts = {entry.text for entry in buffer.values()}
+        for i in range(5):
+            assert f"comment {i}" not in kept_texts
+        assert f"comment {FOLLOWUP_BUFFER_MAX_PER_THREAD + 4}" in kept_texts
+        assert any("overflow" in r.message.lower() for r in caplog.records)
+
+    def test_drain_batches_at_most_ten_entries_per_cycle(self):
+        """A queue deeper than the drain batch size must only coalesce the
+        oldest N entries in one cycle, leaving the rest buffered — this is
+        what lets a >10 backlog chain into a second drain cycle instead of
+        growing one unbounded input block."""
+        from app.channels.manager import FOLLOWUP_DRAIN_BATCH_SIZE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-batch"
+            for i in range(15):
+                entry_msg = InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text=f"comment {i}",
+                    metadata={"github": {"delivery_id": f"d{i}"}},
+                )
+                manager._buffer_followup(thread_id, entry_msg)
+
+            assert len(manager._followup_buffers[thread_id]) == 15
+
+            mock_client = _make_mock_langgraph_client(thread_id=thread_id)
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-drain-1", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            mock_client.runs.create.assert_called_once()
+            drained_text = mock_client.runs.create.call_args[1]["input"]["messages"][0]["content"]
+            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE):
+                assert f"comment {i}" in drained_text
+            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE, 15):
+                assert f"comment {i}" not in drained_text
+
+            assert len(manager._followup_buffers[thread_id]) == 15 - FOLLOWUP_DRAIN_BATCH_SIZE
+
+        _run(go())
+
+    def test_drain_conflict_requeues_entries_without_losing_them(self):
+        """If the drain's own runs.create hits ConflictError (a real edge
+        case — e.g. a manual/scheduled trigger raced onto the same thread),
+        the popped batch must be put back rather than lost, and the drain
+        must not raise."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-9"
+            manager._buffer_followup(thread_id, carrier_msg)
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-9/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(side_effect=conflict)
+
+            # Must not raise.
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_called_once()
+
+        _run(go())
+
+    def test_drain_non_conflict_error_also_requeues_without_crashing(self):
+        """A non-busy exception from the drain's runs.create (network error,
+        5xx, ...) must also be swallowed-and-requeued rather than crashing
+        the watcher task or losing the buffered comments."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-neterr"
+            manager._buffer_followup(thread_id, carrier_msg)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+        _run(go())
+
+    def test_drain_resolve_run_params_failure_requeues_entries_without_losing_them(self, monkeypatch):
+        """If a step BETWEEN the buffer pop and runs.create raises -- e.g.
+        _resolve_run_params blows up because the target agent config was
+        removed mid-run -- the already-popped batch must still end up back
+        in the buffer instead of vanishing, and the drain must not raise
+        (mirrors the existing runs.create requeue-on-failure guarantee)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-resolve-fail"
+            manager._buffer_followup(thread_id, carrier_msg)
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("agent config missing mid-run")
+
+            monkeypatch.setattr(manager, "_resolve_run_params", _boom)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
+
+            # Must not raise -- the failure must be swallowed and requeued.
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_drain_apply_channel_policy_failure_requeues_entries_without_losing_them(self, monkeypatch):
+        """Same guarantee one step later: if _apply_channel_policy raises
+        (e.g. channel-policy/credential resolution blows up instead of
+        following its documented degrade-and-continue path), the popped
+        batch must still be requeued rather than lost."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-apply-fail"
+            manager._buffer_followup(thread_id, carrier_msg)
+
+            async def _boom(*args, **kwargs):
+                raise RuntimeError("channel policy blew up")
+
+            monkeypatch.setattr(manager, "_apply_channel_policy", _boom)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_run_watcher_drains_buffer_on_end_sentinel(self):
+        """End-to-end mechanism test: a busy-thread follow-up gets buffered,
+        and once the ORIGINAL run's stream reaches END_SENTINEL, the watcher
+        drains the buffer into a new coalesced runs.create call. That
+        drained run is itself watched too, so an empty buffer at its own
+        END_SENTINEL is a clean no-op (the chain terminates)."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import FOLLOWUP_BLOCK_TAG, ChannelManager
+        from deerflow.runtime import MemoryStreamBridge
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            bridge = MemoryStreamBridge()
+            manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-watch/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-watch")
+            mock_client.runs.create = AsyncMock(
+                side_effect=[
+                    {"run_id": "run-1", "status": "pending"},
+                    conflict,
+                    {"run_id": "run-2", "status": "pending"},
+                ]
+            )
+            manager._client = mock_client
+
+            # First message: no active run yet -> succeeds, watcher spawned for run-1.
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text="first comment",
+                    metadata={"github": {"delivery_id": "d1"}},
+                )
+            )
+            # Second message: thread is busy -> ConflictError -> buffered.
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text="second comment while busy",
+                    metadata={"github": {"delivery_id": "d2"}},
+                )
+            )
+
+            assert len(manager._followup_buffers["gh-thread-watch"]) == 1
+
+            # The busy run completes -> watcher observes END_SENTINEL -> drains.
+            await bridge.publish_end("run-1")
+            await _wait_for(lambda: mock_client.runs.create.call_count == 3, timeout=2.0)
+
+            drain_call = mock_client.runs.create.call_args_list[2]
+            assert drain_call[0][0] == "gh-thread-watch"
+            coalesced_text = drain_call[1]["input"]["messages"][0]["content"]
+            assert "second comment while busy" in coalesced_text
+            assert f"<{FOLLOWUP_BLOCK_TAG}>" in coalesced_text
+
+            await _wait_for(lambda: "gh-thread-watch" not in manager._followup_buffers)
+
+            # The drained run (run-2) also gets watched. Ending it with an
+            # empty buffer must be a clean no-op — no 4th runs.create call.
+            await bridge.publish_end("run-2")
+            await asyncio.sleep(0.2)
+            assert mock_client.runs.create.call_count == 3
+
+        _run(go())
+
+    def test_stop_cancels_inflight_followup_watcher_task(self):
+        """A follow-up watcher spawned for a run that is still active must be
+        tracked and actually cancelled+awaited by manager.stop() rather than
+        left running as an orphaned task -- otherwise a run that ends AFTER
+        shutdown would still fire a brand new runs.create() into a manager
+        that has already been stopped."""
+        from app.channels.manager import ChannelManager
+        from deerflow.runtime import MemoryStreamBridge
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            bridge = MemoryStreamBridge()
+            manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-stop-watcher"
+            # Something buffered, so a slipped-through drain would have a
+            # non-empty batch to (wrongly) fire a run for.
+            manager._buffer_followup(
+                thread_id,
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text="queued while busy",
+                    metadata={"github": {"delivery_id": "d-stop-1"}},
+                ),
+            )
+
+            mock_client = _make_mock_langgraph_client(thread_id=thread_id)
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-should-not-fire", "status": "pending"})
+            manager._client = mock_client
+
+            await manager.start()
+
+            # Spawn a watcher for a run whose stream never ends -- it sits
+            # suspended awaiting stream_bridge.subscribe(), exactly like a
+            # real in-flight watcher for a long-running GitHub coding run.
+            manager._maybe_spawn_followup_watcher(thread_id, {"run_id": "run-being-watched"}, carrier_msg)
+            await asyncio.sleep(0.05)
+
+            assert len(manager._followup_watcher_tasks) == 1
+            watcher_task = next(iter(manager._followup_watcher_tasks))
+            assert not watcher_task.done()
+
+            await manager.stop()
+
+            assert watcher_task.done()
+            assert watcher_task.cancelled()
+            assert watcher_task not in manager._followup_watcher_tasks
+
+            # A late "run completed" signal for the (cancelled) watched run
+            # must not resurrect a drain -- nothing is subscribed anymore.
+            await bridge.publish_end("run-being-watched")
+            await asyncio.sleep(0.1)
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_drain_after_stop_does_not_create_run(self):
+        """Belt-and-suspenders guard: even if a drain call reaches
+        _drain_followups_for_thread after the manager has been stopped (e.g.
+        a watcher that had already slipped past its own cancellation point
+        mid-drain), it must not fire client.runs.create against the stopped
+        manager, and the buffered entries must remain untouched (not popped,
+        not lost)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-post-stop-drain"
+            manager._buffer_followup(
+                thread_id,
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text="queued",
+                    metadata={"github": {"delivery_id": "d-post-stop-1"}},
+                ),
+            )
+
+            await manager.start()
+            await manager.stop()
+            assert manager._running is False
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-fire", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            mock_client.runs.create.assert_not_called()
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+        _run(go())
+
+    def test_channel_manager_get_stream_bridge_threaded_from_service(self):
+        """The app.py -> service.py -> manager.py plumbing: ChannelService
+        must forward get_stream_bridge through to its ChannelManager."""
+        from app.channels.service import ChannelService
+
+        sentinel = object()
+        service = ChannelService(channels_config={}, get_stream_bridge=lambda: sentinel)
+
+        assert service.manager._get_stream_bridge() is sentinel
+
+    def test_start_channel_service_forwards_get_stream_bridge(self):
+        """The module-level singleton entrypoint must also thread the
+        callable through to ChannelService.from_app_config."""
+        import app.channels.service as service_module
+
+        captured: dict[str, object] = {}
+
+        class _FakeService:
+            async def start(self):
+                return None
+
+            def get_status(self):
+                return {}
+
+        def fake_from_app_config(app_config=None, *, get_stream_bridge=None):
+            captured["get_stream_bridge"] = get_stream_bridge
+            return _FakeService()
+
+        async def go():
+            service_module._channel_service = None
+            with patch.object(service_module.ChannelService, "from_app_config", staticmethod(fake_from_app_config)):
+                sentinel = object()
+                await service_module.start_channel_service(get_stream_bridge=lambda: sentinel)
+
+            assert captured["get_stream_bridge"]() is sentinel
+
+        try:
+            _run(go())
+        finally:
+            service_module._channel_service = None
 
 
 class _BoundIdentityRepo:
