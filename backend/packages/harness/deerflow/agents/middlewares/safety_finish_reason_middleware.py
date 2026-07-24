@@ -48,11 +48,13 @@ and Loop then accounts against the cleaned message.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.safety_termination_detectors import (
@@ -62,6 +64,7 @@ from deerflow.agents.middlewares.safety_termination_detectors import (
 )
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.runtime.events.catalog import MIDDLEWARE_SAFETY_TERMINATION_TAG
+from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -82,6 +85,15 @@ _USER_FACING_MESSAGE = (
 # the message is rewritten only so it is not persisted empty (see #4393), so
 # it must not claim any tool calls were suppressed.
 _USER_FACING_EMPTY_MESSAGE = "The model provider stopped this response with a safety-related signal ({reason_field}={reason_value!r}, detector={detector!r}) and returned no content. Please rephrase your request or start a new conversation."
+
+
+@dataclass(frozen=True)
+class _SafetyIntervention:
+    update: dict
+    termination: SafetyTermination
+    suppressed_names: list[str]
+    message: AIMessage
+    tool_calls: list[dict]
 
 
 class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
@@ -190,6 +202,25 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
     # ----- observability ---------------------------------------------------
 
+    @staticmethod
+    def _build_event_payload(
+        termination: SafetyTermination,
+        suppressed_names: list[str],
+        runtime: Runtime,
+    ) -> dict:
+        thread_id = None
+        if runtime is not None and getattr(runtime, "context", None):
+            thread_id = runtime.context.get("thread_id") if isinstance(runtime.context, dict) else None
+        return {
+            "type": "safety_termination",
+            "detector": termination.detector,
+            "reason_field": termination.reason_field,
+            "reason_value": termination.reason_value,
+            "suppressed_tool_call_count": len(suppressed_names),
+            "suppressed_tool_call_names": suppressed_names,
+            "thread_id": thread_id,
+        }
+
     def _emit_event(
         self,
         termination: SafetyTermination,
@@ -204,28 +235,41 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
+        except GraphBubbleUp:
+            raise
         except Exception:  # noqa: BLE001
             logger.debug("get_stream_writer unavailable; skipping safety_termination event", exc_info=True)
             return
 
-        thread_id = None
-        if runtime is not None and getattr(runtime, "context", None):
-            thread_id = runtime.context.get("thread_id") if isinstance(runtime.context, dict) else None
-
         try:
-            writer(
-                {
-                    "type": "safety_termination",
-                    "detector": termination.detector,
-                    "reason_field": termination.reason_field,
-                    "reason_value": termination.reason_value,
-                    "suppressed_tool_call_count": len(suppressed_names),
-                    "suppressed_tool_call_names": suppressed_names,
-                    "thread_id": thread_id,
-                }
-            )
+            emit_custom_event(self._build_event_payload(termination, suppressed_names, runtime), writer=writer)
+        except GraphBubbleUp:
+            raise
         except Exception:  # noqa: BLE001
             logger.debug("Failed to emit safety_termination stream event", exc_info=True)
+
+    async def _aemit_event(
+        self,
+        termination: SafetyTermination,
+        suppressed_names: list[str],
+        runtime: Runtime,
+    ) -> None:
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+        except GraphBubbleUp:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.debug("get_stream_writer unavailable; skipping async safety_termination event", exc_info=True)
+            return
+
+        try:
+            await aemit_custom_event(self._build_event_payload(termination, suppressed_names, runtime), writer=writer)
+        except GraphBubbleUp:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to emit async safety_termination stream event", exc_info=True)
 
     def _record_audit_event(
         self,
@@ -286,7 +330,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
     # ----- main apply ------------------------------------------------------
 
-    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+    def _prepare_intervention(self, state: AgentState, runtime: Runtime) -> _SafetyIntervention | None:
         messages = state.get("messages", [])
         if not messages:
             return None
@@ -348,10 +392,23 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             },
         )
 
-        self._emit_event(termination, [tc.get("name") or "unknown" for tc in tool_calls], runtime)
-        self._record_audit_event(termination, last, list(tool_calls), runtime)
+        tool_calls = list(tool_calls)
+        return _SafetyIntervention(
+            update={"messages": [patched]},
+            termination=termination,
+            suppressed_names=[tc.get("name") or "unknown" for tc in tool_calls],
+            message=last,
+            tool_calls=tool_calls,
+        )
 
-        return {"messages": [patched]}
+    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+        intervention = self._prepare_intervention(state, runtime)
+        if intervention is None:
+            return None
+
+        self._emit_event(intervention.termination, intervention.suppressed_names, runtime)
+        self._record_audit_event(intervention.termination, intervention.message, intervention.tool_calls, runtime)
+        return intervention.update
 
     # ----- hooks -----------------------------------------------------------
 
@@ -361,4 +418,10 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state, runtime)
+        intervention = self._prepare_intervention(state, runtime)
+        if intervention is None:
+            return None
+
+        await self._aemit_event(intervention.termination, intervention.suppressed_names, runtime)
+        self._record_audit_event(intervention.termination, intervention.message, intervention.tool_calls, runtime)
+        return intervention.update

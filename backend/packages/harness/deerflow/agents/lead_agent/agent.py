@@ -46,6 +46,7 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
@@ -273,6 +274,7 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    authorization_provider=None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -293,12 +295,22 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        authorization_provider: Provider already resolved for assembly-time
+            filtering. Reused by the execution-time authorization middleware.
 
     Returns:
         List of middleware instances.
     """
     resolved_app_config = app_config or get_app_config()
-    middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+    runtime_middleware_kwargs = {
+        "app_config": resolved_app_config,
+        "lazy_init": True,
+    }
+    if authorization_provider is not None:
+        runtime_middleware_kwargs["authorization_provider"] = authorization_provider
+    if authorization_provider is not None and deferred_setup is not None:
+        runtime_middleware_kwargs["deferred_setup"] = deferred_setup
+    middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
@@ -622,16 +634,26 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         configured_tools = raw_tools
         if non_interactive:
             configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        authorization_candidates = [*configured_tools]
+        if skill_setup.describe_skill_tool:
+            authorization_candidates.append(skill_setup.describe_skill_tool)
+        if should_use_memory_tools(resolved_app_config.memory):
+            _append_memory_tools_without_name_conflicts(authorization_candidates)
+        configured_tool_ids = {id(tool) for tool in configured_tools}
+        authorized_tools, _authz_provider = apply_tool_authorization(
+            authorization_candidates,
+            context=cfg,
+            app_config=resolved_app_config,
+        )
+        configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+        late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
         final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+        final_tools.extend(late_tools)
         mcp_routing_middleware = build_mcp_routing_middleware(
             final_tools,
             setup,
             top_k=resolved_app_config.tool_search.auto_promote_top_k,
         )
-        if skill_setup.describe_skill_tool:
-            final_tools.append(skill_setup.describe_skill_tool)
-        if should_use_memory_tools(resolved_app_config.memory):
-            _append_memory_tools_without_name_conflicts(final_tools)
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
@@ -644,6 +666,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                     deferred_setup=setup,
                     mcp_routing_middleware=mcp_routing_middleware,
                     user_id=resolved_user_id,
+                    authorization_provider=_authz_provider,
                 ),
                 mode,
             ),
@@ -691,17 +714,27 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     configured_tools = raw_tools + extra_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+    authorization_candidates = [*configured_tools]
+    if skill_setup.describe_skill_tool:
+        authorization_candidates.append(skill_setup.describe_skill_tool)
+    if should_use_memory_tools(resolved_app_config.memory):
+        _append_memory_tools_without_name_conflicts(authorization_candidates)
+    configured_tool_ids = {id(tool) for tool in configured_tools}
+    authorized_tools, _authz_provider = apply_tool_authorization(
+        authorization_candidates,
+        context=cfg,
+        app_config=resolved_app_config,
+    )
+    configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+    late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
+    final_tools.extend(late_tools)
     mcp_routing_middleware = build_mcp_routing_middleware(
         final_tools,
         setup,
         top_k=resolved_app_config.tool_search.auto_promote_top_k,
     )
-    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(configured_tools, deferred_names=setup.deferred_names)
-    if skill_setup.describe_skill_tool:
-        final_tools.append(skill_setup.describe_skill_tool)
-    if should_use_memory_tools(resolved_app_config.memory):
-        _append_memory_tools_without_name_conflicts(final_tools)
+    mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=setup.deferred_names)
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
         tools=final_tools,
@@ -715,6 +748,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_setup=setup,
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=resolved_user_id,
+                authorization_provider=_authz_provider,
             ),
             mode,
         ),
