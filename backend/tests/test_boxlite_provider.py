@@ -1105,6 +1105,49 @@ def test_forced_collision_never_overwrites_active_tenant(monkeypatch):
     provider.shutdown()
 
 
+def test_late_same_tenant_collision_reuses_active_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    sandbox_id = "deadbeefdeadbeef"
+    key = ("user-a", "thread-a")
+    active = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+    duplicate = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: sandbox_id),
+    )
+
+    def _create_box_with_late_registration(_sandbox_id):
+        with provider._lock:
+            provider._boxes[sandbox_id] = active
+            provider._active_box_identity[sandbox_id] = key
+        return duplicate
+
+    monkeypatch.setattr(provider, "_create_box", _create_box_with_late_registration)
+
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert duplicate.is_closed
+    assert provider.get(sandbox_id) is active
+    assert provider._thread_boxes[key] == sandbox_id
+    provider.shutdown()
+
+
 def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
     monkeypatch.setattr(
         "deerflow.community.boxlite.provider.get_app_config",

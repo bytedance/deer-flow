@@ -774,6 +774,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Fail closed if a warm ID changed tenants during an acquire."""
         if sandbox_id not in self._warm_pool:
             return
+        # Startup-adopted entries have unknown identity until their first reclaim.
         stored_key = self._warm_pool_identity.get(sandbox_id)
         if stored_key is not None and stored_key != requested_key:
             raise SandboxIdentityCollisionError(sandbox_id, stored_key, requested_key)

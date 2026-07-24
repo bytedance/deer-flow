@@ -406,17 +406,20 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             with self._lock:
                 if box.id in self._boxes:
                     conflict = self._active_box_identity.get(box.id)
+                    if conflict == key:
+                        self._thread_boxes[key] = box.id
                 else:
                     self._boxes[box.id] = box
                     self._active_box_identity[box.id] = key
                     self._thread_boxes[key] = box.id
             if conflict is not _NO_ACTIVE_IDENTITY:
                 box.close()
-                raise SandboxIdentityCollisionError(
-                    sandbox_id,
-                    conflict,
-                    key,
-                )
+                if conflict != key:
+                    raise SandboxIdentityCollisionError(
+                        sandbox_id,
+                        conflict,
+                        key,
+                    )
             return box.id
 
     def _create_box(self, sandbox_id: str) -> BoxliteBox:
@@ -492,6 +495,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
+            # Startup-adopted entries have unknown identity until their first reclaim.
             stored_key = self._warm_pool_identity.get(sandbox_id)
             if stored_key is not None and stored_key != expected_key:
                 raise SandboxIdentityCollisionError(
