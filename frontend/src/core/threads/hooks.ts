@@ -796,7 +796,11 @@ export function useCoalescedStreamMessages(
   const [snapshot, setSnapshot] = useState<Message[]>(messages);
   const latestRef = useRef(messages);
   latestRef.current = messages;
-  const lastFlushRef = useRef(0);
+  // Monotonic clock: a wall-clock step (NTP, sleep/wake) between two reads
+  // would otherwise be added to the remaining interval and stall the flush for
+  // the length of the jump. -Infinity means "never flushed", so the first
+  // update of a stream always takes the leading edge.
+  const lastFlushRef = useRef(Number.NEGATIVE_INFINITY);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Every publication goes through the shallow-equality guard: inputs whose
@@ -820,19 +824,22 @@ export function useCoalescedStreamMessages(
       publish();
       return;
     }
+    const now = performance.now();
     const decision = decideCoalesce(
-      Date.now(),
+      now,
       lastFlushRef.current,
       intervalMs,
       timerRef.current !== null,
     );
     if (decision.action === "flush-now") {
-      lastFlushRef.current = Date.now();
+      lastFlushRef.current = now;
       publish();
     } else if (decision.action === "schedule") {
       timerRef.current = setTimeout(() => {
         timerRef.current = null;
-        lastFlushRef.current = Date.now();
+        // Read the clock again: timers fire late under load, and the next
+        // interval must start from the real flush.
+        lastFlushRef.current = performance.now();
         publish();
       }, decision.delayMs);
     }

@@ -60,6 +60,26 @@ describe("decideCoalesce", () => {
     }
   });
 
+  it("takes the leading edge when nothing has flushed yet", () => {
+    // The hook seeds lastFlush with -Infinity on a monotonic clock whose epoch
+    // is page load, so the first update of a stream must not be deferred.
+    expect(decideCoalesce(5, Number.NEGATIVE_INFINITY, 80, false)).toEqual({
+      action: "flush-now",
+    });
+  });
+
+  it("keeps the scheduled delay inside the interval", () => {
+    // Holds for every elapsed value a monotonic clock can produce, which is why
+    // the call site needs no clamp on the timeout delay.
+    for (let elapsed = 0; elapsed < 80; elapsed++) {
+      const decision = decideCoalesce(1000, 1000 - elapsed, 80, false);
+      expect(decision.action).toBe("schedule");
+      if (decision.action !== "schedule") continue;
+      expect(decision.delayMs).toBeGreaterThan(0);
+      expect(decision.delayMs).toBeLessThanOrEqual(80);
+    }
+  });
+
   it("exports a frame-scale default interval", () => {
     expect(STREAM_RENDER_COALESCE_MS).toBeGreaterThanOrEqual(50);
     expect(STREAM_RENDER_COALESCE_MS).toBeLessThanOrEqual(100);
