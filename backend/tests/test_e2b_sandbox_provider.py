@@ -2062,15 +2062,20 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     assert p._evictions_in_progress == set()
 
 
-def test_capacity_reset_clears_reserved_slots(monkeypatch):
-    """reset() ends the provider and clears reserved slots."""
+def test_capacity_reset_uses_destructive_shutdown_semantics(monkeypatch):
+    """reset() destroys tracked E2B resources and ends the provider."""
     p = _make_provider(replicas=1, overflow_policy="wait", acquire_timeout=30)
-    _install_fake_sdk(monkeypatch, p)
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="active")
+    fake_cls.create_factory = lambda **_kwargs: client
+    p.acquire("t1", user_id="u1")
 
     p._reserved_slots = 3
     p.reset()
     assert p._reserved_slots == 0
     assert p._shutdown_called
+    assert client.killed
+    assert client.closed
 
 
 def test_capacity_reset_wakes_waiter_with_shutdown_error(monkeypatch):

@@ -786,6 +786,8 @@ default asyncio executor.
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
 Shutdown closes an unowned discovery client without destroying its VM.
+Reset destroys tracked active and warm E2B VMs. The old provider instance
+cannot accept new acquisitions.
 
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 

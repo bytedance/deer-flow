@@ -1617,7 +1617,7 @@ class E2BSandboxProvider(SandboxProvider):
         return None
 
     def reset(self) -> None:
-        """Stop this provider before the singleton releases it."""
+        """Destroy tracked E2B VMs and make this detached provider unusable."""
         self.shutdown()
 
     def shutdown(self) -> None:
