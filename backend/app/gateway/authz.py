@@ -31,17 +31,24 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException, Request
 
+from deerflow.authz.principal import build_principal_from_context
+from deerflow.authz.provider import AuthzDecision, AuthzRequest
+from deerflow.authz.runtime import resolve_authorization_provider
+
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
+    from deerflow.config.authorization_config import AuthorizationConfig
 
 P = ParamSpec("P")
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 # Permission constants
@@ -128,6 +135,74 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
+def _get_route_authorization_config() -> AuthorizationConfig:
+    """Return the hot-reloaded authorization config for this request.
+
+    Falls back to a disabled config when AppConfig is not available (e.g. test
+    environments without a config.yaml), preserving legacy all-permissions behavior.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config().authorization
+    except (FileNotFoundError, RuntimeError):
+        return AuthorizationConfig()
+
+
+async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
+    """Return the route permissions granted to an authenticated user.
+
+    Disabled authorization preserves the legacy all-permissions behavior.
+    When enabled, every registered ``resource:action`` permission is evaluated
+    independently so a provider failure affects only the route being checked.
+    """
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return list(_ALL_PERMISSIONS)
+
+    try:
+        provider = resolve_authorization_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.exception("Failed to resolve authorization provider for Gateway routes")
+        return [] if config.fail_closed else list(_ALL_PERMISSIONS)
+
+    principal = build_principal_from_context(
+        {
+            "user_id": str(user.id),
+            "user_role": getattr(user, "system_role", None),
+            "oauth_provider": getattr(user, "oauth_provider", None),
+            "oauth_id": getattr(user, "oauth_id", None),
+            "is_internal": is_internal,
+        },
+        default_role=config.default_role,
+    )
+
+    permissions: list[str] = []
+    for permission in _ALL_PERMISSIONS:
+        _, action = permission.split(":", maxsplit=1)
+        request = AuthzRequest(
+            principal=principal,
+            resource="route",
+            action=action,
+            target=permission,
+        )
+        try:
+            decision = await provider.aauthorize(request)
+            if not isinstance(decision, AuthzDecision):
+                raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+        except Exception:
+            logger.exception("Authorization provider failed while evaluating route permission %s", permission)
+            if not config.fail_closed:
+                permissions.append(permission)
+            continue
+        if decision.allow:
+            permissions.append(permission)
+
+    return permissions
+
+
 async def _authenticate(request: Request) -> AuthContext:
     """Authenticate request and return AuthContext.
 
@@ -140,8 +215,12 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    # In future, permissions could be stored in user record
-    return AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    is_internal = getattr(request.state, "auth_source", None) == AUTH_SOURCE_INTERNAL or getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE
+    permissions = await resolve_route_permissions(user, is_internal=is_internal)
+    return AuthContext(user=user, permissions=permissions)
 
 
 def require_auth[**P, T](func: Callable[P, T]) -> Callable[P, T]:
