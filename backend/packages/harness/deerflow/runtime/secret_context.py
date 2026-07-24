@@ -31,6 +31,25 @@ ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
 # entire value must be stripped from every observable serialization surface.
 SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
 
+LEGACY_AUTH_TOKEN_METADATA_KEY = "auth_token"
+
+
+class LegacyRunMetadataSecretError(ValueError):
+    """Raised when a run puts a request credential in persisted metadata."""
+
+
+def validate_run_metadata_secrets(metadata: Any) -> None:
+    """Reject the legacy credential field at run admission."""
+    if isinstance(metadata, dict) and LEGACY_AUTH_TOKEN_METADATA_KEY in metadata:
+        raise LegacyRunMetadataSecretError("Run metadata key 'auth_token' is not allowed; pass request-scoped credentials via config.context.secrets instead.")
+
+
+def redact_metadata_secrets(metadata: Any) -> Any:
+    """Return API-safe metadata without mutating historical storage objects."""
+    if not isinstance(metadata, dict):
+        return metadata
+    return {key: value for key, value in metadata.items() if key != LEGACY_AUTH_TOKEN_METADATA_KEY}
+
 
 def _string_pairs(raw: Any) -> dict[str, str]:
     if not isinstance(raw, dict):
