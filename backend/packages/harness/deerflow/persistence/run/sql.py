@@ -461,8 +461,16 @@ class RunRepository(RunStore):
         *,
         grace_seconds: int,
         error: str,
+        stop_reason: str | None = None,
     ) -> bool:
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+        values: dict[str, Any] = {
+            "status": "error",
+            "error": error,
+            "updated_at": datetime.now(UTC),
+        }
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
         async with self._sf() as session:
             result = await session.execute(
                 update(RunRow)
@@ -471,7 +479,7 @@ class RunRepository(RunStore):
                     RunRow.status.in_(("pending", "running")),
                     _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
                 )
-                .values(status="error", error=error, updated_at=datetime.now(UTC))
+                .values(**values)
             )
             await session.commit()
             return result.rowcount != 0
