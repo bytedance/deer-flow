@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_termination_detectors import (
@@ -689,14 +690,23 @@ class TestAuditEvent:
 class TestStreamEvent:
     def test_emits_event_when_writer_available(self, monkeypatch):
         captured: list = []
+        dispatched: list = []
 
         def fake_writer(payload):
             captured.append(payload)
+
+        def fake_emit_custom_event(payload, *, writer):
+            writer(payload)
+            dispatched.append(payload)
 
         # Patch get_stream_writer at the symbol-resolution site.
         import langgraph.config
 
         monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: fake_writer)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.emit_custom_event",
+            fake_emit_custom_event,
+        )
 
         mw = SafetyFinishReasonMiddleware()
         state = {
@@ -718,6 +728,83 @@ class TestStreamEvent:
         assert payload["suppressed_tool_call_count"] == 1
         assert payload["suppressed_tool_call_names"] == ["write_file"]
         assert payload["thread_id"] == "t-stream"
+        assert dispatched == captured
+
+    @pytest.mark.anyio
+    async def test_async_hook_uses_async_event_dispatch(self, monkeypatch):
+        captured: list = []
+        dispatched: list = []
+
+        async def fake_emit_custom_event(payload, *, writer):
+            writer(payload)
+            dispatched.append(payload)
+
+        import langgraph.config
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: captured.append)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.aemit_custom_event",
+            fake_emit_custom_event,
+        )
+
+        mw = SafetyFinishReasonMiddleware()
+        state = {
+            "messages": [
+                _ai(
+                    tool_calls=[_write_call()],
+                    response_metadata={"finish_reason": "content_filter"},
+                )
+            ]
+        }
+
+        result = await mw.aafter_model(state, _runtime("t-async-stream"))
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert dispatched == captured
+        assert [payload["type"] for payload in captured] == ["safety_termination"]
+        assert captured[0]["thread_id"] == "t-async-stream"
+
+    def test_sync_event_preserves_langgraph_control_flow(self, monkeypatch):
+        import langgraph.config
+
+        def interrupt_dispatch(*_args, **_kwargs):
+            raise GraphBubbleUp
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda _payload: None)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.emit_custom_event",
+            interrupt_dispatch,
+        )
+
+        termination = SafetyTermination(
+            detector="test",
+            reason_field="finish_reason",
+            reason_value="content_filter",
+        )
+        with pytest.raises(GraphBubbleUp):
+            SafetyFinishReasonMiddleware()._emit_event(termination, ["write_file"], _runtime())
+
+    @pytest.mark.anyio
+    async def test_async_event_preserves_langgraph_control_flow(self, monkeypatch):
+        import langgraph.config
+
+        async def interrupt_dispatch(*_args, **_kwargs):
+            raise GraphBubbleUp
+
+        monkeypatch.setattr(langgraph.config, "get_stream_writer", lambda: lambda _payload: None)
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.safety_finish_reason_middleware.aemit_custom_event",
+            interrupt_dispatch,
+        )
+
+        termination = SafetyTermination(
+            detector="test",
+            reason_field="finish_reason",
+            reason_value="content_filter",
+        )
+        with pytest.raises(GraphBubbleUp):
+            await SafetyFinishReasonMiddleware()._aemit_event(termination, ["write_file"], _runtime())
 
     def test_writer_unavailable_does_not_break(self, monkeypatch):
         import langgraph.config

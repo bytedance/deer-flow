@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
@@ -138,6 +139,42 @@ def test_content_filter_with_tool_calls_does_not_invoke_tool_node():
     # finish_reason on response_metadata is preserved (so SSE / converters
     # downstream still see the real provider reason).
     assert final_ai.response_metadata.get("finish_reason") == "content_filter"
+
+
+@pytest.mark.anyio
+async def test_safety_termination_event_reaches_astream_events():
+    """Exercise the middleware's real async graph hook and callback context."""
+
+    _TOOL_INVOCATIONS.clear()
+    agent = create_agent(
+        model=_ContentFilteredModel(),
+        tools=[write_file],
+        middleware=[SafetyFinishReasonMiddleware()],
+        context_schema=dict,
+    )
+
+    events = [
+        event
+        async for event in agent.astream_events(
+            {"messages": [HumanMessage(content="write me a report")]},
+            version="v2",
+            context={"thread_id": "safety-stream-thread"},
+        )
+        if event["event"] == "on_custom_event"
+    ]
+
+    assert len(events) == 1
+    assert events[0]["name"] == "safety_termination"
+    assert events[0]["data"] == {
+        "type": "safety_termination",
+        "detector": "openai_compatible_content_filter",
+        "reason_field": "finish_reason",
+        "reason_value": "content_filter",
+        "suppressed_tool_call_count": 1,
+        "suppressed_tool_call_names": ["write_file"],
+        "thread_id": "safety-stream-thread",
+    }
+    assert _TOOL_INVOCATIONS == []
 
 
 def test_content_filter_without_tool_calls_passes_through_unchanged():
