@@ -32,6 +32,7 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -419,13 +420,14 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer(
+    await aemit_custom_event(
         {
             "type": "task_started",
             "task_id": task_id,
             "description": description,
             "model_name": effective_model,
-        }
+        },
+        writer=writer,
     )
 
     try:
@@ -434,7 +436,10 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                await aemit_custom_event(
+                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"},
+                    writer=writer,
+                )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
                 return _task_result_command(
@@ -460,7 +465,7 @@ async def task_tool(
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
                     message = ai_messages[i]
-                    writer(
+                    await aemit_custom_event(
                         {
                             "type": "task_running",
                             "task_id": task_id,
@@ -469,7 +474,8 @@ async def task_tool(
                             "total_messages": current_message_count,
                             "usage": usage,
                             "model_name": effective_model,
-                        }
+                        },
+                        writer=writer,
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
@@ -478,14 +484,15 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_completed",
                         "task_id": task_id,
                         "result": result.result,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
@@ -503,14 +510,15 @@ async def task_tool(
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_failed",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
@@ -528,14 +536,15 @@ async def task_tool(
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_cancelled",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
@@ -549,14 +558,15 @@ async def task_tool(
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
@@ -581,13 +591,14 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
