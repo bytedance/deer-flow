@@ -20,6 +20,7 @@ from langgraph_sdk.errors import ConflictError
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
     InboundMessageType,
@@ -752,7 +753,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
             filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
 
-            inline_content = f.pop("_content", None)
+            inline_content = f.pop(INBOUND_FILE_CONTENT_KEY, None)
             if isinstance(inline_content, bytes):
                 data = inline_content
             elif isinstance(inline_content, (bytearray, memoryview)):

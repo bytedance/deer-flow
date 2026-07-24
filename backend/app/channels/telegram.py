@@ -11,7 +11,15 @@ from typing import Any
 
 from app.channels.base import Channel
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
+from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +357,8 @@ class TelegramChannel(Channel):
         downloaded bytes to ``ChannelManager`` through a short-lived private
         field that the manager consumes before persisting safe upload metadata.
         """
+        # Owner/thread scoping is intentionally applied by ChannelManager when
+        # it persists these bytes through _ingest_inbound_files().
         del thread_id, user_id
         if not msg.files:
             return msg
@@ -399,7 +409,7 @@ class TelegramChannel(Channel):
                     "filename": filename,
                     "mime_type": file_info.get("mime_type") if isinstance(file_info.get("mime_type"), str) else "application/octet-stream",
                     "size": len(content),
-                    "_content": content,
+                    INBOUND_FILE_CONTENT_KEY: content,
                 }
             )
 
@@ -411,13 +421,13 @@ class TelegramChannel(Channel):
 
     # -- helpers -----------------------------------------------------------
 
-    async def _download_inbound_file(self, bot: Any, file_id: str) -> tuple[int | None, bytes | None]:
+    async def _download_inbound_file(self, bot: Any, file_id: str) -> tuple[int | None, bytearray | None]:
         """Fetch one file entirely on the event loop that owns PTB's HTTP client."""
         telegram_file = await bot.get_file(file_id)
         resolved_size = self._file_size(getattr(telegram_file, "file_size", None))
         if resolved_size is not None and resolved_size > TELEGRAM_MAX_INBOUND_FILE_BYTES:
             return resolved_size, None
-        return resolved_size, bytes(await telegram_file.download_as_bytearray())
+        return resolved_size, await telegram_file.download_as_bytearray()
 
     async def _track_telegram_bridge_task(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         """Keep a main-loop submission visible to Telegram-loop shutdown."""
@@ -495,8 +505,6 @@ class TelegramChannel(Channel):
     def _safe_inbound_filename(value: Any, fallback: str) -> str:
         if not isinstance(value, str):
             return fallback
-        from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
-
         try:
             candidate = normalize_filename(value.strip())
         except (UnicodeError, ValueError):
