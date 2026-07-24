@@ -227,6 +227,7 @@ class MemoryRunStore(RunStore):
         *,
         grace_seconds: int,
         error: str,
+        stop_reason: str | None = None,
     ) -> bool:
         from deerflow.utils.time import is_lease_expired
 
@@ -240,6 +241,8 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = "error"
         run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

@@ -248,6 +248,46 @@ Phase 1 最低验证要求：
 - **兼容性：** 只拒绝不符合 `AuthzRequest` / `filter_resources` 类型契约的运行时
   输入；Phase 1A-2 仍未接入运行时，`authorization.enabled: false` 行为不变。
 
+### 2026-07-22 — Phase 1B / 工具授权执行接入
+
+- **背景：** Phase 1A 完成了 Principal 链路、RBAC provider 和 factory。
+  Phase 1B 将 provider 接入 Layer 1（组装时过滤）和 Layer 2（执行时拦截）。
+- **决策：** `apply_tool_authorization()` 是 Layer 1 的统一入口，组合 provider
+  解析、Principal 构建和 `filter_tools_by_authorization` 过滤。disabled 时返回
+  原始工具和 `None`。
+- **决策：** Layer 1 过滤在 `assemble_deferred_tools` 之前执行，覆盖三条路径：
+  lead agent（bootstrap + default）、subagent、embedded client。
+- **决策：** Layer 2 通过 `GuardrailAuthorizationAdapter` 复用 `GuardrailMiddleware`，
+  authorization middleware 在显式 guardrail 之前（外层），两者独立运行。
+- **决策：** Layer 1 和 Layer 2 尝试共享同一个 provider 实例（"resolve once per
+  build"）。subagent 通过 `_authz_provider` 属性传递。
+- **决策：** Embedded client `_agent_config_key` 加入 `user_role` 和 `is_internal`
+  作为 cache key，角色变化时强制重建 agent。
+- **兼容性：** `authorization.enabled: false` 时工具集合和执行决策完全不变。
+- **延期：** Models/Skills/Sandbox 权限（Phase 2+）；route-level 迁移。
+
+#### Phase 1B review 收口
+
+- Layer 1 的候选集合必须包含本次 build 最终可能暴露给模型的全部业务工具；
+  `describe_skill` 和 memory tools 因此在授权过滤前加入，过滤后才进行 deferred
+  assembly。框架生成的 `tool_search` 仍是受已过滤 catalog 约束的基础设施工具。
+- lead、bootstrap、native subagent 和 embedded client 都把 Layer 1 解析出的同一
+  provider 实例传给 Layer 2，禁止在 middleware 构建时再次解析 provider。
+- `tool_search` 仅在当前 build 确实生成了 deferred catalog 时作为基础设施工具跳过
+  authorization adapter 的第二次 provider 调用；catalog 已由 Layer 1 过滤。显式配置的
+  guardrail 仍会检查它，没有 deferred setup 的普通同名工具也不获得豁免。
+- 内置 RBAC provider 在解析时校验 `authorization.default_role` 属于已配置角色，配置
+  错误直接阻止 agent 构建，不再表现为难以诊断的空工具集合。
+- `DeerFlowClient.stream()` 的调用方属于可信进程内边界，可通过关键字参数传入与
+  Gateway runtime context 相同的授权身份字段；这些字段同时进入真实执行 context。
+  agent cache key 使用完整 Principal（包括 user/channel/oauth/internal/attributes），
+  并深拷贝嵌套 attributes，防止调用方原地修改身份数据后复用旧工具集合。
+- disabled 模式仍在 Layer 1 候选阶段包含 `describe_skill` / memory tools，但 deferred
+  assembly 后恢复原有顺序（业务工具、`tool_search`、late framework tools）。
+- 回归测试必须经过真实 lead/bootstrap、subagent 和 embedded 组装函数，不能只测试
+  `filter_tools_by_authorization()` helper；同时断言被拒绝工具不在最终 bound tools 中，
+  且 Layer 2 收到的 provider 与 Layer 1 为同一对象。
+
 ### 新记录模板
 
 ```markdown
