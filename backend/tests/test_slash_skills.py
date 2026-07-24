@@ -505,7 +505,7 @@ def test_skill_activation_middleware_async_records_activation_audit_event(monkey
     assert kwargs["changes"]["content_hash"] == hashlib.sha256(b"# Data Analysis\nUse pandas.").hexdigest()
 
 
-def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch, tmp_path):
+def test_skill_activation_middleware_warns_and_ignores_activation_audit_errors(monkeypatch, tmp_path, caplog):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
@@ -517,10 +517,12 @@ def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch
     def handler(model_request: ModelRequest):
         return AIMessage(content="ok")
 
-    result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
+    with caplog.at_level("WARNING"):
+        result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
+    assert "Failed to record slash skill activation audit event" in caplog.text
 
 
 def test_skill_activation_middleware_activates_only_latest_real_user_message(monkeypatch, tmp_path):

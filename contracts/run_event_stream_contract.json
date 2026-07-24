@@ -1,0 +1,455 @@
+{
+  "version": 1,
+  "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The current DeerFlow run event stream contract. It freezes existing names and categories, describes producer payloads, and records compatibility rules without changing runtime behavior.",
+  "compatibility": {
+    "current_event_names": "frozen",
+    "consumer_rule": "Consumers must ignore unknown event types, unknown envelope fields, and unknown optional payload or metadata fields.",
+    "additive_changes": [
+      "add_event_type",
+      "add_optional_payload_field",
+      "add_optional_metadata_field",
+      "add_envelope_field"
+    ],
+    "breaking_changes": [
+      "remove_event_type",
+      "rename_event_type",
+      "change_event_category",
+      "remove_required_field",
+      "change_required_field_type"
+    ]
+  },
+  "legacy_event_aliases": [
+    {
+      "event_type": "ai_message",
+      "canonical_event_type": "llm.ai.response",
+      "status": "read-only compatibility",
+      "produced_by_current_runtime": false,
+      "compatibility_scope": "Category-based message projections and last-visible-AI store queries, including the /messages/page endpoint, recognize this historical name.",
+      "known_limitations": "The legacy /messages endpoint returns category=message rows but only enriches feedback for llm.ai.response.",
+      "notes": "New producers must use llm.ai.response."
+    }
+  ],
+  "record_schema": {
+    "type": "object",
+    "required": [
+      "thread_id",
+      "run_id",
+      "seq",
+      "event_type",
+      "category",
+      "content",
+      "metadata",
+      "created_at"
+    ],
+    "properties": {
+      "thread_id": {"type": "string"},
+      "run_id": {"type": "string"},
+      "seq": {"type": "integer", "minimum": 1},
+      "event_type": {"type": "string", "minLength": 1, "maxLength": 32},
+      "category": {"type": "string", "minLength": 1, "maxLength": 16},
+      "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
+      "metadata": {"type": "object"},
+      "created_at": {"type": "string", "format": "date-time"},
+      "user_id": {"type": ["string", "null"]}
+    },
+    "additionalProperties": true
+  },
+  "sequence": {
+    "scope": "thread_id",
+    "guarantee": "strictly increasing within a thread",
+    "jsonl_multi_process_limit": "JsonlRunEventStore only guarantees monotonic assignment within one process; use DbRunEventStore for shared multi-process writes."
+  },
+  "categories": {
+    "trace": "Execution evidence that is excluded from message projections.",
+    "message": "A candidate message projection. Server and frontend visibility filters still apply.",
+    "outputs": "Root graph completion output; not an authoritative run lifecycle status.",
+    "error": "Callback-observed run or chain failure evidence.",
+    "middleware": "Middleware state-change audit evidence.",
+    "context": "Identity-only evidence about effective hidden context.",
+    "subagent": "Subagent lifecycle and persisted step evidence.",
+    "workspace": "Run-scoped workspace and output file-change evidence."
+  },
+  "events": [
+    {
+      "event_type": "run.start",
+      "category": "trace",
+      "producer": "RunJournal.on_chain_start(parent_run_id=None)",
+      "content_schema": {
+        "type": "object",
+        "required": ["chain"],
+        "properties": {"chain": {"type": ["string", "null"]}},
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["caller"],
+        "properties": {"caller": {"type": "string"}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "run.end",
+      "category": "outputs",
+      "producer": "RunJournal.on_chain_end(parent_run_id=None)",
+      "content_schema": true,
+      "content_description": "Opaque root graph outputs as supplied by LangGraph. Values nested inside the output may have backend-dependent representations when they are not directly JSON serializable.",
+      "storage_semantics": {
+        "memory": "Retains the original Python container and nested values.",
+        "jsonl": "Persists JSON with json.dumps(default=str), so nested non-JSON values are restored as strings.",
+        "database": "Persists the top-level payload as JSON text with json.dumps(default=str), then restores the JSON container on read; nested non-JSON values remain strings."
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {"status": {"const": "success"}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "run.error",
+      "category": "error",
+      "producer": "RunJournal.on_chain_error()",
+      "content_schema": {"type": "string"},
+      "metadata_schema": {
+        "type": "object",
+        "required": ["error_type"],
+        "properties": {"error_type": {"type": "string"}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "llm.human.input",
+      "category": "message",
+      "producer": "RunJournal.on_chat_model_start() for the first persisted lead-agent HumanMessage",
+      "content_schema": {
+        "type": "object",
+        "required": ["type", "content"],
+        "properties": {
+          "type": {"const": "human"},
+          "content": true,
+          "additional_kwargs": {"type": "object"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["caller"],
+        "properties": {"caller": {"const": "lead_agent"}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "llm.ai.response",
+      "category": "message",
+      "producer": "RunJournal.on_llm_end()",
+      "content_schema": {
+        "type": "object",
+        "required": ["type", "content", "tool_calls"],
+        "properties": {
+          "type": {"const": "ai"},
+          "content": true,
+          "tool_calls": {"type": "array"},
+          "additional_kwargs": {"type": "object"},
+          "response_metadata": {"type": "object"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["caller", "usage", "latency_ms", "llm_call_index"],
+        "properties": {
+          "caller": {"type": "string"},
+          "usage": {"type": "object"},
+          "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+          "llm_call_index": {"type": "integer", "minimum": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "llm.tool.result",
+      "category": "message",
+      "producer": "RunJournal.on_tool_end() for ToolMessage or Command(update.messages[])",
+      "content_schema": {
+        "type": "object",
+        "required": ["type", "content"],
+        "properties": {
+          "type": {"type": "string"},
+          "content": true,
+          "tool_call_id": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    },
+    {
+      "event_type": "llm.error",
+      "category": "trace",
+      "producer": "RunJournal.on_llm_error()",
+      "content_schema": {"type": "string"},
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    },
+    {
+      "event_type": "context:memory",
+      "category": "context",
+      "producer": "RunJournal.record_memory_context() from DynamicContextMiddleware",
+      "content_schema": {
+        "type": "object",
+        "required": ["content_sha256"],
+        "properties": {
+          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    },
+    {
+      "event_type": "subagent.start",
+      "category": "subagent",
+      "producer": "subagent_run_event(task_started)",
+      "content_schema": {
+        "type": "object",
+        "required": ["task_id", "description"],
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "description": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["task_id"],
+        "properties": {"task_id": {"type": "string", "minLength": 1}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "subagent.step",
+      "category": "subagent",
+      "producer": "subagent_run_event(task_running)",
+      "content_schema": {
+        "type": "object",
+        "required": ["task_id", "message_index", "kind", "text", "truncated"],
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "message_index": {"type": "integer", "minimum": 0},
+          "kind": {"enum": ["ai", "tool"]},
+          "text": {"type": "string"},
+          "truncated": {"type": "boolean"},
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "args"],
+              "properties": {
+                "name": {"type": ["string", "null"]},
+                "args": true,
+                "args_truncated": {"type": "boolean"}
+              },
+              "additionalProperties": true
+            }
+          },
+          "tool_name": {"type": ["string", "null"]}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"kind": {"const": "ai"}}},
+            "then": {"required": ["tool_calls"]}
+          },
+          {
+            "if": {"properties": {"kind": {"const": "tool"}}},
+            "then": {"required": ["tool_name"]}
+          }
+        ],
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["task_id", "message_index"],
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "message_index": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "subagent.end",
+      "category": "subagent",
+      "producer": "subagent_run_event(task_completed|task_failed|task_cancelled|task_timed_out)",
+      "content_schema": {
+        "type": "object",
+        "required": ["task_id", "status"],
+        "properties": {
+          "task_id": {"type": "string", "minLength": 1},
+          "status": {"enum": ["completed", "failed", "cancelled", "timed_out"]},
+          "model_name": {"type": "string"},
+          "usage": {"type": "object"},
+          "result": {"type": "string"},
+          "result_truncated": {"type": "boolean"},
+          "error": {"type": "string"},
+          "error_truncated": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["task_id"],
+        "properties": {"task_id": {"type": "string", "minLength": 1}},
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "workspace_changes",
+      "category": "workspace",
+      "producer": "workspace_changes.record_workspace_changes()",
+      "content_schema": {"type": "string"},
+      "metadata_schema": {
+        "type": "object",
+        "required": ["workspace_changes"],
+        "properties": {
+          "workspace_changes": {
+            "type": "object",
+            "required": ["version", "summary", "files", "limits"],
+            "properties": {
+              "version": {"const": 1},
+              "summary": {
+                "type": "object",
+                "required": ["created", "modified", "deleted", "symlink_created", "additions", "deletions", "truncated"],
+                "properties": {
+                  "created": {"type": "integer", "minimum": 0},
+                  "modified": {"type": "integer", "minimum": 0},
+                  "deleted": {"type": "integer", "minimum": 0},
+                  "symlink_created": {"type": "integer", "minimum": 0},
+                  "additions": {"type": "integer", "minimum": 0},
+                  "deletions": {"type": "integer", "minimum": 0},
+                  "truncated": {"type": "boolean"}
+                },
+                "additionalProperties": true
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "path",
+                    "root",
+                    "status",
+                    "binary",
+                    "sensitive",
+                    "size_before",
+                    "size_after",
+                    "sha256_before",
+                    "sha256_after",
+                    "diff",
+                    "diff_truncated",
+                    "diff_unavailable_reason",
+                    "additions",
+                    "deletions",
+                    "symlink",
+                    "symlink_target_before",
+                    "symlink_target_after"
+                  ],
+                  "properties": {
+                    "path": {"type": "string"},
+                    "root": {"type": "string"},
+                    "status": {"enum": ["created", "modified", "deleted", "symlink_created"]},
+                    "binary": {"type": "boolean"},
+                    "sensitive": {"type": "boolean"},
+                    "size_before": {"type": ["integer", "null"], "minimum": 0},
+                    "size_after": {"type": ["integer", "null"], "minimum": 0},
+                    "sha256_before": {"type": ["string", "null"]},
+                    "sha256_after": {"type": ["string", "null"]},
+                    "diff": {"type": "string"},
+                    "diff_truncated": {"type": "boolean"},
+                    "diff_unavailable_reason": {"type": ["string", "null"]},
+                    "additions": {"type": "integer", "minimum": 0},
+                    "deletions": {"type": "integer", "minimum": 0},
+                    "symlink": {"type": "boolean"},
+                    "symlink_target_before": {"type": ["string", "null"]},
+                    "symlink_target_after": {"type": ["string", "null"]}
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "limits": {
+                "type": "object",
+                "required": ["max_files", "max_scanned_files", "max_file_bytes_for_diff", "max_total_diff_bytes"],
+                "properties": {
+                  "max_files": {"type": "integer", "minimum": 0},
+                  "max_scanned_files": {"type": "integer", "minimum": 0},
+                  "max_file_bytes_for_diff": {"type": "integer", "minimum": 0},
+                  "max_total_diff_bytes": {"type": "integer", "minimum": 0}
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  ],
+  "dynamic_event_patterns": [
+    {
+      "pattern": "middleware:{tag}",
+      "category": "middleware",
+      "producer": "RunJournal.record_middleware(tag, ...)",
+      "known_tags": ["guardrail", "safety_termination", "skill_activation", "skill_secrets"],
+      "event_type_schema": {
+        "type": "string",
+        "pattern": "^middleware:",
+        "minLength": 12,
+        "maxLength": 32
+      },
+      "tag_schema": {"type": "string", "minLength": 1, "maxLength": 21},
+      "content_schema": {
+        "type": "object",
+        "required": ["name", "hook", "action", "changes"],
+        "properties": {
+          "name": {"type": "string"},
+          "hook": {"type": "string"},
+          "action": {"type": "string"},
+          "changes": {"type": "object"}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true}
+    }
+  ],
+  "known_gaps": [
+    {
+      "id": "mixed-event-name-separators",
+      "status": "frozen for compatibility",
+      "notes": "Current dot, colon, and bare-word event names remain unchanged. Any future normalization requires a versioned migration or dual-write period."
+    },
+    {
+      "id": "tool-call-intent",
+      "status": "not first-class",
+      "notes": "Tool call requests are embedded in llm.ai.response content.tool_calls. llm.tool.result records returned messages, and a missing or timed-out result may leave no dedicated outcome event."
+    },
+    {
+      "id": "terminal-run-status",
+      "status": "split source of truth",
+      "notes": "run.end is only a root graph completion marker and always says success. RunRow.status is authoritative for success, error, interrupted, and timeout; worker loss may leave no terminal run event."
+    },
+    {
+      "id": "run-end-backend-serialization",
+      "status": "backend-dependent opaque payload",
+      "affected_event_types": ["run.end"],
+      "notes": "Memory retains nested Python values in root graph outputs, while JSONL and database persistence stringify nested values that are not directly JSON serializable. Consumers must not rely on backend-identical nested run.end content."
+    },
+    {
+      "id": "middleware-coverage",
+      "status": "partial",
+      "notes": "Loop detection and deferred-tool promotion do not currently emit middleware events."
+    },
+    {
+      "id": "run-scoped-observation-context",
+      "status": "manual wiring",
+      "notes": "Journal attribution, token accounting, and external tracing metadata are still attached manually at several LLM call sites."
+    }
+  ]
+}
