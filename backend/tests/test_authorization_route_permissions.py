@@ -12,12 +12,13 @@ from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.authz import (
     Permissions,
     _authenticate,
+    _get_cached_route_provider,
     require_permission,
     resolve_route_permissions,
 )
 from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
-from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 
 
 class _RecordingProvider:
@@ -68,15 +69,17 @@ def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) ->
         default_role="user",
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    monkeypatch.setattr("app.gateway.authz.resolve_authorization_provider", lambda resolved_config: provider)
+    # Bypass the provider cache so each test gets its own provider instance.
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch):
     config = AuthorizationConfig(enabled=False)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    resolver = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
-    monkeypatch.setattr("app.gateway.authz.resolve_authorization_provider", resolver)
+    # Bypass cache + ensure provider is never resolved when disabled.
+    cached = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", cached)
 
     permissions = await resolve_route_permissions(_user(), is_internal=False)
 
@@ -88,7 +91,7 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
     ]
-    resolver.assert_not_called()
+    cached.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -179,10 +182,10 @@ async def test_route_permissions_apply_failure_mode_to_provider_resolution(monke
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
 
-    def fail_resolution(resolved_config):
+    def fail_cached(c):
         raise ValueError("invalid provider configuration")
 
-    monkeypatch.setattr("app.gateway.authz.resolve_authorization_provider", fail_resolution)
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", fail_cached)
 
     assert await resolve_route_permissions(_user(), is_internal=False) == expected
 
@@ -263,3 +266,90 @@ def test_auth_middleware_marks_internal_route_principal(monkeypatch):
     assert response.status_code == 200
     permission_resolver.assert_awaited_once()
     assert permission_resolver.await_args.kwargs == {"is_internal": True}
+
+
+# ── Provider cache tests ────────────────────────────────────────────────
+
+
+class TestRouteProviderCache:
+    """Verify the provider cache returns the same instance for unchanged config
+    and re-resolves when config content changes."""
+
+    def test_same_config_returns_same_provider(self):
+        """Calling twice with the same config object returns the same instance."""
+        import app.gateway.authz as authz_module
+
+        # Reset cache
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
+        config = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"routes": {"allow": "*"}}}},
+            ),
+        )
+
+        p1 = _get_cached_route_provider(config)
+        p2 = _get_cached_route_provider(config)
+        assert p1 is not None
+        assert p2 is p1
+
+    def test_changed_config_returns_new_provider(self):
+        """A config with different content triggers re-resolution."""
+        import app.gateway.authz as authz_module
+
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
+        config1 = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"routes": {"allow": "*"}}}},
+            ),
+        )
+        config2 = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"routes": {"allow": []}}}},
+            ),
+        )
+
+        p1 = _get_cached_route_provider(config1)
+        p2 = _get_cached_route_provider(config2)
+        assert p1 is not None
+        assert p2 is not None
+        assert p1 is not p2
+
+    def test_same_content_different_object_reuses_provider(self):
+        """Same content in a new object (e.g. hot-reload with no changes) reuses provider."""
+        import app.gateway.authz as authz_module
+
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
+        config1 = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"routes": {"allow": "*"}}}},
+            ),
+        )
+        # Same content, different object
+        config2 = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"routes": {"allow": "*"}}}},
+            ),
+        )
+
+        p1 = _get_cached_route_provider(config1)
+        p2 = _get_cached_route_provider(config2)
+        assert p1 is p2
