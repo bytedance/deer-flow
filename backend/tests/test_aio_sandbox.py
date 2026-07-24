@@ -7,6 +7,39 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_local_sandbox_client_bypasses_environment_proxy():
+    """Local sandbox API calls must not inherit HTTP_PROXY (#3441)."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    sentinel_httpx = MagicMock()
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client", return_value=sentinel_httpx) as client_cls,
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(id="test-sandbox", base_url="http://host.docker.internal:8080")
+
+    client_cls.assert_called_once_with(timeout=600, follow_redirects=True, trust_env=False)
+    sdk_cls.assert_called_once_with(
+        base_url="http://host.docker.internal:8080",
+        timeout=600,
+        httpx_client=sentinel_httpx,
+    )
+
+
+def test_external_sandbox_client_keeps_environment_proxy_support():
+    """Externally hosted sandbox URLs retain the SDK's default proxy behavior."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client") as client_cls,
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(id="test-sandbox", base_url="https://sandbox.example.com")
+
+    client_cls.assert_not_called()
+    sdk_cls.assert_called_once_with(base_url="https://sandbox.example.com", timeout=600)
+
+
 @pytest.fixture()
 def sandbox():
     """Create an AioSandbox with a mocked client."""
