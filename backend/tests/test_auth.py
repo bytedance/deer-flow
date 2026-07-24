@@ -539,6 +539,44 @@ def test_create_user_rejects_email_differing_only_in_case(tmp_path):
     asyncio.run(_run())
 
 
+def test_create_user_rejects_legacy_mixed_case_email(tmp_path):
+    """Registration must not duplicate a mixed-case row created before normalization."""
+    import asyncio
+    from uuid import uuid4
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.user.model import UserRow
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            sf = get_session_factory()
+            repo = SQLiteUserRepository(sf)
+            async with sf() as session:
+                session.add(
+                    UserRow(
+                        id=str(uuid4()),
+                        email="Victim@x.com",
+                        password_hash="h",
+                        system_role="user",
+                        needs_setup=False,
+                        token_version=0,
+                    )
+                )
+                await session.commit()
+
+            with pytest.raises(ValueError, match="Email already registered"):
+                await repo.create_user(User(email="victim@x.com", password_hash="h", system_role="user"))
+            assert await repo.count_users() == 1
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 def test_update_user_normalizes_email(tmp_path):
     """Changing an email through update_user stores the canonical lowercase form."""
     import asyncio

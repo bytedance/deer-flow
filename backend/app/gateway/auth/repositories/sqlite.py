@@ -93,6 +93,11 @@ class SQLiteUserRepository(UserRepository):
         user.email = _normalize_email(user.email)
         row = self._user_to_row(user)
         async with self._sf() as session:
+            # The unique constraint is case-sensitive, so it cannot catch a
+            # canonical address colliding with a mixed-case legacy row.
+            existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
+            if await session.scalar(existing) is not None:
+                raise ValueError(f"Email already registered: {user.email}")
             session.add(row)
             try:
                 await session.commit()
