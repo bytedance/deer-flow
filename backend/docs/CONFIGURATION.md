@@ -426,6 +426,15 @@ sandbox:
    home_dir: /home/user             # /mnt/user-data is remapped under this directory
    idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
    replicas: 3                      # max concurrent sandboxes per gateway process
+   ownership:                       # use Redis when more than one gateway shares E2B
+     type: redis
+     redis_url: $REDIS_URL
+   reconciliation_interval_seconds: 60
+   reconciliation_grace_seconds: 120
+   reconciliation_orphan_ttl_seconds: 3600
+   reconciliation_max_pages: 10
+   reconciliation_max_items: 200
+   reconciliation_max_seconds: 15
    mounts:                          # one-shot upload of host files at sandbox start
      - host_path: /path/on/host
        container_path: /home/user/shared
@@ -440,10 +449,19 @@ provider in `config.yaml`.
 
 Notes specific to `E2BSandboxProvider`:
 
-- Each DeerFlow thread is bound to its e2b sandbox via metadata
-  (`deer_flow_user`, `deer_flow_thread`), so the same thread reuses the same
-  sandbox across gateway restarts and across processes — no cross-process
-  file lock is needed because the e2b control plane is the source of truth.
+- Each DeerFlow thread is bound to its E2B sandbox via metadata
+  (`deer_flow_user`, `deer_flow_thread`). Startup and periodic reconciliation
+  probe every bounded candidate, adopt one healthy canonical sandbox, and reap
+  duplicates after a grace period. Provider-tagged entries without a complete
+  user/thread identity are reaped only after the orphan TTL.
+- Ownership leases prevent one gateway from adopting or destroying a sandbox
+  another live gateway is responsible for. The default in-memory store is safe
+  only for one gateway process. Multi-worker/load-balanced deployments must use
+  `sandbox.ownership.type: redis`; an existing Redis stream bridge configuration
+  is inferred automatically.
+- Reconciliation is bounded by page, item, and wall-clock limits. Its summary log
+  exposes discovered, adopted, duplicate, deferred, killed, dead, and budget-exhausted
+  counts for operational monitoring.
 - Idle expiry is enforced server-side by e2b's `set_timeout()`. The provider
   refreshes the timeout on every release so warm sandboxes stay alive long
   enough for the next acquire.
