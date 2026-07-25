@@ -1172,6 +1172,10 @@ class RunManager:
             if lease_lost:
                 raise asyncio.CancelledError()
             yield
+        except asyncio.CancelledError:
+            if record.abort_event.is_set():
+                raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
+            raise
         finally:
             try:
                 if self._store is not None:
@@ -1273,7 +1277,7 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.status in (RunStatus.pending, RunStatus.running) or r.finalizing for r in self._thread_records_locked(thread_id))
+            return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""

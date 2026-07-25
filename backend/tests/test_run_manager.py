@@ -159,7 +159,7 @@ async def test_reservation_delete_failure_preserves_body_error_and_clears_local_
 
 
 @pytest.mark.anyio
-async def test_reservation_body_is_cancelled_when_lease_is_lost():
+async def test_reservation_lease_loss_surfaces_as_conflict_after_cancelling_body():
     store = LostLeaseRunStore()
     manager = RunManager(
         store=store,
@@ -184,7 +184,7 @@ async def test_reservation_body_is_cancelled_when_lease_is_lost():
 
     await manager._renew_leases()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(ConflictError, match="reservation lease was lost"):
         await task
     assert not await manager.has_inflight("thread-1")
     assert await store.list_inflight() == []
@@ -530,6 +530,16 @@ async def test_has_inflight(manager: RunManager):
 
     await manager.set_status(record.run_id, RunStatus.success)
     assert await manager.has_inflight("thread-1") is False
+
+
+@pytest.mark.anyio
+async def test_has_inflight_ignores_checkpoint_write_reservation(manager: RunManager):
+    """Internal checkpoint writers are not user-visible runs."""
+    async with manager.reserve_thread_operation(
+        "thread-1",
+        kind=ThreadOperationKind.checkpoint_write,
+    ):
+        assert await manager.has_inflight("thread-1") is False
 
 
 @pytest.mark.anyio
