@@ -28,6 +28,7 @@ from app.gateway.internal_auth import (
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -35,6 +36,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    ORPHAN_RECOVERY_STOP_REASON,
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
@@ -56,6 +58,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
+from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -120,21 +123,27 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
         return False
 
 
+async def _orphan_recovery_observed_after_heartbeat(
+    record: RunRecord,
+    run_mgr: RunManager,
+) -> bool:
+    """Return whether durable orphan recovery is the consumer's liveness edge.
+
+    A normal terminal status is not sufficient: the producer persists status
+    before publishing its final error/data frames and END. Orphan recovery is
+    different because the producer is known to be gone and the durable
+    ``stop_reason`` is written atomically with the terminal status. Only that
+    explicit signal may synthesize END after a heartbeat.
+    """
+    if not record.store_only:
+        return False
+    refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
+    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+
+
 # ---------------------------------------------------------------------------
 # Input / config helpers
 # ---------------------------------------------------------------------------
-
-
-def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
-    """Normalize the stream_mode parameter to a list.
-
-    Default matches what ``useStream`` expects: values + messages-tuple.
-    """
-    if raw is None:
-        return ["values"]
-    if isinstance(raw, str):
-        return [raw]
-    return raw if raw else ["values"]
 
 
 def _strip_external_message_metadata(message: Any) -> Any:
@@ -629,9 +638,10 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
+        self.checkpoint_exists = tup is not None
         self.config = getattr(tup, "config", None) or config
         checkpoint = getattr(tup, "checkpoint", None) or {}
         self.values = dict(checkpoint.get("channel_values") or {})
@@ -883,7 +893,7 @@ async def apply_checkpoint_to_run_config(
 
 
 async def start_run(
-    body: Any,
+    body: RunCreateRequest,
     thread_id: str,
     request: Request,
 ) -> RunRecord:
@@ -892,13 +902,13 @@ async def start_run(
     Parameters
     ----------
     body : RunCreateRequest
-        The validated request body (typed as Any to avoid circular import
-        with the router module that defines the Pydantic model).
+        The validated request body shared by HTTP and internal launch paths.
     thread_id : str
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
@@ -1018,8 +1028,6 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
-        stream_modes = normalize_stream_modes(body.stream_mode)
-
         task = asyncio.create_task(
             run_agent(
                 bridge,
@@ -1069,10 +1077,7 @@ async def launch_scheduled_thread_run(
             ),
             cookies={},
         )
-    # SimpleNamespace stands in for the Pydantic run-request body that the
-    # HTTP path parses. If start_run gains a new body.* attribute that it reads
-    # directly, add the matching field here so the scheduler path stays in sync.
-    body = SimpleNamespace(
+    body = RunCreateRequest(
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
@@ -1092,10 +1097,10 @@ async def launch_scheduled_thread_run(
         stream_subgraphs=False,
         stream_resumable=None,
         on_disconnect="continue",
-        on_completion="keep",
+        on_completion=None,
         multitask_strategy="reject",
         after_seconds=None,
-        if_not_exists="reject",
+        if_not_exists="create",
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)
@@ -1125,7 +1130,7 @@ async def sse_consumer(
                 break
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _terminal_record_stream_missing(bridge, record):
+                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
@@ -1188,7 +1193,7 @@ async def wait_for_run_completion(
             if entry is END_SENTINEL:
                 completed = True
                 return True
-            if entry is HEARTBEAT_SENTINEL and await _terminal_record_stream_missing(bridge, record):
+            if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                 completed = True
                 return True
             if await request.is_disconnected():

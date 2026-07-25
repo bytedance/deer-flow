@@ -61,15 +61,15 @@ class PermanentStatusRunStore(MemoryRunStore):
         )
 
 
-class FailingStatusRunStore(MemoryRunStore):
-    """Memory run store that always fails status updates."""
+class FailingTakeoverRunStore(MemoryRunStore):
+    """Memory run store that always fails takeover claims."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.status_update_attempts = 0
+        self.takeover_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
-        self.status_update_attempts += 1
+    async def claim_for_takeover(self, run_id, *, grace_seconds, error, stop_reason=None):
+        self.takeover_attempts += 1
         raise sqlite3.OperationalError("database is locked")
 
 
@@ -301,9 +301,9 @@ async def test_reconcile_orphaned_inflight_runs_skips_live_local_run():
 
 
 @pytest.mark.anyio
-async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_not_persisted():
-    """Startup recovery must not report a row as recovered if the error update failed."""
-    store = FailingStatusRunStore()
+async def test_reconcile_orphaned_inflight_runs_skips_rows_when_takeover_claim_fails():
+    """Startup recovery must not report a row as recovered if the takeover claim failed."""
+    store = FailingTakeoverRunStore()
     await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
     manager = RunManager(
         store=store,
@@ -318,7 +318,7 @@ async def test_reconcile_orphaned_inflight_runs_skips_rows_when_error_status_is_
     stored = await store.get("running-run")
     assert recovered == []
     assert stored["status"] == "running"
-    assert store.status_update_attempts == 2
+    assert store.takeover_attempts == 2
 
 
 @pytest.mark.anyio
@@ -574,6 +574,25 @@ async def test_list_by_thread_merges_store_runs_newest_first():
 
     assert [run.run_id for run in runs] == [memory_record.run_id, "old-store"]
     assert runs[0] is memory_record
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_limit_does_not_let_old_memory_hide_new_store_run():
+    """A local row must not consume the store query's newest-run limit."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old_memory = await manager.create("thread-1")
+    old_memory.created_at = "2026-01-01T00:00:00+00:00"
+    await store.put(
+        "new-store",
+        thread_id="thread-1",
+        status="success",
+        created_at="2026-01-02T00:00:00+00:00",
+    )
+
+    runs = await manager.list_by_thread("thread-1", limit=1)
+
+    assert [run.run_id for run in runs] == ["new-store"]
 
 
 @pytest.mark.anyio

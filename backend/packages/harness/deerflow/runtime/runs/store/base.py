@@ -188,13 +188,15 @@ class RunStore(abc.ABC):
         *,
         grace_seconds: int,
         error: str,
+        stop_reason: str | None = None,
     ) -> bool:
         """Atomically mark an expired-lease active run as ``error``.
 
         Only rows whose lease has expired past *grace_seconds* (or whose
         lease is NULL — pre-ownership data) are updated.  The conditional
         WHERE closes the race between the caller's stale read of the lease
-        and a concurrent heartbeat renewal by the owning worker.
+        and a concurrent heartbeat renewal by the owning worker. When
+        provided, *stop_reason* is persisted in the same atomic update.
 
         Returns ``False`` when:
           - the run is no longer ``pending`` / ``running``,
