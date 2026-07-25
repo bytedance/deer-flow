@@ -793,7 +793,12 @@ export function useCoalescedStreamMessages(
   isStreaming: boolean,
   intervalMs: number = STREAM_RENDER_COALESCE_MS,
 ): Message[] {
-  const [snapshot, setSnapshot] = useState<Message[]>(messages);
+  // `null` means "no snapshot belongs to the current stream": the live array is
+  // returned until the leading-edge flush lands, so a snapshot left over from an
+  // earlier stream can never be painted. This hook outlives thread switches (the
+  // chat page deliberately avoids re-mounting, see its `onStart` comment), so a
+  // retained snapshot would otherwise be another thread's messages.
+  const [snapshot, setSnapshot] = useState<Message[] | null>(null);
   const latestRef = useRef(messages);
   latestRef.current = messages;
   // Monotonic clock: a wall-clock step (NTP, sleep/wake) between two reads
@@ -808,7 +813,7 @@ export function useCoalescedStreamMessages(
   // must not re-trigger renders, or this effect would setState-loop.
   const publish = useCallback(() => {
     setSnapshot((previous) =>
-      sameMessageArray(previous, latestRef.current)
+      previous !== null && sameMessageArray(previous, latestRef.current)
         ? previous
         : latestRef.current,
     );
@@ -824,12 +829,13 @@ export function useCoalescedStreamMessages(
   useEffect(() => {
     if (!isStreaming) {
       clearPendingFlush();
-      // Keep the snapshot current so the next stream starts from a fresh base,
-      // and drop the flush baseline so the leading edge is per stream rather
-      // than per hook instance: a run starting within one interval of the
-      // previous one must not have its first frame deferred.
+      // Drop the flush baseline so the leading edge is per stream rather than
+      // per hook instance: a run starting within one interval of the previous
+      // one must not have its first frame deferred. Dropping the snapshot with
+      // it costs one render per stream end, versus one per idle message change
+      // if the snapshot were instead kept in sync while nothing reads it.
       lastFlushRef.current = Number.NEGATIVE_INFINITY;
-      publish();
+      setSnapshot((previous) => (previous === null ? previous : null));
       return;
     }
     const now = performance.now();
@@ -866,7 +872,7 @@ export function useCoalescedStreamMessages(
     [],
   );
 
-  return isStreaming ? snapshot : messages;
+  return isStreaming && snapshot !== null ? snapshot : messages;
 }
 
 export function upsertThreadInSearchCache(
