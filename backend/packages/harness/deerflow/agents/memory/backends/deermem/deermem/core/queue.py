@@ -61,6 +61,13 @@ class ConversationContext:
     user_id: str | None = None
     trace_id: str | None = None
     signals: frozenset[str] = field(default_factory=frozenset)
+    # Emergency (summarization) flushes bypass the updater's index watermark:
+    # the subset they carry is a one-shot "extract before removal" snapshot whose
+    # own length would otherwise regress the conversation watermark. Such contexts
+    # also coexist with (do not replace) a pending normal update for the same key
+    # so a flush cannot drop a pending normal update's un-extracted tail. See
+    # ``_enqueue_locked``'s match-key + backpressure handling.
+    bypass_watermark: bool = False
 
 
 class MemoryUpdateQueue:
@@ -118,6 +125,7 @@ class MemoryUpdateQueue:
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
+                bypass_watermark=False,
             )
             self._reset_timer()
 
@@ -141,6 +149,7 @@ class MemoryUpdateQueue:
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
+                bypass_watermark=True,
             )
             self._schedule_timer(0)
 
@@ -155,17 +164,27 @@ class MemoryUpdateQueue:
         user_id: str | None,
         trace_id: str | None,
         signals: frozenset[str],
+        bypass_watermark: bool = False,
     ) -> ConversationContext:
         key = queue_key(thread_id, user_id, agent_name)
+        # Emergency (bypass) and normal updates coexist: the match key includes
+        # ``bypass_watermark`` so a summarization flush (bypass=True) never
+        # replaces a pending normal update for the same (thread, user, agent) --
+        # replacing it would drop the normal update's un-extracted tail, which
+        # the next turn may not re-feed if the user stops. Both are processed
+        # independently instead.
         existing = next(
-            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key),
+            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark),
             None,
         )
-        # Backpressure: once depth reaches the cap, reject NEW non-signal items.
-        # Same-key updates merge (do not grow depth) and signal-bearing items are
-        # always admitted, so important memories are never shed under load.
+        # Backpressure: once depth reaches the cap, reject NEW non-signal normal
+        # items. Same-key updates merge (do not grow depth); signal-bearing items
+        # and emergency (bypass) flushes are always admitted. Signals capture
+        # important memories, and the emergency path captures messages about to
+        # be removed by summarization -- neither can be re-fed next turn, so
+        # shedding them under load would lose data rather than merely defer it.
         max_depth = self._config.queue_max_depth
-        if max_depth > 0 and not signals and existing is None and len(self._items) >= max_depth:
+        if max_depth > 0 and not bypass_watermark and not signals and existing is None and len(self._items) >= max_depth:
             raise QueueFull(f"memory update queue is full (depth {len(self._items)} >= {max_depth}); non-signal update for thread {thread_id} rejected")
 
         # Merge by signal union: a signal seen on any update for this key stays.
@@ -177,9 +196,10 @@ class MemoryUpdateQueue:
             user_id=user_id,
             trace_id=trace_id,
             signals=merged_signals,
+            bypass_watermark=bypass_watermark,
         )
         if existing is not None:
-            self._items = [c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) != key]
+            self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
         return context
 
@@ -246,6 +266,7 @@ class MemoryUpdateQueue:
                         signals=context.signals,
                         user_id=context.user_id,
                         trace_id=context.trace_id,
+                        bypass_watermark=context.bypass_watermark,
                     )
                     if success:
                         succeeded += 1
@@ -273,14 +294,17 @@ class MemoryUpdateQueue:
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
-                schedule_delay: float | None = None
+                # Reschedule inside the lock: ``_schedule_timer`` read-cancels-
+                # reassigns ``self._timer`` non-atomically, and a concurrent
+                # ``add``'s ``_reset_timer`` (also under the lock) touches the
+                # same field. Holding the lock makes the reschedule atomic w.r.t.
+                # ``add``. ``_schedule_timer`` only calls ``Timer.start()`` (no
+                # synchronous lock acquisition), so this cannot deadlock.
                 if self._reprocess_pending:
                     self._reprocess_pending = False
                     if self._items:
                         # New work arrived mid-processing: re-run immediately.
-                        schedule_delay = 0
-            if schedule_delay is not None:
-                self._schedule_timer(schedule_delay)
+                        self._schedule_timer(0)
 
     def flush(self, *, skip_inter_item_delay: bool = False) -> None:
         """Force immediate processing of the queue.

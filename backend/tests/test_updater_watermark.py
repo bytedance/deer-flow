@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
-from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
+from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater, _message_identity
 
 
 class _FakeLLM:
@@ -117,4 +117,48 @@ def test_watermark_resets_when_conversation_shrinks() -> None:
     # watermark past the end; it re-extracts from the start.
     short_msgs = _msgs("only")
     updater.update_memory(short_msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 2
+
+
+def test_watermark_front_removal_does_not_skip_pending_tail() -> None:
+    """Regression: an index watermark skips un-extracted turns when
+    summarization removes the conversation front. The watermark is
+    content/identity based, so after a front removal it finds the last-extracted
+    message at its NEW index and feeds the real pending tail instead of slicing
+    past the (now shorter) list.
+
+    Setup: 6 messages; pre-set the watermark to msg[3] so msgs[0..3] are
+    "already extracted" and msgs[4..5] are pending. Summarization then removes
+    the front pair (msgs[0..1]). The surviving 4-message list must still feed
+    the pending pair (msgs[4..5]) -- an index watermark (=4) would slice [4:]
+    on a 4-element list and feed nothing, losing them.
+    """
+    llm = _FakeLLM()
+    updater = MemoryUpdater(_config(), _FakeStorage(), llm)
+    msgs = _msgs("a", "b", "c")  # [H a, A ra, H b, A rb, H c, A rc]
+    updater._watermarks[("t1", "u", "a")] = _message_identity(msgs[3])  # ...A rb extracted
+    surviving = msgs[2:]  # summarization removed the front pair
+    updater.update_memory(surviving, thread_id="t1", agent_name="a", user_id="u")
+    # The pending tail (H c, A rc) was fed -> exactly one extraction.
+    assert llm.invoke_count == 1
+
+
+def test_emergency_flush_bypasses_watermark_and_does_not_regress() -> None:
+    """Regression: the emergency (summarization) flush path
+    bypasses the watermark -- it extracts its subset in full and does NOT
+    advance the conversation watermark (advancing from the subset's own last
+    message, which is older than the conversation's latest, would regress it
+    and skip the real tail on the next normal feed)."""
+    llm = _FakeLLM()
+    updater = MemoryUpdater(_config(), _FakeStorage(), llm)
+    msgs = _msgs("a", "b")  # [H a, A ra, H b, A rb]
+    key = ("t1", "u", "a")
+    updater._watermarks[key] = _message_identity(msgs[1])  # ...A ra extracted; H b, A rb pending
+    # Emergency flush of the front subset about to be removed.
+    updater.update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True)
+    assert llm.invoke_count == 1  # subset extracted in full
+    # Watermark did not regress to the subset's last message.
+    assert updater._watermarks[key] == _message_identity(msgs[1])
+    # A subsequent normal feed of the full conversation still extracts the tail.
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
     assert llm.invoke_count == 2
