@@ -210,6 +210,87 @@ def test_skill_manage_rejects_support_path_traversal(monkeypatch, tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("support_path", "support_content"),
+    [
+        ("references/helper.py", "print('code outside scripts')\n"),
+        ("assets/runner", "#!/usr/bin/env python3\nprint('extensionless code')\n"),
+    ],
+)
+def test_skill_manage_treats_code_outside_scripts_as_executable(monkeypatch, tmp_path, support_path, support_content):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_result("allow", "ok"))
+    calls = []
+
+    async def _scan(content, *, executable, location, **kwargs):
+        calls.append({"executable": executable, "location": location})
+        if location.endswith(support_path):
+            return await _async_result("warn", "code needs review")
+        return await _async_result("allow", "ok")
+
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+
+    runtime = _make_runtime(user_id="default")
+    anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", _skill_content("demo-skill"))
+
+    with pytest.raises(ValueError, match="rejected executable content.*code needs review"):
+        anyio.run(
+            skill_manage_module.skill_manage_tool.coroutine,
+            runtime,
+            "write_file",
+            "demo-skill",
+            support_content,
+            support_path,
+        )
+
+    assert {"executable": True, "location": f"demo-skill/{support_path}"} in calls
+    user_custom = tmp_path / "users" / "default" / "skills" / "custom"
+    assert not (user_custom / "demo-skill" / support_path).exists()
+
+
+def test_skill_manage_does_not_treat_nested_scripts_name_as_executable(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_result("allow", "ok"))
+    support_path = "references/scripts/notes.txt"
+    calls = []
+
+    async def _scan(content, *, executable, location, **kwargs):
+        calls.append({"executable": executable, "location": location})
+        if location.endswith(support_path):
+            return await _async_result("warn", "prompt text needs review")
+        return await _async_result("allow", "ok")
+
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", _scan)
+
+    runtime = _make_runtime(user_id="default")
+    anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    result = anyio.run(
+        skill_manage_module.skill_manage_tool.coroutine,
+        runtime,
+        "write_file",
+        "demo-skill",
+        "Review notes.\n",
+        support_path,
+    )
+
+    assert "Wrote" in result
+    assert {"executable": False, "location": f"demo-skill/{support_path}"} in calls
+
+
 def test_skill_manage_static_critical_blocks_create_before_llm(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     config = _make_config(skills_root)

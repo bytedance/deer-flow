@@ -15,6 +15,7 @@ from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.skills.code_files import is_skill_code_file
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -225,7 +226,8 @@ async def _skill_manage_impl(
             target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
             exists = await _to_thread(target.exists)
             prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
-            executable = "scripts/" in path or path.startswith("scripts/")
+            relative_path = Path(path)
+            executable = is_skill_code_file(relative_path, has_shebang=content.startswith("#!"))
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
