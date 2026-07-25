@@ -79,6 +79,28 @@ def test_normalize_stream_modes_empty_list():
     assert normalize_stream_modes([]) == ["values"]
 
 
+@pytest.mark.parametrize("raw", ["messages", "events", "tools", ["values", "events"]])
+def test_normalize_stream_modes_rejects_unsupported_modes(raw):
+    from app.gateway.services import normalize_stream_modes
+
+    with pytest.raises(ValueError, match="Unsupported stream mode"):
+        normalize_stream_modes(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("messages-tuple", ["messages"]),
+        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages"]),
+        (["updates", "custom"], ["updates", "custom"]),
+    ],
+)
+def test_to_langgraph_stream_modes_maps_alias_and_deduplicates(raw, expected):
+    from deerflow.runtime.stream_modes import to_langgraph_stream_modes
+
+    assert to_langgraph_stream_modes(raw) == expected
+
+
 def test_normalize_input_none():
     from app.gateway.services import normalize_input
 
@@ -1438,15 +1460,19 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     from types import SimpleNamespace
     from unittest.mock import patch
 
+    from app.gateway.routers.thread_runs import RunCreateRequest
     from app.gateway.services import launch_scheduled_thread_run
 
     async def _scenario():
         captured: dict[str, object] = {}
 
         async def fake_start_run(body, thread_id, request):
+            captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
             captured["metadata"] = body.metadata
+            captured["if_not_exists"] = body.if_not_exists
+            captured["on_completion"] = body.on_completion
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -1463,8 +1489,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     captured, result = asyncio.run(_scenario())
 
     assert captured["thread_id"] == "thread-scheduled"
+    assert isinstance(captured["body"], RunCreateRequest)
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert captured["if_not_exists"] == "create"
+    assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
 
 
@@ -1755,6 +1784,54 @@ class TestInjectAuthenticatedUserContextAuthz:
         config = {"context": "not a dict"}
         with pytest.raises(TypeError, match="run context must be a mapping"):
             inject_authenticated_user_context(config, _make_request_with_auth_source("session"))
+
+
+@pytest.mark.asyncio
+async def test_run_agent_invalid_stream_mode_finalizes_run_before_graph_invocation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-invalid-stream-mode")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    agent_factory = MagicMock()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id}},
+        stream_modes=["events"],
+    )
+    await asyncio.sleep(0)
+
+    assert record.status == RunStatus.error
+    assert record.error == "Unsupported stream mode(s): events"
+    agent_factory.assert_not_called()
+    bridge.publish.assert_awaited_once_with(
+        record.run_id,
+        "error",
+        {
+            "message": "Unsupported stream mode(s): events",
+            "name": "UnsupportedStreamModeError",
+        },
+    )
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    replacement = await run_manager.create_or_reject(record.thread_id)
+    assert replacement.run_id != record.run_id
 
 
 @pytest.mark.asyncio

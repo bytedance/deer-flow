@@ -62,14 +62,15 @@ def test_thread_page_orders_across_runs_and_paginates_without_gaps():
     assert older.json()["next_before_seq"] is None
 
 
-def test_thread_page_scans_past_middleware_chunks_to_fill_visible_page(monkeypatch):
+@pytest.mark.parametrize("caller", ["middleware:title", "subagent:general-purpose"])
+def test_thread_page_scans_past_internal_ai_chunks_to_fill_visible_page(monkeypatch, caller):
     monkeypatch.setattr(thread_runs, "THREAD_MESSAGE_PAGE_SCAN_BATCH", 3)
     store = MemoryRunEventStore()
 
     async def seed():
         await _put_message(store, "run-1", "human", "visible-old")
         for index in range(3):
-            await _put_message(store, "run-1", "ai", f"middleware-{index}", caller="middleware:title")
+            await _put_message(store, "run-1", "ai", f"internal-{index}", caller=caller)
         await _put_message(store, "run-2", "human", "visible-new-human")
         await _put_message(store, "run-2", "ai", "visible-new-ai")
 
@@ -82,6 +83,62 @@ def test_thread_page_scans_past_middleware_chunks_to_fill_visible_page(monkeypat
     assert [row["seq"] for row in body["data"]] == [5, 6]
     assert body["has_more"] is True
     assert body["next_before_seq"] == 5
+
+
+def test_thread_page_hides_subagent_ai_but_keeps_root_task_result():
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "run-1", "human", "user-prompt")
+        await store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="llm.ai.response",
+            category="message",
+            content={
+                "type": "ai",
+                "id": "lead-task-call",
+                "content": "",
+                "tool_calls": [{"id": "task-0", "name": "task", "args": {}}],
+                "additional_kwargs": {},
+            },
+            metadata={"caller": "lead_agent"},
+        )
+        await _put_message(
+            store,
+            "run-1",
+            "ai",
+            "internal-subagent-answer",
+            caller="subagent:general-purpose",
+        )
+        await store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="llm.tool.result",
+            category="message",
+            content={
+                "type": "tool",
+                "id": "root-task-result",
+                "tool_call_id": "task-0",
+                "content": "Task Succeeded. Result: poem",
+                "additional_kwargs": {"subagent_status": "completed"},
+            },
+            metadata={},
+        )
+        await _put_message(store, "run-1", "ai", "lead-final-answer")
+
+    asyncio.run(seed())
+    app = _make_app(store)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages/page")
+
+    assert response.status_code == 200
+    assert [row["content"]["id"] for row in response.json()["data"]] == [
+        "user-prompt",
+        "lead-task-call",
+        "root-task-result",
+        "lead-final-answer",
+    ]
 
 
 def test_thread_page_scans_large_middleware_only_region_with_production_batch_size():

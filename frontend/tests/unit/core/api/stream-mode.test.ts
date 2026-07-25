@@ -2,33 +2,34 @@ import { expect, test } from "@rstest/core";
 
 import { sanitizeRunStreamOptions } from "@/core/api/stream-mode";
 
-test("drops unsupported stream modes from array payloads", () => {
-  const sanitized = sanitizeRunStreamOptions({
-    streamMode: [
-      "values",
-      "messages-tuple",
-      "custom",
-      "updates",
-      "events",
-      "tools",
-    ],
-  });
-
-  expect(sanitized.streamMode).toEqual([
-    "values",
-    "messages-tuple",
-    "custom",
-    "updates",
-    "events",
-  ]);
+test("rejects mixed supported and unsupported stream modes", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: ["values", "events", "tools"],
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): events, tools");
 });
 
-test("drops unsupported stream modes from scalar payloads", () => {
-  const sanitized = sanitizeRunStreamOptions({
-    streamMode: "tools",
-  });
+test("rejects payloads when every requested stream mode is unsupported", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: ["events", "tools"],
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): events, tools");
 
-  expect(sanitized.streamMode).toBeUndefined();
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: "tools",
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): tools");
+});
+
+test("rejects messages because the Gateway only supports messages-tuple framing", () => {
+  expect(() =>
+    sanitizeRunStreamOptions({
+      streamMode: "messages",
+    }),
+  ).toThrow("Unsupported LangGraph stream mode(s): messages");
 });
 
 test("keeps payloads without streamMode untouched", () => {
@@ -37,4 +38,26 @@ test("keeps payloads without streamMode untouched", () => {
   };
 
   expect(sanitizeRunStreamOptions(options)).toBe(options);
+});
+
+test("strips streamResumable before sending run options to the API", () => {
+  const sanitized = sanitizeRunStreamOptions({
+    streamResumable: true,
+    streamSubgraphs: true,
+  });
+
+  expect(sanitized).toEqual({
+    streamSubgraphs: true,
+  });
+});
+
+test("sanitizes streamResumable while preserving valid stream modes", () => {
+  const sanitized = sanitizeRunStreamOptions({
+    streamResumable: true,
+    streamMode: ["values", "custom"],
+  });
+
+  expect(sanitized).toEqual({
+    streamMode: ["values", "custom"],
+  });
 });
