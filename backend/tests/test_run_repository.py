@@ -42,7 +42,7 @@ class _CustomRunStoreWithoutProgress(RunStore):
         return None
 
     async def start_run(self, *args, **kwargs):
-        return None
+        return False
 
     async def delete(self, *args, **kwargs):
         return None
