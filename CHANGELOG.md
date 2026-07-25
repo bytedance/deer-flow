@@ -198,6 +198,9 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Re-check orphan candidates through an atomic, lease-aware takeover
+  claim so a successful heartbeat after the scan keeps the run active and only
+  one reconciler reports recovery. ([#4424])
 - **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
   lead-agent skills, preventing passive enabled skills and evaluation fixtures
   from removing MCP, web, file, and delegation tools from every run. ([#4095],
@@ -1114,3 +1117,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4287]: https://github.com/bytedance/deer-flow/pull/4287
 [#4288]: https://github.com/bytedance/deer-flow/pull/4288
 [#4324]: https://github.com/bytedance/deer-flow/issues/4324
+[#4424]: https://github.com/bytedance/deer-flow/issues/4424

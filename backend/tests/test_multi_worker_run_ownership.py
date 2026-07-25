@@ -404,6 +404,51 @@ async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan
 
 
 @pytest.mark.anyio
+async def test_concurrent_reconcilers_report_one_successful_claim():
+    """Two reapers scanning the same candidate must report one recovery."""
+    store = MemoryRunStore()
+    grace = 10
+    run_id = "contended-orphan"
+    await store.put(
+        run_id,
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="worker-dead",
+        lease_expires_at=(datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat(),
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+
+    original_scan = store.list_inflight_with_expired_lease
+    both_scanned = asyncio.Event()
+    scan_lock = asyncio.Lock()
+    scan_count = 0
+
+    async def synchronized_scan(*, before=None, grace_seconds=10):
+        nonlocal scan_count
+        rows = [dict(row) for row in await original_scan(before=before, grace_seconds=grace_seconds)]
+        async with scan_lock:
+            scan_count += 1
+            if scan_count == 2:
+                both_scanned.set()
+        await asyncio.wait_for(both_scanned.wait(), timeout=1)
+        return rows
+
+    store.list_inflight_with_expired_lease = synchronized_scan
+    managers = [
+        _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace)),
+        _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace)),
+    ]
+
+    results = await asyncio.gather(*(manager.reconcile_orphaned_inflight_runs(error="orphaned") for manager in managers))
+
+    assert sorted(len(recovered) for recovered in results) == [0, 1]
+    assert [record.run_id for recovered in results for record in recovered] == [run_id]
+    row = await store.get(run_id)
+    assert row is not None
+    assert row["status"] == "error"
+
+
+@pytest.mark.anyio
 async def test_reconciliation_claims_null_lease_runs():
     """Pre-ownership rows (NULL lease) must be reclaimed."""
     store = MemoryRunStore()

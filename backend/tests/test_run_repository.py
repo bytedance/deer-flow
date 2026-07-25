@@ -959,6 +959,47 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
+        """The SQL takeover CAS must reject a candidate renewed after its scan."""
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        run_id = "renewed-after-scan"
+        owner_worker_id = "worker-alive"
+        try:
+            await repo.put(
+                run_id,
+                thread_id="t1",
+                status="running",
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat(),
+                created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+            )
+            original_scan = repo.list_inflight_with_expired_lease
+
+            async def scan_then_renew(*, before=None, grace_seconds=10):
+                rows = await original_scan(before=before, grace_seconds=grace_seconds)
+                renewed = await repo.update_lease(
+                    run_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+                )
+                assert renewed is True
+                return rows
+
+            repo.list_inflight_with_expired_lease = scan_then_renew
+            manager = RunManager(store=repo)
+
+            recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
+
+            row = await repo.get(run_id)
+            assert recovered == []
+            assert row is not None
+            assert row["status"] == "running"
+            assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_claim_for_takeover_succeeds_with_null_lease(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("run-null", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat())

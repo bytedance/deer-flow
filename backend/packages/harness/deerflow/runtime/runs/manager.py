@@ -1213,7 +1213,10 @@ class RunManager:
 
         Rows with a still-valid lease are skipped — they belong to another live
         worker. Rows with a NULL lease (pre-ownership data) are reclaimed as
-        well, matching the original single-worker recovery behaviour.
+        well, matching the original single-worker recovery behaviour. The
+        candidate scan is only an optimization: each row is claimed with a
+        lease-aware conditional update so a heartbeat renewal after the scan
+        always wins over reconciliation.
         """
         if self._store is None:
             return []
