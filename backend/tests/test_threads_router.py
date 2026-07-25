@@ -2013,7 +2013,8 @@ def test_branch_seeds_run_events_with_parent_history(monkeypatch, mode) -> None:
     assert [row["content"]["id"] for row in rows] == ["h1", "t1", "a1"]
     assert [row["event_type"] for row in rows] == ["llm.human.input", "llm.tool.result", "llm.ai.response"]
     assert all(row["category"] == "message" for row in rows)
-    assert all(row["run_id"] == f"branch-seed-{branch_thread_id}" for row in rows)
+    # One synthetic run per inherited turn (#4458): this source has a single turn.
+    assert all(row["run_id"] == f"branch-seed-{branch_thread_id}-1" for row in rows)
     assert all((row.get("metadata") or {}).get("branch_seed") is True for row in rows)
     seqs = [row["seq"] for row in rows]
     assert seqs == sorted(seqs)
