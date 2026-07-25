@@ -51,6 +51,20 @@ class _BarrierRunRepo(ScheduledTaskRunRepository):
         return result
 
 
+class _FailFirstRunningUpdateRepo(ScheduledTaskRunRepository):
+    """Inject one failure at the post-launch queued -> running transition."""
+
+    def __init__(self, session_factory) -> None:
+        super().__init__(session_factory)
+        self._fail_running_update = True
+
+    async def update_status(self, run_record_id: str, *, status: str, **kwargs) -> None:
+        if status == "running" and self._fail_running_update:
+            self._fail_running_update = False
+            raise RuntimeError("injected post-launch bookkeeping failure")
+        await super().update_status(run_record_id, status=status, **kwargs)
+
+
 def _make_service(task_repo, run_repo, launched: list) -> ScheduledTaskService:
     async def fake_launch(**kwargs):
         # Yield so a truly-concurrent sibling can interleave, then record.
@@ -180,6 +194,36 @@ async def test_natural_timing_concurrent_dispatch_launches_exactly_once(tmp_path
             assert outcomes.count("launched") == 1, (i, outcomes)
             assert len(launched) == 1, (i, launched)
             assert await _active_run_count(run_repo, task_id) == 1, i
+    finally:
+        await close_engine()
+
+
+async def test_post_launch_bookkeeping_failure_keeps_active_slot_and_run_id(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = _FailFirstRunningUpdateRepo(sf)
+        launched: list = []
+        service = _make_service(task_repo, run_repo, launched)
+        task = await _seed_task(task_repo, "task-post-launch-failure")
+        now = datetime.now(UTC)
+
+        first = await service.dispatch_task(dict(task), now=now, trigger="scheduled")
+        second = await service.dispatch_task(dict(task), now=now, trigger="manual")
+
+        assert first["outcome"] == "launched"
+        assert first["run_id"] == "run-1"
+        assert first["error"] == "injected post-launch bookkeeping failure"
+        assert second["outcome"] == "conflict"
+        assert len(launched) == 1
+
+        rows = await run_repo.list_by_task(task["id"], limit=10)
+        active = [row for row in rows if row["status"] in _ACTIVE_STATUSES]
+        assert len(active) == 1
+        assert active[0]["status"] == "running"
+        assert active[0]["run_id"] == "run-1"
     finally:
         await close_engine()
 

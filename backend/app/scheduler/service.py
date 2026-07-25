@@ -143,51 +143,8 @@ class ScheduledTaskService:
                     "scheduled_trigger": trigger,
                 },
             )
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
-            if task["schedule_type"] == "once":
-                # Stay "running" until handle_run_completion sees the real
-                # terminal outcome; declaring "completed" at launch would stick
-                # if the run fails or the process dies (startup reconciliation
-                # is cancel_stuck_once_tasks).
-                task_status = "running"
-            elif trigger == "manual" and task.get("status") == "paused":
-                task_status = "paused"
-            else:
-                task_status = "enabled"
-            await self._task_run_repo.update_status(
-                task_run_id,
-                status="running",
-                run_id=result["run_id"],
-                started_at=now,
-                # A fast-failing run can reach handle_run_completion before this
-                # write resumes; never clobber its terminal status.
-                protect_terminal=True,
-            )
-            await self._task_repo.update_after_launch(
-                task["id"],
-                status=task_status,
-                next_run_at=next_at,
-                last_run_at=now,
-                last_run_id=result["run_id"],
-                last_thread_id=result["thread_id"],
-                last_error=None,
-                increment_run_count=True,
-                # Same race as the run-row write above: a fast-failing run's
-                # completion hook may have already finalized a `once` task.
-                protect_terminal=True,
-            )
-            return {
-                "outcome": "launched",
-                "task_run_id": task_run_id,
-                "run_id": result["run_id"],
-                "thread_id": result["thread_id"],
-                "error": None,
-            }
+            run_id = result["run_id"]
+            launched_thread_id = result["thread_id"]
         except Exception as exc:
             next_at = next_run_at(
                 task["schedule_type"],
@@ -221,6 +178,88 @@ class ScheduledTaskService:
                 "task_run_id": task_run_id,
                 "run_id": None,
                 "thread_id": execution_thread_id,
+                "error": str(exc),
+            }
+
+        try:
+            next_at = next_run_at(
+                task["schedule_type"],
+                task["schedule_spec"],
+                task["timezone"],
+                now=now,
+            )
+            if task["schedule_type"] == "once":
+                # Stay "running" until handle_run_completion sees the real
+                # terminal outcome; declaring "completed" at launch would stick
+                # if the run fails or the process dies (startup reconciliation
+                # is cancel_stuck_once_tasks).
+                task_status = "running"
+            elif trigger == "manual" and task.get("status") == "paused":
+                task_status = "paused"
+            else:
+                task_status = "enabled"
+            await self._task_run_repo.update_status(
+                task_run_id,
+                status="running",
+                run_id=run_id,
+                started_at=now,
+                # A fast-failing run can reach handle_run_completion before this
+                # write resumes; never clobber its terminal status.
+                protect_terminal=True,
+            )
+            await self._task_repo.update_after_launch(
+                task["id"],
+                status=task_status,
+                next_run_at=next_at,
+                last_run_at=now,
+                last_run_id=run_id,
+                last_thread_id=launched_thread_id,
+                last_error=None,
+                increment_run_count=True,
+                # Same race as the run-row write above: a fast-failing run's
+                # completion hook may have already finalized a `once` task.
+                protect_terminal=True,
+            )
+            return {
+                "outcome": "launched",
+                "task_run_id": task_run_id,
+                "run_id": run_id,
+                "thread_id": launched_thread_id,
+                "error": None,
+            }
+        except Exception as exc:
+            # The run is already live. Never terminalize its queued/running row
+            # because doing so would release the task's unique active slot and
+            # allow a duplicate launch. Retrying this row update is idempotent;
+            # the parent task update is not (it increments run_count), so leave
+            # that to later reconciliation rather than risking a double count.
+            logger.exception(
+                "Scheduled task %s launched as run %s, but post-launch bookkeeping failed; preserving the active slot",
+                task["id"],
+                run_id,
+            )
+            try:
+                await self._task_run_repo.update_status(
+                    task_run_id,
+                    status="running",
+                    run_id=run_id,
+                    started_at=now,
+                    protect_terminal=True,
+                )
+            except Exception:
+                # If the retry also fails, the original queued row remains an
+                # active-slot guard. The run completion hook can backfill the
+                # run id when persistence recovers.
+                logger.exception(
+                    "Failed to backfill launched run %s on scheduled task row %s",
+                    run_id,
+                    task_run_id,
+                )
+            return {
+                "outcome": "launched",
+                "task_run_id": task_run_id,
+                "run_id": run_id,
+                "thread_id": launched_thread_id,
                 "error": str(exc),
             }
 
