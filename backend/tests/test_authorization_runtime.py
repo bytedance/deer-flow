@@ -40,6 +40,7 @@ class TestValidProvider:
     def test_builtin_rbac_resolves(self):
         config = AuthorizationConfig(
             enabled=True,
+            default_role="admin",
             provider=AuthorizationProviderConfig(
                 use="deerflow.authz.rbac:RbacAuthorizationProvider",
                 config={"roles": {"admin": {"tools": {"allow": "*"}}}},
@@ -160,6 +161,19 @@ class TestRbacErrorPropagation:
         else:
             pytest.fail("Expected ValueError for invalid RBAC config")
 
+    def test_unknown_default_role_fails_during_provider_resolution(self):
+        config = AuthorizationConfig(
+            enabled=True,
+            default_role="missing",
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}}},
+            ),
+        )
+
+        with pytest.raises(ValueError, match="default_role.*missing.*known roles"):
+            resolve_authorization_provider(config)
+
 
 class TestNoFactoryInjection:
     """Factory must not inject fail_closed or default_role into provider kwargs."""
@@ -187,6 +201,7 @@ class TestNoCaching:
     def test_each_call_returns_new_instance(self):
         config = AuthorizationConfig(
             enabled=True,
+            default_role="admin",
             provider=AuthorizationProviderConfig(
                 use="deerflow.authz.rbac:RbacAuthorizationProvider",
                 config={"roles": {"admin": {"tools": {"allow": "*"}}}},

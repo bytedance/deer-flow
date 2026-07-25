@@ -84,7 +84,8 @@ class E2BSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        # Per-(user,thread) lock to serialise acquire() against itself.
+        # Per-(user,thread) lock to serialise acquire() and release() state
+        # transitions without holding the provider-wide lock across remote IO.
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
@@ -1072,6 +1073,22 @@ class E2BSandboxProvider(SandboxProvider):
         the warm-pool entry stays valid for at least one ``idle_timeout``
         window after release.
         """
+        with self._lock:
+            thread_key = next(
+                (key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id),
+                None,
+            )
+
+        if thread_key is None:
+            self._release_internal(sandbox_id)
+            return
+
+        user_id, thread_id = thread_key
+        with self._get_thread_lock(thread_id, user_id):
+            self._release_internal(sandbox_id)
+
+    def _release_internal(self, sandbox_id: str) -> None:
+        """Complete one release while the thread transition lock is held."""
         sandbox: E2BSandbox | None = None
         seed: str | None = None
 

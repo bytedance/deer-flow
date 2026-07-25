@@ -57,6 +57,19 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  runDuration: {
+    reasoning: "Reasoning",
+    working: "Working…",
+    completedIn: (duration) => `Completed in ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
+  },
+
   // Home
   home: {
     docs: "Docs",
@@ -116,6 +129,7 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
+    disclaimer: "Deerflow is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",

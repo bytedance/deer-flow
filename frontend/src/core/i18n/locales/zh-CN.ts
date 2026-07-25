@@ -57,6 +57,18 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  runDuration: {
+    reasoning: "思考过程",
+    working: "执行中…",
+    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    description: "任务总耗时，包括模型推理、工具调用和等待时间。",
+    lessThanSecond: "不足 1 秒",
+    hours: (value) => `${value} 小时`,
+    minutes: (value) => `${value} 分`,
+    seconds: (value) => `${value} 秒`,
+    separator: " ",
+  },
+
   // Home
   home: {
     docs: "文档",
@@ -115,6 +127,7 @@ export const zhCN: Translations = {
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
+    disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",

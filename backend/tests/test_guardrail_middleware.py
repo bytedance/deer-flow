@@ -431,17 +431,19 @@ class TestGuardrailMiddleware:
         assert journal.calls == []
 
     # Journal: a recording failure must not alter the guardrail denial outcome.
-    def test_guardrail_event_recording_failure_does_not_change_denial(self):
+    def test_guardrail_event_recording_failure_warns_without_changing_denial(self, caplog):
         journal = _FakeJournal(fail=True)
         mw = GuardrailMiddleware(_DenyAllProvider())
         req = _make_tool_call_request("bash", context={"__run_journal": journal})
         handler = MagicMock()
 
-        result = mw.wrap_tool_call(req, handler)
+        with caplog.at_level("WARNING"):
+            result = mw.wrap_tool_call(req, handler)
 
         handler.assert_not_called()
         assert result.status == "error"
         assert "oap.denied" in result.content
+        assert "Failed to record middleware:guardrail event" in caplog.text
 
     # Journal: the async denial path records the same guardrail audit event.
     def test_async_denied_tool_records_guardrail_event(self):

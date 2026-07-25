@@ -67,6 +67,10 @@ async def test_mark_stale_active_runs_fails_orphaned_runs(tmp_path):
     assert sf is not None
 
     repo = ScheduledTaskRunRepository(sf)
+    # The queued and running rows live on different tasks: mark_stale_active_runs
+    # is a global sweep (no task filter), and the uq_scheduled_task_run_active
+    # partial unique index forbids two active rows on one task_id, so the pair
+    # that proves both active statuses get swept must be spread across tasks.
     await repo.create(
         run_record_id="task-run-queued",
         task_id="task-1",
@@ -77,12 +81,14 @@ async def test_mark_stale_active_runs_fails_orphaned_runs(tmp_path):
     )
     await repo.create(
         run_record_id="task-run-running",
-        task_id="task-1",
-        thread_id="thread-1",
+        task_id="task-2",
+        thread_id="thread-2",
         scheduled_for=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
         trigger="scheduled",
         status="running",
     )
+    # A terminal row on task-1 (outside the index predicate) coexists with the
+    # active queued row and must be left untouched by the sweep.
     await repo.create(
         run_record_id="task-run-success",
         task_id="task-1",
@@ -95,8 +101,8 @@ async def test_mark_stale_active_runs_fails_orphaned_runs(tmp_path):
     swept = await repo.mark_stale_active_runs(error="interrupted: gateway restarted")
     assert swept == 2
 
-    history = await repo.list_by_task("task-1")
-    by_id = {entry["id"]: entry for entry in history}
+    by_id = {entry["id"]: entry for entry in await repo.list_by_task("task-1")}
+    by_id.update({entry["id"]: entry for entry in await repo.list_by_task("task-2")})
     assert by_id["task-run-queued"]["status"] == "interrupted"
     assert by_id["task-run-running"]["status"] == "interrupted"
     assert by_id["task-run-success"]["status"] == "success"
