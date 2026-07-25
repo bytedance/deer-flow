@@ -24,6 +24,7 @@ export const enUS: Translations = {
     delete: "Delete",
     edit: "Edit",
     rename: "Rename",
+    renameFailed: "Failed to rename thread.",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",

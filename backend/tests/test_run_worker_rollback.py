@@ -18,7 +18,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.runs.manager import ConflictError, RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
     RollbackPoint,
@@ -43,6 +43,48 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aget_tuple = AsyncMock(return_value=None)
         self.aput_writes = AsyncMock()
+
+
+@pytest.mark.anyio
+async def test_pending_cancel_stops_waiting_for_prior_finalization():
+    run_manager = RunManager()
+    prior = await run_manager.create("thread-cancel-while-waiting")
+    prior.status = RunStatus.interrupted
+    prior.finalizing = True
+    record = await run_manager.create("thread-cancel-while-waiting")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    def agent_factory(**_kwargs):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("cancelled pending run must not build an agent")
+
+    record.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={},
+        )
+    )
+    await asyncio.sleep(0)
+
+    outcome = await run_manager.cancel(record.run_id)
+    await asyncio.wait_for(record.task, timeout=0.2)
+
+    assert outcome == CancelOutcome.cancelled
+    assert prior.finalizing is True
+    assert factory_called is False
+    assert record.status == RunStatus.interrupted
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
@@ -639,8 +681,6 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
     """
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.abort_action = "rollback"
-    record.abort_event.set()
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
@@ -664,6 +704,10 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
 
     class DummyAgent:
         async def aget_state(self, _config):
+            # Cancel after the worker crosses its startup barrier so this test
+            # exercises the running rollback path, not pending cancellation.
+            record.abort_action = "rollback"
+            record.abort_event.set()
             raise RuntimeError("materialization failed")
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
@@ -2729,14 +2773,16 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     """
     import deerflow.runtime.runs.worker as worker_module
 
+    helper_called = asyncio.Event()
+
     async def _boom(*_args, **_kwargs):
+        helper_called.set()
         raise RuntimeError("forced helper failure")
 
     monkeypatch.setattr(worker_module, "_ensure_interrupted_title", _boom)
 
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.status = RunStatus.interrupted
 
     bridge = SimpleNamespace(
         publish=AsyncMock(),
@@ -2792,5 +2838,6 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     # The helper raised, but the run still reaches the threads_meta status sync
     # and ``publish_end`` — i.e. the SSE stream is closed cleanly and the row
     # reflects the run outcome.
+    assert helper_called.is_set()
     assert captured_status.get("status") == ("thread-1", "interrupted")
     bridge.publish_end.assert_awaited_once_with(record.run_id)
