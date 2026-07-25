@@ -11,7 +11,7 @@ from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy,  RunStartOutcome
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
