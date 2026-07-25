@@ -96,6 +96,14 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def start_run(self, run_id: str) -> bool:
+        """Atomically transition a pending run to running.
+
+        Returns ``False`` when the row is missing or no longer pending.
+        """
+        pass
+
+    @abc.abstractmethod
     async def delete(self, run_id: str) -> None:
         pass
 

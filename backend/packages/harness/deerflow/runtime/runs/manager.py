@@ -167,6 +167,8 @@ class RunRecord:
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
+    # Serializes startup if an admitted run is ever handed to more than one worker path.
+    start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
@@ -188,6 +190,17 @@ class RunRecord:
     owner_worker_id: str | None = None
     lease_expires_at: str | None = None
     stop_reason: str | None = None
+
+
+class RunStartOutcome(StrEnum):
+    """Result of the pending-to-running startup barrier."""
+
+    started = "started"
+    cancelled = "cancelled"
+
+
+class RunStartupError(RuntimeError):
+    """Raised when durable startup cannot be resolved safely."""
 
 
 OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
@@ -646,6 +659,69 @@ class RunManager:
                 sources.add(source)
         return sources
 
+    async def try_start(self, run_id: str) -> RunStartOutcome:
+        """Transition an uncancelled pending run to running before building the agent."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is None:
+            raise RunStartupError(f"Cannot start unknown run {run_id}")
+
+        async with record.start_lock:
+            async with self._lock:
+                if record.abort_event.is_set() or record.status != RunStatus.pending:
+                    return RunStartOutcome.cancelled
+
+            if self._store is not None:
+                try:
+                    updated = await self._call_store_with_retry(
+                        "start_run",
+                        run_id,
+                        lambda: self._store.start_run(run_id),
+                    )
+                except Exception as exc:
+                    raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
+                if updated is False:
+                    async with self._lock:
+                        if record.status == RunStatus.pending:
+                            record.status = RunStatus.interrupted
+                            record.abort_event.set()
+                            record.updated_at = _now_iso()
+                    return RunStartOutcome.cancelled
+
+            async with self._lock:
+                if record.abort_event.is_set() or record.status != RunStatus.pending:
+                    restore_status = record.status
+                    restore_error = record.error
+                    restore_stop_reason = record.stop_reason
+                else:
+                    record.status = RunStatus.running
+                    record.updated_at = _now_iso()
+                    logger.info("Run %s -> %s", run_id, RunStatus.running.value)
+                    return RunStartOutcome.started
+
+            if self._store is not None:
+                await self._persist_status(
+                    record,
+                    restore_status,
+                    error=restore_error,
+                    stop_reason=restore_stop_reason,
+                )
+            return RunStartOutcome.cancelled
+
+    async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
+        """Mark an admitted run as failed if its worker task could not be attached."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.pending:
+                return False
+            record.status = RunStatus.error
+            record.error = error
+            record.abort_event.set()
+            record.updated_at = _now_iso()
+
+        await self._persist_status(record, RunStatus.error, error=error)
+        return True
+
     async def get_many_by_thread(
         self,
         thread_id: str,
@@ -713,6 +789,7 @@ class RunManager:
         run_id: str,
         *,
         poll_interval: float = 0.01,
+        abort_event: asyncio.Event | None = None,
     ) -> None:
         """Wait until older same-thread runs have finished post-cancel cleanup."""
         while True:
@@ -729,7 +806,14 @@ class RunManager:
                 if not found_current or not prior_finalizing:
                     return
 
-            await asyncio.sleep(poll_interval)
+            if abort_event is None:
+                await asyncio.sleep(poll_interval)
+                continue
+            try:
+                await asyncio.wait_for(abort_event.wait(), timeout=poll_interval)
+            except TimeoutError:
+                continue
+            return
 
     async def has_later_run(self, thread_id: str, run_id: str) -> bool:
         """Return whether a newer in-memory run has been admitted for the thread."""
@@ -824,7 +908,7 @@ class RunManager:
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
-                if task_active:
+                if task_active and record.status == RunStatus.running:
                     record.task.cancel()
                 record.status = RunStatus.interrupted
                 record.updated_at = _now_iso()
