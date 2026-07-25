@@ -78,6 +78,7 @@ def _middleware(
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.ainvoke = mock.AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
     model.with_config.return_value = model
     return DeerFlowSummarizationMiddleware(
         model=model,
@@ -319,6 +320,108 @@ async def test_abefore_model_calls_hooks_same_as_sync() -> None:
 
     await middleware.abefore_model({"messages": _messages()}, _runtime())
 
+    assert len(captured) == 1
+    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+def test_before_summarization_hook_not_called_when_summary_creation_fails() -> None:
+    """A failed summary LLM call must not dispatch hooks: compaction aborts and
+    the same messages would be flushed again on the next trigger retry (#4346)."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.invoke.side_effect = RuntimeError("provider down")
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert captured == []
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_abefore_model_hook_not_called_when_summary_creation_fails() -> None:
+    """Async path must match the sync failure semantics exactly."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.ainvoke.side_effect = RuntimeError("provider down")
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert captured == []
+    assert result is None
+
+
+def test_before_summarization_hook_not_called_when_summary_is_blank() -> None:
+    """A whitespace-only summary body must be treated as generation failure:
+    committing ``""`` would fire hooks and remove all prior history for an
+    empty replacement (#4346 review, same guard as #4361)."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.invoke.return_value = SimpleNamespace(text="   \n  ")
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert captured == []
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_abefore_model_hook_not_called_when_summary_is_blank() -> None:
+    """Async path must match the sync blank-summary semantics exactly."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.ainvoke.return_value = SimpleNamespace(text="   \n  ")
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert captured == []
+    assert result is None
+
+
+def test_hook_called_once_with_full_message_set_on_success() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is not None
+    assert len(captured) == 1
+    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+    assert [message.content for message in captured[0].preserved_messages] == ["user-2", "assistant-2"]
+
+
+def test_failed_then_successful_trigger_flushes_exactly_once() -> None:
+    """Two consecutive trigger cycles where the first summary call fails must
+    produce a single flush: the failing turn enqueues nothing, the retry does."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.invoke.side_effect = [
+        RuntimeError("provider down"),
+        SimpleNamespace(text="compressed summary"),
+    ]
+
+    failed = middleware.before_model({"messages": _messages()}, _runtime())
+    retried = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert failed is None
+    assert retried is not None
+    assert len(captured) == 1
+    assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+@pytest.mark.anyio
+async def test_failed_then_successful_trigger_flushes_exactly_once_async() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append])
+    middleware._summary_model.ainvoke.side_effect = [
+        RuntimeError("provider down"),
+        SimpleNamespace(text="compressed summary"),
+    ]
+
+    failed = await middleware.abefore_model({"messages": _messages()}, _runtime())
+    retried = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert failed is None
+    assert retried is not None
     assert len(captured) == 1
     assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
 
