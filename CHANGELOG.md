@@ -198,6 +198,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Thread metadata now switches to `running` only after the run passes
+  the startup barrier, so pending-cancelled runs no longer briefly project
+  `running`; clients may observe the prior thread status during worker startup.
+  ([#4450])
 - **runtime:** Re-check orphan candidates through an atomic, lease-aware takeover
   claim so a successful heartbeat after the scan keeps the run active and only
   one reconciler reports recovery. ([#4424])

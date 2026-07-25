@@ -44,6 +44,9 @@ class _CustomRunStoreWithoutProgress(RunStore):
     async def update_status(self, *args, **kwargs):
         return None
 
+    async def start_run(self, *args, **kwargs):
+        return False
+
     async def delete(self, *args, **kwargs):
         return None
 
@@ -151,6 +154,22 @@ class TestRunRepository:
         repo = await _make_repo(tmp_path)
         updated = await repo.update_status("missing", "error", error="lost")
         assert updated is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_start_run_only_updates_pending_rows(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("pending-run", thread_id="t1", status="pending")
+        await repo.put("cancelled-run", thread_id="t2", status="pending")
+        await repo.update_status("cancelled-run", "interrupted")
+
+        assert await repo.start_run("pending-run") is True
+        assert await repo.start_run("cancelled-run") is False
+
+        pending_row = await repo.get("pending-run")
+        cancelled_row = await repo.get("cancelled-run")
+        assert pending_row["status"] == "running"
+        assert cancelled_row["status"] == "interrupted"
         await _cleanup()
 
     @pytest.mark.anyio

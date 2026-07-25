@@ -224,6 +224,20 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def start_run(self, run_id: str) -> bool:
+        """Start only a still-pending run; cancelled rows must not be resurrected."""
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "pending",
+                )
+                .values(status="running", updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return result.rowcount != 0
+
     async def update_model_name(self, run_id, model_name):
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id).values(model_name=self._normalize_model_name(model_name), updated_at=datetime.now(UTC)))

@@ -10,7 +10,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 import deerflow.runtime.runs.worker as worker
 from deerflow.runtime.goal import goal_thread_lock
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import RunManager, RunStartOutcome
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, _persist_run_duration, run_agent
 
 
@@ -367,6 +368,11 @@ async def test_successful_subsecond_run_persists_zero_duration(monkeypatch: pyte
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             yield {"messages": []}
 
+    async def try_start(run_id):
+        record.status = RunStatus.running
+        return RunStartOutcome.started
+
+    monkeypatch.setattr(run_manager, "try_start", try_start)
     monkeypatch.setattr(run_manager, "set_status", set_status)
     monkeypatch.setattr(worker, "_persist_run_duration", persist_duration)
 
