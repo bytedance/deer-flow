@@ -114,6 +114,20 @@ class LostLeaseRunStore(MemoryRunStore):
         return False
 
 
+class PausedLostLeaseRunStore(MemoryRunStore):
+    """Run store whose failed renewal can be released after reservation cleanup."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewal_started = asyncio.Event()
+        self.finish_renewal = asyncio.Event()
+
+    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        self.renewal_started.set()
+        await self.finish_renewal.wait()
+        return False
+
+
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
     rows = {}
     for run_id in run_ids:
@@ -174,6 +188,88 @@ async def test_reservation_body_is_cancelled_when_lease_is_lost():
         await task
     assert not await manager.has_inflight("thread-1")
     assert await store.list_inflight() == []
+
+
+@pytest.mark.anyio
+async def test_reservation_cancelled_while_attaching_task_is_released(monkeypatch):
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    admitted = asyncio.Event()
+    return_from_admission = asyncio.Event()
+    original_admit = manager._admit_thread_operation
+
+    async def pause_after_admission(*args, **kwargs):
+        record = await original_admit(*args, **kwargs)
+        admitted.set()
+        await return_from_admission.wait()
+        return record
+
+    monkeypatch.setattr(manager, "_admit_thread_operation", pause_after_admission)
+
+    async def reserve() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            raise AssertionError("cancelled reservation must not enter its body")
+
+    task = asyncio.create_task(reserve())
+    await admitted.wait()
+    await manager._lock.acquire()
+    return_from_admission.set()
+    await asyncio.sleep(0)
+    task.cancel()
+    manager._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not await manager.has_inflight("thread-1")
+    assert manager._runs == {}
+    assert manager._runs_by_thread == {}
+    assert await store.list_inflight() == []
+
+
+@pytest.mark.anyio
+async def test_late_failed_renewal_does_not_cancel_released_reservation():
+    store = PausedLostLeaseRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    entered = asyncio.Event()
+    leave_body = asyncio.Event()
+    context_exited = asyncio.Event()
+    finish_request = asyncio.Event()
+
+    async def request() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            entered.set()
+            await leave_body.wait()
+        context_exited.set()
+        await finish_request.wait()
+
+    request_task = asyncio.create_task(request())
+    await entered.wait()
+    renewal_task = asyncio.create_task(manager._renew_leases())
+    await store.renewal_started.wait()
+
+    leave_body.set()
+    await context_exited.wait()
+    assert not await manager.has_inflight("thread-1")
+
+    store.finish_renewal.set()
+    await renewal_task
+    assert not request_task.done()
+
+    finish_request.set()
+    await request_task
 
 
 @pytest.mark.anyio

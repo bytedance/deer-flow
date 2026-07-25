@@ -1160,15 +1160,15 @@ class RunManager:
             multitask_strategy="reject",
             user_id=user_id,
         )
-        reservation_task = asyncio.current_task()
-        if reservation_task is None:
-            raise RuntimeError("Thread operation reservation requires an active asyncio task")
-        lease_lost = True
-        async with self._lock:
-            if self._runs.get(record.run_id) is record:
-                record.task = reservation_task
-                lease_lost = record.abort_event.is_set()
         try:
+            reservation_task = asyncio.current_task()
+            if reservation_task is None:
+                raise RuntimeError("Thread operation reservation requires an active asyncio task")
+            lease_lost = True
+            async with self._lock:
+                if self._runs.get(record.run_id) is record:
+                    record.task = reservation_task
+                    lease_lost = record.abort_event.is_set()
             if lease_lost:
                 raise asyncio.CancelledError()
             yield
@@ -1432,16 +1432,18 @@ class RunManager:
                     # or ``owner_worker_id`` changed). Stop the local task so
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
-                    logger.warning(
-                        "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
-                        run_id,
-                        record.status.value,
-                        record.owner_worker_id,
-                    )
-                    record.abort_event.set()
-                    task_active = record.task is not None and not record.task.done()
-                    if task_active:
-                        record.task.cancel()
+                    async with self._lock:
+                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        if still_active:
+                            logger.warning(
+                                "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
+                                run_id,
+                                record.status.value,
+                                record.owner_worker_id,
+                            )
+                            record.abort_event.set()
+                            if record.task is not None:
+                                record.task.cancel()
             except Exception:
                 logger.warning("Failed to renew lease for run %s", run_id, exc_info=True)
 

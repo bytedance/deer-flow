@@ -58,7 +58,6 @@ from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     build_goal_state,
     ensure_thread_checkpoint,
-    goal_thread_lock,
     read_thread_goal,
     write_thread_goal,
 )
@@ -1055,13 +1054,17 @@ async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Requ
     this endpoint creates the missing thread checkpoint on demand.
     """
     checkpointer = get_checkpointer(request)
-    await _ensure_thread_for_goal(thread_id, request)
     try:
         goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
-        async with goal_thread_lock(thread_id):
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            await _ensure_thread_for_goal(thread_id, request)
             await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to set goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
@@ -1074,8 +1077,10 @@ async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespo
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
     try:
-        async with goal_thread_lock(thread_id):
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Clear the goal after the run finishes.") from None
     except LookupError:
         return ThreadGoalResponse(goal=None)
     except Exception:

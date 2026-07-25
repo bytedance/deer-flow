@@ -674,6 +674,44 @@ def test_goal_status_and_clear_round_trip() -> None:
     assert "goal" not in state_response.json()["values"]
 
 
+def test_goal_mutations_reject_run_owned_by_another_worker() -> None:
+    """PUT and DELETE goal writes share the durable thread-operation boundary."""
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    app, _store, _checkpointer = _build_thread_app()
+    run_store = MemoryRunStore()
+    owner = RunManager(store=run_store, worker_id="worker-a")
+    app.state.run_manager = RunManager(store=run_store, worker_id="worker-b")
+    thread_id = "thread-goal-race"
+
+    async def _seed_active_run() -> None:
+        active = await owner.create_or_reject(thread_id)
+        await owner.set_status(active.run_id, RunStatus.running)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id})
+        assert created.status_code == 200, created.text
+        initial_goal = client.put(
+            f"/api/threads/{thread_id}/goal",
+            json={"objective": "Original goal"},
+        )
+        assert initial_goal.status_code == 200, initial_goal.text
+        assert client.portal is not None
+        client.portal.call(_seed_active_run)
+        put_response = client.put(
+            f"/api/threads/{thread_id}/goal",
+            json={"objective": "Must not be written"},
+        )
+        delete_response = client.delete(f"/api/threads/{thread_id}/goal")
+        goal_response = client.get(f"/api/threads/{thread_id}/goal")
+
+    assert put_response.status_code == 409, put_response.text
+    assert delete_response.status_code == 409, delete_response.text
+    assert goal_response.status_code == 200, goal_response.text
+    assert goal_response.json()["goal"]["objective"] == "Original goal"
+
+
 def test_internal_owner_header_assigns_thread_to_owner() -> None:
     import asyncio
 
