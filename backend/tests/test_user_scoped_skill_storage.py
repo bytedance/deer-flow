@@ -155,6 +155,143 @@ class TestSkillLoading:
         assert len(custom_skills) == 1
         assert custom_skills[0].name == "my-skill"
 
+    def test_public_orphan_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """Regression for issue #4095: evals/ and fixtures/ directories in the
+        public walk are excluded even without a parent SKILL.md package boundary."""
+        public_dir = skills_root / "public" / "deep-research"
+        public_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("deep-research"), encoding="utf-8")
+        orphan_fixture_dir = skills_root / "public" / "evals" / "fixtures" / "orphan"
+        orphan_fixture_dir.mkdir(parents=True)
+        (orphan_fixture_dir / "SKILL.md").write_text(_skill_content("orphan-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"deep-research"}
+
+    def test_user_custom_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        """Regression for issue #4095: the user-custom walk excludes orphan
+        evals/fixtures support trees whose immediate children are not skill
+        packages.  (A single-level namespace ``fixtures/team-helper/SKILL.md``
+        is discovered — that case is covered by the namespace test.)"""
+        user_storage.write_custom_skill("my-skill", "SKILL.md", _skill_content("my-skill"))
+        user_custom_root = base_dir / "users" / "test-user" / "skills" / "custom"
+        # Two-level orphan: evals/ has no SKILL.md, and its only child fixtures/
+        # also has no SKILL.md — no immediate-child package to treat as namespace.
+        stale_fixture_dir = user_custom_root / "evals" / "fixtures" / "stale"
+        stale_fixture_dir.mkdir(parents=True)
+        (stale_fixture_dir / "SKILL.md").write_text(_skill_content("stale-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"my-skill"}
+
+    def test_legacy_global_custom_eval_fixture_dirs_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """Regression for issue #4095: the legacy global-custom fallback walk excludes
+        orphan evals/fixtures support trees whose immediate children are not skill
+        packages."""
+        global_dir = skills_root / "custom" / "global-skill"
+        global_dir.mkdir(parents=True)
+        (global_dir / "SKILL.md").write_text(_skill_content("global-skill"), encoding="utf-8")
+        # Two-level orphan: evals/ has no SKILL.md and fixtures/ (its only child)
+        # also has no SKILL.md — no immediate-child package to treat as namespace.
+        eval_fixture_dir = skills_root / "custom" / "evals" / "fixtures" / "legacy-fixture"
+        eval_fixture_dir.mkdir(parents=True)
+        (eval_fixture_dir / "SKILL.md").write_text(_skill_content("legacy-fixture"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"global-skill"}
+
+    def test_skill_packages_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """``evals`` and ``fixtures`` are not reserved skill names (PR #4164
+        review): packages whose own directory carries SKILL.md are discovered
+        in the public and user-custom walks; only support-data directories
+        without their own SKILL.md are pruned."""
+        public_pkg = skills_root / "public" / "evals"
+        public_pkg.mkdir(parents=True)
+        (public_pkg / "SKILL.md").write_text(_skill_content("evals"), encoding="utf-8")
+        user_storage.write_custom_skill("fixtures", "SKILL.md", _skill_content("fixtures"))
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"evals", "fixtures"}
+
+    def test_legacy_skill_package_named_evals_is_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        """The legacy global-custom fallback walk also discovers a package
+        legitimately named ``evals`` when the directory itself is a package."""
+        global_pkg = skills_root / "custom" / "evals"
+        global_pkg.mkdir(parents=True)
+        (global_pkg / "SKILL.md").write_text(_skill_content("evals"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"evals"}
+
+    def test_namespace_dirs_named_evals_or_fixtures_are_recursed(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Namespace directories named ``evals`` or ``fixtures`` that contain
+        deeper skill packages must be recursed into in both the public and
+        user-custom discovery walks (PR #4164 review follow-up)."""
+        # Public walk: fixtures/team-helper (fixtures has no SKILL.md of its own)
+        public_ns = skills_root / "public" / "fixtures" / "team-helper"
+        public_ns.mkdir(parents=True)
+        (public_ns / "SKILL.md").write_text(_skill_content("team-helper", "Team helper under fixtures ns"), encoding="utf-8")
+
+        # User-custom walk: evals/sub-skill (evals has no SKILL.md of its own)
+        user_custom_ns = base_dir / "users" / "test-user" / "skills" / "custom" / "evals" / "sub-skill"
+        user_custom_ns.mkdir(parents=True)
+        (user_custom_ns / "SKILL.md").write_text(_skill_content("sub-skill", "sub-skill under evals ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "team-helper" in names
+        assert "sub-skill" in names
+
+    def test_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Recursive namespace directories (more than one level) named ``evals`` or
+        ``fixtures`` must be recursed into in all three discovery walks
+        (PR #4164 round 3): ``public/fixtures/team/deep-helper/SKILL.md`` is
+        discovered because ``team`` is not a support-data name, making
+        ``fixtures`` a legitimate namespace."""
+        # Public walk: fixtures/team/deep-helper (two levels below fixtures)
+        public_deep = skills_root / "public" / "fixtures" / "team" / "deep-helper"
+        public_deep.mkdir(parents=True)
+        (public_deep / "SKILL.md").write_text(_skill_content("deep-helper", "Deep helper under fixtures/team ns"), encoding="utf-8")
+
+        # User-custom walk: evals/group/nested-tool (two levels below evals)
+        user_custom_deep = base_dir / "users" / "test-user" / "skills" / "custom" / "evals" / "group" / "nested-tool"
+        user_custom_deep.mkdir(parents=True)
+        (user_custom_deep / "SKILL.md").write_text(_skill_content("nested-tool", "Nested tool under evals/group ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "deep-helper" in names
+        assert "nested-tool" in names
+
+    def test_legacy_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Recursive namespace in the legacy global-custom fallback walk is also
+        recursed into (PR #4164 round 3)."""
+        legacy_deep = skills_root / "custom" / "fixtures" / "org" / "legacy-deep"
+        legacy_deep.mkdir(parents=True)
+        (legacy_deep / "SKILL.md").write_text(_skill_content("legacy-deep", "Legacy deep under fixtures/org ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "legacy-deep" in names
+
+    def test_legacy_namespace_dirs_named_evals_or_fixtures_are_recursed(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        """Namespace directories named ``evals`` or ``fixtures`` in the legacy
+        global-custom fallback walk are also recursed into (the fallback runs
+        only when the user-custom walk is empty)."""
+        # Legacy walk: fixtures/legacy-tool (fixtures has no SKILL.md of its own)
+        legacy_ns = skills_root / "custom" / "fixtures" / "legacy-tool"
+        legacy_ns.mkdir(parents=True)
+        (legacy_ns / "SKILL.md").write_text(_skill_content("legacy-tool", "Legacy tool under fixtures ns"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert "legacy-tool" in names
+
     def test_fallback_to_global_custom_when_user_dir_empty(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
         # Put skill in global custom (NOT in user dir)
         global_dir = skills_root / "custom" / "global-skill"

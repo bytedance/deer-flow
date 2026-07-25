@@ -102,6 +102,126 @@ def test_load_skills_skips_hidden_directories(tmp_path: Path):
     assert "secret-skill" not in names
 
 
+def test_load_skills_skips_evals_and_fixtures_directories(tmp_path: Path):
+    """Skills inside evals/ or fixtures/ directories must not be discovered (issue #4095).
+
+    Fixtures nested under a real skill package are excluded by the package-boundary
+    rule.  Fixtures at the top-level with no immediate-child SKILL.md are pruned
+    by the support-data directory filter.  A namespace directory named evals or
+    fixtures whose immediate children are skill packages is NOT pruned — that
+    case is covered by ``test_namespace_dirs_named_evals_or_fixtures_are_recursed``."""
+    skills_root = tmp_path / "skills"
+
+    # Real skill + package-boundary case: nested fixture under an actual skill package.
+    _write_skill(skills_root / "public" / "real-skill", "real-skill", "A real skill")
+    _write_skill(skills_root / "public" / "skill-reviewer", "skill-reviewer", "Reviews skills")
+    _write_skill(skills_root / "public" / "skill-reviewer" / "evals" / "fixtures" / "prompt-injection", "injection-example", "Eval fixture")
+    # Orphan fixture at the top level: evals/ has no SKILL.md and no immediate child with one.
+    orphan_dir = skills_root / "public" / "evals" / "fixtures" / "restrictive"
+    orphan_dir.mkdir(parents=True)
+    (orphan_dir / "SKILL.md").write_text(
+        "---\nname: orphan-fixture\ndescription: Orphan\n---\n\n# orphan-fixture\n",
+        encoding="utf-8",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+    names = {skill.name for skill in skills}
+
+    assert "real-skill" in names
+    assert "skill-reviewer" in names
+    assert "injection-example" not in names
+    assert "orphan-fixture" not in names
+
+
+def test_skill_packages_named_evals_or_fixtures_are_discovered(tmp_path: Path):
+    """``evals`` and ``fixtures`` are not reserved skill names (PR #4164 review):
+    a package whose own directory carries SKILL.md is discovered in both the
+    public and custom walks, while nested support data below that package
+    boundary stays excluded."""
+    skills_root = tmp_path / "skills"
+
+    _write_skill(skills_root / "public" / "evals", "evals", "Legit skill named evals")
+    _write_skill(skills_root / "custom" / "fixtures", "fixtures", "Legit skill named fixtures")
+    # Support data nested below the evals package boundary must stay out.
+    _write_skill(skills_root / "public" / "evals" / "fixtures" / "nested", "nested-fixture", "Support data")
+
+    names = {skill.name for skill in get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)}
+
+    assert "evals" in names
+    assert "fixtures" in names
+    assert "nested-fixture" not in names
+
+
+def test_namespace_dirs_named_evals_or_fixtures_are_recursed(tmp_path: Path):
+    """Namespace directories named ``evals`` or ``fixtures`` that contain deeper
+    skill packages must be recursed into, not pruned (PR #4164 review follow-up):
+    ``public/fixtures/team-helper/SKILL.md`` is discovered because ``fixtures``
+    is a legitimate namespace containing a skill package, not orphan support data."""
+    skills_root = tmp_path / "skills"
+
+    # Namespace: fixtures/team-helper (fixtures has no SKILL.md of its own)
+    _write_skill(skills_root / "public" / "fixtures" / "team-helper", "team-helper", "Team helper under fixtures namespace")
+    # Namespace: evals/quality-checker (evals has no SKILL.md of its own)
+    _write_skill(skills_root / "public" / "evals" / "quality-checker", "quality-checker", "Quality checker under evals namespace")
+    # Orphaned support data below an existing skill package must still be excluded.
+    _write_skill(skills_root / "public" / "reviewer", "reviewer", "A real skill")
+    _write_skill(skills_root / "public" / "reviewer" / "evals" / "fixtures" / "orphan", "orphan-fixture", "Orphan support data")
+
+    names = {skill.name for skill in get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)}
+
+    assert "team-helper" in names
+    assert "quality-checker" in names
+    assert "reviewer" in names
+    assert "orphan-fixture" not in names
+
+
+def test_recursive_namespace_dirs_named_evals_or_fixtures_are_discovered(tmp_path: Path):
+    """Recursive namespace directories (more than one level) named ``evals`` or
+    ``fixtures`` must be recursed into, not pruned (PR #4164 review round 3):
+    ``public/fixtures/team/deep-helper/SKILL.md`` is discovered even though
+    ``fixtures`` has no direct-child SKILL.md because ``team`` is not a
+    support-data name."""
+    skills_root = tmp_path / "skills"
+
+    # Recursive namespace: fixtures/team/deep-helper (two levels below fixtures)
+    _write_skill(skills_root / "public" / "fixtures" / "team" / "deep-helper", "deep-helper", "Deep helper under fixtures/team namespace")
+    # Single-level namespace: also works (existing coverage retained above)
+    _write_skill(skills_root / "public" / "evals" / "shallow-helper", "shallow-helper", "Shallow helper under evals namespace")
+
+    names = {skill.name for skill in get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)}
+
+    assert "deep-helper" in names
+    assert "shallow-helper" in names
+
+
+def test_eval_fixture_skills_cannot_clamp_tool_policy(tmp_path: Path):
+    """End-to-end regression for issue #4095, exercising the real loader and the
+    real tool-policy functions (no mocks): a restrictive eval-fixture SKILL.md
+    must never reach ``allowed-tools`` filtering, so the ``task`` delegation
+    tool survives for the lead agent."""
+    from deerflow.skills.tool_policy import allowed_tool_names_for_skills, filter_tools_by_skill_allowed_tools
+
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public" / "real-skill", "real-skill", "A real skill")
+    # An orphaned fixture directory with no parent SKILL.md package boundary:
+    # only the evals/fixtures directory-name exclusion keeps it undiscovered.
+    fixture_dir = skills_root / "public" / "evals" / "fixtures" / "restrictive"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "SKILL.md").write_text(
+        "---\nname: restrictive-fixture\ndescription: Eval fixture\nallowed-tools: [bash]\n---\n\n# restrictive-fixture\n",
+        encoding="utf-8",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    assert "restrictive-fixture" not in {skill.name for skill in skills}
+    # No discovered skill declares allowed-tools, so the policy stays allow-all.
+    assert allowed_tool_names_for_skills(skills) is None
+    tools = [SimpleNamespace(name="task"), SimpleNamespace(name="bash"), SimpleNamespace(name="web_search")]
+    filtered = filter_tools_by_skill_allowed_tools(tools, skills)
+    assert [tool.name for tool in filtered] == ["task", "bash", "web_search"]
+
+
 def test_load_skills_prefers_custom_over_public_with_same_name(tmp_path: Path):
     skills_root = tmp_path / "skills"
     _write_skill(skills_root / "public" / "shared-skill", "shared-skill", "Public version")
