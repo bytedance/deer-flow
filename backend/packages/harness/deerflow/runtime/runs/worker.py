@@ -584,6 +584,25 @@ async def run_agent(
                 pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                 pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
 
+            # Resuming from an older checkpoint is a fork, and a delta fork
+            # materializes the abandoned sibling's writes back into state
+            # (#4458). Rewrite it as a linear head write *after* the rollback
+            # point is captured, so cancel-with-rollback still restores the
+            # real pre-run head rather than the rolled-back one.
+            resumed_messages = await _linearize_delta_checkpoint_resume(
+                accessor=accessor,
+                checkpointer=checkpointer,
+                config=config,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+            if resumed_messages is not None:
+                # The graph now starts from the rolled-back state, so the
+                # current-run message boundary is that state, not the head we
+                # captured for rollback.
+                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
+                initial_runnable_config = RunnableConfig(**config)
+
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
 
@@ -1271,6 +1290,80 @@ async def _capture_rollback_point(
         metadata=dict(getattr(snapshot, "metadata", None) or {}),
         pending_writes=tuple(getattr(checkpoint_tuple, "pending_writes", ()) or ()),
     )
+
+
+async def _linearize_delta_checkpoint_resume(
+    *,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+    config: dict[str, Any],
+    thread_id: str,
+    run_id: str,
+) -> list[Any] | None:
+    """Replace a delta-mode checkpoint fork with an equivalent linear write.
+
+    Resuming from an older checkpoint forks the lineage, and in ``delta`` mode
+    the fork's state cannot be materialized correctly: the delta history walk
+    collects **every** ``pending_writes`` entry stored on each on-path
+    ancestor, but a shared parent also carries the writes of the sibling child
+    that was abandoned. Those writes are replayed into the fork, so the run
+    starts from a message list that still contains the answer it was supposed
+    to replace — regenerating in a branched thread surfaced this as the old
+    assistant message reappearing beside the new one after a reload (#4458).
+    Reproduced on postgres, sqlite, and the in-memory saver; ``full`` mode is
+    unaffected because its checkpoints carry complete ``channel_values`` and
+    need no replay.
+
+    The upstream contract (`BaseCheckpointSaver.get_delta_channel_history` and
+    the savers overriding it) is where write-to-child ownership belongs, so
+    this does not reimplement it. Instead the fork is expressed as what it
+    means: materialize the requested checkpoint's state and write it as an
+    ``Overwrite`` on the **current head**, which has no other children, then
+    run linearly. The abandoned turn stays in checkpoint history as the
+    rewritten head's ancestry.
+
+    Returns the materialized messages when the resume was linearized, or
+    ``None`` when there was nothing to do (full mode, no checkpoint selector,
+    a non-root namespace, or a selector that already names the head). Failures
+    propagate: silently falling back to the fork would persist the corrupted
+    history this exists to prevent.
+    """
+    if checkpointer is None or accessor.mode != "delta":
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        return None
+    if configurable.get("checkpoint_ns"):
+        # Subgraph namespaces have their own lineage; the Gateway only selects
+        # root checkpoints, so leave anything else untouched.
+        return None
+
+    head_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    head = await accessor.aget(head_config)
+    if _checkpoint_id(head) == checkpoint_id:
+        # Selecting the head is already linear — no sibling can exist yet.
+        return None
+
+    source_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}}
+    snapshot = await accessor.aget(source_config)
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages") if isinstance(values, dict) else None
+    if not isinstance(messages, list):
+        raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+
+    # Same shape as the rollback restore: a state-only mutation graph writing
+    # through the thread's effective schema so middleware channels survive.
+    mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    await mutation_accessor.aupdate(head_config, {"messages": Overwrite(list(messages))}, as_node="checkpoint_resume")
+
+    configurable.pop("checkpoint_id", None)
+    configurable.pop("checkpoint_map", None)
+    logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)
+    return list(messages)
 
 
 async def _rollback_to_pre_run_checkpoint(
