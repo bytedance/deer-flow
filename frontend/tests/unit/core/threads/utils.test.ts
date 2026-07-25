@@ -79,7 +79,9 @@ test("prefers context.agent_name over metadata.agent_name", () => {
 
 test("reads pinned thread metadata strictly from the pinned metadata key", () => {
   expect(
-    isThreadPinned(makeThread("pinned", { [THREAD_PINNED_METADATA_KEY]: true })),
+    isThreadPinned(
+      makeThread("pinned", { [THREAD_PINNED_METADATA_KEY]: true }),
+    ),
   ).toBe(true);
   expect(
     isThreadPinned(
