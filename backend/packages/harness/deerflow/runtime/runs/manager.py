@@ -7,7 +7,7 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
+RUN_LAUNCH_TIMEOUT_ERROR = "Run did not attach a worker before its launch lease expired."
 
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
@@ -1093,12 +1094,44 @@ class RunManager:
                     interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
-        # runs. Store-side claimed rows are already finalised.
-        for interrupted_record in interrupted_records:
-            await self._persist_status(interrupted_record, RunStatus.interrupted)
+        # runs. Store-side claimed rows are already finalised. Cancellation at
+        # this point happens after the replacement was admitted, so close that
+        # new run before propagating cancellation to the caller.
+        try:
+            for interrupted_record in interrupted_records:
+                await self._persist_status(interrupted_record, RunStatus.interrupted)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self.cancel(record.run_id))
+            except Exception:
+                logger.warning("Failed to close run %s after admission was cancelled", record.run_id, exc_info=True)
+            raise
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
+
+    async def attach_task_if_active(
+        self,
+        run_id: str,
+        task_factory: Callable[[], Coroutine[Any, Any, None]],
+    ) -> asyncio.Task[None] | None:
+        """Attach and schedule a worker only while a pending run is active.
+
+        Cancellation can race the gap between durable admission and worker
+        attachment.  Creating the task while holding the manager lock makes
+        the status check and attachment one atomic lifecycle transition: a
+        run interrupted before attachment never starts executing.
+        """
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.pending or record.abort_event.is_set():
+                return None
+            if record.task is not None:
+                raise RuntimeError(f"Run {run_id} already has an attached task")
+
+            task = asyncio.create_task(task_factory())
+            record.task = task
+            return task
 
     async def reconcile_orphaned_inflight_runs(
         self,
@@ -1294,24 +1327,35 @@ class RunManager:
                 self._schedule_orphan_reconciliation()
 
     async def _renew_leases(self) -> None:
-        """Renew the lease on every locally-owned active run."""
+        """Renew attached workers and expire pending runs that never launched."""
         if self._store is None or self._run_ownership_config is None:
             return
         lease_seconds = self._run_ownership_config.lease_seconds
         new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
 
+        expired_unattached: list[RunRecord] = []
         async with self._lock:
-            # Renew any pending/running run owned by this worker unless its
-            # background task has already completed. A pending run whose task
-            # has not been spawned yet (``task is None``) is still live from
-            # this worker's perspective — between ``create_run_atomic``
-            # inserting the row and the worker layer spawning the agent task
-            # there is a brief window. If we drop those records here and the
-            # window stretches past ``lease_seconds`` (e.g. event-loop
-            # saturation, slow checkpoint hydrate on a fresh worker), peer
-            # reconciliation will reclaim the run as an orphan and mark it
-            # ``error`` even though this worker still intends to execute it.
-            active_runs = [(rid, record) for rid, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())]
+            active_runs: list[tuple[str, RunRecord]] = []
+            for run_id, record in self._runs.items():
+                if record.status not in (RunStatus.pending, RunStatus.running) or record.owner_worker_id != self._worker_id:
+                    continue
+                if record.task is None and record.status == RunStatus.pending:
+                    # Before attachment the initial lease is a launch deadline,
+                    # not proof of a live worker. Renewing it would let a leaked
+                    # pending admission reserve the thread forever.
+                    if is_lease_expired(record.lease_expires_at, grace_seconds=0):
+                        record.status = RunStatus.error
+                        record.error = RUN_LAUNCH_TIMEOUT_ERROR
+                        record.abort_event.set()
+                        record.updated_at = _now_iso()
+                        expired_unattached.append(record)
+                    continue
+                if record.task is None or not record.task.done():
+                    active_runs.append((run_id, record))
+
+        for record in expired_unattached:
+            await self._persist_status(record, RunStatus.error, error=RUN_LAUNCH_TIMEOUT_ERROR)
+            logger.error("Run %s exceeded its worker-attachment deadline", record.run_id)
 
         for run_id, record in active_runs:
             try:

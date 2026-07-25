@@ -111,6 +111,8 @@ LLM-powered persistent context retention across conversations:
 
 FastAPI application providing REST endpoints for frontend integration:
 
+Run launch preparation (input/config/checkpoint validation, authenticated context assembly, and thread metadata setup) completes before durable run admission. `RunManager` then attaches the background worker only if the pending run is still active. In heartbeat-enabled multi-worker mode, the initial lease is also the worker-attachment deadline and is not renewed until a task exists, preventing leaked pending rows from reserving a thread indefinitely.
+
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |

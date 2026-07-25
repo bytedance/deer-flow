@@ -277,6 +277,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > [!IMPORTANT]
 > The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), and `run_ownership.heartbeat_enabled: true`. The bridge shares SSE delivery and `Last-Event-ID` replay across workers, while lease reconciliation marks runs from dead workers as errors, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE and `/wait` consumers also refresh durable status on heartbeats as a fallback if terminal publication fails. The rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
 
+Gateway run creation completes input, configuration, checkpoint, authenticated-context, and thread-metadata setup before reserving the thread with a durable pending run. Worker attachment is conditional on that pending run still being active, and in multi-worker mode the initial lease is the attachment deadline rather than a renewable heartbeat until a worker exists. Validation/cancellation failures therefore cannot strand a pending reservation or start an agent after cancellation.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Option 2: Local Development

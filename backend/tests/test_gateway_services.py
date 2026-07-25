@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -1062,14 +1063,33 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
-async def _capture_start_run_graph_input(body, *, auth_source=None):
-    from types import SimpleNamespace
+async def _capture_start_run_graph_input(body: Any, *, auth_source: str | None = None) -> object:
     from unittest.mock import patch
+
+    from app.gateway.services import start_run
+
+    request, _run_manager = _make_start_run_test_request(auth_source=auth_source)
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args: Any, **kwargs: Any) -> None:
+        captured["graph_input"] = kwargs["graph_input"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-command-test", request)
+        await record.task
+
+    return captured["graph_input"]
+
+
+def _make_start_run_test_request(*, auth_source: str | None = None) -> tuple[Any, Any]:
+    from types import SimpleNamespace
 
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
-    from app.gateway.services import start_run
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
     from deerflow.runtime import RunManager
     from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -1089,19 +1109,124 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
-    captured: dict[str, object] = {}
+    return request, run_manager
 
-    async def fake_run_agent(*args, **kwargs):
-        captured["graph_input"] = kwargs["graph_input"]
+
+@pytest.mark.asyncio
+async def test_start_run_validation_failure_does_not_leave_active_run(_stub_app_config: None) -> None:
+    """A rejected checkpoint must not reserve the thread for later runs."""
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime.runs.schemas import RunStatus
+
+    request, run_manager = _make_start_run_test_request()
+
+    async def fake_run_agent(_bridge: Any, manager: Any, record: Any, **_kwargs: Any) -> None:
+        await manager.set_status(record.run_id, RunStatus.success)
+
+    invalid = RunCreateRequest(
+        input={"messages": [{"role": "user", "content": "hello"}]},
+        checkpoint_id="missing-checkpoint",
+    )
+    valid = RunCreateRequest(input={"messages": [{"role": "user", "content": "retry"}]})
 
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
     ):
-        record = await start_run(body, "thread-command-test", request)
-        await record.task
+        with pytest.raises(HTTPException) as exc_info:
+            await start_run(invalid, "thread-validation-failure", request)
 
-    return captured["graph_input"]
+        assert exc_info.value.status_code == 404
+        assert not await run_manager.has_inflight("thread-validation-failure")
+
+        retry = await start_run(valid, "thread-validation-failure", request)
+        assert retry.task is not None
+        await retry.task
+
+    assert retry.status == RunStatus.success
+
+
+@pytest.mark.asyncio
+async def test_start_run_does_not_attach_worker_after_pre_attach_cancel(
+    _stub_app_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after admission must prevent the worker from starting."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime.runs.manager import CancelOutcome
+    from deerflow.runtime.runs.schemas import RunStatus
+
+    request, run_manager = _make_start_run_test_request()
+    create_or_reject = run_manager.create_or_reject
+    worker_started = asyncio.Event()
+
+    async def admit_then_cancel(*args: Any, **kwargs: Any) -> Any:
+        record = await create_or_reject(*args, **kwargs)
+        assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
+        return record
+
+    async def fake_run_agent(*_args: Any, **_kwargs: Any) -> None:
+        worker_started.set()
+
+    monkeypatch.setattr(run_manager, "create_or_reject", admit_then_cancel)
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]})
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-pre-attach-cancel", request)
+
+    assert record.status == RunStatus.interrupted
+    assert record.task is None
+    await asyncio.sleep(0)
+    assert not worker_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_start_run_cancelled_during_thread_metadata_does_not_admit_run(
+    _stub_app_config: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation during metadata setup must not strand a pending run."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    request, run_manager = _make_start_run_test_request()
+    thread_store = request.app.state.thread_store
+    original_get = thread_store.get
+    metadata_started = asyncio.Event()
+    release_metadata = asyncio.Event()
+
+    async def blocking_get(*args: Any, **kwargs: Any) -> Any:
+        metadata_started.set()
+        await release_metadata.wait()
+        return await original_get(*args, **kwargs)
+
+    monkeypatch.setattr(thread_store, "get", blocking_get)
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]})
+
+    with patch("app.gateway.services.resolve_agent_factory", return_value=object()):
+        start_task = asyncio.create_task(start_run(body, "thread-metadata-cancel", request))
+        await metadata_started.wait()
+        start_task.cancel()
+        release_metadata.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    assert not await run_manager.has_inflight("thread-metadata-cancel")
 
 
 def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):

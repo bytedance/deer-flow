@@ -677,18 +677,8 @@ async def test_heartbeat_renews_active_run_leases():
 
 
 @pytest.mark.anyio
-async def test_heartbeat_renews_pending_run_before_task_is_spawned():
-    """A run sitting in ``pending`` between ``create_run_atomic`` and task
-    spawn must still have its lease renewed.
-
-    Pre-fix the renewal filter required ``record.task is not None``, so a
-    pending run with no task yet (the brief window after
-    ``create_run_atomic`` inserts the row before the worker layer spawns
-    the agent task) was silently skipped. If that window stretched past
-    ``lease_seconds`` — e.g. event-loop saturation, slow checkpoint
-    hydrate — peer reconciliation reclaimed the run as an orphan and
-    marked it ``error`` even though this worker still intended to run it.
-    """
+async def test_heartbeat_does_not_renew_unattached_pending_before_launch_deadline():
+    """The initial lease is a launch deadline until a worker is attached."""
     config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
     store = MemoryRunStore()
     manager = _make_manager(store=store, run_ownership_config=config)
@@ -701,18 +691,35 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     original_lease = record.lease_expires_at
     assert original_lease is not None
 
-    # Force a measurable gap so the renewed lease strictly post-dates the
-    # original — without this the two timestamps land in the same
-    # microsecond on fast hosts and the strict comparison fails trivially.
-    await asyncio.sleep(0.001)
-
     store.update_lease = AsyncMock(wraps=store.update_lease)
 
     await manager._renew_leases()
 
-    store.update_lease.assert_awaited_once()
-    assert record.lease_expires_at is not None
-    assert record.lease_expires_at > original_lease
+    store.update_lease.assert_not_awaited()
+    assert record.lease_expires_at == original_lease
+    assert record.status == RunStatus.pending
+
+
+@pytest.mark.anyio
+async def test_heartbeat_errors_unattached_pending_after_launch_deadline():
+    """An unattached pending run becomes terminal when its initial lease expires."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=config)
+
+    record = await manager.create_or_reject("thread-1")
+    record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    await manager._renew_leases()
+
+    stored = await store.get(record.run_id)
+    store.update_lease.assert_not_awaited()
+    assert record.status == RunStatus.error
+    assert record.abort_event.is_set()
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert "attach a worker" in stored["error"]
 
 
 @pytest.mark.anyio

@@ -958,49 +958,10 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
-        try:
-            async with goal_thread_lock(thread_id):
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=body.metadata or {},
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built below keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                )
-        except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedStrategyError as exc:
-            raise HTTPException(status_code=501, detail=str(exc)) from exc
-
-        # Upsert thread metadata so the thread appears in /threads/search,
-        # even for threads that were never explicitly created via POST /threads
-        # (e.g. stateless runs).
-        try:
-            existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None and owner_user_id:
-                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
-                if unscoped_existing is not None:
-                    if unscoped_existing.get("user_id") != owner_user_id:
-                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None:
-                await run_ctx.thread_store.create(
-                    thread_id,
-                    assistant_id=body.assistant_id,
-                    metadata=body.metadata,
-                )
-            else:
-                await run_ctx.thread_store.update_status(thread_id, "running")
-        except Exception:
-            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
-
+        # Complete every fallible/awaited launch-preparation step before durable
+        # admission. Once create_or_reject() registers a pending run, the only
+        # remaining transition before worker execution is the manager-guarded
+        # task attachment below.
         agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
@@ -1028,22 +989,73 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
-        task = asyncio.create_task(
-            run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=run_ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
+        # Upsert thread metadata so the thread appears in /threads/search,
+        # even for threads that were never explicitly created via POST /threads
+        # (e.g. stateless runs). This awaited setup stays before admission: a
+        # request cancelled here must not leave a pending run behind.
+        try:
+            existing = await run_ctx.thread_store.get(thread_id)
+            if existing is None and owner_user_id:
+                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
+                if unscoped_existing is not None:
+                    if unscoped_existing.get("user_id") != owner_user_id:
+                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
+                    existing = await run_ctx.thread_store.get(thread_id)
+            if existing is None:
+                await run_ctx.thread_store.create(
+                    thread_id,
+                    assistant_id=body.assistant_id,
+                    metadata=body.metadata,
+                )
+            else:
+                await run_ctx.thread_store.update_status(thread_id, "running")
+        except Exception:
+            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
+
+        try:
+            async with goal_thread_lock(thread_id):
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=body.metadata or {},
+                    # Persist a secret-redacted copy of the config: the run record is
+                    # written to runs.kwargs_json and echoed by the run API, so a
+                    # request-scoped secret (#3861) must not ride along. The live
+                    # config built below keeps the secrets for the actual run.
+                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                )
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except UnsupportedStrategyError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
+
+        try:
+            await run_mgr.attach_task_if_active(
+                record.run_id,
+                lambda: run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    ctx=run_ctx,
+                    agent_factory=agent_factory,
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=stream_modes,
+                    stream_subgraphs=body.stream_subgraphs,
+                    interrupt_before=body.interrupt_before,
+                    interrupt_after=body.interrupt_after,
+                ),
             )
-        )
-        record.task = task
+        except asyncio.CancelledError:
+            # create_or_reject() has already crossed the durable admission
+            # boundary. Close the pending row if the request is cancelled
+            # before task attachment can complete.
+            await asyncio.shield(run_mgr.cancel(record.run_id))
+            raise
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name

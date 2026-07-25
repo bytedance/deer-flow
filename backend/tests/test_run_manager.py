@@ -700,6 +700,40 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
 
 
 @pytest.mark.anyio
+async def test_create_or_reject_cancellation_after_registration_interrupts_new_run() -> None:
+    """Cancellation after local admission must not leave the replacement active."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def blocking_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> None:
+        persist_started.set()
+        await release_persist.wait()
+        await original_persist_status(record, status, **kwargs)
+
+    manager._persist_status = blocking_persist_status
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
+    await persist_started.wait()
+    create_task.cancel()
+    release_persist.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await create_task
+
+    records = await manager.list_by_thread("thread-1")
+    replacement = next(record for record in records if record.run_id != old.run_id)
+    stored_replacement = await store.get(replacement.run_id)
+    assert replacement.status == RunStatus.interrupted
+    assert replacement.abort_event.is_set()
+    assert stored_replacement is not None
+    assert stored_replacement["status"] == "interrupted"
+
+
+@pytest.mark.anyio
 async def test_create_or_reject_rollback_persists_interrupted_status_to_store():
     """rollback strategy should persist interrupted status for old runs."""
     store = MemoryRunStore()
