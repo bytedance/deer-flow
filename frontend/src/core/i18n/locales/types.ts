@@ -13,6 +13,7 @@ export interface Translations {
     delete: string;
     edit: string;
     rename: string;
+    renameFailed: string;
     share: string;
     openInNewWindow: string;
     close: string;
