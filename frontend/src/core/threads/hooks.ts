@@ -44,11 +44,6 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 
-export type ToolEndEvent = {
-  name: string;
-  data: unknown;
-};
-
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
@@ -57,7 +52,6 @@ export type ThreadStreamOptions = {
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
-  onToolEnd?: (event: ToolEndEvent) => void;
 };
 
 type SendMessageOptions = {
@@ -95,6 +89,27 @@ type RegeneratePrepareResponse = {
   metadata: Record<string, unknown>;
   target_run_id: string;
 };
+
+export function hasToolResult(messages: Message[], toolName: string): boolean {
+  const matchingToolCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.type !== "ai") {
+      continue;
+    }
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.name === toolName && toolCall.id) {
+        matchingToolCallIds.add(toolCall.id);
+      }
+    }
+  }
+
+  return messages.some(
+    (message) =>
+      message.type === "tool" &&
+      (message.name === toolName ||
+        matchingToolCallIds.has(message.tool_call_id)),
+  );
+}
 
 export function buildThreadSubmitMessages({
   text,
@@ -959,7 +974,6 @@ export function useThreadStream({
   onSend,
   onStart,
   onFinish,
-  onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
@@ -990,7 +1004,6 @@ export function useThreadStream({
     onSend,
     onStart,
     onFinish,
-    onToolEnd,
   });
 
   const {
@@ -1005,8 +1018,8 @@ export function useThreadStream({
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish, onToolEnd };
-  }, [onSend, onStart, onFinish, onToolEnd]);
+    listeners.current = { onSend, onStart, onFinish };
+  }, [onSend, onStart, onFinish]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -1095,14 +1108,6 @@ export function useThreadStream({
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
-      }
-    },
-    onLangChainEvent(event) {
-      if (event.event === "on_tool_end") {
-        listeners.current.onToolEnd?.({
-          name: event.name,
-          data: event.data,
-        });
       }
     },
     onUpdateEvent(data) {

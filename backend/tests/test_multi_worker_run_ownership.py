@@ -5,6 +5,7 @@ Coverage:
 - create_or_reject with interrupt strategy claims and cancels old runs
 - create_run_atomic refuses to interrupt a run owned by another live worker
 - reconcile_orphaned_inflight_runs uses lease-based detection
+- periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
 - Lease heartbeat renews active run leases
 - GATEWAY_WORKERS=1 + heartbeat_enabled=false behaviour unchanged
@@ -19,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -387,6 +388,262 @@ async def test_reconciliation_returns_empty_when_no_orphaned_runs():
     )
 
     assert recovered == []
+
+
+@pytest.mark.anyio
+async def test_periodic_reconciliation_notifies_recovery_callback():
+    """Periodic recovery must hand terminalized rows to Gateway orchestration."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock()
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+
+    await manager._reconcile_orphans_periodic()
+    await asyncio.sleep(0)
+
+    on_orphans_recovered.assert_awaited_once()
+    recovered = on_orphans_recovered.await_args.args[0]
+    assert [record.run_id for record in recovered] == ["periodic-orphan"]
+    assert recovered[0].status == RunStatus.error
+    assert recovered[0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    stored = await store.get("periodic-orphan")
+    assert stored is not None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_periodic_reconciliation_logs_recovered_run_ids_when_callback_fails(caplog):
+    """Callback failures must identify every recovered run in the warning."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock(side_effect=RuntimeError("callback failed"))
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    created_at = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+    for run_id in ("periodic-orphan-1", "periodic-orphan-2"):
+        await store.put(
+            run_id,
+            thread_id=f"thread-{run_id}",
+            status="running",
+            owner_worker_id="dead-worker",
+            lease_expires_at=expired_lease,
+            created_at=created_at,
+        )
+
+    with caplog.at_level("WARNING", logger="deerflow.runtime.runs.manager"):
+        await manager._reconcile_orphans_periodic()
+        await asyncio.sleep(0)
+
+    assert "Periodic orphan recovery callback failed for 2 run(s)" in caplog.text
+    assert "periodic-orphan-1" in caplog.text
+    assert "periodic-orphan-2" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_periodic_terminalization_does_not_block_lease_renewal_or_shutdown():
+    """The real heartbeat loop must keep renewing during a slow callback."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    callback_finished = asyncio.Event()
+
+    async def on_orphans_recovered(_recovered):
+        callback_started.set()
+        await callback_release.wait()
+        callback_finished.set()
+
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    active = await manager.create_or_reject("active-thread")
+    await manager.set_status(active.run_id, RunStatus.running)
+    original_expiry = active.lease_expires_at
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+
+    await manager.start_heartbeat()
+    await asyncio.wait_for(callback_started.wait(), timeout=4.5)
+    expiry_during_callback = active.lease_expires_at
+    await asyncio.sleep(1.2)
+
+    assert expiry_during_callback != original_expiry
+    assert active.lease_expires_at != expiry_during_callback
+    assert callback_finished.is_set() is False
+
+    shutdown_task = asyncio.create_task(manager.shutdown(timeout=1.0))
+    await asyncio.sleep(0)
+    assert shutdown_task.done() is False
+    callback_release.set()
+    await asyncio.wait_for(shutdown_task, timeout=1.0)
+    assert callback_finished.is_set() is True
+
+
+@pytest.mark.anyio
+async def test_periodic_store_scan_does_not_block_real_heartbeat_loop():
+    """A slow orphan scan must not stall later lease-renewal cycles."""
+
+    class SlowScanStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.scan_started = asyncio.Event()
+            self.scan_release = asyncio.Event()
+
+        async def list_inflight_with_expired_lease(
+            self,
+            *,
+            before=None,
+            grace_seconds=10,
+        ):
+            self.scan_started.set()
+            await self.scan_release.wait()
+            return await super().list_inflight_with_expired_lease(
+                before=before,
+                grace_seconds=grace_seconds,
+            )
+
+    store = SlowScanStore()
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+    )
+    active = await manager.create_or_reject("active-thread")
+    await manager.set_status(active.run_id, RunStatus.running)
+
+    await manager.start_heartbeat()
+    await asyncio.wait_for(store.scan_started.wait(), timeout=4.5)
+    expiry_during_scan = active.lease_expires_at
+    await asyncio.sleep(1.2)
+
+    assert active.lease_expires_at != expiry_during_scan
+
+    store.scan_release.set()
+    await manager.stop_heartbeat()
+    await manager._drain_orphan_recovery_task(timeout=0.5)
+
+
+@pytest.mark.anyio
+async def test_periodic_recovery_is_single_flight():
+    """A second trigger must not create another recovery pipeline."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    callback_calls = 0
+
+    async def on_orphans_recovered(_recovered):
+        nonlocal callback_calls
+        callback_calls += 1
+        callback_started.set()
+        await callback_release.wait()
+
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+
+    manager._schedule_orphan_reconciliation()
+    await asyncio.wait_for(callback_started.wait(), timeout=0.5)
+    first_task = manager._orphan_recovery_task
+    manager._schedule_orphan_reconciliation()
+
+    assert manager._orphan_recovery_task is first_task
+    assert callback_calls == 1
+
+    callback_release.set()
+    await asyncio.wait_for(first_task, timeout=0.5)
+
+
+@pytest.mark.anyio
+async def test_shutdown_cancels_recovery_that_exceeds_drain_budget():
+    """The pending -> cancel -> gather branch must observe callback cancellation."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+
+    async def on_orphans_recovered(_recovered):
+        callback_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            raise
+
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+    manager._schedule_orphan_reconciliation()
+    await asyncio.wait_for(callback_started.wait(), timeout=0.5)
+
+    await manager.shutdown(timeout=0.01)
+
+    assert callback_cancelled.is_set()
+    assert manager._orphan_recovery_task is None
+
+
+@pytest.mark.anyio
+async def test_shutdown_applies_shared_deadline_to_heartbeat_stop():
+    """A stuck heartbeat must not receive a separate five-second budget."""
+    manager = _make_manager(
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    heartbeat_cancelled = asyncio.Event()
+
+    async def stuck_heartbeat():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            heartbeat_cancelled.set()
+            raise
+
+    manager._heartbeat_stop = asyncio.Event()
+    manager._heartbeat_task = asyncio.create_task(stuck_heartbeat())
+    started = asyncio.get_running_loop().time()
+
+    await manager.shutdown(timeout=0.01)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert heartbeat_cancelled.is_set()
+    assert elapsed < 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -1023,13 +1280,19 @@ async def test_claim_for_takeover_succeeds_with_expired_lease():
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
     await store.put("run-1", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat(), owner_worker_id="w-a", lease_expires_at=expired_lease)
 
-    ok = await store.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+    ok = await store.claim_for_takeover(
+        "run-1",
+        grace_seconds=grace,
+        error="claimed",
+        stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+    )
     assert ok is True
 
     row = await store.get("run-1")
     assert row is not None
     assert row["status"] == "error"
     assert row["error"] == "claimed"
+    assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
 
 
 @pytest.mark.anyio

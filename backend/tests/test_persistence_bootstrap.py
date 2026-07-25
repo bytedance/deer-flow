@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0006_agents"
+HEAD = "0007_scheduled_run_active_index"
 BASELINE = "0001_baseline"
 
 
