@@ -24,6 +24,7 @@ export const zhCN: Translations = {
     delete: "删除",
     edit: "编辑",
     rename: "重命名",
+    renameFailed: "重命名会话失败。",
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",
@@ -55,6 +56,18 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+  },
+
+  runDuration: {
+    reasoning: "思考过程",
+    working: "执行中…",
+    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    description: "任务总耗时，包括模型推理、工具调用和等待时间。",
+    lessThanSecond: "不足 1 秒",
+    hours: (value) => `${value} 小时`,
+    minutes: (value) => `${value} 分`,
+    seconds: (value) => `${value} 秒`,
+    separator: " ",
   },
 
   // Home

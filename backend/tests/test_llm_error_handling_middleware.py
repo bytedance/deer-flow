@@ -95,12 +95,17 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
     attempts = 0
     waits: list[float] = []
     events: list[dict] = []
+    dispatched_events: list[dict] = []
 
     async def fake_sleep(delay: float) -> None:
         waits.append(delay)
 
     def fake_writer():
         return events.append
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     async def handler(_request) -> AIMessage:
         nonlocal attempts
@@ -114,6 +119,10 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
         "langgraph.config.get_stream_writer",
         fake_writer,
     )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event",
+        fake_emit_custom_event,
+    )
 
     result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
@@ -122,6 +131,7 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
     assert attempts == 3
     assert waits == [0.025, 0.025]
     assert [event["type"] for event in events] == ["llm_retry", "llm_retry"]
+    assert dispatched_events == events
 
 
 def test_async_model_call_returns_user_message_for_quota_errors() -> None:
@@ -168,10 +178,16 @@ def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
     waits: list[float] = []
+    events: list[dict] = []
+    dispatched_events: list[dict] = []
     attempts = 0
 
     def fake_sleep(delay: float) -> None:
         waits.append(delay)
+
+    def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     def handler(_request) -> AIMessage:
         nonlocal attempts
@@ -185,12 +201,52 @@ def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch
         return AIMessage(content="ok")
 
     monkeypatch.setattr("time.sleep", fake_sleep)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.emit_custom_event",
+        fake_emit_custom_event,
+    )
 
     result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
     assert waits == [2.0]
+    assert dispatched_events == events
+    assert [event["type"] for event in events] == ["llm_retry"]
+
+
+def test_sync_retry_event_preserves_langgraph_control_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware()
+
+    def interrupt_dispatch(*_args, **_kwargs):
+        raise GraphBubbleUp
+
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: lambda _payload: None)
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.emit_custom_event",
+        interrupt_dispatch,
+    )
+
+    with pytest.raises(GraphBubbleUp):
+        middleware._emit_retry_event(1, 10, "busy", max_attempts=2)
+
+
+@pytest.mark.anyio
+async def test_async_retry_event_preserves_langgraph_control_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware()
+
+    async def interrupt_dispatch(*_args, **_kwargs):
+        raise GraphBubbleUp
+
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: lambda _payload: None)
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event",
+        interrupt_dispatch,
+    )
+
+    with pytest.raises(GraphBubbleUp):
+        await middleware._aemit_retry_event(1, 10, "busy", max_attempts=2)
 
 
 def test_sync_model_call_propagates_graph_bubble_up() -> None:

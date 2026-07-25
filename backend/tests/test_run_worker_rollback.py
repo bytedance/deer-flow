@@ -6,7 +6,7 @@ from typing import Annotated, Any, NotRequired, TypedDict
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage
 from langgraph.channels.delta import DeltaChannel
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
@@ -18,7 +18,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.runs.manager import ConflictError, RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
     RollbackPoint,
@@ -31,6 +31,7 @@ from deerflow.runtime.runs.worker import (
     _ensure_interrupted_title,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
+    _LargeFileToolChunkBatcher,
     _rollback_to_pre_run_checkpoint,
     _try_extract_from_message,
     run_agent,
@@ -42,6 +43,48 @@ class FakeCheckpointer:
         self.adelete_thread = AsyncMock()
         self.aget_tuple = AsyncMock(return_value=None)
         self.aput_writes = AsyncMock()
+
+
+@pytest.mark.anyio
+async def test_pending_cancel_stops_waiting_for_prior_finalization():
+    run_manager = RunManager()
+    prior = await run_manager.create("thread-cancel-while-waiting")
+    prior.status = RunStatus.interrupted
+    prior.finalizing = True
+    record = await run_manager.create("thread-cancel-while-waiting")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    def agent_factory(**_kwargs):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("cancelled pending run must not build an agent")
+
+    record.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={},
+        )
+    )
+    await asyncio.sleep(0)
+
+    outcome = await run_manager.cancel(record.run_id)
+    await asyncio.wait_for(record.task, timeout=0.2)
+
+    assert outcome == CancelOutcome.cancelled
+    assert prior.finalizing is True
+    assert factory_called is False
+    assert record.status == RunStatus.interrupted
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
@@ -93,6 +136,197 @@ def _build_message_append_graph(state_schema: type, checkpointer: Any):
     return builder.compile(checkpointer=checkpointer)
 
 
+@pytest.mark.parametrize("tool_name", ["write_file", "str_replace"])
+def test_large_file_tool_chunk_batcher_streams_bounded_batches(tool_name: str):
+    batcher = _LargeFileToolChunkBatcher(batch_size=2)
+    first = AIMessageChunk(
+        content="",
+        id="ai-1",
+        tool_call_chunks=[
+            {
+                "id": "call-1",
+                "index": 0,
+                "name": tool_name,
+                "args": '{"path":"/mnt/user-data/outputs/report.md","content":"Hel',
+            }
+        ],
+    )
+    continuation = AIMessageChunk(
+        content="",
+        id="ai-1",
+        tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
+    )
+
+    assert batcher.push((first, {})) == []
+    published = batcher.push((continuation, {}))
+    assert len(published) == 1
+    message, metadata = published[0]
+    assert metadata == {}
+    assert message.tool_calls[0]["args"]["content"] == "Hello"
+    assert batcher.flush() == []
+
+
+def test_large_file_tool_chunk_batcher_preserves_visible_and_non_file_chunks():
+    batcher = _LargeFileToolChunkBatcher()
+    visible_text = AIMessageChunk(content="Writing the report now.", id="ai-1")
+    search_tool = AIMessageChunk(
+        content="",
+        id="ai-2",
+        tool_call_chunks=[
+            {
+                "id": "call-2",
+                "index": 0,
+                "name": "web_search",
+                "args": '{"query":"vector databases"}',
+            }
+        ],
+    )
+    write_with_reasoning = AIMessageChunk(
+        content="",
+        id="ai-3",
+        additional_kwargs={"reasoning_content": "Choosing a filename."},
+        tool_call_chunks=[
+            {
+                "id": "call-3",
+                "index": 0,
+                "name": "write_file",
+                "args": '{"path":"/mnt/user-data/outputs/report.md"}',
+            }
+        ],
+    )
+
+    assert batcher.push((visible_text, {})) == [(visible_text, {})]
+    assert batcher.push((search_tool, {})) == [(search_tool, {})]
+    visible_reasoning = batcher.push((write_with_reasoning, {}))
+    assert len(visible_reasoning) == 1
+    filtered_message, filtered_metadata = visible_reasoning[0]
+    assert filtered_metadata == {}
+    assert filtered_message.additional_kwargs == {"reasoning_content": "Choosing a filename."}
+    assert filtered_message.tool_call_chunks == []
+    pending_file_chunks = batcher.flush()
+    assert len(pending_file_chunks) == 1
+    assert pending_file_chunks[0][0].tool_call_chunks[0]["name"] == "write_file"
+
+
+def test_large_file_tool_chunk_batcher_separates_subgraph_namespaces():
+    batcher = _LargeFileToolChunkBatcher()
+    first = AIMessageChunk(
+        content="",
+        id="shared-ai-id",
+        tool_call_chunks=[{"id": "call-a", "index": 0, "name": "write_file", "args": '{"path":"a.md","content":"A'}],
+    )
+    second = AIMessageChunk(
+        content="",
+        id="shared-ai-id",
+        tool_call_chunks=[{"id": "call-b", "index": 0, "name": "write_file", "args": '{"path":"b.md","content":"B'}],
+    )
+
+    assert batcher.push((first, {"langgraph_checkpoint_ns": "task-a"})) == []
+    published = batcher.push((second, {"langgraph_checkpoint_ns": "task-b"}))
+
+    assert len(published) == 1
+    assert published[0][1]["langgraph_checkpoint_ns"] == "task-a"
+    assert batcher.flush()[0][1]["langgraph_checkpoint_ns"] == "task-b"
+
+
+@pytest.mark.parametrize("metadata", [None, "not-a-dict"])
+def test_large_file_tool_chunk_batcher_accepts_non_dict_metadata(metadata: Any):
+    batcher = _LargeFileToolChunkBatcher(batch_size=1)
+    message = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[
+            {
+                "id": "call-file",
+                "index": 0,
+                "name": "write_file",
+                "args": '{"path":"report.md","content":"draft"}',
+            }
+        ],
+    )
+
+    published = batcher.push((message, metadata))
+
+    assert len(published) == 1
+    assert published[0][0].tool_call_chunks[0]["args"] == '{"path":"report.md","content":"draft"}'
+    assert published[0][1] == {}
+
+
+def test_large_file_tool_chunk_batcher_does_not_retain_non_file_names():
+    batcher = _LargeFileToolChunkBatcher()
+
+    for index in range(100):
+        message = AIMessageChunk(
+            content="",
+            id=f"ai-{index}",
+            tool_call_chunks=[
+                {
+                    "id": f"call-{index}",
+                    "index": 0,
+                    "name": "web_search",
+                    "args": '{"query":"deerflow"}',
+                }
+            ],
+        )
+
+        assert batcher.push((message, {})) == [(message, {})]
+
+    assert batcher.tool_names == {}
+
+
+def test_large_file_tool_chunk_batcher_starts_batching_after_split_name_matches():
+    batcher = _LargeFileToolChunkBatcher(batch_size=1)
+    name_prefix = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[{"id": "call-file", "index": 0, "name": "write_", "args": ""}],
+    )
+    name_suffix = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[
+            {
+                "index": 0,
+                "name": "file",
+                "args": '{"path":"report.md","content":"draft"}',
+            }
+        ],
+    )
+
+    assert batcher.push((name_prefix, {})) == [(name_prefix, {})]
+    assert set(batcher.tool_names.values()) == {"write_"}
+    assert len(batcher.push((name_suffix, {}))) == 1
+    assert set(batcher.tool_names.values()) == {"write_file"}
+
+
+def test_large_file_tool_chunk_batcher_keeps_identity_across_batches_then_releases_it():
+    batcher = _LargeFileToolChunkBatcher(batch_size=1)
+    first = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[
+            {
+                "id": "call-file",
+                "index": 0,
+                "name": "write_file",
+                "args": '{"path":"report.md","content":"Hel',
+            }
+        ],
+    )
+    continuation = AIMessageChunk(
+        content="",
+        id="ai-file",
+        tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
+    )
+
+    assert len(batcher.push((first, {}))) == 1
+    assert len(batcher.push((continuation, {}))) == 1
+    assert set(batcher.tool_names.values()) == {"write_file"}
+
+    assert batcher.finish() == []
+    assert batcher.tool_names == {}
+
+
 def test_build_runtime_context_includes_app_config_when_present():
     app_config = object()
 
@@ -134,6 +368,200 @@ def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
     )
 
     assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+
+
+@pytest.mark.anyio
+async def test_run_agent_batches_incremental_file_args_and_keeps_complete_values():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-file-stream")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    complete_message = AIMessage(
+        content="",
+        id="ai-file",
+        tool_calls=[
+            {
+                "id": "call-file",
+                "name": "write_file",
+                "args": {
+                    "path": "/mnt/user-data/outputs/report.md",
+                    "content": "Hello world",
+                },
+                "type": "tool_call",
+            }
+        ],
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        id="ai-file",
+                        tool_call_chunks=[
+                            {
+                                "id": "call-file",
+                                "index": 0,
+                                "name": "write_file",
+                                "args": '{"path":"/mnt/user-data/outputs/report.md","content":"Hello',
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+            )
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        id="ai-file",
+                        tool_call_chunks=[{"index": 0, "name": None, "args": ' world"}'}],
+                    ),
+                    {},
+                ),
+            )
+            yield ("values", {"messages": [complete_message]})
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    message_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "messages"]
+    assert len(message_events) == 1
+    assert message_events[0][2][0]["tool_calls"][0]["args"]["content"] == "Hello world"
+    values_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "values"]
+    assert any(event["messages"][0]["tool_calls"][0]["args"]["content"] == "Hello world" for event in values_events)
+
+
+@pytest.mark.parametrize(
+    ("stream_error", "flush_publish_error", "expected_error"),
+    [
+        (True, False, "stream failed"),
+        (True, True, "stream failed"),
+        (False, True, "flush publish failed"),
+    ],
+)
+@pytest.mark.anyio
+async def test_run_agent_handles_pending_file_args_when_stream_or_flush_raises(stream_error: bool, flush_publish_error: bool, expected_error: str):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-file-stream-error")
+
+    async def publish(_run_id: str, event: str, _data: Any):
+        if flush_publish_error and event == "messages":
+            raise RuntimeError("flush publish failed")
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=publish),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield (
+                "messages",
+                (
+                    AIMessageChunk(
+                        content="",
+                        id="ai-file",
+                        tool_call_chunks=[
+                            {
+                                "id": "call-file",
+                                "index": 0,
+                                "name": "write_file",
+                                "args": '{"path":"report.md","content":"partial',
+                            }
+                        ],
+                    ),
+                    {},
+                ),
+            )
+            if stream_error:
+                raise RuntimeError("stream failed")
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple", "values"],
+    )
+
+    message_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "messages"]
+    assert len(message_events) == 1
+    assert message_events[0][2][0]["tool_call_chunks"][0]["args"].endswith('"content":"partial')
+    error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert error_events[0][2]["message"] == expected_error
+
+
+@pytest.mark.anyio
+async def test_run_agent_keeps_file_chunks_unbatched_without_values_mode():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-file-messages-only")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    chunks = [
+        AIMessageChunk(
+            content="",
+            id="ai-file",
+            tool_call_chunks=[
+                {
+                    "id": "call-file",
+                    "index": 0,
+                    "name": "write_file",
+                    "args": '{"path":"report.md","content":"Hel',
+                }
+            ],
+        ),
+        AIMessageChunk(
+            content="",
+            id="ai-file",
+            tool_call_chunks=[{"index": 0, "name": None, "args": 'lo"}'}],
+        ),
+    ]
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            for chunk in chunks:
+                yield (chunk, {})
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["messages-tuple"],
+    )
+
+    message_events = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "messages"]
+    assert len(message_events) == 2
+    assert message_events[0][0]["tool_call_chunks"][0]["args"].endswith('"content":"Hel')
+    assert message_events[1][0]["tool_call_chunks"][0]["args"] == 'lo"}'
 
 
 @pytest.mark.anyio
@@ -253,8 +681,6 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
     """
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.abort_action = "rollback"
-    record.abort_event.set()
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
@@ -278,6 +704,10 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
 
     class DummyAgent:
         async def aget_state(self, _config):
+            # Cancel after the worker crosses its startup barrier so this test
+            # exercises the running rollback path, not pending cancellation.
+            record.abort_action = "rollback"
+            record.abort_event.set()
             raise RuntimeError("materialization failed")
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
@@ -2343,14 +2773,16 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     """
     import deerflow.runtime.runs.worker as worker_module
 
+    helper_called = asyncio.Event()
+
     async def _boom(*_args, **_kwargs):
+        helper_called.set()
         raise RuntimeError("forced helper failure")
 
     monkeypatch.setattr(worker_module, "_ensure_interrupted_title", _boom)
 
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.status = RunStatus.interrupted
 
     bridge = SimpleNamespace(
         publish=AsyncMock(),
@@ -2406,5 +2838,6 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     # The helper raised, but the run still reaches the threads_meta status sync
     # and ``publish_end`` — i.e. the SSE stream is closed cleanly and the row
     # reflects the run outcome.
+    assert helper_called.is_set()
     assert captured_status.get("status") == ("thread-1", "interrupted")
     bridge.publish_end.assert_awaited_once_with(record.run_id)

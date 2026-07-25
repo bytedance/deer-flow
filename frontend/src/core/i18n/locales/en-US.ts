@@ -24,6 +24,7 @@ export const enUS: Translations = {
     delete: "Delete",
     edit: "Edit",
     rename: "Rename",
+    renameFailed: "Failed to rename thread.",
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
@@ -55,6 +56,19 @@ export const enUS: Translations = {
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
     showBrowser: "Open browser panel",
+  },
+
+  runDuration: {
+    reasoning: "Reasoning",
+    working: "Working…",
+    completedIn: (duration) => `Completed in ${duration}`,
+    description:
+      "Total task time, including model reasoning, tool calls, and waiting.",
+    lessThanSecond: "<1s",
+    hours: (value) => `${value}h`,
+    minutes: (value) => `${value}m`,
+    seconds: (value) => `${value}s`,
+    separator: " ",
   },
 
   // Home

@@ -18,6 +18,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import { getMessageRunId } from "../messages/run-duration";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -43,11 +44,6 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 
-export type ToolEndEvent = {
-  name: string;
-  data: unknown;
-};
-
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
@@ -56,7 +52,6 @@ export type ThreadStreamOptions = {
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
-  onToolEnd?: (event: ToolEndEvent) => void;
 };
 
 type SendMessageOptions = {
@@ -94,6 +89,27 @@ type RegeneratePrepareResponse = {
   metadata: Record<string, unknown>;
   target_run_id: string;
 };
+
+export function hasToolResult(messages: Message[], toolName: string): boolean {
+  const matchingToolCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.type !== "ai") {
+      continue;
+    }
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.name === toolName && toolCall.id) {
+        matchingToolCallIds.add(toolCall.id);
+      }
+    }
+  }
+
+  return messages.some(
+    (message) =>
+      message.type === "tool" &&
+      (message.name === toolName ||
+        matchingToolCallIds.has(message.tool_call_id)),
+  );
+}
 
 export function buildThreadSubmitMessages({
   text,
@@ -316,8 +332,13 @@ export function mergeMessages(
   optimisticMessages: Message[],
 ): Message[] {
   const savedTurnDurations = new Map<string, number>();
+  const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
+    const runId = getMessageRunId(msg);
+    if (identity && runId) {
+      savedRunIds.set(identity, runId);
+    }
     if (identity && msg.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
         identity,
@@ -412,17 +433,26 @@ export function mergeMessages(
 
   return merged.map((message) => {
     const identity = messageIdentity(message);
-    if (
-      identity &&
+    if (!identity) {
+      return message;
+    }
+    const shouldRestoreRunId =
+      savedRunIds.has(identity) && !getMessageRunId(message);
+    const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
-      message.additional_kwargs?.turn_duration === undefined
-    ) {
+      message.additional_kwargs?.turn_duration === undefined;
+    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
       return {
         ...message,
-        additional_kwargs: {
-          ...message.additional_kwargs,
-          turn_duration: savedTurnDurations.get(identity),
-        },
+        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
+        ...(shouldRestoreTurnDuration
+          ? {
+              additional_kwargs: {
+                ...message.additional_kwargs,
+                turn_duration: savedTurnDurations.get(identity),
+              },
+            }
+          : {}),
       } as Message;
     }
     return message;
@@ -944,7 +974,6 @@ export function useThreadStream({
   onSend,
   onStart,
   onFinish,
-  onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
@@ -975,7 +1004,6 @@ export function useThreadStream({
     onSend,
     onStart,
     onFinish,
-    onToolEnd,
   });
 
   const {
@@ -990,8 +1018,8 @@ export function useThreadStream({
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
-    listeners.current = { onSend, onStart, onFinish, onToolEnd };
-  }, [onSend, onStart, onFinish, onToolEnd]);
+    listeners.current = { onSend, onStart, onFinish };
+  }, [onSend, onStart, onFinish]);
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
@@ -1080,14 +1108,6 @@ export function useThreadStream({
             metadata: { agent_name: context.agent_name },
           })
           .catch(() => ({}));
-      }
-    },
-    onLangChainEvent(event) {
-      if (event.event === "on_tool_end") {
-        listeners.current.onToolEnd?.({
-          name: event.name,
-          data: event.data,
-        });
       }
     },
     onUpdateEvent(data) {
@@ -1522,7 +1542,9 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
-            streamSubgraphs: true,
+            // No streamSubgraphs: subtask progress arrives via root-namespace
+            // custom events, while subgraph frames would leak a delegated
+            // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
             config: {
               recursion_limit: 1000,
@@ -1628,7 +1650,7 @@ export function useThreadStream({
           threadId,
           checkpoint: prepared.checkpoint,
           metadata: prepared.metadata,
-          streamSubgraphs: true,
+          // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
           config: {
             recursion_limit: 1000,

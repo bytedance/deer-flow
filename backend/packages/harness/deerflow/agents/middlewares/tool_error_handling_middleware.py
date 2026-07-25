@@ -157,6 +157,8 @@ def _build_runtime_middlewares(
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
+    authorization_provider=None,
+    authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -199,7 +201,33 @@ def _build_runtime_middlewares(
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
-    # Guardrail middleware (if configured)
+    # Authorization uses the existing GuardrailMiddleware so execution-time
+    # deny, audit, and fail-closed handling stay in one proven implementation.
+    # It is appended before an explicit guardrail provider, making authorization
+    # the outer guard and avoiding an unnecessary external policy call for an
+    # already-denied tool.
+    authorization_config = app_config.authorization
+    if authorization_config.enabled is True:
+        if authorization_provider is None:
+            from deerflow.authz.runtime import resolve_authorization_provider
+
+            authorization_provider = resolve_authorization_provider(authorization_config)
+        if authorization_provider is not None:
+            from deerflow.authz.adapter import GuardrailAuthorizationAdapter
+            from deerflow.guardrails.middleware import GuardrailMiddleware
+
+            tail.append(
+                GuardrailMiddleware(
+                    GuardrailAuthorizationAdapter(
+                        authorization_provider,
+                        default_role=authorization_config.default_role,
+                        infrastructure_tool_names=authorization_infrastructure_tool_names,
+                    ),
+                    fail_closed=authorization_config.fail_closed,
+                )
+            )
+
+    # Explicit guardrail middleware remains independently active when configured.
     guardrails_config = app_config.guardrails
     if guardrails_config.enabled and guardrails_config.provider:
         import inspect
@@ -264,13 +292,21 @@ def _build_runtime_middlewares(
     return middlewares
 
 
-def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
+def build_lead_runtime_middlewares(
+    *,
+    app_config: AppConfig,
+    lazy_init: bool = True,
+    authorization_provider=None,
+    deferred_setup: "DeferredToolSetup | None" = None,
+) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        authorization_provider=authorization_provider,
+        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
 
@@ -282,6 +318,7 @@ def build_subagent_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
+    authorization_provider=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -294,6 +331,8 @@ def build_subagent_runtime_middlewares(
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        authorization_provider=authorization_provider,
+        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
     if model_name is None and app_config.models:

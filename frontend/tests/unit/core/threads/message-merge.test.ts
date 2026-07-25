@@ -96,6 +96,39 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
   ]);
 });
 
+test("mergeMessages preserves historical run metadata on a live checkpoint replacement", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "persisted",
+    additional_kwargs: { turn_duration: 114 },
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        content: persistedAi,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-07-21T00:00:00Z",
+      },
+    ],
+    new Set(),
+  );
+  const checkpointAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live checkpoint",
+  } as Message;
+
+  expect(mergeMessages(history, [checkpointAi], [])).toEqual([
+    {
+      ...checkpointAi,
+      run_id: "run-1",
+      additional_kwargs: { turn_duration: 114 },
+    },
+  ]);
+});
+
 test("mergeMessages keeps a protected pre-compression input at its canonical position", () => {
   const canonicalInput = {
     id: "input-1",

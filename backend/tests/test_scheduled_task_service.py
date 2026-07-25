@@ -447,7 +447,11 @@ async def test_skip_policy_applies_to_fresh_thread_runs():
 
     assert result["outcome"] == "skipped"
     assert launched == []
-    assert run_repo.created["status"] == "queued"
+    # The skip tombstone is created directly as terminal "skipped" (not the
+    # transient "queued" the launch path uses): a queued row is active and would
+    # itself trip the uq_scheduled_task_run_active partial unique index against
+    # the pre-existing run still holding the task's single active slot.
+    assert run_repo.created["status"] == "skipped"
     assert run_repo.updated[-1][1]["status"] == "skipped"
     assert task_repo.updated[1]["status"] == "enabled"
     assert task_repo.updated[1]["increment_run_count"] is False
