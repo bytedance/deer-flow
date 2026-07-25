@@ -429,14 +429,9 @@ async def run_agent(
             abort_event=record.abort_event,
         )
 
-        try_start = getattr(run_manager, "try_start", None)
-        if try_start is None:
-            await run_manager.set_status(run_id, RunStatus.running)
-            start_outcome = RunStartOutcome.started
-        else:
-            start_outcome = await try_start(run_id)
-            if start_outcome is not RunStartOutcome.started:
-                return
+        start_outcome = await run_manager.try_start(run_id)
+        if start_outcome is not RunStartOutcome.started:
+            return
         started = True
 
         if thread_store is not None:

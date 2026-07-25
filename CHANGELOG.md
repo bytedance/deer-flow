@@ -198,6 +198,10 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Thread metadata now switches to `running` only after the run passes
+  the startup barrier, so pending-cancelled runs no longer briefly project
+  `running`; clients may observe the prior thread status during worker startup.
+  ([#4450])
 - **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
   lead-agent skills, preventing passive enabled skills and evaluation fixtures
   from removing MCP, web, file, and delegation tools from every run. ([#4095],

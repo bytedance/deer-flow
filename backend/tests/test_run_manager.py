@@ -247,6 +247,37 @@ async def test_try_start_respects_durable_and_racing_cancels():
 
 
 @pytest.mark.anyio
+async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
+    """Worker attach failures should finalize only runs still pending startup."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-1")
+    error = "Failed to attach run worker: boom"
+
+    assert await manager.fail_start_if_pending(record.run_id, error=error) is True
+
+    stored = await store.get(record.run_id)
+    assert record.status == RunStatus.error
+    assert record.error == error
+    assert record.abort_event.is_set()
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["error"] == error
+
+    running = await manager.create_or_reject("thread-2")
+    assert await manager.try_start(running.run_id) == RunStartOutcome.started
+
+    assert await manager.fail_start_if_pending(running.run_id, error="late") is False
+
+    stored_running = await store.get(running.run_id)
+    assert running.status == RunStatus.running
+    assert running.error is None
+    assert stored_running is not None
+    assert stored_running["status"] == RunStatus.running.value
+    assert stored_running["error"] is None
+
+
+@pytest.mark.anyio
 async def test_completion_persistence_recreates_missing_store_row():
     """Completion updates should recreate a missing row and persist final counters."""
     store = MissingCompletionRunStore()

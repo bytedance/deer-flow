@@ -906,6 +906,57 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
     assert "thread metadata store failed after cancellation" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_config, caplog, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    import app.gateway.services as services
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.manager import RunStartOutcome
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    metadata_started = asyncio.Event()
+    run_agent_called = asyncio.Event()
+
+    async def get_thread(_thread_id):
+        metadata_started.set()
+        await asyncio.Event().wait()
+
+    async def fake_run_agent(_bridge, run_manager, record, **_kwargs):
+        run_agent_called.set()
+        start_outcome = await run_manager.try_start(record.run_id)
+        assert start_outcome is RunStartOutcome.started
+
+    monkeypatch.setattr(services, "_THREAD_METADATA_SETUP_TIMEOUT_SECONDS", 0.01)
+    run_manager = RunManager(store=MemoryRunStore())
+    body = _run_create_request()
+    request = _make_start_run_request(
+        run_manager,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-timeout-meta", request)
+        await asyncio.wait_for(metadata_started.wait(), timeout=1)
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    assert run_agent_called.is_set()
+    assert record.status == RunStatus.running
+    assert (await run_manager.get(record.run_id)).status == RunStatus.running
+    assert "Timed out ensuring thread_meta for thread-timeout-meta" in caplog.text
+
+
 def test_context_merges_into_configurable():
     """Context values must be merged into config['configurable'] by start_run.
 
