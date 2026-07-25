@@ -330,7 +330,7 @@ def test_gateway_lifespan_initializes_monocle():
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     setup_spy = MagicMock(return_value=False)
@@ -372,7 +372,7 @@ def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
-    async def fake_start(_startup_config):
+    async def fake_start(_startup_config, **_kwargs):
         return fake_service
 
     setup_spy = MagicMock(side_effect=ValueError("MONOCLE_EXPORTERS has unknown exporter(s): fle."))
