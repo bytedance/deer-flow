@@ -41,8 +41,11 @@ database store.
 
 `category="message"` means an event is eligible for a message projection; it
 does not guarantee that the row is visible in the UI. Thread-history APIs also
-filter middleware model calls and superseded regenerate runs, and the frontend
-honors message-level visibility markers such as `hide_from_ui`.
+filter middleware model calls, subagent AI responses, and superseded regenerate
+runs, and the frontend honors message-level visibility markers such as
+`hide_from_ui`. Subagent events remain available through the run-events
+endpoint; parent `task` ToolMessages remain in thread history so subtask cards
+can restore their terminal status after reload.
 
 All other categories are excluded from message projections and are available
 through run-event or specialized APIs:
@@ -122,7 +125,7 @@ Schema. It is the authoritative field-level reference.
 
 | Consumer | Read path and behavior |
 | --- | --- |
-| Frontend thread history | `GET /api/threads/{thread_id}/messages/page` scans `list_messages()`, removes middleware rows and superseded regenerate runs, then applies frontend message visibility rules. |
+| Frontend thread history | `GET /api/threads/{thread_id}/messages/page` scans `list_messages()`, removes middleware rows, subagent AI responses, and superseded regenerate runs, then applies frontend message visibility rules. |
 | Per-run message clients | Thread-scoped and stateless run message endpoints call `list_messages_by_run()`. |
 | Run debug/audit | `GET /api/threads/{thread_id}/runs/{run_id}/events` calls `list_events()` and supports `event_types`, `task_id`, `limit`, and `after_seq`. |
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
