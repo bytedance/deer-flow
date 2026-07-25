@@ -69,3 +69,45 @@ class SandboxFileNotFoundError(SandboxFileError):
     """Raised when a file or directory is not found."""
 
     pass
+
+
+class SandboxCapacityExceededError(SandboxError):
+    """Raised when the sandbox provider has no available capacity.
+
+    The reason distinguishes occupied capacity from provider shutdown.
+    The caller controls retry scheduling. DeerFlow does not retry automatically.
+    """
+
+    CODE = "SANDBOX_CAPACITY_EXCEEDED"
+
+    def __init__(
+        self,
+        message: str = "All sandbox replica slots are in use",
+        *,
+        active: int = 0,
+        warm: int = 0,
+        reserved: int = 0,
+        replicas: int = 0,
+        retry_after_seconds: float = 5.0,
+        reason: str = "capacity",
+    ) -> None:
+        details: dict[str, object] = {
+            "code": self.CODE,
+            "reason": reason,
+            "replicas": replicas,
+            "retryable": True,
+            "retry_after_seconds": retry_after_seconds,
+        }
+        if active:
+            details["active"] = active
+        if warm:
+            details["warm"] = warm
+        if reserved:
+            details["reserved"] = reserved
+        super().__init__(message, details)
+        self.active = active
+        self.warm = warm
+        self.reserved = reserved
+        self.replicas = replicas
+        self.retry_after_seconds = retry_after_seconds
+        self.reason = reason

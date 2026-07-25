@@ -12,6 +12,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
+  limit. The default `wait` policy waits for `acquire_timeout`, then fails the
+  agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
+  `burst_limit` to permit bounded extra VMs. The `reject` policy can remove one
+  warm VM before it returns a capacity error. ([#4391])
 - **skills:** A directory containing `SKILL.md` is now a runtime package
   boundary. Nested `SKILL.md` files inside that package are supporting data and
   are no longer registered as independent skills; unusual custom layouts must

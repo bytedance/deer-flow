@@ -275,7 +275,7 @@ Browser login uses `HttpOnly` session cookies. The login page offers a "keep me 
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 > [!IMPORTANT]
-> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). The Redis stream bridge (`stream_bridge.type: redis`) shares SSE delivery and `Last-Event-ID` replay across workers, with a rolling retained-buffer TTL (`stream_ttl_seconds`) as a cleanup safety net. Malformed reconnect IDs live-tail new events instead of replaying the retained buffer. It does not make run cancellation, request de-duplication, or IM channel state fully cross-worker by itself; use single-worker Gateway or explicit sticky routing/ownership before raising `GATEWAY_WORKERS`.
+> The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), and `run_ownership.heartbeat_enabled: true`. The bridge shares SSE delivery and `Last-Event-ID` replay across workers, while lease reconciliation marks runs from dead workers as errors, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE and `/wait` consumers also refresh durable status on heartbeats as a fallback if terminal publication fails. The rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -765,11 +765,31 @@ Use `/compact` in the Web UI composer to summarize older context for the current
 
 Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is also attributed back to the dispatching step.
+The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is also attributed back to the dispatching step.
 
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
 
 ### Sandbox & File System
+
+`E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
+`acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
+automatically. Clients can use the structured error to schedule a retry.
+
+Use `burst` with `burst_limit` to permit bounded extra VMs. The `wait` and
+`reject` policies use only `replicas`. The `reject` policy can remove one warm
+VM before it returns an error.
+
+`replicas` limits one Gateway process. It does not limit all Gateway processes.
+E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
+default asyncio executor.
+
+An E2B VM keeps its slot until E2B confirms destruction. This rule covers
+create and reclaim operations. Discovery can find a VM from another Gateway.
+Shutdown closes an unowned discovery client without destroying its VM.
+Release stops counting a transition when the VM enters the warm pool.
+Shutdown races retry remote cleanup after a transient kill failure.
+Reset destroys tracked active and warm E2B VMs. The old provider instance
+cannot accept new acquisitions.
 
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
@@ -865,6 +885,10 @@ response = client.chat("Analyze this paper for me", thread_id="my-thread")
 for event in client.stream("hello"):
     if event.type == "messages-tuple" and event.data.get("type") == "ai":
         print(event.data["content"])
+    elif event.type == "messages-tuple" and event.data.get("type") == "tool" and "artifact" in event.data:
+        # Structured tool artifacts (for example, ask_clarification cards)
+        # are preserved when the ToolMessage provides one.
+        print(event.data["artifact"])
 
 # Configuration & management — returns Gateway-aligned dicts
 models = client.list_models()        # {"models": [...]}
@@ -875,6 +899,8 @@ client.set_goal("thread-1", "finish the implementation and make all tests pass")
 client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
 client.clear_goal("thread-1")
 ```
+
+The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
 

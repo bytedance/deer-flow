@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
+STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
+LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
+
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
     "database table is locked",
@@ -184,6 +188,9 @@ class RunRecord:
     stop_reason: str | None = None
 
 
+OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
+
+
 class RunManager:
     """In-memory run registry with optional persistent RunStore backing.
 
@@ -199,6 +206,7 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
+        on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -211,8 +219,10 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
+        self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
+        self._orphan_recovery_task: asyncio.Task[None] | None = None
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -580,7 +590,12 @@ class RunManager:
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
-        store_limit = max(0, limit - len(memory_records))
+        # Query enough rows to cover both the requested page and every possible
+        # in-memory/store duplicate. Local records can be older than persisted
+        # rows, so subtracting them from the store limit can hide the actual
+        # newest run before the merge; querying only ``limit`` can still lose a
+        # distinct row when that page is occupied by duplicate local records.
+        store_limit = limit + len(memory_records)
         try:
             rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
         except Exception:
@@ -1090,6 +1105,7 @@ class RunManager:
         *,
         error: str,
         before: str | None = None,
+        stop_reason: str | None = None,
     ) -> list[RunRecord]:
         """Mark persisted active runs as failed when their lease has expired.
 
@@ -1138,6 +1154,7 @@ class RunManager:
                         record.run_id,
                         grace_seconds=grace_seconds,
                         error=error,
+                        stop_reason=stop_reason,
                     ),
                 )
             except Exception:
@@ -1151,6 +1168,7 @@ class RunManager:
                 continue
             record.status = RunStatus.error
             record.error = error
+            record.stop_reason = stop_reason
             record.updated_at = now
             recovered.append(record)
 
@@ -1215,21 +1233,21 @@ class RunManager:
         self._heartbeat_task = task
         logger.info("Run lease heartbeat started for worker %s", self._worker_id)
 
-    async def stop_heartbeat(self) -> None:
-        """Stop the background heartbeat task."""
+    async def stop_heartbeat(self, *, timeout: float = 5.0) -> None:
+        """Stop the background heartbeat task within ``timeout`` seconds."""
         if self._heartbeat_stop is not None:
             self._heartbeat_stop.set()
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
-            try:
-                await asyncio.wait_for(self._heartbeat_task, timeout=5.0)
-            except TimeoutError:
+            _, pending = await asyncio.wait(
+                (self._heartbeat_task,),
+                timeout=max(0.0, timeout),
+            )
+            if pending:
                 self._heartbeat_task.cancel()
                 try:
                     await self._heartbeat_task
                 except asyncio.CancelledError:
                     pass
-            except asyncio.CancelledError:
-                pass
         self._heartbeat_task = None
         self._heartbeat_stop = None
         logger.info("Run lease heartbeat stopped for worker %s", self._worker_id)
@@ -1273,10 +1291,7 @@ class RunManager:
             # replacement starts before the lease expires, and the
             # startup pass skips the still-valid lease.
             if cycle % 3 == 0:
-                try:
-                    await self._reconcile_orphans_periodic()
-                except Exception:
-                    logger.warning("Periodic orphan reconciliation failed", exc_info=True)
+                self._schedule_orphan_reconciliation()
 
     async def _renew_leases(self) -> None:
         """Renew the lease on every locally-owned active run."""
@@ -1339,22 +1354,74 @@ class RunManager:
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.
 
-        Called from ``_heartbeat_loop`` every ``lease_seconds``. Startup
-        reconciliation handles the initial sweep; this periodic pass
-        catches orphans whose lease expires between restarts.
+        Scheduled as a single-flight background task by ``_heartbeat_loop``.
+        This keeps both the store scan/status writes and the Gateway callback
+        off the lease-renewal loop. Startup reconciliation handles the initial
+        sweep; this periodic pass catches orphans whose lease expires between
+        restarts.
         """
-        error_msg = "Run lease expired — owning worker is unreachable."
-        recovered = await self.reconcile_orphaned_inflight_runs(error=error_msg)
+        recovered = await self.reconcile_orphaned_inflight_runs(
+            error=LEASE_ORPHAN_RECOVERY_ERROR,
+            stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+        )
         if recovered:
             logger.warning(
                 "Periodic reconciliation recovered %d orphaned run(s) as error",
                 len(recovered),
             )
+            if self._on_orphans_recovered is not None:
+                try:
+                    await self._on_orphans_recovered(recovered)
+                except Exception:
+                    logger.warning(
+                        "Periodic orphan recovery callback failed for %d run(s): run_ids=%s",
+                        len(recovered),
+                        [record.run_id for record in recovered],
+                        exc_info=True,
+                    )
+
+    def _schedule_orphan_reconciliation(self) -> None:
+        """Start one supervised recovery pass unless one is already running."""
+        task = self._orphan_recovery_task
+        if task is not None and not task.done():
+            logger.debug("Skipping periodic orphan reconciliation: previous pass is still running")
+            return
+        task = asyncio.create_task(self._reconcile_orphans_periodic())
+        task.set_name("deerflow-periodic-orphan-recovery")
+        self._orphan_recovery_task = task
+        task.add_done_callback(self._orphan_reconciliation_done)
+
+    def _orphan_reconciliation_done(self, task: asyncio.Task[None]) -> None:
+        """Clear and inspect the supervised single-flight recovery task."""
+        if self._orphan_recovery_task is task:
+            self._orphan_recovery_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.warning("Periodic orphan reconciliation failed", exc_info=True)
+
+    async def _drain_orphan_recovery_task(self, *, timeout: float) -> None:
+        """Boundedly await the supervised recovery pass during shutdown."""
+        task = self._orphan_recovery_task
+        if task is None or task.done():
+            return
+        _, pending = await asyncio.wait((task,), timeout=max(0.0, timeout))
+        if pending:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            logger.warning(
+                "Orphan recovery drain exceeded %.1fs on shutdown; cancelled the active pass",
+                timeout,
+            )
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
-        Stops the lease heartbeat first so no renewal races against the drain.
+        Signals active runs first so their cancellation/cleanup can overlap a
+        bounded heartbeat stop. The heartbeat may perform one final benign
+        lease renewal before it observes the stop event.
 
         Chat runs execute in fire-and-forget background ``asyncio`` tasks that
         write checkpoints through a shared checkpointer. On shutdown the
@@ -1380,7 +1447,6 @@ class RunManager:
         ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
         after ``timeout`` are logged and may still race teardown.
         """
-        await self.stop_heartbeat()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -1393,11 +1459,14 @@ class RunManager:
                 # Status is decided AFTER the drain (below), not here: a run that
                 # completes on its own during the drain must keep its real status.
 
+        await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
+
         if not inflight:
+            await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
             return
 
         tasks = [record.task for record in inflight]
-        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
 
         # Only mark/persist ``interrupted`` for runs that did not settle on their
         # own (still pending after the timeout, or ended cancelled). A run that
@@ -1445,6 +1514,7 @@ class RunManager:
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+        await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
 
 
 class CancelOutcome(StrEnum):

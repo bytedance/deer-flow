@@ -431,16 +431,16 @@ class DeerFlowClient:
     @staticmethod
     def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
         """Build a ``messages-tuple`` tool-result event from a ToolMessage."""
-        return StreamEvent(
-            type="messages-tuple",
-            data={
-                "type": "tool",
-                "content": DeerFlowClient._extract_text(msg.content),
-                "name": msg.name,
-                "tool_call_id": msg.tool_call_id,
-                "id": msg.id,
-            },
-        )
+        data: dict[str, Any] = {
+            "type": "tool",
+            "content": DeerFlowClient._extract_text(msg.content),
+            "name": msg.name,
+            "tool_call_id": msg.tool_call_id,
+            "id": msg.id,
+        }
+        if (artifact := getattr(msg, "artifact", None)) is not None:
+            data["artifact"] = artifact
+        return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
     def _serialize_message(msg) -> dict:
@@ -464,6 +464,8 @@ class DeerFlowClient:
             }
             if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
                 d["additional_kwargs"] = additional_kwargs
+            if (artifact := getattr(msg, "artifact", None)) is not None:
+                d["artifact"] = artifact
             return d
         if isinstance(msg, HumanMessage):
             d = {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
@@ -803,6 +805,7 @@ class DeerFlowClient:
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "additional_kwargs": {...}}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
+              Tool results also include ``"artifact"`` when the source ToolMessage has a non-None artifact.
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
         if thread_id is None:
