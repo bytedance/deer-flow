@@ -92,6 +92,7 @@ class RunRepository(RunStore):
         user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
         status="pending",
+        operation_kind: str = "run",
         multitask_strategy="reject",
         metadata=None,
         kwargs=None,
@@ -118,6 +119,7 @@ class RunRepository(RunStore):
             "user_id": resolved_user_id,
             "model_name": self._normalize_model_name(model_name),
             "status": status,
+            "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
             "metadata_json": self._safe_json(metadata) or {},
             "kwargs_json": self._safe_json(kwargs) or {},
@@ -160,7 +162,7 @@ class RunRepository(RunStore):
         limit=100,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
-        stmt = select(RunRow).where(RunRow.thread_id == thread_id)
+        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         stmt = stmt.order_by(RunRow.created_at.desc()).limit(limit)
@@ -178,6 +180,7 @@ class RunRepository(RunStore):
         source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
         stmt = select(source).where(
             RunRow.thread_id == thread_id,
+            RunRow.operation_kind == "run",
             RunRow.status == "success",
             source.is_not(None),
             source != "",
@@ -198,7 +201,7 @@ class RunRepository(RunStore):
         if not run_ids:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
-        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_id.in_(run_ids))
+        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run", RunRow.run_id.in_(run_ids))
         if resolved_user_id is not None:
             stmt = stmt.where(RunRow.user_id == resolved_user_id)
         async with self._sf() as session:
@@ -242,6 +245,10 @@ class RunRepository(RunStore):
             await session.delete(row)
             await session.commit()
 
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
+        """Release a reservation using its captured owner, not request context."""
+        await self.delete(run_id, user_id=user_id)
+
     async def list_pending(self, *, before=None):
         if before is None:
             before_dt = datetime.now(UTC)
@@ -249,7 +256,7 @@ class RunRepository(RunStore):
             before_dt = before
         else:
             before_dt = datetime.fromisoformat(before)
-        stmt = select(RunRow).where(RunRow.status == "pending", RunRow.created_at <= before_dt).order_by(RunRow.created_at.asc())
+        stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.status == "pending", RunRow.created_at <= before_dt).order_by(RunRow.created_at.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
@@ -378,6 +385,7 @@ class RunRepository(RunStore):
         statuses = ("success", "error", "running") if include_active else ("success", "error")
         _completed = RunRow.status.in_(statuses)
         _thread = RunRow.thread_id == thread_id
+        _run_operation = RunRow.operation_kind == "run"
 
         stmt = select(
             RunRow.model_name,
@@ -388,7 +396,7 @@ class RunRepository(RunStore):
             RunRow.subagent_tokens,
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
-        ).where(_thread, _completed)
+        ).where(_thread, _run_operation, _completed)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()
@@ -510,13 +518,14 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def create_run_atomic(
+    async def create_thread_operation_atomic(
         self,
         run_id: str,
         *,
         thread_id: str,
         owner_worker_id: str,
         lease_expires_at: str | None,
+        operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
         user_id: str | None = None,
@@ -541,7 +550,7 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_run_atomic")
+        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -553,6 +562,7 @@ class RunRepository(RunStore):
             "user_id": resolved_user_id,
             "model_name": self._normalize_model_name(model_name),
             "status": "pending",
+            "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
             "metadata_json": self._safe_json(metadata) or {},
             "kwargs_json": self._safe_json(kwargs) or {},
@@ -576,6 +586,7 @@ class RunRepository(RunStore):
                 )
                 result = await session.execute(stmt)
                 for row in result.scalars():
+                    lease_expired = False
                     if row.lease_expires_at is not None:
                         # SQLite drops tzinfo on read despite
                         # ``DateTime(timezone=True)`` (see ``_row_to_dict``).
@@ -588,6 +599,7 @@ class RunRepository(RunStore):
                         row_lease = row.lease_expires_at
                         if row_lease.tzinfo is None:
                             row_lease = row_lease.replace(tzinfo=UTC)
+                        lease_expired = row_lease < cutoff
                         if row_lease >= cutoff and row.owner_worker_id != owner_worker_id:
                             # Live run owned by another worker — we cannot
                             # interrupt it and the partial unique index would
@@ -595,6 +607,8 @@ class RunRepository(RunStore):
                             # ConflictError so the caller gets a clean signal
                             # instead of a retry loop on IntegrityError.
                             raise ConflictError(f"Thread {thread_id} already has an active run owned by another worker")
+                    if row.operation_kind != "run" and not lease_expired:
+                        raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                     row.status = "interrupted"
                     row.error = "Cancelled by newer run"
                     row.owner_worker_id = owner_worker_id

@@ -3,7 +3,7 @@
 Coverage:
 - create_or_reject with reject strategy blocks duplicate active runs
 - create_or_reject with interrupt strategy claims and cancels old runs
-- create_run_atomic refuses to interrupt a run owned by another live worker
+- create_thread_operation_atomic refuses to interrupt a run owned by another live worker
 - reconcile_orphaned_inflight_runs uses lease-based detection
 - periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -72,6 +72,76 @@ async def test_reject_succeeds_when_no_active_run():
     assert record.status == RunStatus.pending
     assert record.owner_worker_id is not None
     assert record.lease_expires_at is not None
+
+
+@pytest.mark.anyio
+async def test_checkpoint_write_reservation_rejects_nonowning_worker_while_run_is_active():
+    """A durable run owned by worker A must block worker B's checkpoint writer."""
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    non_owner = _make_manager(store=store, worker_id="worker-b")
+    active = await owner.create_or_reject("thread-1")
+    await owner.set_status(active.run_id, RunStatus.running)
+
+    with pytest.raises(ConflictError, match="already has an active run"):
+        async with non_owner.reserve_thread_operation("thread-1", kind=ThreadOperationKind.checkpoint_write):
+            pytest.fail("the checkpoint mutation guard must not be acquired")
+
+    stored = await store.get(active.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_checkpoint_write_reservation_blocks_new_runs_until_mutation_finishes():
+    """The durable guard closes the check-then-write window in both directions."""
+    store = MemoryRunStore()
+    compaction_worker = _make_manager(store=store, worker_id="worker-a")
+    run_worker = _make_manager(store=store, worker_id="worker-b")
+
+    async with compaction_worker.reserve_thread_operation("thread-1", kind=ThreadOperationKind.checkpoint_write):
+        inflight = await store.list_inflight()
+        assert len(inflight) == 1
+        assert inflight[0]["operation_kind"] == ThreadOperationKind.checkpoint_write
+        assert inflight[0]["metadata"] == {}
+
+        with pytest.raises(ConflictError, match="checkpoint write"):
+            await run_worker.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    assert await store.list_inflight() == []
+    assert await store.list_by_thread("thread-1") == []
+
+    admitted = await run_worker.create_or_reject("thread-1")
+    assert admitted.status == RunStatus.pending
+
+
+@pytest.mark.anyio
+async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
+    """A dead checkpoint writer must not wait for periodic reconciliation."""
+    store = MemoryRunStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "checkpoint-write-1",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    assert admitted.status == RunStatus.pending
+    stale = await store.get("checkpoint-write-1")
+    assert stale is not None
+    assert stale["status"] == "interrupted"
+    assert stale["owner_worker_id"] == "worker-b"
 
 
 @pytest.mark.anyio
@@ -139,7 +209,7 @@ async def test_interrupt_exhausted_retries_surface_as_conflict_error():
     import sqlite3
 
     class _AlwaysUniqueViolationStore(MemoryRunStore):
-        """MemoryRunStore whose ``create_run_atomic`` always raises a
+        """MemoryRunStore whose ``create_thread_operation_atomic`` always raises a
         real-flavoured unique-violation IntegrityError, simulating a worker
         that keeps losing the cross-worker race for the same thread."""
 
@@ -147,7 +217,7 @@ async def test_interrupt_exhausted_retries_surface_as_conflict_error():
             super().__init__()
             self.atomic_call_count = 0
 
-        async def create_run_atomic(self, *args, **kwargs):
+        async def create_thread_operation_atomic(self, *args, **kwargs):
             self.atomic_call_count += 1
             err = sqlite3.IntegrityError("UNIQUE constraint failed: runs.uq_runs_thread_active")
             err.sqlite_errorcode = sqlite3.SQLITE_CONSTRAINT_UNIQUE
@@ -184,6 +254,7 @@ async def test_run_record_stores_owner_and_lease():
     assert stored is not None
     assert stored["owner_worker_id"] == manager.worker_id
     assert stored["lease_expires_at"] is not None
+    assert stored["operation_kind"] == ThreadOperationKind.run
 
 
 @pytest.mark.anyio
@@ -197,6 +268,34 @@ async def test_store_row_roundtrips_ownership_fields():
     assert hydrated is not None
     assert hydrated.owner_worker_id == manager.worker_id
     assert hydrated.lease_expires_at is not None
+    assert hydrated.operation_kind == ThreadOperationKind.run
+
+
+@pytest.mark.anyio
+async def test_reconciliation_releases_expired_internal_operation_without_reporting_run():
+    """Expired internal reservations release admission without becoming failed runs."""
+    store = MemoryRunStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "checkpoint-write-1",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="owner expired")
+
+    assert recovered == []
+    stored = await store.get("checkpoint-write-1")
+    assert stored is not None
+    assert stored["status"] == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -678,12 +777,12 @@ async def test_heartbeat_renews_active_run_leases():
 
 @pytest.mark.anyio
 async def test_heartbeat_renews_pending_run_before_task_is_spawned():
-    """A run sitting in ``pending`` between ``create_run_atomic`` and task
+    """A run sitting in ``pending`` between ``create_thread_operation_atomic`` and task
     spawn must still have its lease renewed.
 
     Pre-fix the renewal filter required ``record.task is not None``, so a
     pending run with no task yet (the brief window after
-    ``create_run_atomic`` inserts the row before the worker layer spawns
+    ``create_thread_operation_atomic`` inserts the row before the worker layer spawns
     the agent task) was silently skipped. If that window stretched past
     ``lease_seconds`` — e.g. event-loop saturation, slow checkpoint
     hydrate — peer reconciliation reclaimed the run as an orphan and
@@ -859,14 +958,14 @@ def test_two_managers_have_different_default_ids():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_reject_prevents_duplicate():
-    """store.create_run_atomic with reject must raise ConflictError on duplicate."""
+async def test_create_thread_operation_atomic_reject_prevents_duplicate():
+    """Atomic thread-operation creation must reject a duplicate."""
     store = MemoryRunStore()
     config = _lease_config()
 
-    store.create_run_atomic = AsyncMock(wraps=store.create_run_atomic)
+    store.create_thread_operation_atomic = AsyncMock(wraps=store.create_thread_operation_atomic)
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="run-1",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -876,7 +975,7 @@ async def test_create_run_atomic_reject_prevents_duplicate():
     )
 
     with pytest.raises(ConflictError, match="already has an active run"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-2",
             thread_id="thread-1",
             owner_worker_id="w2",
@@ -887,14 +986,14 @@ async def test_create_run_atomic_reject_prevents_duplicate():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_claims_and_creates():
-    """store.create_run_atomic with interrupt must claim old and create new."""
+async def test_create_thread_operation_atomic_interrupt_claims_and_creates():
+    """Atomic thread-operation creation with interrupt must claim and replace."""
     store = MemoryRunStore()
     config = _lease_config()
     # Create an active run with an expired lease (simulating a crashed worker)
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="run-old",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -903,7 +1002,7 @@ async def test_create_run_atomic_interrupt_claims_and_creates():
         grace_seconds=config.grace_seconds,
     )
 
-    new_row, claimed = await store.create_run_atomic(
+    new_row, claimed = await store.create_thread_operation_atomic(
         run_id="run-new",
         thread_id="thread-1",
         owner_worker_id="w2",
@@ -923,7 +1022,7 @@ async def test_create_run_atomic_interrupt_claims_and_creates():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
+async def test_create_thread_operation_atomic_interrupt_rejects_other_worker_valid_lease():
     """Interrupt must raise ConflictError when a valid-lease run is owned by another worker.
 
     The partial unique index ``uq_runs_thread_active`` would reject the INSERT
@@ -934,7 +1033,7 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
     config = _lease_config(grace_seconds=10)
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="valid-lease-run",
         thread_id="thread-1",
         owner_worker_id="other-worker",
@@ -944,7 +1043,7 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
     )
 
     with pytest.raises(ConflictError, match="another worker"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-new",
             thread_id="thread-1",
             owner_worker_id="w2",
@@ -960,13 +1059,13 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
+async def test_create_thread_operation_atomic_interrupt_allows_self_owned_valid_lease():
     """Interrupt must succeed when the existing valid-lease run is owned by this worker."""
     store = MemoryRunStore()
     config = _lease_config(grace_seconds=10)
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="self-run",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -975,7 +1074,7 @@ async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
         grace_seconds=config.grace_seconds,
     )
 
-    new_row, claimed = await store.create_run_atomic(
+    new_row, claimed = await store.create_thread_operation_atomic(
         run_id="run-new",
         thread_id="thread-1",
         owner_worker_id="w1",  # same worker
@@ -991,7 +1090,7 @@ async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_conflict():
+async def test_create_thread_operation_atomic_interrupt_rolls_back_earlier_mutations_on_conflict():
     """Interrupt must not leave earlier candidates interrupted when a later
     candidate raises ConflictError.
 
@@ -1012,7 +1111,7 @@ async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_confl
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    # Seed both active rows directly via ``put`` (bypassing create_run_atomic's
+    # Seed both active rows directly via ``put`` (bypassing atomic operation creation's
     # reject check, which would refuse the second row). Insert the
     # interruptible run first so dict iteration visits it first — that's the
     # ordering that exposes the half-interrupted divergence in a naive
@@ -1033,7 +1132,7 @@ async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_confl
     )
 
     with pytest.raises(ConflictError, match="another worker"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-new",
             thread_id="thread-1",
             owner_worker_id="w1",

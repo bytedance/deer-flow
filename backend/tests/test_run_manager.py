@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
-from deerflow.runtime import DisconnectMode, RunManager, RunStatus
+from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -99,12 +100,176 @@ class AlwaysMissingCompletionRunStore(MemoryRunStore):
         return False
 
 
+class FailingDeleteRunStore(MemoryRunStore):
+    """Run store that cannot release a persisted thread-operation row."""
+
+    async def delete(self, run_id, *, user_id=None):
+        raise RuntimeError("delete failed")
+
+
+class LostLeaseRunStore(MemoryRunStore):
+    """Run store that reports a reservation was taken over."""
+
+    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        return False
+
+
+class PausedLostLeaseRunStore(MemoryRunStore):
+    """Run store whose failed renewal can be released after reservation cleanup."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewal_started = asyncio.Event()
+        self.finish_renewal = asyncio.Event()
+
+    async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        self.renewal_started.set()
+        await self.finish_renewal.wait()
+        return False
+
+
 async def _stored_statuses(store: MemoryRunStore, *run_ids: str) -> dict[str, Any]:
     rows = {}
     for run_id in run_ids:
         row = await store.get(run_id)
         rows[run_id] = row["status"] if row else None
     return rows
+
+
+@pytest.mark.anyio
+async def test_reservation_delete_failure_preserves_body_error_and_clears_local_record(caplog):
+    store = FailingDeleteRunStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="body failed"):
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            raise ValueError("body failed")
+
+    assert not await manager.has_inflight("thread-1")
+    assert manager._runs == {}
+    assert manager._runs_by_thread == {}
+    assert len(await store.list_inflight()) == 1
+    assert "leaving it for orphan reconciliation" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_reservation_lease_loss_surfaces_as_conflict_after_cancelling_body():
+    store = LostLeaseRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    entered = asyncio.Event()
+
+    async def hold_reservation() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            entered.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold_reservation())
+    await entered.wait()
+
+    await manager._renew_leases()
+
+    with pytest.raises(ConflictError, match="reservation lease was lost"):
+        await task
+    assert not await manager.has_inflight("thread-1")
+    assert await store.list_inflight() == []
+
+
+@pytest.mark.anyio
+async def test_reservation_cancelled_while_attaching_task_is_released(monkeypatch):
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    admitted = asyncio.Event()
+    return_from_admission = asyncio.Event()
+    original_admit = manager._admit_thread_operation
+
+    async def pause_after_admission(*args, **kwargs):
+        record = await original_admit(*args, **kwargs)
+        admitted.set()
+        await return_from_admission.wait()
+        return record
+
+    monkeypatch.setattr(manager, "_admit_thread_operation", pause_after_admission)
+
+    async def reserve() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            raise AssertionError("cancelled reservation must not enter its body")
+
+    task = asyncio.create_task(reserve())
+    await admitted.wait()
+    await manager._lock.acquire()
+    return_from_admission.set()
+    await asyncio.sleep(0)
+    task.cancel()
+    manager._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not await manager.has_inflight("thread-1")
+    assert manager._runs == {}
+    assert manager._runs_by_thread == {}
+    assert await store.list_inflight() == []
+
+
+@pytest.mark.anyio
+async def test_late_failed_renewal_does_not_cancel_released_reservation():
+    store = PausedLostLeaseRunStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    entered = asyncio.Event()
+    leave_body = asyncio.Event()
+    context_exited = asyncio.Event()
+    finish_request = asyncio.Event()
+
+    async def request() -> None:
+        async with manager.reserve_thread_operation(
+            "thread-1",
+            kind=ThreadOperationKind.checkpoint_write,
+        ):
+            entered.set()
+            await leave_body.wait()
+        context_exited.set()
+        await finish_request.wait()
+
+    request_task = asyncio.create_task(request())
+    await entered.wait()
+    renewal_task = asyncio.create_task(manager._renew_leases())
+    await store.renewal_started.wait()
+
+    leave_body.set()
+    await context_exited.wait()
+    assert not await manager.has_inflight("thread-1")
+
+    store.finish_renewal.set()
+    await renewal_task
+    assert not request_task.done()
+
+    finish_request.set()
+    await request_task
 
 
 @pytest.mark.anyio
@@ -365,6 +530,16 @@ async def test_has_inflight(manager: RunManager):
 
     await manager.set_status(record.run_id, RunStatus.success)
     assert await manager.has_inflight("thread-1") is False
+
+
+@pytest.mark.anyio
+async def test_has_inflight_ignores_checkpoint_write_reservation(manager: RunManager):
+    """Internal checkpoint writers are not user-visible runs."""
+    async with manager.reserve_thread_operation(
+        "thread-1",
+        kind=ThreadOperationKind.checkpoint_write,
+    ):
+        assert await manager.has_inflight("thread-1") is False
 
 
 @pytest.mark.anyio
@@ -662,7 +837,7 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     manager = RunManager(store=store)
     old = await manager.create("thread-1")
     await manager.set_status(old.run_id, RunStatus.running)
-    store.create_run_atomic = AsyncMock(side_effect=RuntimeError("db down"))
+    store.create_thread_operation_atomic = AsyncMock(side_effect=RuntimeError("db down"))
 
     with pytest.raises(RuntimeError, match="db down"):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -686,7 +861,7 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     async def cancelled_create(run_id, **kwargs):
         raise asyncio.CancelledError
 
-    store.create_run_atomic = cancelled_create
+    store.create_thread_operation_atomic = cancelled_create
 
     with pytest.raises(asyncio.CancelledError):
         await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
@@ -900,12 +1075,12 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
 
 
 class _FailingPutRunStore(MemoryRunStore):
-    """Memory run store whose every ``put`` and ``create_run_atomic`` fails (non-retryably)."""
+    """Memory run store whose every ``put`` and atomic operation create fails."""
 
     async def put(self, run_id, **kwargs):
         raise ValueError("simulated persist failure")
 
-    async def create_run_atomic(self, run_id, **kwargs):
+    async def create_thread_operation_atomic(self, run_id, **kwargs):
         raise ValueError("simulated persist failure")
 
 

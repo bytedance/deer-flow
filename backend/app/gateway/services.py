@@ -11,7 +11,8 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -44,6 +45,7 @@ from deerflow.runtime import (
     RunRecord,
     RunStatus,
     StreamBridge,
+    ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
     run_agent,
@@ -63,6 +65,25 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def reserve_checkpoint_write(
+    request: Request,
+    thread_id: str,
+    *,
+    user_id: str | None = None,
+) -> AsyncIterator[None]:
+    """Serialize an out-of-run checkpoint writer against all thread operations."""
+    run_manager = get_run_manager(request)
+    async with goal_thread_lock(thread_id):
+        async with run_manager.reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=user_id,
+        ):
+            yield
+
 
 _TERMINAL_RUN_STATUSES = {
     RunStatus.success,
