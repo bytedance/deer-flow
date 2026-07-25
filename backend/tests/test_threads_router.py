@@ -838,7 +838,13 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     assert response.json()["status"] == stored_status
 
 
-def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
+def test_patch_thread_returns_iso_and_preserves_updated_at() -> None:
+    """A metadata-only PATCH (pin/unpin) must not bump ``updated_at``.
+
+    The endpoint calls ``update_metadata(..., touch=False)`` so pinning or
+    unpinning a chat does not reorder the ``updated_at``-sorted recent list.
+    Timestamps are still surfaced as ISO via ``coerce_iso``.
+    """
     app, store, _checkpointer = _build_thread_app()
     thread_id = "patch-target"
 
@@ -869,10 +875,9 @@ def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
-    # Patch issues a fresh ``updated_at`` via ``MemoryThreadMetaStore.update_metadata``,
-    # so it must be > the migrated legacy ``created_at`` (both ISO strings
-    # sort lexicographically by time when the format is consistent).
-    assert body["updated_at"] > body["created_at"]
+    # ``touch=False`` preserves the original ``updated_at``; both timestamps
+    # derive from the same legacy value, so they coerce to the same ISO string.
+    assert body["updated_at"] == body["created_at"]
     assert body["metadata"] == {"k": "v1"}
 
 

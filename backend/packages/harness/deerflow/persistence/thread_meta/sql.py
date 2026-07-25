@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
@@ -190,6 +191,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         thread_id: str,
         metadata: dict,
         *,
+        touch: bool = True,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         """Merge ``metadata`` into ``metadata_json``.
@@ -197,6 +199,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         Read-modify-write inside a single session/transaction so concurrent
         callers see consistent state. No-op if the row does not exist or
         the user_id check fails.
+
+        ``touch`` refreshes ``updated_at`` (default); pass ``touch=False`` to
+        preserve recency ordering for metadata-only changes such as pin/unpin.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
         async with self._sf() as session:
@@ -208,7 +213,13 @@ class ThreadMetaRepository(ThreadMetaStore):
             merged = dict(row.metadata_json or {})
             merged.update(metadata)
             row.metadata_json = merged
-            row.updated_at = datetime.now(UTC)
+            if touch:
+                row.updated_at = datetime.now(UTC)
+            else:
+                # ``updated_at`` has an ``onupdate`` hook that fires on any row
+                # UPDATE. Force the existing value into the SET clause so the
+                # hook is skipped and recency ordering is preserved.
+                flag_modified(row, "updated_at")
             await session.commit()
 
     async def update_owner(

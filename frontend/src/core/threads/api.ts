@@ -35,6 +35,17 @@ export type BranchThreadFromTurnInput = {
 
 export type ThreadMetadataPatch = Record<string, unknown>;
 
+/**
+ * The subset of thread fields the Gateway ``PATCH /api/threads/{id}`` handler
+ * returns. The endpoint's ``ThreadResponse`` omits ``values`` and ``context``,
+ * so callers must not rely on them here — read them via a full thread fetch
+ * instead.
+ */
+export type ThreadMetadataPatchResponse = Pick<
+  AgentThread,
+  "thread_id" | "status" | "created_at" | "updated_at" | "metadata"
+>;
+
 async function readThreadAPIError(
   response: Response,
   fallback: string,
@@ -101,7 +112,7 @@ export async function branchThreadFromTurn(
 export async function patchThreadMetadata(
   threadId: string,
   metadata: ThreadMetadataPatch,
-): Promise<AgentThread> {
+): Promise<ThreadMetadataPatchResponse> {
   const response = await fetchWithAuth(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
     {
@@ -119,7 +130,7 @@ export async function patchThreadMetadata(
     );
   }
 
-  return (await response.json()) as AgentThread;
+  return (await response.json()) as ThreadMetadataPatchResponse;
 }
 
 export async function compactThreadContext(

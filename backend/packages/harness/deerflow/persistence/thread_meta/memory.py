@@ -117,14 +117,15 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         record["updated_at"] = now_iso()
         await self._store.aput(THREADS_NS, thread_id, record)
 
-    async def update_metadata(self, thread_id: str, metadata: dict, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
         record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_metadata")
         if record is None:
             return
         merged = dict(record.get("metadata") or {})
         merged.update(metadata)
         record["metadata"] = merged
-        record["updated_at"] = now_iso()
+        if touch:
+            record["updated_at"] = now_iso()
         await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_owner(self, thread_id: str, owner_user_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:

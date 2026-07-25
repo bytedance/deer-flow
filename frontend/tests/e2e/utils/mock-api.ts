@@ -291,6 +291,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       if (thread.thread_id !== threadId) {
         return thread;
       }
+      // Preserve ``updated_at`` (via ``...thread``) to mirror the real Gateway,
+      // which patches metadata with ``touch=False`` so pin/unpin does not bump
+      // recency ordering. Sidebar order therefore comes from the client-side
+      // pinned-first sort, exactly as in production.
       updated = {
         ...thread,
         metadata: {

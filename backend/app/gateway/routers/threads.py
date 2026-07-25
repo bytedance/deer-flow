@@ -961,13 +961,17 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
+    # ``touch=False``: a metadata-only patch (e.g. pin/unpin) is not conversation
+    # activity, so it must not bump ``updated_at`` — otherwise unpinning a chat
+    # would jump it to the top of the ``updated_at``-sorted recent list.
     try:
-        await thread_store.update_metadata(thread_id, body.metadata)
+        await thread_store.update_metadata(thread_id, body.metadata, touch=False)
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
 
-    # Re-read to get the merged metadata + refreshed updated_at
+    # Re-read to get the merged metadata (``updated_at`` is intentionally
+    # preserved; see ``touch=False`` above).
     record = await thread_store.get(thread_id) or record
     return ThreadResponse(
         thread_id=thread_id,

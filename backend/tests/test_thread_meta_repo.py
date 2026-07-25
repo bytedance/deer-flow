@@ -138,6 +138,29 @@ class TestThreadMetaRepository:
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
 
     @pytest.mark.anyio
+    async def test_update_metadata_touches_updated_at_by_default(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        await repo.update_metadata("t1", {"b": 2})
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, "b": 2}
+        assert record["updated_at"] >= original
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touch_false_preserves_updated_at(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        # Pin/unpin style patch must not bump recency ordering.
+        await repo.update_metadata("t1", {"deerflow_pinned": True}, touch=False)
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, "deerflow_pinned": True}
+        assert record["updated_at"] == original
+
+    @pytest.mark.anyio
     async def test_update_owner_with_bypass_moves_row(self, repo):
         await repo.create("t1", user_id="default", metadata={"source": "channel"})
         await repo.update_owner("t1", "owner-1", user_id=None)

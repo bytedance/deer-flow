@@ -2,7 +2,10 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import type { AgentThread, AgentThreadContext } from "./types";
 
-export const THREAD_PINNED_METADATA_KEY = "pinned";
+// Namespaced to match other internal metadata keys (``deerflow_sidecar``,
+// ``deerflow_branch``) so it cannot collide with a future feature or a
+// client-supplied key.
+export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
 
 export type ChannelThreadSource = {
   type: "im_channel";

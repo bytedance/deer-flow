@@ -62,12 +62,17 @@ class ThreadMetaStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def update_metadata(self, thread_id: str, metadata: dict, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
         """Merge ``metadata`` into the thread's metadata field.
 
         Existing keys are overwritten by the new values; keys absent from
         ``metadata`` are preserved. No-op if the thread does not exist
         or the owner check fails.
+
+        When ``touch`` is ``True`` (default) the row's ``updated_at`` is
+        refreshed so the change bumps recency ordering. Pass ``touch=False``
+        for metadata that is not conversation activity (e.g. pin/unpin) so the
+        thread keeps its place in ``updated_at``-sorted lists.
         """
         pass
 
