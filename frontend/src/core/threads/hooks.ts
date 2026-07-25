@@ -814,12 +814,16 @@ export function useCoalescedStreamMessages(
     );
   }, []);
 
+  const clearPendingFlush = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!isStreaming) {
-      if (timerRef.current !== null) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
+      clearPendingFlush();
       // Keep the snapshot current so the next stream starts from a fresh base,
       // and drop the flush baseline so the leading edge is per stream rather
       // than per hook instance: a run starting within one interval of the
@@ -836,6 +840,10 @@ export function useCoalescedStreamMessages(
       timerRef.current !== null,
     );
     if (decision.action === "flush-now") {
+      // A trailing timer can still be armed here: timers fire late under
+      // main-thread load, which is exactly when a chunk overtakes one. Leaving
+      // it would publish a second time and slip the next interval forward.
+      clearPendingFlush();
       lastFlushRef.current = now;
       publish();
     } else if (decision.action === "schedule") {
@@ -847,7 +855,7 @@ export function useCoalescedStreamMessages(
         publish();
       }, decision.delayMs);
     }
-  }, [messages, isStreaming, intervalMs, publish]);
+  }, [messages, isStreaming, intervalMs, publish, clearPendingFlush]);
 
   useEffect(
     () => () => {

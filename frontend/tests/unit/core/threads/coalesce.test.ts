@@ -26,6 +26,16 @@ describe("decideCoalesce", () => {
     expect(decideCoalesce(1000, 950, 80, true)).toEqual({ action: "wait" });
   });
 
+  it("still takes the leading edge when a late trailing flush is pending", () => {
+    // Timer callbacks queue behind long tasks, so an update can arrive past the
+    // interval while the trailing flush is still armed. The decision is
+    // flush-now, which obliges the call site to disarm that timer — otherwise
+    // it publishes a second time and slips the next interval forward.
+    expect(decideCoalesce(1000, 900, 80, true)).toEqual({
+      action: "flush-now",
+    });
+  });
+
   it("never delays a flush beyond the interval, unlike a debounce", () => {
     // Simulate a dense stream: updates every 10ms. A debounce would keep
     // resetting its timer and never fire; here the trailing flush scheduled at
