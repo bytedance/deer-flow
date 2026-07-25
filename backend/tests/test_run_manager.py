@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -217,6 +217,33 @@ async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
     await manager.set_status(record.run_id, RunStatus.error, error="boom")
 
     assert store.status_update_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_try_start_respects_durable_and_racing_cancels():
+    """Startup must not resurrect durable or locally racing cancels."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread-1")
+    await store.update_status(record.run_id, RunStatus.interrupted.value)
+
+    assert await manager.try_start(record.run_id) == RunStartOutcome.cancelled
+    assert record.status == RunStatus.interrupted
+    assert (await store.get(record.run_id))["status"] == RunStatus.interrupted.value
+
+    record = await manager.create_or_reject("thread-2")
+    original_start_run = store.start_run
+
+    async def start_then_cancel(run_id):
+        updated = await original_start_run(run_id)
+        await manager.cancel(record.run_id)
+        return updated
+
+    store.start_run = start_then_cancel
+
+    assert await manager.try_start(record.run_id) == RunStartOutcome.cancelled
+    assert record.status == RunStatus.interrupted
+    assert (await store.get(record.run_id))["status"] == RunStatus.interrupted.value
 
 
 @pytest.mark.anyio

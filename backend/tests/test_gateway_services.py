@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,39 @@ def _stub_app_config():
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
+
+
+def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    store = InMemoryStore()
+    return SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(auth_source=auth_source),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=SimpleNamespace(),
+                run_manager=run_manager,
+                checkpointer=InMemorySaver(),
+                store=store,
+                run_event_store=SimpleNamespace(),
+                run_events_config=None,
+                thread_store=thread_store or MemoryThreadMetaStore(store),
+            )
+        ),
+    )
+
+
+def _run_create_request(content="hello", **kwargs):
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    return RunCreateRequest(
+        input={"messages": [{"role": "user", "content": content}]},
+        **kwargs,
+    )
 
 
 def test_format_sse_basic():
@@ -773,6 +809,79 @@ def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
 
     assert exc.value.status_code == 404
     assert "missing" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_app_config):
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_id = "thread-invalid-checkpoint"
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    request = _make_start_run_request(run_manager)
+    invalid_body = _run_create_request(
+        checkpoint_id="missing-checkpoint",
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        pytest.raises(HTTPException, match="Checkpoint missing-checkpoint not found"),
+    ):
+        await start_run(invalid_body, thread_id, request)
+
+    assert await run_manager.list_by_thread(thread_id, user_id=None) == []
+    assert await run_store.list_by_thread(thread_id, user_id=None) == []
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    metadata_started = asyncio.Event()
+
+    async def get_thread(_thread_id):
+        metadata_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("thread metadata store failed after cancellation") from exc
+
+    async def fake_run_agent(*_args, **_kwargs):
+        return None
+
+    run_manager = RunManager(store=MemoryRunStore())
+    body = _run_create_request()
+    request = _make_start_run_request(
+        run_manager,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-cancel-log-meta", request)
+        await asyncio.wait_for(metadata_started.wait(), timeout=1)
+        assert record.task is not None
+        await run_manager.cancel(record.run_id)
+        await asyncio.wait_for(record.task, timeout=1)
+        await asyncio.sleep(0)
+
+    assert "thread metadata store failed after cancellation" in caplog.text
 
 
 def test_context_merges_into_configurable():
@@ -1767,7 +1876,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         CHECKPOINT_MODE_METADATA_KEY,
         INTERNAL_CHECKPOINT_MODE_KEY,
     )
-    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
     from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -1782,6 +1891,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         cleanup=AsyncMock(),
     )
     run_manager = SimpleNamespace(
+        try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=AsyncMock(),
     )
@@ -1832,7 +1942,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
     from unittest.mock import AsyncMock, MagicMock, call
 
     from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY
-    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
     from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -1853,6 +1963,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         cleanup=AsyncMock(),
     )
     run_manager = SimpleNamespace(
+        try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=AsyncMock(),
     )
