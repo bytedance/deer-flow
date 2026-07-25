@@ -24,6 +24,7 @@ export const zhCN: Translations = {
     delete: "删除",
     edit: "编辑",
     rename: "重命名",
+    renameFailed: "重命名会话失败。",
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",
