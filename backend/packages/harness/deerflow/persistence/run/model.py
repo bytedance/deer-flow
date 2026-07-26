@@ -19,6 +19,7 @@ class RunRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
