@@ -34,12 +34,10 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
         return True
     if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
         return False
-    if "." not in hostname:
-        return False
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return True
+        return "." in hostname
     return not (address.is_loopback or address.is_private or address.is_link_local)
 
 

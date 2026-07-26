@@ -60,6 +60,8 @@ class _FakeLoop:
         ("http://host.containers.internal:8080", False),
         ("http://k3s:30001", False),
         ("http://10.0.0.8:8080", False),
+        ("http://8.8.8.8:8080", True),
+        ("http://[2606:4700:4700::1111]:8080", True),
         ("https://sandbox.example.com", True),
     ],
 )

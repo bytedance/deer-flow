@@ -26,7 +26,15 @@ def test_local_sandbox_client_bypasses_environment_proxy():
     )
 
 
-def test_external_sandbox_client_keeps_environment_proxy_support():
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://sandbox.example.com",
+        "http://8.8.8.8:8080",
+        "http://[2606:4700:4700::1111]:8080",
+    ],
+)
+def test_external_sandbox_client_keeps_environment_proxy_support(base_url: str):
     """Externally hosted sandbox URLs retain the SDK's default proxy behavior."""
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
@@ -34,10 +42,10 @@ def test_external_sandbox_client_keeps_environment_proxy_support():
         patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client") as client_cls,
         patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
     ):
-        AioSandbox(id="test-sandbox", base_url="https://sandbox.example.com")
+        AioSandbox(id="test-sandbox", base_url=base_url)
 
     client_cls.assert_not_called()
-    sdk_cls.assert_called_once_with(base_url="https://sandbox.example.com", timeout=600)
+    sdk_cls.assert_called_once_with(base_url=base_url, timeout=600)
 
 
 @pytest.fixture()
