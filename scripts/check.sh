@@ -27,12 +27,29 @@ fi
 
 echo ""
 echo "Checking pnpm..."
+# Use Corepack fallback: check pnpm first, then corepack pnpm
+PNPM_CMD=""
 if command -v pnpm >/dev/null 2>&1; then
-    PNPM_VERSION=$(pnpm -v)
-    echo "  ✓ pnpm $PNPM_VERSION"
+    PNPM_CMD="pnpm"
+elif command -v pnpm.cmd >/dev/null 2>&1; then
+    PNPM_CMD="pnpm.cmd"
+elif command -v corepack >/dev/null 2>&1; then
+    PNPM_CMD="corepack pnpm"
+elif command -v corepack.cmd >/dev/null 2>&1; then
+    PNPM_CMD="corepack.cmd pnpm"
+fi
+
+if [ -n "$PNPM_CMD" ]; then
+    PNPM_VERSION=$($PNPM_CMD -v)
+    if [ "$PNPM_CMD" = "pnpm" ] || [ "$PNPM_CMD" = "pnpm.cmd" ]; then
+        echo "  ✓ pnpm $PNPM_VERSION"
+    else
+        echo "  ✓ pnpm $PNPM_VERSION (via Corepack)"
+    fi
 else
     echo "  ✗ pnpm not found"
     echo "    Install: npm install -g pnpm"
+    echo "    Or enable Corepack: corepack enable"
     echo "    Or visit: https://pnpm.io/installation"
     FAILED=1
 fi
