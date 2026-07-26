@@ -126,6 +126,15 @@ def _seed_rows() -> tuple[list[ThreadMetaRow], list[RunRow]]:
             created_at=NOW - timedelta(hours=2),
             updated_at=NOW - timedelta(hours=2) + timedelta(seconds=8),
         ),
+        RunRow(
+            run_id="checkpoint-write-1",
+            thread_id="t1",
+            user_id="user-a",
+            operation_kind="checkpoint_write",
+            status="error",
+            created_at=NOW - timedelta(minutes=30),
+            updated_at=NOW - timedelta(minutes=29),
+        ),
     ]
     return threads, runs
 

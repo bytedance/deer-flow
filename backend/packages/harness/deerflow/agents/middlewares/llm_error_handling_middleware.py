@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.config.app_config import AppConfig
+from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
 logger = logging.getLogger(__name__)
 
@@ -709,6 +710,26 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             detail=_extract_error_detail(exc),
         )
 
+    def _build_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> dict[str, Any]:
+        return {
+            "type": "llm_retry",
+            "attempt": attempt,
+            # Effective budget for this call (burst-rate == 2), not the
+            # configured ceiling - the frontend renders this and the
+            # ``message`` below, so both must describe the loop that runs.
+            "max_attempts": max_attempts,
+            "wait_ms": wait_ms,
+            "reason": reason,
+            "message": self._build_retry_message(attempt, wait_ms, reason, max_attempts=max_attempts),
+        }
+
     def _emit_retry_event(
         self,
         attempt: int,
@@ -721,21 +742,35 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
-            writer(
-                {
-                    "type": "llm_retry",
-                    "attempt": attempt,
-                    # Effective budget for this call (burst-rate == 2), not the
-                    # configured ceiling - the frontend renders this and the
-                    # ``message`` below, so both must describe the loop that runs.
-                    "max_attempts": max_attempts,
-                    "wait_ms": wait_ms,
-                    "reason": reason,
-                    "message": self._build_retry_message(attempt, wait_ms, reason, max_attempts=max_attempts),
-                }
+            emit_custom_event(
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                writer=writer,
             )
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to emit llm_retry event", exc_info=True)
+
+    async def _aemit_retry_event(
+        self,
+        attempt: int,
+        wait_ms: int,
+        reason: str,
+        *,
+        max_attempts: int,
+    ) -> None:
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            await aemit_custom_event(
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                writer=writer,
+            )
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.debug("Failed to emit async llm_retry event", exc_info=True)
 
     @override
     def wrap_model_call(
@@ -834,7 +869,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         wait_ms,
                         _extract_error_detail(exc),
                     )
-                    self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
+                    await self._aemit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
                     continue

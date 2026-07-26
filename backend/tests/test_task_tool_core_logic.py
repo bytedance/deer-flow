@@ -499,8 +499,13 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     runtime = _make_runtime()
     runtime.context["deerflow_trace_id"] = "task-trace-1"
     events = []
+    dispatched_events = []
     captured = {}
     get_available_tools = MagicMock(return_value=["tool-a", "tool-b"])
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     class DummyExecutor:
         def __init__(self, **kwargs):
@@ -529,6 +534,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
@@ -557,6 +563,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert dispatched_events == events
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
 
@@ -1701,6 +1708,11 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     config = _make_subagent_config()
     runtime = _make_runtime()
     events = []
+    dispatched_events = []
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     records = [
         {"source_run_id": "r1", "caller": "subagent:general-purpose", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
@@ -1712,6 +1724,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
@@ -1727,6 +1740,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
 
     terminal_events = [e for e in events if e["type"] == expected_type]
     assert len(terminal_events) == 1
+    assert dispatched_events == events
     assert terminal_events[0]["usage"] == {
         "input_tokens": 300,
         "output_tokens": 130,

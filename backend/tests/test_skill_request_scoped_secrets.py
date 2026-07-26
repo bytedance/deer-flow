@@ -898,6 +898,26 @@ class TestInContextBindsSecrets:
         # Values must never reach the audit journal.
         assert "tok-secret-value" not in str(bind_calls[0])
 
+    def test_binding_audit_failure_warns_without_breaking_binding(self, tmp_path, monkeypatch, caplog):
+        from deerflow.runtime.secret_context import read_active_secrets
+
+        skill = _make_secret_skill(tmp_path, "erp-report", [SecretRequirement("ERP_TOKEN")])
+        journal = MagicMock()
+        journal.record_middleware.side_effect = RuntimeError("db down")
+        context = {"secrets": {"ERP_TOKEN": "tok-123"}, "__run_journal": journal}
+
+        with caplog.at_level("WARNING"):
+            self._run_call(
+                tmp_path,
+                monkeypatch,
+                [skill],
+                context=context,
+                skill_context=[_skill_context_entry(skill)],
+            )
+
+        assert read_active_secrets(context) == {"ERP_TOKEN": "tok-123"}
+        assert "Failed to record skill secret binding audit event" in caplog.text
+
     def test_slash_binding_persists_across_model_calls_in_same_run(self, tmp_path, monkeypatch):
         """#3861 semantics preserved under per-call recompute: after the single
         activation call, the tool loop issues more model calls without a fresh
