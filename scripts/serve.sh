@@ -29,6 +29,14 @@ set -e
 REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
 cd "$REPO_ROOT"
 
+# Load pnpm resolver with Corepack fallback
+# See scripts/_pnpm.sh for details
+_pnpm_sh="$REPO_ROOT/scripts/_pnpm.sh"
+if [ -f "$_pnpm_sh" ]; then
+    # shellcheck source=scripts/_pnpm.sh
+    source "$_pnpm_sh"
+fi
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 
 if [ -f "$REPO_ROOT/.env" ]; then
@@ -294,14 +302,22 @@ if $DAEMON_MODE; then
 fi
 
 # Frontend command
+_PNPM_CMD=$(_get_pnpm_cmd || true)
+if [ -z "$_PNPM_CMD" ]; then
+    echo "✗ pnpm not found. Install pnpm or enable Corepack:" >&2
+    echo "    npm install -g pnpm" >&2
+    echo "    corepack enable" >&2
+    exit 1
+fi
+
 if $DEV_MODE; then
-    FRONTEND_CMD="pnpm run dev"
+    FRONTEND_CMD="$_PNPM_CMD run dev"
 else
     if ! PYTHON_BIN="$(_pick_python)"; then
         echo "Python is required to generate BETTER_AUTH_SECRET."
         exit 1
     fi
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') pnpm run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(16))') $_PNPM_CMD run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -386,7 +402,7 @@ if ! $SKIP_INSTALL; then
     # in particular). Required for postgres extras — see PR #2584.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && pnpm install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    (cd frontend && $_PNPM_CMD install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
