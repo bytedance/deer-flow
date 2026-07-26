@@ -1092,6 +1092,51 @@ class RunManager:
             user_id=user_id,
         )
 
+    async def _close_cancelled_admission(self, record: RunRecord) -> None:
+        """Terminalize an unseen replacement and confirm its durable state."""
+        await self.cancel(record.run_id)
+        if self._store is None:
+            return
+
+        stored = await self._call_store_with_retry(
+            "verify cancelled admission",
+            record.run_id,
+            lambda: self._store.get(record.run_id, user_id=record.user_id),
+        )
+        active_statuses = (RunStatus.pending.value, RunStatus.running.value)
+        if stored is not None and stored.get("status") in active_statuses:
+            # `_persist_status` is deliberately best-effort. This compensation
+            # path needs a strict second CAS attempt because the caller never
+            # receives the record and no worker can attach after it returns.
+            # A peer terminal transition wins the CAS and is preserved below.
+            await self._call_store_with_retry(
+                "terminalize cancelled admission",
+                record.run_id,
+                lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
+            )
+            stored = await self._call_store_with_retry(
+                "verify terminal cancelled admission",
+                record.run_id,
+                lambda: self._store.get(record.run_id, user_id=record.user_id),
+            )
+            if stored is not None and stored.get("status") in active_statuses:
+                raise RuntimeError(f"Cancelled admission {record.run_id} remains active in the run store")
+
+        if stored is None:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record:
+                    self._runs.pop(record.run_id, None)
+                    self._unindex_run_locked(record.run_id, record.thread_id)
+            return
+
+        stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
+        async with self._lock:
+            if self._runs.get(record.run_id) is record:
+                record.status = stored_status
+                record.error = stored.get("error")
+                record.stop_reason = stored.get("stop_reason")
+                record.updated_at = _now_iso()
+
     async def _admit_thread_operation(
         self,
         thread_id: str,
@@ -1260,9 +1305,29 @@ class RunManager:
                     interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
-        # runs. Store-side claimed rows are already finalised.
-        for interrupted_record in interrupted_records:
-            await self._persist_status(interrupted_record, RunStatus.interrupted)
+        # runs. Store-side claimed rows are already finalised. Cancellation at
+        # this point happens after the replacement was admitted, so close that
+        # new run before propagating cancellation to the caller.
+        try:
+            for interrupted_record in interrupted_records:
+                await self._persist_status(interrupted_record, RunStatus.interrupted)
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(self._close_cancelled_admission(record))
+            cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    break
+            try:
+                cleanup.result()
+            except asyncio.CancelledError:
+                logger.error("Cancelled admission cleanup task was itself cancelled for run %s", record.run_id)
+            except Exception:
+                logger.exception("Failed to close run %s after admission was cancelled", record.run_id)
+            raise
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
