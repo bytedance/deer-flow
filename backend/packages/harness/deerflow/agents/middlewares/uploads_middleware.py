@@ -5,7 +5,8 @@ on demand via the ``list_uploaded_files`` tool.
 """
 
 import logging
-from collections import Counter
+
+from deerflow.tools.builtins.list_uploaded_files_tool import _format_extension_counts
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -33,9 +34,8 @@ def _extension_label(file: dict) -> str:
 
 
 def _format_omitted_file_types(files: list[dict]) -> str:
-    counts = Counter(_extension_label(file) for file in files)
-    parts = [f"{count} {extension}" for extension, count in sorted(counts.items())]
-    return neutralize_untrusted_tags(", ".join(parts))
+    extensions = [_extension_label(file) for file in files]
+    return _format_extension_counts(extensions)
 
 
 class UploadsMiddlewareState(AgentState):

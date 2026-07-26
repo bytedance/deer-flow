@@ -33,10 +33,15 @@ def _extension_label(file_path: Path) -> str:
     return neutralize_untrusted_tags(suffix) or "(no extension)"
 
 
-def _format_omitted_summary(omitted: list[str]) -> str:
-    counts = Counter(_extension_label(Path(f)) for f in omitted)
+def _format_extension_counts(extensions: list[str]) -> str:
+    counts = Counter(extensions)
     parts = [f"{count} {ext}" for ext, count in sorted(counts.items())]
     return neutralize_untrusted_tags(", ".join(parts))
+
+
+def _format_omitted_summary(omitted: list[str]) -> str:
+    extensions = [_extension_label(Path(f)) for f in omitted]
+    return _format_extension_counts(extensions)
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:
