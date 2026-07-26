@@ -360,7 +360,6 @@ const ChatBox: React.FC<{
         collapsedSize="0%"
         defaultSize={initialRightPanelSize}
         minSize="20%"
-        maxSize="75%"
         className="min-h-0 min-w-0"
       >
         <aside
