@@ -11,11 +11,12 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
-from deerflow.persistence.thread_meta.base import ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 THREADS_NS: tuple[str, ...] = ("threads",)
+SEARCH_PAGE_SIZE = 500
 
 
 class MemoryThreadMetaStore(ThreadMetaStore):
@@ -84,13 +85,25 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         if resolved_user_id is not None:
             filter_dict["user_id"] = resolved_user_id
 
-        items = await self._store.asearch(
-            THREADS_NS,
-            filter=filter_dict or None,
-            limit=limit,
-            offset=offset,
-        )
-        return [self._item_to_dict(item) for item in items]
+        items = []
+        search_offset = 0
+        while True:
+            page = await self._store.asearch(
+                THREADS_NS,
+                filter=filter_dict or None,
+                limit=SEARCH_PAGE_SIZE,
+                offset=search_offset,
+            )
+            if not page:
+                break
+            items.extend(page)
+            if len(page) < SEARCH_PAGE_SIZE:
+                break
+            search_offset += len(page)
+
+        records = [self._item_to_dict(item) for item in items]
+        records.sort(key=self._sort_key, reverse=True)
+        return records[offset : offset + limit]
 
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         item = await self._store.aget(THREADS_NS, thread_id)
@@ -158,3 +171,9 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             "created_at": coerce_iso(val.get("created_at", "")),
             "updated_at": coerce_iso(val.get("updated_at", "")),
         }
+
+    @staticmethod
+    def _sort_key(record: dict[str, Any]) -> tuple[bool, str, str]:
+        metadata = record.get("metadata")
+        pinned = isinstance(metadata, dict) and metadata.get(THREAD_PINNED_METADATA_KEY) is True
+        return (pinned, str(record.get("updated_at") or ""), str(record.get("thread_id") or ""))

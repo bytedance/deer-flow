@@ -16,6 +16,7 @@ export const MOCK_THREAD_ID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_THREAD_ID_2 = "00000000-0000-0000-0000-000000000002";
 export const MOCK_SIDECAR_THREAD_ID = "00000000-0000-0000-0000-0000000000aa";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
+export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
 
 const MOCK_AUTH_USER = {
   id: "default",
@@ -282,6 +283,21 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     values: { title: thread.title ?? "Untitled", goal: thread.goal ?? null },
   });
 
+  const threadUpdatedAt = (thread: MockThread) =>
+    Date.parse(thread.updated_at ?? "2025-01-01T00:00:00Z") || 0;
+
+  const sortThreadSearchResults = (items: readonly MockThread[]) =>
+    [...items].sort((left, right) => {
+      const pinnedDiff =
+        Number(right.metadata?.[THREAD_PINNED_METADATA_KEY] === true) -
+        Number(left.metadata?.[THREAD_PINNED_METADATA_KEY] === true);
+      return (
+        pinnedDiff ||
+        threadUpdatedAt(right) - threadUpdatedAt(left) ||
+        right.thread_id.localeCompare(left.thread_id)
+      );
+    });
+
   const patchThreadMetadata = (
     threadId: string,
     metadata: Record<string, unknown>,
@@ -291,10 +307,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       if (thread.thread_id !== threadId) {
         return thread;
       }
-      // Preserve ``updated_at`` (via ``...thread``) to mirror the real Gateway,
-      // which patches metadata with ``touch=False`` so pin/unpin does not bump
-      // recency ordering. Sidebar order therefore comes from the client-side
-      // pinned-first sort, exactly as in production.
+      // Preserve ``updated_at`` for pin/unpin metadata changes; the search mock
+      // below mirrors the Gateway's server-side pinned-first ordering.
       updated = {
         ...thread,
         metadata: {
@@ -600,7 +614,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   // Thread search — sidebar thread list & chats list page
   void page.route("**/api/langgraph/threads/search", async (route) => {
-    let body = threads.map(threadSearchResult);
+    let body = sortThreadSearchResults(threads).map(threadSearchResult);
 
     let limit: number | undefined;
     let offset = 0;

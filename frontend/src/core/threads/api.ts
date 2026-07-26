@@ -37,9 +37,9 @@ export type ThreadMetadataPatch = Record<string, unknown>;
 
 /**
  * The subset of thread fields the Gateway ``PATCH /api/threads/{id}`` handler
- * returns. The endpoint's ``ThreadResponse`` omits ``values`` and ``context``,
- * so callers must not rely on them here — read them via a full thread fetch
- * instead.
+ * returns with meaningful values. The endpoint's ``ThreadResponse`` model also
+ * serializes default ``values`` and ``interrupts``, but PATCH leaves those empty;
+ * callers that need state should read it via a full thread fetch instead.
  */
 export type ThreadMetadataPatchResponse = Pick<
   AgentThread,

@@ -19,6 +19,8 @@ from typing import Any
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
+THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
+
 
 class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
@@ -51,6 +53,12 @@ class ThreadMetaStore(abc.ABC):
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
+        """Search threads.
+
+        Results are ordered with pinned threads first
+        (``metadata.deerflow_pinned is True``), then by ``updated_at`` and
+        ``thread_id`` descending within each group.
+        """
         pass
 
     @abc.abstractmethod

@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
 
 @pytest.fixture
@@ -154,11 +154,20 @@ class TestThreadMetaRepository:
         original = (await repo.get("t1"))["updated_at"]
 
         # Pin/unpin style patch must not bump recency ordering.
-        await repo.update_metadata("t1", {"deerflow_pinned": True}, touch=False)
+        await repo.update_metadata("t1", {THREAD_PINNED_METADATA_KEY: True}, touch=False)
 
         record = await repo.get("t1")
-        assert record["metadata"] == {"a": 1, "deerflow_pinned": True}
+        assert record["metadata"] == {"a": 1, THREAD_PINNED_METADATA_KEY: True}
         assert record["updated_at"] == original
+
+    @pytest.mark.anyio
+    async def test_search_orders_pinned_threads_before_newer_unpinned_threads(self, repo):
+        await repo.create("older-pinned", metadata={THREAD_PINNED_METADATA_KEY: True})
+        await repo.create("newer-unpinned")
+
+        results = await repo.search(limit=1)
+
+        assert [record["thread_id"] for record in results] == ["older-pinned"]
 
     @pytest.mark.anyio
     async def test_update_owner_with_bypass_moves_row(self, repo):
