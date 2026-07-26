@@ -152,7 +152,6 @@ function FormFieldInput({
         className="flex flex-wrap gap-2"
         role="group"
         aria-labelledby={labelId}
-        aria-invalid={invalid || undefined}
         aria-describedby={invalid ? errorId : undefined}
       >
         {(field.options ?? []).map((option) => {
