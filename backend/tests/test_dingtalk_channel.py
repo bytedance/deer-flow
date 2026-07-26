@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1757,14 +1758,18 @@ class TestExtractFiles:
             {"type": "image", "download_code": "dc_b", "filename": "image_1.png"},
         ]
 
-    def test_rich_text_get_image_list_failure_swallowed(self):
+    def test_rich_text_get_image_list_failure_is_logged_not_silent(self, caplog):
+        """An SDK parse failure must be distinguishable from "no inline images"."""
         msg = _make_chatbot_message(text="", message_type="richText")
 
         def _boom():
             raise RuntimeError("sdk failure")
 
         msg.get_image_list = _boom
-        assert DingTalkChannel._extract_files(msg) == []
+        with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+            assert DingTalkChannel._extract_files(msg) == []
+
+        assert any("failed to read inline images" in r.message for r in caplog.records)
 
     def test_file_message_from_raw_data(self):
         files = DingTalkChannel._extract_files(_make_file_message(download_code="dc_doc", file_name="报价.xlsx"))
@@ -1897,7 +1902,9 @@ class TestReceiveFile:
 
         _run(go())
 
-    def test_download_failure_skips_file(self):
+    def test_download_failure_surfaces_marker(self):
+        """A failed download must stay visible to the agent, not vanish silently."""
+
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})
             channel._download_by_code = AsyncMock(return_value=None)
@@ -1912,7 +1919,53 @@ class TestReceiveFile:
             out = await channel.receive_file(msg, "t1", user_id="default")
 
             assert out.files == []
-            assert out.text == "hi"
+            assert out.text == "[failed to load file: x.pdf]\n\nhi"
+
+        _run(go())
+
+    def test_download_failure_without_filename_uses_type_only_marker(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=None)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "image", "download_code": "dc1", "filename": ""}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert out.text == "[failed to load image]"
+
+        _run(go())
+
+    def test_partial_failure_keeps_successful_path(self, tmp_path, monkeypatch):
+        """One bad attachment must not cost the agent the one that did load."""
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+            channel._download_by_code = AsyncMock(side_effect=[b"OK", None])
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="two files",
+                thread_ts="m",
+                files=[
+                    {"type": "file", "download_code": "good", "filename": "ok.pdf"},
+                    {"type": "file", "download_code": "bad", "filename": "broken.pdf"},
+                ],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert f"{VIRTUAL_PATH_PREFIX}/uploads/ok.pdf" in out.text
+            assert "[failed to load file: broken.pdf]" in out.text
+            assert out.text.endswith("two files")
 
         _run(go())
 
@@ -1937,6 +1990,63 @@ class TestReceiveFile:
             assert len(written) == 1
             assert written[0].name == "passwd"
             assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/passwd"
+
+        _run(go())
+
+    def test_rejected_filename_falls_back_to_generated_name(self, tmp_path, monkeypatch):
+        """A filename normalize_filename rejects must land on the generated name.
+
+        ``".."`` raises inside ``normalize_filename`` (unlike ``../../etc/passwd``,
+        whose basename ``passwd`` is accepted), so this exercises the except branch.
+        """
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"D")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "abc123456789", "filename": ".."}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            written = list(uploads.iterdir())
+            assert len(written) == 1
+            assert written[0].name == "dingtalk_abc123456789.bin"
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/dingtalk_abc123456789.bin"
+
+        _run(go())
+
+    def test_fallback_name_sanitizes_download_code(self, tmp_path, monkeypatch):
+        """download_code is webhook data: it must not inject path separators."""
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"D")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "image", "download_code": "../../evil", "filename": ".."}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            written = list(uploads.iterdir())
+            assert len(written) == 1
+            assert "/" not in written[0].name
+            assert written[0].name == "dingtalk_evil.png"
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/dingtalk_evil.png"
 
         _run(go())
 

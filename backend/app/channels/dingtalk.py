@@ -509,6 +509,10 @@ class DingTalkChannel(Channel):
             try:
                 codes = message.get_image_list() or []
             except Exception:
+                # Log rather than swallow: without this, a richText message whose
+                # SDK image parse fails looks identical to one that simply has no
+                # inline images, which is hard to diagnose if the SDK shape changes.
+                logger.warning("[DingTalk] failed to read inline images from richText message", exc_info=True)
                 codes = []
             for idx, code in enumerate(codes):
                 if code:
@@ -534,11 +538,17 @@ class DingTalkChannel(Channel):
         the file by path. Descriptors are then cleared so the generic
         URL-based ``_ingest_inbound_files`` pass does not try to re-fetch them
         (DingTalk files are downloaded by code, not by URL).
+
+        An attachment that fails to download contributes a short
+        ``[failed to load ...]`` marker instead of a path, so the agent can tell
+        the user something was sent but could not be read rather than silently
+        ignoring it.
         """
         if not msg.files:
             return msg
 
         virtual_paths: list[str] = []
+        failures: list[str] = []
         for f in msg.files:
             if not isinstance(f, dict):
                 continue
@@ -550,9 +560,12 @@ class DingTalkChannel(Channel):
             virtual_path = await self._receive_single_file(download_code, file_type, filename, thread_id, user_id=user_id)
             if virtual_path:
                 virtual_paths.append(virtual_path)
+            else:
+                failures.append(f"[failed to load {file_type}: {filename}]" if filename else f"[failed to load {file_type}]")
 
-        if virtual_paths:
-            block = "\n".join(virtual_paths)
+        prefix_lines = virtual_paths + failures
+        if prefix_lines:
+            block = "\n".join(prefix_lines)
             msg.text = f"{block}\n\n{msg.text}".strip() if msg.text else block
 
         msg.files = []
@@ -581,10 +594,15 @@ class DingTalkChannel(Channel):
         uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
 
         default_ext = "png" if file_type == "image" else "bin"
-        fallback_name = f"dingtalk_{download_code[-12:]}.{default_ext}"
+        # ``download_code`` is attacker-controllable webhook data, so restrict it to
+        # a safe character set before embedding it in the fallback name. This keeps
+        # the fallback safe by construction instead of relying on a later write
+        # failure to reject a name that escaped the uploads directory.
+        code_token = re.sub(r"[^A-Za-z0-9_-]", "", download_code)[-12:] or "attachment"
+        fallback_name = f"dingtalk_{code_token}.{default_ext}"
         # normalize_filename strips directory components and rejects traversal
-        # patterns ("..", backslash paths, over-long names); fall back to a safe
-        # generated name if the platform-supplied filename is rejected.
+        # patterns ("..", backslash paths, over-long names); fall back to the
+        # sanitized generated name if the platform-supplied filename is rejected.
         try:
             safe_filename = normalize_filename(filename or fallback_name)
         except ValueError:
