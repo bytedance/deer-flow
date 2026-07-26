@@ -15,7 +15,7 @@ import {
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -26,14 +26,17 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
-import { resolveArtifactURL } from "@/core/artifacts/utils";
+import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
-  findToolCallResult,
+  extractTextFromMessage,
 } from "@/core/messages/utils";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
@@ -554,6 +557,40 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (name === "write_file" || name === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
+
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
   if (name.startsWith("browser_")) {
     const shot = browserView?.screenshot;
@@ -749,38 +786,24 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
 
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
+          if (!writeFileArtifactUrl) {
+            return;
+          }
+          select(writeFileArtifactUrl);
           setOpen(true);
         }}
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -872,27 +895,41 @@ interface BrowserViewMeta {
   title?: string;
 }
 
-function findBrowserViewMeta(
-  toolCallId: string,
-  messages: Message[],
-): BrowserViewMeta | undefined {
+function indexToolCallData(messages: Message[]) {
+  const toolCallResults = new Map<string, string>();
+  const browserViews = new Map<string, BrowserViewMeta>();
+
   for (const message of messages) {
-    if (message.type === "tool" && message.tool_call_id === toolCallId) {
-      const meta = (
+    if (message.type !== "tool" || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (!toolCallResults.has(toolCallId)) {
+      const result = extractTextFromMessage(message);
+      if (result) {
+        toolCallResults.set(toolCallId, result);
+      }
+    }
+
+    if (!browserViews.has(toolCallId)) {
+      const browserView = (
         message.additional_kwargs as
           | { browser_view?: BrowserViewMeta }
           | undefined
       )?.browser_view;
-      if (meta && typeof meta.screenshot === "string") {
-        return meta;
+      if (browserView && typeof browserView.screenshot === "string") {
+        browserViews.set(toolCallId, browserView);
       }
     }
   }
-  return undefined;
+
+  return { browserViews, toolCallResults };
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
+  const { browserViews, toolCallResults } = indexToolCallData(messages);
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       const content = extractContentFromMessage(message);
@@ -927,7 +964,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
+          const toolCallResult = toolCallResults.get(toolCallId);
           if (toolCallResult) {
             try {
               const json = JSON.parse(toolCallResult);
@@ -936,7 +973,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
               step.result = toolCallResult;
             }
           }
-          step.browserView = findBrowserViewMeta(toolCallId, messages);
+          step.browserView = browserViews.get(toolCallId);
         }
         steps.push(step);
       }

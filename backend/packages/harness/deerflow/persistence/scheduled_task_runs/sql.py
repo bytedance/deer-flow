@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
@@ -11,6 +12,26 @@ from deerflow.utils.time import coerce_iso
 
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
 ACTIVE_RUN_STATUSES: tuple[str, ...] = ("queued", "running")
+
+
+class ActiveScheduledRunConflict(Exception):
+    """A concurrent dispatch already holds the task's single active-run slot.
+
+    Raised by :meth:`ScheduledTaskRunRepository.create` when inserting an
+    active (queued/running) run row would violate the partial unique index
+    ``uq_scheduled_task_run_active`` (at most one active run per ``task_id``).
+    This is the atomic counterpart to the non-atomic ``has_active_runs`` check
+    in ``ScheduledTaskService.dispatch_task``: two dispatches can both pass that
+    check, but only one can insert the active row — the loser lands here.
+
+    Translating the SQLAlchemy ``IntegrityError`` into a domain exception at
+    the repository boundary keeps the service layer free of ``sqlalchemy.exc``
+    coupling (mirrors ``deerflow.runtime.ConflictError`` for the runs table).
+    """
+
+    def __init__(self, task_id: str) -> None:
+        self.task_id = task_id
+        super().__init__(f"scheduled task {task_id!r} already has an active run")
 
 
 class ScheduledTaskRunRepository:
@@ -46,7 +67,18 @@ class ScheduledTaskRunRepository:
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                # Only active-status inserts can trip the partial unique index
+                # ``uq_scheduled_task_run_active``; a terminal-status row (e.g.
+                # a "skipped" tombstone) is outside its predicate and cannot
+                # conflict, so any IntegrityError there is a genuine fault and
+                # is re-raised untranslated.
+                if status in ACTIVE_RUN_STATUSES:
+                    raise ActiveScheduledRunConflict(task_id) from None
+                raise
             await session.refresh(row)
             return self._row_to_dict(row)
 

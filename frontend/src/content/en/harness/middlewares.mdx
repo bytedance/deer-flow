@@ -17,6 +17,14 @@ Every time the Lead Agent calls the LLM, it runs through a **middleware chain** 
 
 This design keeps the agent core simple and stable while allowing rich, composable behaviors to be layered in.
 
+<Callout type="info">
+  Each subagent runs its own agent loop and gets its own middleware chain. The
+  loop-detection, token-budget, and summarization guards below are mirrored on
+  the subagent chain (#3875); the other middlewares are Lead-Agent-specific
+  (e.g. memory, title generation, clarification). See
+  [Subagents → Runaway guards](/docs/harness/subagents#runaway-guards).
+</Callout>
+
 ## How the chain works
 
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
@@ -57,6 +65,8 @@ Intercepts clarification tool calls and converts them into proper user-facing re
 Detects when the agent is making the same tool call repeatedly without making progress. When a loop is detected, the middleware intervenes to break the cycle and prevents the agent from burning turns indefinitely.
 
 Warning interventions are queued per thread and run, then drained on the next model call as a single hidden `HumanMessage(name="loop_warning")` appended after existing tool results. This keeps provider tool-call pairing valid. Run start/end hooks clear stale or undelivered warnings, and hard stops still strip tool calls before forcing a final text response.
+
+This middleware is also attached to the subagent chain, where only the tool-loop heuristic can fire (subagents disallow `task`), so a degenerate subagent loop is broken the same way.
 
 **Configuration**: built-in, no user configuration.
 
@@ -144,6 +154,8 @@ The backend stamps bounded structured task-result and skill-read metadata before
 ### SummarizationMiddleware
 
 When the conversation grows long, summarizes older messages to reduce context size. The generated summary is stored in thread state and projected into later model calls as hidden durable context data, preserving meaning without keeping the original messages in the active transcript.
+
+The same middleware and the same `summarization.enabled` switch also compact subagent transcripts, so a single config covers both the Lead Agent and subagent chains (#3875).
 
 **Configuration**: `summarization:` section in `config.yaml`. See detailed configuration below.
 

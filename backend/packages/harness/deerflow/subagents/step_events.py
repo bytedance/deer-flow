@@ -23,6 +23,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
+from deerflow.runtime.events.catalog import (
+    SUBAGENT_END_EVENT,
+    SUBAGENT_START_EVENT,
+    SUBAGENT_STEP_EVENT,
+)
 from deerflow.utils.messages import message_content_to_text
 
 from .status_contract import normalize_token_usage
@@ -36,7 +41,7 @@ SUBAGENT_STEP_MAX_CHARS = 8192
 #: ``RunEvent.category`` for persisted subagent steps. A dedicated category (not
 #: ``"message"``) keeps these events out of ``list_messages`` (the thread message
 #: feed) while still being returned by ``list_events`` for fetch-on-expand (#3779).
-SUBAGENT_EVENT_CATEGORY = "subagent"
+SUBAGENT_EVENT_CATEGORY = SUBAGENT_START_EVENT.category
 
 #: Map of ``task_*`` terminal custom-event types to their persisted status.
 _TERMINAL_EVENT_STATUS: dict[str, str] = {
@@ -193,8 +198,8 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
 
     Returns the ``event_type`` / ``category`` / ``content`` / ``metadata`` for a
     persistable subagent lifecycle event, or ``None`` for any chunk that is not a
-    subagent event (so the worker only persists what it recognizes). ``thread_id``
-    / ``run_id`` are filled in by the caller.
+    valid subagent event (so the worker only persists what it recognizes).
+    ``thread_id`` / ``run_id`` are filled in by the caller.
     """
     if not isinstance(chunk, dict):
         return None
@@ -204,21 +209,31 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         return None
 
     task_id = chunk.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
 
     if event == "task_started":
+        description = chunk.get("description")
+        if description is not None and not isinstance(description, str):
+            return None
         return {
-            "event_type": "subagent.start",
-            "category": SUBAGENT_EVENT_CATEGORY,
-            "content": {"task_id": task_id, "description": chunk.get("description")},
+            "event_type": SUBAGENT_START_EVENT.event_type,
+            "category": SUBAGENT_START_EVENT.category,
+            "content": {"task_id": task_id, "description": description},
             "metadata": {"task_id": task_id},
         }
 
     if event == "task_running":
         message_index = chunk.get("message_index")
+        message = chunk.get("message")
+        if isinstance(message_index, bool) or not isinstance(message_index, int) or message_index < 0:
+            return None
+        if not isinstance(message, dict):
+            return None
         return {
-            "event_type": "subagent.step",
-            "category": SUBAGENT_EVENT_CATEGORY,
-            "content": build_subagent_step(chunk.get("message") or {}, task_id=task_id, message_index=message_index),
+            "event_type": SUBAGENT_STEP_EVENT.event_type,
+            "category": SUBAGENT_STEP_EVENT.category,
+            "content": build_subagent_step(message, task_id=task_id, message_index=message_index),
             "metadata": {"task_id": task_id, "message_index": message_index},
         }
 
@@ -245,8 +260,8 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
             if error_truncated:
                 content["error_truncated"] = True
         return {
-            "event_type": "subagent.end",
-            "category": SUBAGENT_EVENT_CATEGORY,
+            "event_type": SUBAGENT_END_EVENT.event_type,
+            "category": SUBAGENT_END_EVENT.category,
             "content": content,
             "metadata": {"task_id": task_id},
         }

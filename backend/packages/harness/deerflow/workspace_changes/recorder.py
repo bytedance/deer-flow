@@ -12,6 +12,7 @@ from deerflow.config import get_paths
 from .diff import compare_snapshots, get_changed_paths
 from .scanner import scan_workspace_roots
 from .types import (
+    WORKSPACE_CHANGES_EVENT_CATEGORY,
     WORKSPACE_CHANGES_EVENT_TYPE,
     WORKSPACE_CHANGES_METADATA_KEY,
     WorkspaceChangeLimits,
@@ -153,7 +154,7 @@ async def record_workspace_changes(
             thread_id=thread_id,
             run_id=run_id,
             event_type=WORKSPACE_CHANGES_EVENT_TYPE,
-            category="workspace",
+            category=WORKSPACE_CHANGES_EVENT_CATEGORY,
             content=content,
             metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
         )

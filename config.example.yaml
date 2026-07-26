@@ -1522,7 +1522,11 @@ title:
 summarization:
   enabled: true
 
-  # Model to use for summarization (null = use default model)
+  # Model to use for summarization.
+  #   null = summarize with the model the run actually uses (the lead run's model, a
+  #          subagent's own model, or a thread's custom-agent model), NOT models[0].
+  #   set  = that model generates; if its provider fails, compaction falls back to the
+  #          run's own model so a broken summary provider cannot disable compaction.
   # Recommended: Use a lightweight, cost-effective model like "gpt-4o-mini" or similar
   model_name: null
 
@@ -1821,6 +1825,29 @@ run_events:
   track_token_usage: true
 
 # ============================================================================
+# Agent Storage Configuration
+# ============================================================================
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
+# separate from `database` (run/thread/event data) and from agent memory.
+# Restart-required (the backend is captured at Gateway lifespan startup).
+#
+# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
+#                   Single-node only: an agent created on one node is invisible
+#                   to other nodes without a shared mount.
+# backend: db    -- A row per agent in the shared SQL persistence layer, so every
+#                   node sees the same agents. Requires database.backend to be
+#                   'sqlite' or 'postgres' (rejected at startup on 'memory').
+#
+# Switching an existing install to 'db'? Import the on-disk agents once with:
+#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# The source files are left in place, so reverting to 'file' is a clean rollback.
+#
+# agent_storage:
+#   backend: file
+agent_storage:
+  backend: file
+
+# ============================================================================
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
@@ -2101,9 +2128,25 @@ run_ownership:
 # Authorization Configuration
 # ============================================================================
 # Fine-grained resource authorization (RBAC and beyond). Disabled by default;
-# every authenticated user has access to all resources. Schema is present but
-# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# every authenticated user has access to all resources.
 # See RFC: https://github.com/bytedance/deer-flow/issues/4063
+#
+# authorization:
+#   enabled: true
+#   fail_closed: true            # block on provider error / unresolved identity
+#   default_role: user           # applied when user_role is None; built-in RBAC requires this role below
+#   provider:
+#     use: deerflow.authz.rbac:RbacAuthorizationProvider
+#     config:
+#       # A known role with no `tools` policy is unrestricted for tools.
+#       # Define `tools` for every role whose tool access should be constrained.
+#       roles:
+#         admin:
+#           tools: {allow: "*"}
+#         user:
+#           tools: {allow: "*", deny: ["update_agent"]}
+#         guest:
+#           tools: {allow: ["web_search", "read_file"]}
 authorization:
   enabled: false
 

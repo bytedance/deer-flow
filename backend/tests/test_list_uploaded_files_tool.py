@@ -840,3 +840,33 @@ def test_all_string_fields_in_result_are_neutralized(tmp_path):
     # Sanity: the result is non-empty and well-formed
     assert len(result["files"]) == 1
     assert result["total_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# @tool schema — regression for #4375
+# ---------------------------------------------------------------------------
+class TestToolSchema:
+    """Guard the model-facing schema of the @tool wrapper.
+
+    The injected ``runtime`` argument must not leak into the schema sent to the
+    LLM. Declaring it as ``Annotated[Runtime, InjectedToolArg] | None`` (issue
+    #4375) made the top-level annotation a Union, so LangChain no longer treated
+    it as injected and pydantic raised ``PydanticInvalidForJsonSchema`` on the
+    ToolRuntime dataclass the moment the tool was bound to a model.
+    """
+
+    def test_runtime_excluded_from_model_facing_args(self):
+        from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
+
+        assert set(list_uploaded_files.args) == {"include_outline", "max_results"}
+        assert "runtime" not in list_uploaded_files.args
+
+    def test_openai_schema_generation_succeeds(self):
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
+
+        # This raised PydanticInvalidForJsonSchema before the fix.
+        oai = convert_to_openai_tool(list_uploaded_files)
+        params = oai["function"]["parameters"]["properties"]
+        assert set(params) == {"include_outline", "max_results"}
