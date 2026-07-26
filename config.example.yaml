@@ -1522,7 +1522,11 @@ title:
 summarization:
   enabled: true
 
-  # Model to use for summarization (null = use default model)
+  # Model to use for summarization.
+  #   null = summarize with the model the run actually uses (the lead run's model, a
+  #          subagent's own model, or a thread's custom-agent model), NOT models[0].
+  #   set  = that model generates; if its provider fails, compaction falls back to the
+  #          run's own model so a broken summary provider cannot disable compaction.
   # Recommended: Use a lightweight, cost-effective model like "gpt-4o-mini" or similar
   model_name: null
 

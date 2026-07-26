@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import stat
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -117,6 +118,108 @@ def test_get_thread_mounts_uses_explicit_user_id(tmp_path, monkeypatch):
     assert container_paths["/mnt/user-data/workspace"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "workspace")
     assert container_paths["/mnt/user-data/uploads"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "uploads")
     assert container_paths["/mnt/user-data/outputs"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "outputs")
+
+
+def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
+    """Sandbox lark-cli commands must read the same auth dirs as Settings."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    lark_cli = importlib.import_module("deerflow.integrations.lark_cli")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: "default")
+    runtime_dir = tmp_path / "integrations" / "lark-cli" / "sandbox-cli"
+    runtime_dir.mkdir(parents=True)
+
+    mounts = aio_mod.AioSandboxProvider._get_lark_cli_runtime_mounts(user_id="alice")
+    container_paths = {container_path: (host_path, read_only) for host_path, container_path, read_only in mounts}
+
+    assert container_paths[lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR] == (
+        str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config"),
+        True,
+    )
+    assert container_paths[lark_cli.LARK_CLI_SANDBOX_DATA_DIR] == (
+        str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"),
+        False,
+    )
+    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data").stat().st_mode) == 0o700
+    assert container_paths["/mnt/integrations/lark-cli/runtime"] == (
+        str(runtime_dir),
+        True,
+    )
+
+
+def test_get_user_skill_mounts_mounts_only_global_integrations(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+        )
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path / "home"))
+
+    alice = {container: host for host, container, _read_only in aio_mod.AioSandboxProvider._get_user_skill_mounts(user_id="alice")}
+    bob = {container: host for host, container, _read_only in aio_mod.AioSandboxProvider._get_user_skill_mounts(user_id="bob")}
+
+    assert set(alice) == {"/mnt/skills/integrations"}
+    assert set(bob) == {"/mnt/skills/integrations"}
+    assert alice["/mnt/skills/integrations"] == bob["/mnt/skills/integrations"]
+    assert alice["/mnt/skills/integrations"] == str(tmp_path / "home" / "integrations" / "skills")
+
+
+def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_path, monkeypatch, provisioner_module):
+    """Full AIO mount composition must not send duplicate paths to provisioner."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    lark_cli = importlib.import_module("deerflow.integrations.lark_cli")
+    remote_backend = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    home = tmp_path / "home"
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+        )
+    )
+    runtime_dir = home / "integrations" / "lark-cli" / "sandbox-cli"
+    runtime_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=home))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(aio_mod, "user_should_see_legacy_skills", lambda *_args, **_kwargs: False)
+
+    provider = _make_provider(tmp_path)
+    mounts = provider._get_extra_mounts("thread-1", user_id="alice")
+    container_paths = [container for _host, container, _read_only in mounts]
+
+    assert len(container_paths) == len(set(container_paths))
+    assert "/mnt/skills/custom" in container_paths
+    assert "/mnt/skills/integrations" in container_paths
+    assert lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR in container_paths
+    assert lark_cli.LARK_CLI_SANDBOX_DATA_DIR in container_paths
+    assert lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR in container_paths
+
+    payload = remote_backend._provisioner_extra_mounts_payload(mounts)
+    payload_paths = [str(item["container_path"]) for item in payload]
+    assert len(payload_paths) == len(set(payload_paths))
+
+    provisioner_module.DEER_FLOW_HOST_BASE_DIR = str(home)
+    validated = provisioner_module._validated_extra_mounts([provisioner_module.ExtraMount(**item) for item in payload])
+    validated_paths = [mount.container_path for mount in validated]
+
+    assert len(validated_paths) == len(set(validated_paths))
+    assert set(validated_paths) == {
+        "/mnt/acp-workspace",
+        "/mnt/skills/custom",
+        "/mnt/skills/integrations",
+        lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR,
+        lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
+        lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
+    }
 
 
 def test_join_host_path_preserves_windows_drive_letter_style():
@@ -405,6 +508,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "thread_id": "thread-42",
         "user_id": "user-7",
         "include_legacy_skills": True,
+        "provision_lark_cli_runtime": False,
     }
 
 
@@ -433,6 +537,62 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     assert posted["json"]["user_id"] == "ou-user"
     assert posted["json"]["include_legacy_skills"] is False
+
+
+def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypatch):
+    """The provider must request lark-cli runtime provisioning when Lark is installed."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    captured: dict = {}
+
+    def _create(thread_id, sandbox_id, *, extra_mounts=None, user_id=None, provision_lark_cli_runtime=False):
+        captured["provision_lark_cli_runtime"] = provision_lark_cli_runtime
+        return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox")
+
+    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(), discover=MagicMock(return_value=None))
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: True))
+    monkeypatch.setattr(provider, "_register_created_sandbox", lambda *a, **k: "sandbox-lark")
+
+    provider._create_sandbox("thread-lark", "sandbox-lark", user_id="alice")
+    assert captured["provision_lark_cli_runtime"] is True
+
+
+def test_create_sandbox_skips_runtime_when_lark_absent(tmp_path, monkeypatch):
+    """No runtime provisioning request when the Lark skill pack is not installed."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    captured: dict = {}
+
+    def _create(thread_id, sandbox_id, *, extra_mounts=None, user_id=None, provision_lark_cli_runtime=False):
+        captured["provision_lark_cli_runtime"] = provision_lark_cli_runtime
+        return aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox")
+
+    provider._backend = SimpleNamespace(create=_create, destroy=MagicMock(), discover=MagicMock(return_value=None))
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda user_id=None: False))
+    monkeypatch.setattr(provider, "_register_created_sandbox", lambda *a, **k: "sandbox-nolark")
+
+    provider._create_sandbox("thread-nolark", "sandbox-nolark", user_id="alice")
+    assert captured["provision_lark_cli_runtime"] is False
 
 
 # ── Sandbox client teardown (#2872) ──────────────────────────────────────────

@@ -46,6 +46,10 @@ services:
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      # Optional lark-cli init image (Pattern A). Empty ⇒ legacy runtime mount.
+      # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision
+      # the sandbox lark-cli runtime via an init container + emptyDir.
+      - LARK_CLI_INIT_IMAGE=${LARK_CLI_INIT_IMAGE:-}
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
@@ -146,6 +150,8 @@ services:
         APT_MIRROR: ${APT_MIRROR:-}
         UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        LARK_CLI_NPM_VERSION: ${LARK_CLI_NPM_VERSION:-1.0.65}
     container_name: deer-flow-gateway
     # Startup logic lives in docker/dev-entrypoint.sh — UV_EXTRAS validation,
     # `uv sync --all-packages`, .venv self-heal, and uvicorn handoff. Keeps

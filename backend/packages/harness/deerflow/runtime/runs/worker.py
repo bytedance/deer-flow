@@ -75,7 +75,7 @@ from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord
+from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
@@ -417,12 +417,29 @@ async def run_agent(
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
+    started = False
 
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
-        await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+        await run_manager.wait_for_prior_finalizing(
+            thread_id,
+            run_id,
+            abort_event=record.abort_event,
+        )
+
+        start_outcome = await run_manager.try_start(run_id)
+        if start_outcome is not RunStartOutcome.started:
+            return
+        started = True
+
+        if thread_store is not None:
+            try:
+                await thread_store.update_status(thread_id, "running")
+            except Exception:
+                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -471,9 +488,6 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
-
-        # 1. Mark running
-        await run_manager.set_status(run_id, RunStatus.running)
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
@@ -822,7 +836,7 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if checkpointer is not None and record.status == RunStatus.interrupted:
+        if started and checkpointer is not None and record.status == RunStatus.interrupted:
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -831,7 +845,7 @@ async def run_agent(
                 logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
         # Sync title from checkpoint to threads_meta.display_name
-        if checkpointer is not None and thread_store is not None:
+        if started and checkpointer is not None and thread_store is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
@@ -845,7 +859,7 @@ async def run_agent(
 
         # Persist run duration to checkpoint metadata so history reads
         # don't need to correlate runs and events.
-        if checkpointer is not None and record.status == RunStatus.success:
+        if started and checkpointer is not None and record.status == RunStatus.success:
             try:
                 created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                 updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
@@ -863,7 +877,7 @@ async def run_agent(
                 logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
-        if thread_store is not None:
+        if started and thread_store is not None:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
                 await thread_store.update_status(thread_id, final_status)
