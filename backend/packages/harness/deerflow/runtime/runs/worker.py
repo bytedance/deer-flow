@@ -595,27 +595,32 @@ async def run_agent(
         # failure disables rollback: restoring an empty or partial message
         # history would silently truncate the thread.
         if checkpointer is not None:
-            try:
-                rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
-            except Exception:
-                snapshot_capture_failed = True
-                logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
-            if rollback_point is not None:
-                pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
-                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
+            # A previous successful run may still be persisting duration
+            # metadata after its active admission slot is released. Share its
+            # checkpoint lock so the rollback snapshot and any resume rewrite
+            # are one uninterrupted read/write sequence against the head.
+            async with _checkpoint_thread_lock(thread_id):
+                try:
+                    rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
+                except Exception:
+                    snapshot_capture_failed = True
+                    logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                if rollback_point is not None:
+                    pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
+                    pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
 
-            # Resuming from an older checkpoint is a fork, and a delta fork
-            # materializes the abandoned sibling's writes back into state
-            # (#4458). Rewrite it as a linear head write *after* the rollback
-            # point is captured, so cancel-with-rollback still restores the
-            # real pre-run head rather than the rolled-back one.
-            resumed_messages = await _linearize_delta_checkpoint_resume(
-                accessor=accessor,
-                checkpointer=checkpointer,
-                config=config,
-                thread_id=thread_id,
-                run_id=run_id,
-            )
+                # Resuming from an older checkpoint is a fork, and a delta fork
+                # materializes the abandoned sibling's writes back into state
+                # (#4458). Rewrite it as a linear head write *after* the rollback
+                # point is captured, so cancel-with-rollback still restores the
+                # real pre-run head rather than the rolled-back one.
+                resumed_messages = await _linearize_delta_checkpoint_resume(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    config=config,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
             if resumed_messages is not None:
                 # The graph now starts from the selected state, so the
                 # current-run message boundary is that state, not the head we
@@ -1381,7 +1386,9 @@ async def _linearize_delta_checkpoint_resume(
     ``None`` when there was nothing to do (full mode, no checkpoint selector,
     a non-root namespace, or a selector that already names the head). Failures
     propagate: silently falling back to the fork would persist the corrupted
-    history this exists to prevent.
+    history this exists to prevent. The worker call site holds
+    ``_checkpoint_thread_lock`` across rollback capture and this rewrite; do
+    not reacquire that non-reentrant lock inside this helper.
     """
     if checkpointer is None or accessor.mode != "delta":
         return None
@@ -1425,8 +1432,7 @@ async def _linearize_delta_checkpoint_resume(
     )
 
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
-    async with _checkpoint_thread_lock(thread_id):
-        await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
+    await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
     configurable.pop("checkpoint_id", None)
     configurable.pop("checkpoint_map", None)
     logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)

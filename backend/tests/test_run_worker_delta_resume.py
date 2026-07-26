@@ -11,6 +11,7 @@ current head (which has no siblings) and the run proceeds linearly.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
 from unittest.mock import AsyncMock
@@ -28,7 +29,7 @@ from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.worker import RunContext, _linearize_delta_checkpoint_resume, run_agent
+from deerflow.runtime.runs.worker import RunContext, _checkpoint_thread_lock, _linearize_delta_checkpoint_resume, run_agent
 
 pytestmark = pytest.mark.anyio
 
@@ -254,21 +255,83 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
             created_graphs.append(graph)
             return graph
 
-        await run_agent(
-            bridge,
-            run_manager,
-            record,
-            ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
-            agent_factory=agent_factory,
-            graph_input={"messages": [HumanMessage(content="q2", id="h2")]},
-            config=_run_config("worker-branch", base.config["configurable"]["checkpoint_id"]),
-            stream_modes=["values"],
+        await asyncio.wait_for(
+            run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+                agent_factory=agent_factory,
+                graph_input={"messages": [HumanMessage(content="q2", id="h2")]},
+                config=_run_config("worker-branch", base.config["configurable"]["checkpoint_id"]),
+                stream_modes=["values"],
+            ),
+            timeout=5,
         )
 
         assert record.status == RunStatus.success
         final_accessor = CheckpointStateAccessor.bind(created_graphs[-1], checkpointer, mode="delta")
         final = await final_accessor.aget(_run_config("worker-branch"))
         assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
+
+
+async def test_run_agent_serializes_resume_preparation_with_checkpoint_writes(monkeypatch):
+    """Rollback capture and resume linearization share the checkpoint lock.
+
+    A prior successful run can still be persisting duration metadata after its
+    active run slot is released. Resume preparation must wait for that writer
+    so its head snapshot and linear rewrite cannot interleave with the
+    metadata checkpoint's compare-and-write sequence.
+    """
+    checkpointer = InMemorySaver()
+    graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a1")
+    run_manager = RunManager()
+    record = await run_manager.create("worker-lock")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = asyncio.Event()
+    startup_calls: list[str] = []
+
+    def agent_factory(*, config):
+        del config
+        factory_called.set()
+        return graph
+
+    async def capture_rollback_point(*args, **kwargs):
+        del args, kwargs
+        startup_calls.append("capture")
+        return None
+
+    async def linearize_resume(**kwargs):
+        del kwargs
+        startup_calls.append("linearize")
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", capture_rollback_point)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._linearize_delta_checkpoint_resume", linearize_resume)
+
+    async with _checkpoint_thread_lock("worker-lock"):
+        run_task = asyncio.create_task(
+            run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+                agent_factory=agent_factory,
+                graph_input={"messages": [HumanMessage(content="q1", id="h1")]},
+                config=_run_config("worker-lock"),
+                stream_modes=["values"],
+            )
+        )
+        await asyncio.wait_for(factory_called.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert startup_calls == []
+
+    await run_task
+    assert startup_calls == ["capture", "linearize"]
 
 
 async def test_cancelled_delta_resume_rolls_back_to_pre_linearization_head(tmp_path):
