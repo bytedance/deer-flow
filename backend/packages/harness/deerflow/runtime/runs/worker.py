@@ -1425,8 +1425,8 @@ async def _linearize_delta_checkpoint_resume(
     )
 
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
-    await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
-
+    async with _checkpoint_thread_lock(thread_id):
+        await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
     configurable.pop("checkpoint_id", None)
     configurable.pop("checkpoint_map", None)
     logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)
