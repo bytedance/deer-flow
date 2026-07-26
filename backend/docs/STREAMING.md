@@ -173,7 +173,7 @@ sequenceDiagram
 
 - 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，只生成轻量 `run_id` 供 runtime context、tracing 和 per-run middleware 使用。
 - 没有 `StreamBridge` —— 直接 `yield`，生产和消费在同一个 Python 调用栈，不需要跨 task 中介。
-- 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 对象（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict）。Jupyter 用户拿到的是真正的类型，不是匿名 dict。
+- 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 值（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict，以及非 `None` 的 `ToolMessage.artifact`）。`messages-tuple` 工具结果和 `values` 快照里的工具消息都会保留 artifact；没有 artifact 的工具消息维持原有字段形状。Jupyter 用户拿到的是真正的类型，不是经过网络序列化后的匿名值。
 - 没有 asyncio —— 调用者可以直接 `for event in ...`，不必写 `async for`。
 
 ---
@@ -348,6 +348,7 @@ assert "messages" in agent.stream.call_args.kwargs["stream_mode"]
 | 关心什么 | 看这里 |
 |---|---|
 | DeerFlowClient 嵌入式流 | `packages/harness/deerflow/client.py::DeerFlowClient.stream` |
+| Embedded ToolMessage artifact 序列化 | `packages/harness/deerflow/client.py::_tool_message_event` / `_serialize_message` |
 | `chat()` 的 delta 累加器 | `packages/harness/deerflow/client.py::DeerFlowClient.chat` |
 | Gateway async 流 | `packages/harness/deerflow/runtime/runs/worker.py::run_agent` |
 | HTTP SSE 帧输出 | `app/gateway/services.py::sse_consumer` / `format_sse` |

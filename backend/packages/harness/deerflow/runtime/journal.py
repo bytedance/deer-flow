@@ -91,7 +91,7 @@ def build_branch_history_seed_events(
     messages: Sequence[Any],
     *,
     thread_id: str,
-    run_id: str,
+    run_id_prefix: str,
     parent_thread_id: str,
 ) -> list[dict]:
     """Serialize a branch checkpoint's messages into run-event message rows.
@@ -103,6 +103,18 @@ def build_branch_history_seed_events(
     the feed (#4380). Seeding the branch's run_events from the same
     checkpoint snapshot the branch was created from keeps the feed
     consistent with what the branch actually contains.
+
+    Rows are grouped into one synthetic run per inherited turn
+    (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
+    message — the same boundary a real run has, since a run begins with a
+    human input (including the allowlisted hidden ``ask_clarification``
+    reply, which resumes as its own run). ``run_id`` is a *turn* identity to
+    the feed's consumers, not merely a provenance tag: regenerating the last
+    inherited answer resolves that row's ``run_id`` as the superseded source
+    (``_find_target_run_id``) and ``GET /messages/page`` then drops **every**
+    row carrying it. One shared id for the whole seed therefore deleted the
+    complete inherited history on the branch's first regenerate (#4458); one
+    id per turn confines the drop to the turn actually regenerated.
 
     Mirrors RunJournal's message-event contract so seeded rows are
     indistinguishable from journaled ones except by the ``branch_seed``
@@ -125,6 +137,8 @@ def build_branch_history_seed_events(
     events: list[dict] = []
     created_at = datetime.now(UTC).isoformat()
     seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
+    # Messages ahead of the first human turn (none in practice) stay in turn 0.
+    turn_index = 0
     for raw_message in messages:
         message = _coerce_seed_message(raw_message)
         if not isinstance(message, BaseMessage):
@@ -132,6 +146,7 @@ def build_branch_history_seed_events(
         if isinstance(message, HumanMessage):
             if not _should_persist_human_input_message(message):
                 continue
+            turn_index += 1
             event_type = "llm.human.input"
             content = restore_original_human_message(message).model_dump()
             metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
@@ -149,7 +164,7 @@ def build_branch_history_seed_events(
         events.append(
             {
                 "thread_id": thread_id,
-                "run_id": run_id,
+                "run_id": f"{run_id_prefix}-{turn_index}",
                 "event_type": event_type,
                 "category": "message",
                 "content": content,

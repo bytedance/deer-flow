@@ -315,7 +315,7 @@ class ExtensionsConfig(BaseModel):
         skill_config = self.skills.get(skill_name)
         if skill_config is None:
             # Default to enabled for all skill categories
-            return skill_category in ("public", "custom", "legacy")
+            return skill_category in ("public", "custom", "legacy", "integrations")
         return skill_config.enabled
 
 
