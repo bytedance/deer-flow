@@ -24,8 +24,8 @@ def test_queue_add_stores_user_id():
     q = _queue()
     with patch.object(q, "_reset_timer"):
         q.add(thread_id="t1", messages=["msg"], user_id="alice")
-    assert len(q._queue) == 1
-    assert q._queue[0].user_id == "alice"
+    assert len(q._items) == 1
+    assert q._items[0].user_id == "alice"
     q.clear()
 
 
@@ -49,8 +49,8 @@ def test_queue_keeps_updates_for_different_users_in_same_thread_and_agent():
         q.add(thread_id="main", messages=["bob update"], agent_name="researcher", user_id="bob")
 
     assert q.pending_count == 2
-    assert [context.user_id for context in q._queue] == ["alice", "bob"]
-    assert [context.messages for context in q._queue] == [["alice update"], ["bob update"]]
+    assert [context.user_id for context in q._items] == ["alice", "bob"]
+    assert [context.messages for context in q._items] == [["alice update"], ["bob update"]]
 
 
 def test_queue_still_coalesces_updates_for_same_user_thread_and_agent():
@@ -60,9 +60,9 @@ def test_queue_still_coalesces_updates_for_same_user_thread_and_agent():
         q.add(thread_id="main", messages=["second"], agent_name="researcher", user_id="alice")
 
     assert q.pending_count == 1
-    assert q._queue[0].messages == ["second"]
-    assert q._queue[0].user_id == "alice"
-    assert q._queue[0].agent_name == "researcher"
+    assert q._items[0].messages == ["second"]
+    assert q._items[0].user_id == "alice"
+    assert q._items[0].agent_name == "researcher"
 
 
 def test_add_nowait_keeps_different_users_separate():
@@ -72,4 +72,4 @@ def test_add_nowait_keeps_different_users_separate():
         q.add_nowait(thread_id="main", messages=["bob update"], agent_name="researcher", user_id="bob")
 
     assert q.pending_count == 2
-    assert [context.user_id for context in q._queue] == ["alice", "bob"]
+    assert [context.user_id for context in q._items] == ["alice", "bob"]

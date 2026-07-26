@@ -810,6 +810,7 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `consolidation_min_facts` - Minimum facts in a category to trigger consolidation review (default: 8; range: 3–30)
 - `consolidation_max_groups_per_cycle` - Maximum categories the LLM can merge in one cycle (default: 3; range: 1–10; also controls the LLM's prompt instruction)
 - `consolidation_max_sources` - Maximum source facts per merge group; prevents over-merging (default: 8; range: 2–20)
+- `watermark_max_keys` - Soft cap on the in-memory conversation-watermark cache (one entry per distinct thread/user/agent). A bounded LRU: when over capacity the least-recently-used entry is dropped, and a dropped key re-extracts one batch on that thread's next turn (same as a restart). Bounds memory in long-lived gateways handling many threads (default: 4096; 0 = unbounded)
 
 ### Reflection System (`packages/harness/deerflow/reflection/`)
 
