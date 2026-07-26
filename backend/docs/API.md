@@ -790,6 +790,31 @@ Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`
 The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
 assigned `thread_id` and `run_id` on the first message of a new chat.
 
+### SSE replay retention and gaps
+
+Clients may reconnect to a run stream with `Last-Event-ID`. Replay history is
+bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
+rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
+additional control frame.
+
+When a syntactically valid cursor is older than the retained watermark, the
+server sends exactly one `gap` event before any retained data and closes that
+subscription without an `end` event:
+
+```text
+event: gap
+data: {"code":"stream_replay_gap","run_id":"run-123","requested_event_id":"1718000000000-1","earliest_available_event_id":"1718000000100-42","latest_available_event_id":"1718000000200-84","recovery":"reload_durable_state"}
+
+```
+
+The frame deliberately has no SSE `id:`. Consumers must reload durable thread
+state and persisted run events/messages, then may reconnect from
+`latest_available_event_id` to follow newer live events. A gap does not cancel
+the active run. The same signal applies when a no-cursor subscriber has already
+established an empty-stream wait but the first Redis wake-up falls behind before
+delivery; in that case `requested_event_id` is `null`. Malformed cursor handling
+is backend-specific and is not the same as a valid cursor that was evicted.
+
 ---
 
 ## SDK Usage
