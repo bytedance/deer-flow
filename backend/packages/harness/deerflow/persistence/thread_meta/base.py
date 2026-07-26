@@ -19,6 +19,11 @@ from typing import Any
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
+# Cross-component metadata key. Keep in sync with
+# ``frontend/src/core/threads/utils.ts`` and
+# ``frontend/tests/e2e/utils/mock-api.ts``.
+THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
+
 
 class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
@@ -51,6 +56,12 @@ class ThreadMetaStore(abc.ABC):
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
+        """Search threads.
+
+        Results are ordered with pinned threads first
+        (``metadata.deerflow_pinned is True``), then by ``updated_at`` and
+        ``thread_id`` descending within each group.
+        """
         pass
 
     @abc.abstractmethod
@@ -62,12 +73,17 @@ class ThreadMetaStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def update_metadata(self, thread_id: str, metadata: dict, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
         """Merge ``metadata`` into the thread's metadata field.
 
         Existing keys are overwritten by the new values; keys absent from
         ``metadata`` are preserved. No-op if the thread does not exist
         or the owner check fails.
+
+        When ``touch`` is ``True`` (default) the row's ``updated_at`` is
+        refreshed so the change bumps recency ordering. Pass ``touch=False``
+        for metadata that is not conversation activity (e.g. pin/unpin) so the
+        thread keeps its place in ``updated_at``-sorted lists.
         """
         pass
 

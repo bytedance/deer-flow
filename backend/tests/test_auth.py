@@ -478,6 +478,317 @@ def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
     asyncio.run(_run())
 
 
+# ── Email case-insensitivity (account collision invariant) ──────────────────
+#
+# Regression coverage for the case-collision gap: local registration normalises
+# email through ``EmailStr`` (lowercases only the domain) while OIDC lowercases
+# the whole address, and the repo lookup used to be case-sensitive, so
+# ``Victim@x.com`` and ``victim@x.com`` became two separate accounts — defeating
+# the invariant that a local account blocks an SSO login on the same email
+# (flagged on PR #3506, fixed there only OIDC-side). The repo now canonicalises
+# to lowercase on write and matches case-insensitively on read.
+
+
+def test_email_lookup_is_case_insensitive(tmp_path):
+    """A user registered with mixed case resolves for any-case lookup."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            created = await repo.create_user(User(email="Victim@x.com", password_hash="h", system_role="user"))
+            # Stored canonical (lowercase) and reflected back on the returned object.
+            assert created.email == "victim@x.com"
+
+            for variant in ("victim@x.com", "VICTIM@X.COM", "Victim@x.com"):
+                found = await repo.get_user_by_email(variant)
+                assert found is not None, f"lookup missed {variant!r}"
+                assert str(found.id) == str(created.id)
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_create_user_rejects_email_differing_only_in_case(tmp_path):
+    """The second case-variant registration collides on the canonical email."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            await repo.create_user(User(email="Victim@x.com", password_hash="h", system_role="user"))
+            with pytest.raises(ValueError):
+                await repo.create_user(User(email="victim@x.com", password_hash="h", system_role="user"))
+            assert await repo.count_users() == 1
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_create_user_rejects_legacy_mixed_case_email(tmp_path):
+    """Registration must not duplicate a mixed-case row created before normalization."""
+    import asyncio
+    from uuid import uuid4
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.user.model import UserRow
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            sf = get_session_factory()
+            repo = SQLiteUserRepository(sf)
+            async with sf() as session:
+                session.add(
+                    UserRow(
+                        id=str(uuid4()),
+                        email="Victim@x.com",
+                        password_hash="h",
+                        system_role="user",
+                        needs_setup=False,
+                        token_version=0,
+                    )
+                )
+                await session.commit()
+
+            with pytest.raises(ValueError, match="Email already registered"):
+                await repo.create_user(User(email="victim@x.com", password_hash="h", system_role="user"))
+            assert await repo.count_users() == 1
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_update_user_normalizes_email(tmp_path):
+    """Changing an email through update_user stores the canonical lowercase form."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            user = await repo.create_user(User(email="user@x.com", password_hash="h", system_role="user"))
+            user.email = "New@Mixed.COM"
+            await repo.update_user(user)
+            refetched = await repo.get_user_by_id(str(user.id))
+            assert refetched is not None
+            assert refetched.email == "new@mixed.com"
+            assert await repo.get_user_by_email("NEW@MIXED.com") is not None
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_distinct_emails_remain_distinct(tmp_path):
+    """Case-folding must not collapse genuinely different addresses."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            alice = await repo.create_user(User(email="alice@x.com", password_hash="h", system_role="user"))
+            bob = await repo.create_user(User(email="bob@x.com", password_hash="h", system_role="user"))
+            assert await repo.count_users() == 2
+            fa = await repo.get_user_by_email("Alice@x.com")
+            fb = await repo.get_user_by_email("BOB@x.com")
+            assert fa is not None and str(fa.id) == str(alice.id)
+            assert fb is not None and str(fb.id) == str(bob.id)
+            assert str(fa.id) != str(fb.id)
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_legacy_mixed_case_duplicate_rows_resolve_without_error(tmp_path):
+    """A pre-fix DB with two case-variant rows resolves to the oldest, never 500s.
+
+    Migration-safety: existing installations may already hold ``Victim@x.com``
+    and ``victim@x.com`` as separate rows. The case-insensitive lookup must not
+    raise ``MultipleResultsFound``; it deterministically returns the oldest
+    (most-established) account.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.user.model import UserRow
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            sf = get_session_factory()
+            repo = SQLiteUserRepository(sf)
+            older = datetime.now(UTC) - timedelta(days=5)
+            newer = datetime.now(UTC)
+            # Insert raw rows (bypassing create_user's normalisation) to mimic
+            # data written before this fix.
+            async with sf() as session:
+                session.add(UserRow(id=str(uuid4()), email="Victim@x.com", password_hash="h", system_role="user", created_at=older, needs_setup=False, token_version=0))
+                session.add(UserRow(id=str(uuid4()), email="victim@x.com", password_hash="h", system_role="user", created_at=newer, needs_setup=False, token_version=0))
+                await session.commit()
+
+            found = await repo.get_user_by_email("VICTIM@X.COM")
+            assert found is not None
+            assert found.email == "Victim@x.com"  # oldest wins, deterministically
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_update_user_on_legacy_mixed_case_row_does_not_collide(tmp_path):
+    """A password-only update on a legacy mixed-case row must not 500.
+
+    Migration-safety, write side. A pre-fix DB may already hold two rows
+    differing only in case (``Victim@x.com`` + ``victim@x.com``). A password
+    change or admin reset reloads the row and calls ``update_user`` with the
+    email unchanged. ``update_user`` must not opportunistically re-lowercase the
+    mixed-case email, because that collides with the already-canonical row's
+    unique email and raises ``IntegrityError`` — which surfaces as a 500 on the
+    change-password / reset-admin paths that don't catch it. The read path was
+    hardened for this legacy state; the write path must match, so only a genuine
+    email change (differing case-insensitively from the stored value) rewrites
+    the column.
+    """
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.user.model import UserRow
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            sf = get_session_factory()
+            repo = SQLiteUserRepository(sf)
+            mixed_id = str(uuid4())
+            canonical_id = str(uuid4())
+            older = datetime.now(UTC) - timedelta(days=5)
+            newer = datetime.now(UTC)
+            # Raw rows written before the fix (the mixed-case row is the oldest).
+            async with sf() as session:
+                session.add(UserRow(id=mixed_id, email="Victim@x.com", password_hash="old-hash", system_role="user", created_at=older, needs_setup=False, token_version=0))
+                session.add(UserRow(id=canonical_id, email="victim@x.com", password_hash="canonical-hash", system_role="user", created_at=newer, needs_setup=False, token_version=0))
+                await session.commit()
+
+            # Simulate a password change on the mixed-case row: reload it, keep
+            # the email as-stored, set a new hash + bump the token version.
+            mixed = await repo.get_user_by_id(mixed_id)
+            assert mixed is not None
+            assert mixed.email == "Victim@x.com"
+            mixed.password_hash = "new-hash-after-change"
+            mixed.token_version += 1
+
+            # Must not raise IntegrityError even though lowercasing the email
+            # would collide with the canonical row's unique email.
+            await repo.update_user(mixed)
+
+            # The mixed-case row kept its stored casing and took the new password.
+            refetched = await repo.get_user_by_id(mixed_id)
+            assert refetched is not None
+            assert refetched.email == "Victim@x.com"
+            assert refetched.password_hash == "new-hash-after-change"
+            assert refetched.token_version == 1
+
+            # The canonical row is untouched, and no row was lost or merged.
+            canonical = await repo.get_user_by_id(canonical_id)
+            assert canonical is not None
+            assert canonical.email == "victim@x.com"
+            assert canonical.password_hash == "canonical-hash"
+            assert await repo.count_users() == 2
+
+            # Case-insensitive lookup still resolves the mixed-case row (oldest wins).
+            found = await repo.get_user_by_email("VICTIM@X.COM")
+            assert found is not None
+            assert str(found.id) == mixed_id
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_oidc_login_blocked_by_existing_local_account_across_case(tmp_path):
+    """End-to-end invariant: an SSO login cannot create a duplicate of a local
+    account whose email differs only in case.
+
+    Uses the real repository + provider + provisioning (no mocks), so it covers
+    the cross-path gap the mock-based OIDC tests could not: local registration
+    keeps the local-part case (``Victim@x.com``) while OIDC lowercases the whole
+    address (``victim@x.com``).
+    """
+    import asyncio
+
+    from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+    from deerflow.config.auth_config import OIDCProviderConfig
+
+    async def _run() -> None:
+        from fastapi import HTTPException
+
+        from app.gateway.auth.oidc import OIDCIdentity
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            provider = LocalAuthProvider(SQLiteUserRepository(get_session_factory()))
+            await provider.create_user(email="Victim@x.com", password="pw-abc-123!", system_role="user")
+
+            cfg = OIDCProviderConfig(display_name="Test SSO", issuer="https://issuer.example.com", client_id="deer-flow", auto_create_users=True)
+            identity = OIDCIdentity(provider="keycloak", subject="sub-1", email="Victim@x.com", email_verified=True, name="Victim", claims={})
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_or_provision_oidc_user(provider_id="keycloak", provider_config=cfg, identity=identity, local_provider=provider)
+
+            assert exc_info.value.status_code == 409
+            # No duplicate auto-created — the local account still owns the email.
+            assert await provider.count_users() == 1
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 # ── Token Versioning ───────────────────────────────────────────────────────
 
 

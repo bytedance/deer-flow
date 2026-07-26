@@ -262,6 +262,48 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
     assert "MAXIMUM 50 `task` CALLS PER RUN" in prompt
 
 
+def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypatch):
+    """Regression test for single-subagent mode (MIN_CONCURRENT_SUBAGENT_CALLS = 1).
+
+    Before the floor was lowered to 1, a user-configured limit of 1 was silently
+    bumped to 2 by both the prompt path and the middleware. This renders the real
+    system prompt with max_concurrent_subagents=1 and asserts the advertised
+    HARD LIMITS value equals the middleware-enforced max_concurrent, so the two
+    paths cannot drift apart on the newly-allowed value.
+    """
+    from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+
+    enforced = SubagentLimitMiddleware(max_concurrent=1).max_concurrent
+    assert enforced == 1  # 1 must pass through, not be bumped to 2
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_concurrent_subagents=1,
+        max_total_subagents=6,
+        app_config=explicit_config,
+    )
+
+    assert f"MAXIMUM {enforced} `task` CALLS PER RESPONSE" in prompt
+    assert f"HARD LIMITS: max {enforced} `task` calls per response" in prompt
+
+
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
     explicit_config = SimpleNamespace(acp_agents={"codex": object()})
 
