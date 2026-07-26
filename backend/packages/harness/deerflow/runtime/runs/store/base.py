@@ -146,7 +146,9 @@ class RunStore(abc.ABC):
     ) -> bool | None:
         """Persist final completion fields.
 
-        Returns ``False`` when the store can prove no row was updated.
+        Implementations must not replace a different terminal status. Returns
+        ``False`` when the row is missing or already has a conflicting terminal
+        outcome.
         """
         pass
 
