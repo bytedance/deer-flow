@@ -25,6 +25,7 @@ from app.gateway.routers import (
     feedback,
     github_webhooks,
     input_polish,
+    integrations,
     mcp,
     memory,
     models,
@@ -250,7 +251,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(startup_config)
+            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
+            # below) rather than resolving `app.state.stream_bridge` here
+            # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
+            # once, above, by `langgraph_runtime(app, startup_config)`, so
+            # either shape is safe by construction — the closure is just the
+            # more defensive/consistent-with-precedent form, and it is what
+            # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
+            # uses to reach the same StreamBridge every other run consumer
+            # goes through `get_stream_bridge(request)` for.
+            channel_service = await start_channel_service(
+                startup_config,
+                get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+            )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
@@ -503,6 +516,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+
+    # First-party integrations API is mounted at /api/integrations
+    app.include_router(integrations.router)
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)

@@ -258,6 +258,42 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     max_file_size: 50 * 1024 * 1024,
     max_total_size: 100 * 1024 * 1024,
   };
+  let larkIntegrationStatus = {
+    installed: false,
+    version: "v1.0.65",
+    manifest_version: null as string | null,
+    latest_available_version: "v1.0.65" as string | null,
+    runtime_version_mismatch: false,
+    app_configured: false,
+    app_id: null as string | null,
+    app_brand: null as string | null,
+    skills_expected: 27,
+    skills_installed: 0,
+    installed_skills: [] as string[],
+    enabled_skills: [] as string[],
+    install_path: "/tmp/deer-flow/integrations/skills/lark-cli",
+    cli: {
+      available: false,
+      path: null as string | null,
+      version: null as string | null,
+      error: "lark-cli is not on PATH" as string | null,
+    },
+    auth: {
+      status: "unavailable",
+      message: "lark-cli is not installed on the Gateway" as string | null,
+      user: null as string | null,
+      verified: false,
+    },
+    sandbox_runtime_mode: "init-container" as
+      | "none"
+      | "gateway-download"
+      | "init-container",
+    sandbox_runtime_ready: false,
+    sandbox_runtime_detail:
+      "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)." as
+        | string
+        | null,
+  };
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
@@ -1061,6 +1097,149 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ skills }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/status", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(larkIntegrationStatus),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/install", (route) => {
+    if (route.request().method() === "POST") {
+      larkIntegrationStatus = {
+        installed: true,
+        version: "v1.0.65",
+        manifest_version: "v1.0.65",
+        latest_available_version: "v1.0.65",
+        runtime_version_mismatch: false,
+        app_configured: false,
+        app_id: null,
+        app_brand: null,
+        skills_expected: 27,
+        skills_installed: 3,
+        installed_skills: ["lark-doc", "lark-im", "lark-shared"],
+        enabled_skills: ["lark-doc", "lark-im", "lark-shared"],
+        install_path: "/tmp/deer-flow/integrations/skills/lark-cli",
+        cli: {
+          available: true,
+          path: "/usr/bin/lark-cli",
+          version: "lark-cli version v1.0.65",
+          error: null,
+        },
+        auth: {
+          status: "not_configured",
+          message: "lark-cli auth is not configured",
+          user: null,
+          verified: false,
+        },
+        sandbox_runtime_mode: "init-container",
+        sandbox_runtime_ready: true,
+        sandbox_runtime_detail: null,
+      };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          installed_skills: ["lark-doc", "lark-im", "lark-shared"],
+          message: "Installed 3 Lark/Feishu skills.",
+          status: larkIntegrationStatus,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/config/start", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verification_url: "https://open.feishu.cn/page/cli?user_code=config",
+          device_code: "mock-config-device-code",
+          expires_in: 600,
+          interval: 5,
+          user_code: "config",
+          brand: "feishu",
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/config/complete", (route) => {
+    if (route.request().method() === "POST") {
+      larkIntegrationStatus = {
+        ...larkIntegrationStatus,
+        app_configured: true,
+        app_id: "cli_mock",
+        app_brand: "feishu",
+        auth: {
+          status: "not_authorized",
+          message: "Lark user authorization is not configured",
+          user: null,
+          verified: false,
+        },
+      };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Lark/Feishu connection setup completed.",
+          status: larkIntegrationStatus,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/auth/start", (route) => {
+    if (route.request().method() === "POST") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verification_url: "https://open.feishu.cn/auth/mock-device",
+          device_code: "mock-device-code",
+          expires_in: 600,
+          user_code: null,
+          hint: null,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
+  void page.route("**/api/integrations/lark/auth/complete", (route) => {
+    if (route.request().method() === "POST") {
+      larkIntegrationStatus = {
+        ...larkIntegrationStatus,
+        auth: {
+          status: "authenticated",
+          message: "Lark/Feishu authorization is live-verified.",
+          user: "Alice",
+          verified: true,
+        },
+      };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message: "Lark/Feishu authorization completed.",
+          status: larkIntegrationStatus,
+        }),
       });
     }
     return route.fallback();
