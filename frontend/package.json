@@ -111,7 +111,7 @@
     "eslint": "^9.23.0",
     "eslint-config-next": "^15.2.3",
     "happy-dom": "^20.11.1",
-    "postcss": "^8.5.3",
+    "postcss": "^8.5.18",
     "prettier": "^3.5.3",
     "prettier-plugin-tailwindcss": "^0.6.11",
     "tailwindcss": "^4.0.15",
