@@ -364,7 +364,12 @@ export function extractTextFromMessage(message: Message) {
 const THINK_OPEN_TAG = "<think>";
 const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
 
-function splitInlineReasoning(content: string) {
+interface InlineReasoningSplit {
+  content: string;
+  reasoning: string | null;
+}
+
+function splitInlineReasoning(content: string): InlineReasoningSplit {
   const reasoningParts: string[] = [];
 
   // First pass: strip every fully closed `<think>...</think>` pair and
@@ -401,11 +406,29 @@ function splitInlineReasoning(content: string) {
   };
 }
 
+// The split is re-derived on every render: `hasContent`, `hasReasoning`,
+// `extractContentFromMessage` and `extractReasoningContentFromMessage` all run
+// over the whole message list on each stream chunk, so an unmemoized scan costs
+// O(total content) per chunk — quadratic across a long run. Cache per message
+// object, keyed by the exact content string it was derived from so a message
+// whose `content` is reassigned recomputes instead of serving a stale split.
+const inlineReasoningCache = new WeakMap<
+  object,
+  { content: string; split: InlineReasoningSplit }
+>();
+
 function splitInlineReasoningFromAIMessage(message: Message) {
   if (message.type !== "ai" || typeof message.content !== "string") {
     return null;
   }
-  return splitInlineReasoning(message.content);
+  const content = message.content;
+  const cached = inlineReasoningCache.get(message);
+  if (cached?.content === content) {
+    return cached.split;
+  }
+  const split = splitInlineReasoning(content);
+  inlineReasoningCache.set(message, { content, split });
+  return split;
 }
 
 export function extractContentFromMessage(message: Message) {
@@ -454,7 +477,7 @@ export function extractReasoningContentFromMessage(message: Message) {
     }
   }
   if (typeof message.content === "string") {
-    return splitInlineReasoning(message.content).reasoning;
+    return splitInlineReasoningFromAIMessage(message)?.reasoning ?? null;
   }
   return null;
 }
@@ -507,7 +530,9 @@ export function hasReasoning(message: Message) {
     return (part as unknown as { type: "thinking" })?.type === "thinking";
   }
   if (typeof message.content === "string") {
-    return splitInlineReasoning(message.content).reasoning !== null;
+    return (
+      (splitInlineReasoningFromAIMessage(message)?.reasoning ?? null) !== null
+    );
   }
   return false;
 }
@@ -567,14 +592,26 @@ export function findToolCallResult(toolCallId: string, messages: Message[]) {
 }
 
 export function isHiddenFromUIMessage(message: Message) {
+  if (message.additional_kwargs?.hide_from_ui === true) {
+    return true;
+  }
+  if (
+    typeof message.name === "string" &&
+    HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)
+  ) {
+    return true;
+  }
+  // Only the human branch consults the text. Extracting it up front made every
+  // caller pay a full content scan for every AI message it was about to
+  // discard, and this predicate runs over the whole message list on each
+  // stream chunk (grouping, dedup, human-input state).
+  if (message.type !== "human") {
+    return false;
+  }
   const content = extractTextFromMessage(message);
   return (
-    message.additional_kwargs?.hide_from_ui === true ||
-    (typeof message.name === "string" &&
-      HIDDEN_CONTROL_MESSAGE_NAMES.has(message.name)) ||
-    (message.type === "human" &&
-      content.includes("<slash_skill_activation>") &&
-      stripUploadedFilesTag(content).length === 0)
+    content.includes("<slash_skill_activation>") &&
+    stripUploadedFilesTag(content).length === 0
   );
 }
 
