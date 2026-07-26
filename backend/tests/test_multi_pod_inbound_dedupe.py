@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import pytest_asyncio
@@ -18,6 +19,33 @@ import pytest_asyncio
 from app.channels.dedupe_store import INBOUND_DEDUPE_TTL_SECONDS, PostgresInboundDedupeStore
 
 POSTGRES_URL = os.environ.get("DEDUPE_TEST_POSTGRES_URL")
+
+# libpq/psycopg-only query parameters that asyncpg's ``connect()`` rejects. CI
+# hands over ``TEST_POSTGRES_URI`` as ``postgresql://...?sslmode=disable``; left
+# in place these raise ``TypeError: connect() got an unexpected keyword argument
+# 'sslmode'`` once the URL is routed to the asyncpg driver, so strip them here.
+_LIBPQ_ONLY_QUERY_KEYS = {"sslmode", "channel_binding"}
+
+
+def _asyncpg_url(url: str | None) -> str | None:
+    """Normalize a sync ``postgresql://`` URL to the async driver SQLAlchemy needs.
+
+    ``init_engine`` builds an *async* engine, so a bare ``postgresql://`` would fall
+    back to the synchronous psycopg2 driver and fail. Accept either form so the test
+    runs whether CI hands over ``TEST_POSTGRES_URI`` (``postgresql://...``) or a
+    caller passes ``postgresql+asyncpg://...`` directly. libpq-only query params
+    (e.g. ``sslmode``) are dropped because asyncpg does not understand them.
+    """
+    if not url:
+        return url
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    parts = urlsplit(url)
+    if parts.query:
+        kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in _LIBPQ_ONLY_QUERY_KEYS]
+        url = urlunsplit(parts._replace(query=urlencode(kept)))
+    return url
+
 
 pytestmark = pytest.mark.skipif(
     not POSTGRES_URL,
@@ -35,7 +63,7 @@ async def _postgres_engine():
     """
     from deerflow.persistence.engine import close_engine, init_engine
 
-    await init_engine("postgres", url=POSTGRES_URL)
+    await init_engine("postgres", url=_asyncpg_url(POSTGRES_URL))
     try:
         yield
     finally:

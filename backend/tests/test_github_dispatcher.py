@@ -1208,12 +1208,12 @@ async def test_missing_delivery_header_leaves_dedupe_open(base_dir: Path) -> Non
     await fanout_event(bus, "pull_request", "", payload)
     (first,) = await _drain(bus)
     assert first.metadata["message_id"] is None
-    assert manager._is_duplicate_inbound(first) is False
+    assert await manager._is_duplicate_inbound(first) is False
 
     await fanout_event(bus, "pull_request", "", payload)
     (second,) = await _drain(bus)
     assert second.metadata["message_id"] is None
-    assert manager._is_duplicate_inbound(second) is False
+    assert await manager._is_duplicate_inbound(second) is False
 
 
 # ---------------------------------------------------------------------------
