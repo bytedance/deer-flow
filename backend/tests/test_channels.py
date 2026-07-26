@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import tempfile
+import threading
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -7805,6 +7806,9 @@ class TestTelegramSendRetry:
             def __and__(self, other):
                 return FakeFilter(f"{self.expr}&{other.expr}")
 
+            def __or__(self, other):
+                return FakeFilter(f"{self.expr}|{other.expr}")
+
             def __invert__(self):
                 return FakeFilter(f"~{self.expr}")
 
@@ -7836,7 +7840,12 @@ class TestTelegramSendRetry:
         telegram_ext_mod.ApplicationBuilder = FakeApplicationBuilder
         telegram_ext_mod.CommandHandler = fake_command_handler
         telegram_ext_mod.MessageHandler = fake_message_handler
-        telegram_ext_mod.filters = SimpleNamespace(TEXT=FakeFilter("TEXT"), COMMAND=FakeFilter("COMMAND"))
+        telegram_ext_mod.filters = SimpleNamespace(
+            TEXT=FakeFilter("TEXT"),
+            COMMAND=FakeFilter("COMMAND"),
+            PHOTO=FakeFilter("PHOTO"),
+            Document=SimpleNamespace(ALL=FakeFilter("DOCUMENT")),
+        )
         telegram_mod.ext = telegram_ext_mod
         monkeypatch.setitem(sys.modules, "telegram", telegram_mod)
         monkeypatch.setitem(sys.modules, "telegram.ext", telegram_ext_mod)
@@ -7852,6 +7861,9 @@ class TestTelegramSendRetry:
             def join(self, timeout=None):
                 return None
 
+            def is_alive(self):
+                return False
+
         monkeypatch.setattr("app.channels.telegram.threading.Thread", FakeThread)
 
         async def go():
@@ -7866,6 +7878,7 @@ class TestTelegramSendRetry:
                 assert "start" in registered_commands
                 message_filters = {handler.filter_expr.expr for handler in fake_app.handlers if handler.kind == "message"}
                 assert {"TEXT&COMMAND", "TEXT&~COMMAND"} <= message_filters
+                assert "PHOTO|DOCUMENT" in message_filters
             finally:
                 await ch.stop()
 
@@ -7958,13 +7971,25 @@ class TestFeishuSendRetry:
 # ---------------------------------------------------------------------------
 
 
-def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+def _make_telegram_update(
+    chat_type: str,
+    message_id: int,
+    *,
+    reply_to_message_id: int | None = None,
+    text: str | None = "hello",
+    caption: str | None = None,
+    photo: list[SimpleNamespace] | None = None,
+    document: SimpleNamespace | None = None,
+):
     """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
     update = MagicMock()
     update.effective_chat.type = chat_type
     update.effective_chat.id = 100
     update.effective_user.id = 42
     update.message.text = text
+    update.message.caption = caption
+    update.message.photo = photo or []
+    update.message.document = document
     update.message.message_id = message_id
     if reply_to_message_id is not None:
         reply_msg = MagicMock()
@@ -7975,8 +8000,8 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
     return update
 
 
-class TestTelegramPrivateChatThread:
-    """Verify that private chats use topic_id=None (single thread per chat)."""
+class TestTelegramInboundMessages:
+    """Verify Telegram inbound normalization and conversation thread context."""
 
     def test_private_chat_no_reply_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
@@ -7984,7 +8009,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=10)
             await ch._on_text(update, None)
@@ -7994,13 +8019,519 @@ class TestTelegramPrivateChatThread:
 
         _run(go())
 
+    def test_photo_caption_uses_largest_size_and_preserves_thread_context(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            small = SimpleNamespace(file_id="photo-small", file_unique_id="unique-small", file_size=10, width=90, height=90)
+            large = SimpleNamespace(file_id="photo-large", file_unique_id="unique-large", file_size=200, width=800, height=600)
+            update = _make_telegram_update(
+                "group",
+                message_id=40,
+                reply_to_message_id=15,
+                text=None,
+                caption="  Describe this image  ",
+                # Do not rely on Telegram returning PhotoSize objects in order.
+                photo=[large, small],
+            )
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "Describe this image"
+            assert msg.topic_id == "15"
+            assert msg.thread_ts == "40"
+            assert len(msg.files) == 1
+            assert msg.files[0] == {
+                "type": "image",
+                "file_id": "photo-large",
+                "file_unique_id": "unique-large",
+                "filename": "telegram-photo-40.jpg",
+                "mime_type": "image/jpeg",
+                "size": 200,
+            }
+
+        _run(go())
+
+    def test_document_without_caption_still_publishes_an_inbound_turn(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            document = SimpleNamespace(
+                file_id="document-id",
+                file_unique_id="document-unique",
+                file_name="../report.pdf",
+                mime_type="application/pdf",
+                file_size=1234,
+            )
+            update = _make_telegram_update("private", message_id=41, text=None, document=document)
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == ""
+            assert msg.topic_id is None
+            assert msg.files == [
+                {
+                    "type": "file",
+                    "file_id": "document-id",
+                    "file_unique_id": "document-unique",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 1234,
+                }
+            ]
+
+        _run(go())
+
+    def test_photo_without_caption_still_publishes_an_inbound_turn(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            photo = SimpleNamespace(file_id="photo-id", file_unique_id="photo-unique", file_size=25)
+            update = _make_telegram_update("private", message_id=42, text=None, photo=[photo])
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == ""
+            assert msg.files[0]["filename"] == "telegram-photo-42.jpg"
+            assert msg.files[0]["file_id"] == "photo-id"
+
+        _run(go())
+
+    def test_document_caption_is_preserved_and_missing_filename_gets_safe_fallback(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            document = SimpleNamespace(
+                file_id="document-id",
+                file_unique_id="document-unique",
+                file_name=None,
+                mime_type="text/plain",
+                file_size=12,
+            )
+            update = _make_telegram_update("private", message_id=43, text=None, caption="  Review this  ", document=document)
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "Review this"
+            assert msg.files[0]["filename"] == "telegram-document-43.bin"
+
+        _run(go())
+
+    def test_document_staging_filename_gets_visible_safe_fallback(self):
+        from app.channels.telegram import TelegramChannel
+
+        document = SimpleNamespace(
+            file_id="document-id",
+            file_unique_id="document-unique",
+            file_name=".upload-hidden.part",
+            mime_type="application/pdf",
+            file_size=12,
+        )
+        update = _make_telegram_update("private", message_id=44, text=None, document=document)
+
+        files = TelegramChannel._extract_inbound_files(update.message)
+
+        assert files[0]["filename"] == "telegram-document-44.bin"
+
+    def test_receive_file_downloads_bytes_without_retaining_telegram_file_id(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            downloaded = bytearray(b"data")
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=downloaded))
+            bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[
+                    {
+                        "type": "file",
+                        "file_id": "document-id",
+                        "file_unique_id": "document-unique",
+                        "filename": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 4,
+                    }
+                ],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            bot.get_file.assert_awaited_once_with("document-id")
+            telegram_file.download_as_bytearray.assert_awaited_once_with()
+            assert result.text == "caption"
+            assert result.files[0]["_content"] is downloaded
+            assert result.files == [
+                {
+                    "type": "file",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 4,
+                    "_content": b"data",
+                }
+            ]
+
+        _run(go())
+
+    def test_receive_file_marshals_ptb_download_to_telegram_event_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+
+                class LoopBoundFile:
+                    file_size = 4
+
+                    async def download_as_bytearray(self):
+                        assert asyncio.get_running_loop() is telegram_loop
+                        return bytearray(b"data")
+
+                class LoopBoundBot:
+                    async def get_file(self, file_id):
+                        assert asyncio.get_running_loop() is telegram_loop
+                        assert file_id == "document-id"
+                        return LoopBoundFile()
+
+                ch._tg_loop = telegram_loop
+                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="100",
+                    user_id="42",
+                    text="caption",
+                    files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+                )
+                result = await ch.receive_file(msg, "thread-1")
+            finally:
+                telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+            assert result.files[0]["_content"] == b"data"
+
+        _run(go())
+
+    def test_stop_cancels_and_drains_an_inflight_receive_download(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            download_started = threading.Event()
+            download_cancelled = threading.Event()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class SlowTelegramFile:
+                file_size = 4
+
+                async def download_as_bytearray(self):
+                    download_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        download_cancelled.set()
+
+            class LoopBoundBot:
+                async def get_file(self, file_id):
+                    assert asyncio.get_running_loop() is telegram_loop
+                    assert file_id == "document-id"
+                    return SlowTelegramFile()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="100",
+                    user_id="42",
+                    text="caption",
+                    files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+                )
+                receive_task = asyncio.create_task(ch.receive_file(msg, "thread-1"))
+                assert await asyncio.to_thread(download_started.wait, 2)
+
+                await ch.stop()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await receive_task
+                assert download_cancelled.is_set()
+                assert not ch._tg_bridge_tasks
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_cancelled_stop_still_stops_thread_and_clears_state(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            drain_started = threading.Event()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            async def slow_drain():
+                drain_started.set()
+                await asyncio.Event().wait()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._cancel_telegram_bridge_tasks = slow_drain
+
+                stop_task = asyncio.create_task(ch.stop())
+                assert await asyncio.to_thread(drain_started.wait, 2)
+                stop_task.cancel()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+
+                assert not loop_thread.is_alive()
+                assert ch._thread is None
+                assert ch._application is None
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_does_not_reuse_ptb_client_after_telegram_loop_stops(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            stopped_loop = asyncio.new_event_loop()
+            bot = SimpleNamespace(get_file=AsyncMock())
+            ch._tg_loop = stopped_loop
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+            )
+
+            try:
+                result = await ch.receive_file(msg, "thread-1")
+            finally:
+                stopped_loop.close()
+
+            bot.get_file.assert_not_awaited()
+            assert result.files == []
+            assert result.text.startswith("caption")
+            assert "report.pdf" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_declared_oversize_before_download(self):
+        from app.channels.telegram import TELEGRAM_MAX_INBOUND_FILE_BYTES, TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            bot = SimpleNamespace(get_file=AsyncMock())
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[
+                    {
+                        "type": "file",
+                        "file_id": "too-large",
+                        "filename": "archive.zip",
+                        "mime_type": "application/zip",
+                        "size": TELEGRAM_MAX_INBOUND_FILE_BYTES + 1,
+                    }
+                ],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            bot.get_file.assert_not_called()
+            assert result.files == []
+            assert "archive.zip" in result.text
+            assert "20 MB" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_download_larger_than_reported(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 3)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_file = SimpleNamespace(file_size=2, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "image", "file_id": "photo-id", "filename": "photo.jpg", "mime_type": "image/jpeg", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert result.text.startswith("caption")
+            assert "photo.jpg" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_resolved_oversize_before_downloading(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 3)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            download = AsyncMock(return_value=bytearray(b"four"))
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=download)
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[{"type": "file", "file_id": "file-id", "filename": "large.bin", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            download.assert_not_awaited()
+            assert result.files == []
+            assert "large.bin" in result.text
+
+        _run(go())
+
+    def test_receive_file_accepts_exact_download_limit(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 4)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[{"type": "file", "file_id": "file-id", "filename": "exact.bin", "size": 4}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files[0]["_content"] == b"four"
+            assert result.files[0]["size"] == 4
+
+        _run(go())
+
+    def test_receive_file_download_failure_keeps_caption_and_drops_attachment(self, caplog):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed"))))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="Summarize this",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "mime_type": "application/pdf", "size": 10}],
+            )
+
+            with caplog.at_level(logging.ERROR):
+                result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert result.text.startswith("Summarize this")
+            assert "report.pdf" in result.text
+            assert "test-token" not in caplog.text
+
+        _run(go())
+
     def test_private_chat_slash_skill_text_routes_as_chat(self):
         from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=12, text="/data-analysis analyze uploads/foo.csv")
             await ch._on_text(update, None)
@@ -8018,7 +8549,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update(
                 "group",
@@ -8041,7 +8572,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
             await ch._on_text(update, None)
@@ -8057,7 +8588,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=20)
             await ch._on_text(update, None)
@@ -8073,7 +8604,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
             await ch._on_text(update, None)
@@ -8089,7 +8620,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("supergroup", message_id=25)
             await ch._on_text(update, None)
@@ -8105,7 +8636,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=30, text="/new")
             await ch._cmd_generic(update, None)
@@ -8122,7 +8653,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=31, text="/status")
             await ch._cmd_generic(update, None)
@@ -8139,7 +8670,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
             await ch._cmd_generic(update, None)
@@ -8156,7 +8687,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=33, text="/status@DeerFlowBot")
             context = SimpleNamespace(bot=SimpleNamespace(username="DeerFlowBot"))
@@ -8180,7 +8711,7 @@ class TestTelegramProcessingOrder:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
 
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             order = []
 
