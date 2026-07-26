@@ -1,6 +1,8 @@
 """Tests for AioSandboxProvider mount helpers."""
 
 import asyncio
+import contextlib
+import hashlib
 import importlib
 import stat
 from types import SimpleNamespace
@@ -10,6 +12,11 @@ import pytest
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+_LEGACY_COLLIDING_IDENTITIES = (
+    ("user-9721", "thread-9721"),
+    ("user-94361", "thread-94361"),
+)
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
@@ -62,6 +69,8 @@ def _make_provider(tmp_path):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
         provider._config = {"idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
+        provider._active_sandbox_identity = {}
+        provider._warm_pool_identity = {}
         provider._local_teardown = set()
         provider._acquire_epoch = {}
         provider._acquire_epoch_counter = 0
@@ -883,3 +892,101 @@ def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path
     assert "warm-oldest" not in provider._warm_pool
     assert provider._warm_pool == {"warm-newest": (newest_info, 20.0)}
     assert provider._sandbox_infos["created"] is created_info
+
+
+def _make_tenant_isolation_provider(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._thread_locks = {}
+    provider._last_activity = {}
+    provider._warm_pool = {}
+    provider._active_sandbox_identity = {}
+    provider._warm_pool_identity = {}
+    provider._shutdown_called = False
+    provider._config = {"replicas": 3, "idle_timeout": 0}
+
+    create_calls = []
+
+    def _create(thread_id, sandbox_id, **kwargs):
+        create_calls.append((thread_id, sandbox_id, kwargs.get("user_id")))
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url=f"http://sandbox-{len(create_calls)}.local",
+            container_name=f"deer-flow-sandbox-{sandbox_id}",
+        )
+
+    provider._backend = SimpleNamespace(
+        create=MagicMock(side_effect=_create),
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+        is_alive=MagicMock(return_value=True),
+        list_running=MagicMock(return_value=[]),
+    )
+    provider._claim_ownership = MagicMock(return_value=True)
+    provider._held_teardown_lease = lambda _sandbox_id: contextlib.nullcontext()
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_get_extra_mounts",
+        lambda self, thread_id, *, user_id=None: [],
+    )
+    monkeypatch.setattr(
+        aio_mod,
+        "wait_for_sandbox_ready",
+        lambda _url, timeout=60: True,
+    )
+    return provider, create_calls, aio_mod
+
+
+def test_aio_wider_id_separates_known_legacy_collision():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    identity_a, identity_b = _LEGACY_COLLIDING_IDENTITIES
+    user_a, thread_a = identity_a
+    user_b, thread_b = identity_b
+
+    old_a = hashlib.sha256(f"{user_a}:{thread_a}".encode()).hexdigest()[:8]
+    old_b = hashlib.sha256(f"{user_b}:{thread_b}".encode()).hexdigest()[:8]
+
+    assert old_a == old_b
+    assert aio_mod.AioSandboxProvider._deterministic_sandbox_id(
+        thread_a,
+        user_a,
+    ) != aio_mod.AioSandboxProvider._deterministic_sandbox_id(
+        thread_b,
+        user_b,
+    )
+
+
+def test_aio_forced_collision_never_overwrites_active_tenant(
+    tmp_path,
+    monkeypatch,
+):
+    provider, create_calls, aio_mod = _make_tenant_isolation_provider(
+        tmp_path,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_deterministic_sandbox_id",
+        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+    )
+
+    sandbox_id = provider.acquire("thread-a", user_id="user-a")
+    info_a = provider._sandbox_infos[sandbox_id]
+    provider.release(sandbox_id)
+
+    assert sandbox_id in provider._warm_pool
+
+    with pytest.raises(aio_mod.SandboxIdentityCollisionError):
+        provider.acquire("thread-b", user_id="user-b")
+
+    assert provider._warm_pool[sandbox_id][0] is info_a
+    provider._backend.destroy.assert_not_called()
+    assert len(create_calls) == 1
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert provider._sandbox_infos[sandbox_id] is info_a
