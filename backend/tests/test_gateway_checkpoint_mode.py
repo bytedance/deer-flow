@@ -29,7 +29,9 @@ from app.gateway.routers import threads
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+from deerflow.runtime import RunManager
 from deerflow.runtime.checkpoint_mode import checkpoint_metadata_uses_delta, inject_checkpoint_mode
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 _THREAD_ID = "thread-gateway-parity"
 
@@ -128,6 +130,7 @@ def test_full_mode_gateway_rejects_delta_thread_with_409(_stub_app_config, monke
     app.state.thread_store.get = AsyncMock(return_value=None)
     app.state.checkpoint_channel_mode = "full"
     app.state.run_event_store = SimpleNamespace()
+    app.state.run_manager = RunManager(store=MemoryRunStore())
     app.include_router(threads.router)
 
     full_graph = _build_reply_graph("full", checkpointer)

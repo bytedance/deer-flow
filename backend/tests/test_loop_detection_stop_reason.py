@@ -222,6 +222,59 @@ async def test_worker_surfaces_stop_reason_from_safety_finish_reason():
 
 
 @pytest.mark.asyncio
+async def test_worker_surfaces_stop_reason_from_model_length_finish_reason():
+    """The worker persists ``stop_reason=model_length_capped`` when the
+    provider caps a terminal assistant response with ``finish_reason=length``."""
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    mw = ModelLengthFinishReasonMiddleware()
+    captured_runtime: list[Any] = [None]
+
+    class DummyAgent:
+        metadata: dict[str, Any] = {"model_name": "test-model"}
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            runtime = ((config or {}).get("configurable") or {}).get("__pregel_runtime")
+            assert runtime is not None
+            captured_runtime[0] = runtime
+
+            msg = AIMessage(
+                content=('<tool_call><invoke name="write_file"><path>/mnt/user-data/outputs/report.md</path><content># partial'),
+                tool_calls=[],
+                invalid_tool_calls=[],
+                response_metadata={"finish_reason": "length"},
+            )
+            mw._apply({"messages": [msg]}, runtime)
+
+            yield {"messages": [msg]}
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = AsyncMock()
+    bridge.publish = AsyncMock()
+    bridge.publish_end = AsyncMock()
+    bridge.cleanup = AsyncMock()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={"messages": []},
+        config={},
+    )
+
+    assert captured_runtime[0] is not None
+    assert captured_runtime[0].context.get("stop_reason") == "model_length_capped"
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert fetched.stop_reason == "model_length_capped"
+
+
+@pytest.mark.asyncio
 async def test_worker_surfaces_stop_reason_from_subagent_limit():
     """The worker persists ``stop_reason=subagent_limit_capped`` when the
     real SubagentLimitMiddleware hits the total per-run cap."""
