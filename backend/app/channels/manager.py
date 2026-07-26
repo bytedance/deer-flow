@@ -169,8 +169,8 @@ async def _read_wecom_inbound_file(file_info: dict[str, Any], client: httpx.Asyn
     if data is None:
         return None
 
-    aeskey = file_info.get("aeskey") if isinstance(file_info.get("aeskey"), str) else None
-    if not aeskey:
+    aeskey = file_info.get("aeskey")
+    if not isinstance(aeskey, str) or not aeskey:
         return data
 
     try:
@@ -1146,7 +1146,7 @@ class ChannelManager:
         if self._get_stream_bridge is None:
             return
 
-        run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
+        run_id = run_result.get("run_id") if isinstance(run_result, Mapping) else None
         if not run_id:
             logger.warning(
                 "[Manager] runs.create returned no run_id for thread_id=%s; cannot watch for follow-up drain",
