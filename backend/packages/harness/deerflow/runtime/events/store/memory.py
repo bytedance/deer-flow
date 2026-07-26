@@ -93,6 +93,35 @@ class MemoryRunEventStore(RunEventStore):
             results.append(record)
         return results
 
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        # No await occurs between the lookup and append, so this is atomic for
+        # the backend's documented single-event-loop concurrency model.
+        for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
+            if event["event_type"] == event_type:
+                return event, False
+        return (
+            self._put_one(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=event_type,
+                category=category,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+            ),
+            True,
+        )
+
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.

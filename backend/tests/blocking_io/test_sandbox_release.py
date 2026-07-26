@@ -75,6 +75,7 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
     provider._lock = threading.Lock()
     provider._sandboxes = {sandbox_id: MagicMock()}
+    provider._active_sandbox_identity = {sandbox_id: ("default", "thread-1")}
     provider._sandbox_infos = {
         sandbox_id: SandboxInfo(
             sandbox_id=sandbox_id,
@@ -87,6 +88,7 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._thread_locks = {}
     provider._last_activity = {sandbox_id: 1.0}
     provider._warm_pool = {}
+    provider._warm_pool_identity = {}
     provider._unowned_since = {}
     provider._local_teardown = set()
     provider._acquire_epoch = {}

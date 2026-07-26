@@ -545,15 +545,18 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected correctly.
     # With this test's default safety config enabled, the tail order is:
-    #   ..., custom, TerminalResponseMiddleware, SafetyFinishReasonMiddleware,
-    #   ClarificationMiddleware, so the custom mock sits at index [-4].
-    assert len(middlewares) > 0 and isinstance(middlewares[-4], MagicMock)
+    #   ..., custom, TerminalResponseMiddleware, ModelLengthFinishReasonMiddleware,
+    #   SafetyFinishReasonMiddleware, ClarificationMiddleware, so the custom mock
+    #   sits at index [-5].
+    assert len(middlewares) > 0 and isinstance(middlewares[-5], MagicMock)
 
     from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 
-    assert isinstance(middlewares[-3], TerminalResponseMiddleware)
+    assert isinstance(middlewares[-4], TerminalResponseMiddleware)
+    assert isinstance(middlewares[-3], ModelLengthFinishReasonMiddleware)
     assert isinstance(middlewares[-2], SafetyFinishReasonMiddleware)
     assert isinstance(middlewares[-1], ClarificationMiddleware)
 
@@ -609,6 +612,38 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     assert middlewares[0] == "base-middleware"
 
 
+def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
+    """The resolved run model (e.g. a custom agent's model, distinct from models[0])
+    is threaded into the summarization factory, so null-model compaction summarizes
+    with it rather than config.models[0]. Production-shaped: the model reaches the
+    factory as an argument, not via runtime.context."""
+    app_config = _make_app_config(
+        [
+            _make_model("default-model", supports_thinking=False),
+            _make_model("custom-agent-model", supports_thinking=False),
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init: ["base-middleware"])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: captured.update(kwargs) or None,
+    )
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config: "title-middleware")
+    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-middleware")
+
+    lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="custom-agent-model",
+        app_config=app_config,
+    )
+
+    assert captured["run_model_name"] == "custom-agent-model"
+
+
 def test_build_middlewares_orders_skill_activation_before_policy_and_durable_context(monkeypatch):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
@@ -616,7 +651,7 @@ def test_build_middlewares_orders_skill_activation_before_policy_and_durable_con
 
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -644,7 +679,7 @@ def test_compiled_skill_policy_chain_filters_schema_and_blocks_execution(monkeyp
         loop_detection=LoopDetectionConfig(enabled=False),
     )
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -715,7 +750,7 @@ def test_build_middlewares_places_mcp_routing_before_deferred_filter(monkeypatch
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -746,7 +781,7 @@ def test_build_middlewares_uses_loop_detection_config(monkeypatch):
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -772,7 +807,7 @@ def test_build_middlewares_omits_loop_detection_when_disabled(monkeypatch):
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -799,7 +834,7 @@ def test_build_middlewares_injects_configured_extension_middlewares(monkeypatch)
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -810,10 +845,11 @@ def test_build_middlewares_injects_configured_extension_middlewares(monkeypatch)
     )
 
     middleware_types = [type(m).__name__ for m in middlewares]
-    assert middleware_types[-5:] == [
+    assert middleware_types[-6:] == [
         "ConfiguredGuardMiddleware",
         "ConfiguredAuditMiddleware",
         "TerminalResponseMiddleware",
+        "ModelLengthFinishReasonMiddleware",
         "SafetyFinishReasonMiddleware",
         "ClarificationMiddleware",
     ]
@@ -829,7 +865,7 @@ def test_build_middlewares_passes_subagent_total_limit_from_app_config(monkeypat
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -852,7 +888,7 @@ def test_build_middlewares_allows_runtime_subagent_total_limit_override(monkeypa
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     middlewares = lead_agent_module.build_middlewares(
@@ -881,7 +917,7 @@ def test_build_middlewares_rejects_invalid_configured_extension_middleware(monke
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     with pytest.raises(ValueError, match="not an instance of type"):
@@ -901,7 +937,7 @@ def test_build_middlewares_rejects_configured_extension_class_with_wrong_base(mo
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     with pytest.raises(ValueError, match="is not a subclass of AgentMiddleware"):
@@ -921,7 +957,7 @@ def test_build_middlewares_reraises_configured_extension_instantiation_failure(m
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     with pytest.raises(RuntimeError, match="configured middleware init failed"):
@@ -941,7 +977,7 @@ def test_build_middlewares_rejects_missing_configured_extension_module(monkeypat
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     with pytest.raises(ImportError, match="Could not import module definitely_missing_pkg.middlewares_typo"):
@@ -986,7 +1022,10 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
     fake_model.with_config.assert_called_once_with(tags=["middleware:summarize"])
 
 
-def test_create_summarization_middleware_omits_model_name_when_unconfigured(monkeypatch):
+def test_create_summarization_middleware_uses_default_when_unconfigured(monkeypatch):
+    """Null summary config with no supplied run model builds the anchor from the default
+    model — now with an explicit name rather than relying on create_chat_model's internal
+    default, so the factory has no implicit models[0] dependency. Same resulting model."""
     app_config = _make_app_config([_make_model("default-model", supports_thinking=False)])
     app_config.summarization = SummarizationConfig(enabled=True, model_name=None)
     app_config.memory = MemoryConfig(enabled=False)
@@ -1004,10 +1043,35 @@ def test_create_summarization_middleware_omits_model_name_when_unconfigured(monk
 
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
-    assert "name" not in captured
+    assert captured["name"] == "default-model"
     assert captured["thinking_enabled"] is False
     assert captured["app_config"] is app_config
     assert middleware["model"] is fake_model
+    assert middleware["anchor_model_name"] == "default-model"
+
+
+def test_create_summarization_middleware_threads_run_model_name(monkeypatch):
+    """A custom agent's resolved model reaches the middleware as run_model_name (the
+    model-ownership source of truth), while configured_model_name stays None for a
+    null summarization config."""
+    app_config = _make_app_config(
+        [
+            _make_model("default-model", supports_thinking=False),
+            _make_model("custom-agent-model", supports_thinking=False),
+        ]
+    )
+    app_config.summarization = SummarizationConfig(enabled=True, model_name=None)
+    app_config.memory = MemoryConfig(enabled=False)
+
+    fake_model = MagicMock()
+    fake_model.with_config.return_value = fake_model
+    monkeypatch.setattr(summarization_middleware_module, "create_chat_model", lambda **kwargs: fake_model)
+    monkeypatch.setattr(summarization_middleware_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+
+    middleware = lead_agent_module._create_summarization_middleware(app_config=app_config, run_model_name="custom-agent-model")
+
+    assert middleware["run_model_name"] == "custom-agent-model"
+    assert middleware["configured_model_name"] is None
 
 
 def test_create_summarization_middleware_uses_frontend_supported_update_key(monkeypatch):

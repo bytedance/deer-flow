@@ -24,10 +24,21 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 
 
-def _config_with_backend(backend: str, *, heartbeat_enabled: bool | None = None, browser_enabled: bool = False) -> SimpleNamespace:
+def _config_with_backend(
+    backend: str,
+    *,
+    heartbeat_enabled: bool | None = None,
+    browser_enabled: bool = False,
+    run_events_backend: str = "db",
+) -> SimpleNamespace:
     run_ownership = RunOwnershipConfig(heartbeat_enabled=heartbeat_enabled) if heartbeat_enabled is not None else None
     tools = [SimpleNamespace(name="browser_navigate")] if browser_enabled else []
-    return SimpleNamespace(database=DatabaseConfig(backend=backend), run_ownership=run_ownership, tools=tools)
+    return SimpleNamespace(
+        database=DatabaseConfig(backend=backend),
+        run_ownership=run_ownership,
+        run_events=SimpleNamespace(backend=run_events_backend),
+        tools=tools,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +63,34 @@ def test_gate_noop_for_single_worker(monkeypatch):
 def test_gate_allows_multi_worker_with_postgres_and_heartbeat(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "2")
     _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True))
+
+
+@pytest.mark.parametrize("run_events_backend", ["memory", "jsonl"])
+def test_gate_rejects_process_local_run_events_with_multi_worker(monkeypatch, run_events_backend):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "postgres",
+                heartbeat_enabled=True,
+                run_events_backend=run_events_backend,
+            )
+        )
+    msg = str(exc_info.value)
+    assert "run_events.backend='db'" in msg
+    assert run_events_backend in msg
+    assert "GATEWAY_WORKERS=1" in msg
+
+
+def test_gate_allows_process_local_run_events_for_single_worker(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    for run_events_backend in ("memory", "jsonl"):
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "sqlite",
+                run_events_backend=run_events_backend,
+            )
+        )
 
 
 def test_gate_rejects_process_local_browser_with_multi_worker(monkeypatch):
