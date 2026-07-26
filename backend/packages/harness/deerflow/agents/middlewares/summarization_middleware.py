@@ -21,6 +21,25 @@ from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
+_UNSET = object()
+# Valid non-generated summaries for the empty / too-long-to-summarize edges; these
+# short-circuit model invocation (and must not be treated as generation failures).
+_CANNED_SUMMARIES = frozenset(
+    {
+        "No previous conversation history.",
+        "Previous conversation was too long to summarize.",
+    }
+)
+
+
+class SummaryGenerationError(RuntimeError):
+    """Summary generation failed after exhausting the run-model fallback.
+
+    Raised only when a caller opts in via ``raise_on_failure`` (the manual
+    ``/compact`` path) so a real failure is reported distinctly from "nothing to
+    compact". The automatic path leaves ``raise_on_failure`` False and swallows the
+    failure, leaving compaction state unchanged for the turn.
+    """
 
 
 @dataclass(frozen=True)
@@ -82,22 +101,115 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *args,
         before_summarization: list[BeforeSummarizationHook] | None = None,
+        app_config: Any | None = None,
+        configured_model_name: str | None = None,
+        run_model_name: str | None = None,
+        anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._before_summarization_hooks = before_summarization or []
+        # Model-ownership state. The model that actually executes the run is selected
+        # per run and is the authoritative source of truth, so the caller (lead /
+        # subagent / manual builders) supplies it directly as ``run_model_name``
+        # instead of the middleware re-deriving it from ``runtime.context`` /
+        # ``get_config()`` — those fields do not carry a custom agent's or a subagent's
+        # resolved model.
+        #
+        # ``configured_model_name`` is the explicitly configured summary model
+        # (``None`` => summarize with the run's own model). ``run_model_name`` is the
+        # model the run executes with; when they differ and the summary provider is
+        # broken (expired key, quota, outage) the run's own working model can still
+        # compact.
+        self._app_config = app_config
+        self._configured_summary_model_name = configured_model_name
+        self._run_model_name = run_model_name
         # The summary LLM call runs inside a LangGraph middleware hook, so its token
         # stream would otherwise be captured by the messages-tuple stream callback and
         # broadcast to the frontend as a phantom AI message. Tag a dedicated model copy
         # with TAG_NOSTREAM so the streaming handler skips it.
         # Keep self.model untagged so the parent's profile / ls_params inspection still works.
-        #
-        # Preserve any tags already bound on the model (e.g. "middleware:summarize" set in
-        # lead_agent/agent.py for RunJournal attribution): RunnableBinding.with_config does a
-        # shallow merge that would otherwise overwrite the existing tags list entirely.
-        existing_tags = list((getattr(self.model, "config", None) or {}).get("tags") or [])
+        self._summary_model = self._tag_nostream(self.model)
+        # ``self.model`` is the pre-built *anchor* model: it drives the parent's token
+        # counter / profile inspection and is reused verbatim by generation when a
+        # candidate matches its name. The factory builds it guarded and passes its name
+        # explicitly; direct construction (tests) mirrors the old factory choice
+        # (configured model, else default) so the passed ``model`` is the primary.
+        if anchor_model_name is _UNSET:
+            self._anchor_model_name = configured_model_name or self._default_model_name()
+        else:
+            self._anchor_model_name = anchor_model_name
+        # Nostream generation models built lazily by name and cached (None = a build
+        # that failed, so a broken candidate config is not retried every turn and does
+        # not escape the fail-open boundary).
+        self._model_cache: dict[str | None, Any] = {}
+
+    def _tag_nostream(self, model: Any) -> Any:
+        """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
+
+        lead_agent/agent.py binds "middleware:summarize" for RunJournal attribution;
+        RunnableBinding.with_config shallow-merges config, so existing tags must be
+        preserved explicitly instead of being overwritten with just [TAG_NOSTREAM].
+        """
+        existing_tags = list((getattr(model, "config", None) or {}).get("tags") or [])
         merged_tags = [*existing_tags, TAG_NOSTREAM] if TAG_NOSTREAM not in existing_tags else existing_tags
-        self._summary_model = self.model.with_config(tags=merged_tags)
+        return model.with_config(tags=merged_tags)
+
+    def _default_model_name(self) -> str | None:
+        if self._app_config is None:
+            return None
+        models = getattr(self._app_config, "models", None)
+        return models[0].name if models else None
+
+    def _generation_candidate_names(self) -> list[str | None]:
+        """Ordered summary-generation candidates by name (deduplicated).
+
+        Explicit summary model: the configured model first, then the run's own model
+        as a distinct fallback. ``model_name: null``: the run's own model only — its
+        construction is the primary, so there is no eager dependency on
+        ``config.models[0]`` (a bare default is used only when no run model was
+        resolved). A ``None`` entry means "let ``create_chat_model`` pick the default",
+        which only occurs when nothing resolves a name.
+        """
+        default = self._default_model_name()
+        if self._configured_summary_model_name is not None:
+            names = [self._configured_summary_model_name, self._run_model_name or default]
+        else:
+            names = [self._run_model_name or default]
+        deduped: list[str | None] = []
+        seen: set[str | None] = set()
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append(name)
+        return deduped
+
+    def _model_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name``, built lazily and guarded.
+
+        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
+        constructs and caches. A construction failure is caught and cached as ``None``
+        so a broken candidate config never escapes the fail-open boundary, is never
+        retried this turn, and still lets the next candidate run.
+        """
+        if name == self._anchor_model_name:
+            return self._summary_model
+        if name in self._model_cache:
+            return self._model_cache[name]
+        try:
+            model = create_chat_model(
+                name=name,
+                thinking_enabled=False,
+                app_config=self._app_config,
+                attach_tracing=False,
+            )
+            built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
+        except Exception:
+            logger.exception("Failed to build summary model %r; trying the next candidate", name)
+            built = None
+        self._model_cache[name] = built
+        return built
 
     @override
     def _create_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
@@ -107,6 +219,31 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     async def _acreate_summary(self, messages_to_summarize: list[AnyMessage]) -> str | None:
         return await self._asummarize_with(messages_to_summarize)
 
+    def _prepare_summary_prompt(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None) -> str | None:
+        """Return the formatted prompt, or a canned string for the empty/too-long edges.
+
+        A non-``None`` return that is not a real prompt (the two canned strings) is a
+        valid summary and short-circuits generation; ``None`` means "build a prompt".
+        """
+        if not messages_to_summarize:
+            return "No previous conversation history."
+        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
+        if prompt is None:
+            return "Previous conversation was too long to summarize."
+        return prompt
+
+    @staticmethod
+    def _nonempty_summary(text: Any) -> str | None:
+        """Normalize a model response's text; a blank/whitespace-only body is a failure.
+
+        Committing ``""`` as a summary would fire the before_summarization hooks and
+        remove all prior history for an empty replacement, so an empty body is treated
+        as generation failure (try the fallback, or leave state unchanged) rather than
+        a valid summary.
+        """
+        stripped = text.strip() if isinstance(text, str) else ""
+        return stripped or None
+
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Mirror the parent ``_create_summary`` but invoke the nostream-tagged model.
 
@@ -114,38 +251,84 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         cached and reused across concurrent runs, so a temporary swap would leak the
         ``RunnableBinding`` to other coroutines during ``await`` and break parent logic
         that inspects the raw model (``profile`` / ``_get_ls_params``).
+
+        Generation uses the run's own model (``model_name: null``) or the explicitly
+        configured summary model, falling back to the run model on failure so a broken
+        summary provider cannot disable compaction while a working model is available.
         """
-        if not messages_to_summarize:
-            return "No previous conversation history."
-        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
-        if prompt is None:
-            return "Previous conversation was too long to summarize."
-        try:
-            response = self._summary_model.invoke(
-                prompt,
-                config={"metadata": {"lc_source": "summarization"}},
-            )
-            return response.text.strip()
-        except Exception:
-            logger.exception("Summary generation failed; skipping compaction this turn")
-            return None
+        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
+        if prompt is None or prompt in _CANNED_SUMMARIES:
+            return prompt
+        # Walk the ordered candidates; each attempt owns its full lifecycle (lazy
+        # guarded construction -> invoke -> text extraction -> non-empty validation),
+        # and any failure at any stage falls through to the next candidate. When all
+        # candidates fail the caller leaves compaction state unchanged.
+        names = self._generation_candidate_names()
+        for index, name in enumerate(names):
+            text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            if text is not None:
+                return text
+        return None
 
     async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
-        if not messages_to_summarize:
-            return "No previous conversation history."
-        prompt = self._build_summary_prompt(messages_to_summarize, previous_summary=previous_summary)
-        if prompt is None:
-            return "Previous conversation was too long to summarize."
-        try:
-            response = await self._summary_model.ainvoke(
-                prompt,
-                config={"metadata": {"lc_source": "summarization"}},
-            )
-            return response.text.strip()
-        except Exception:
-            logger.exception("Summary generation failed; skipping compaction this turn")
+        prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
+        if prompt is None or prompt in _CANNED_SUMMARIES:
+            return prompt
+        names = self._generation_candidate_names()
+        for index, name in enumerate(names):
+            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            if text is not None:
+                return text
+        return None
+
+    def _invoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
+        """Invoke ``model`` for a summary; ``None`` on error or a blank response.
+
+        Text extraction / non-empty validation runs *inside* the try: reading the
+        response's ``.text`` is part of consuming the provider result, so a failing
+        accessor must convert to a candidate failure (fall through) rather than escape
+        the fail-open boundary.
+        """
+        if model is None:
             return None
+        try:
+            response = model.invoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            return self._checked_summary(response, last)
+        except Exception:
+            self._log_summary_error(last)
+            return None
+
+    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
+        """Async counterpart of :meth:`_invoke_summary`."""
+        if model is None:
+            return None
+        try:
+            response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            return self._checked_summary(response, last)
+        except Exception:
+            self._log_summary_error(last)
+            return None
+
+    def _checked_summary(self, response: Any, last: bool) -> str | None:
+        summary = self._nonempty_summary(getattr(response, "text", None))
+        if summary is None:
+            self._log_summary_empty(last)
+        return summary
+
+    @staticmethod
+    def _log_summary_error(last: bool) -> None:
+        if last:
+            logger.exception("Summary generation failed; skipping compaction this turn")
+        else:
+            logger.warning("Summary generation failed; falling back to the run model", exc_info=True)
+
+    @staticmethod
+    def _log_summary_empty(last: bool) -> None:
+        if last:
+            logger.warning("Summary model returned empty text; skipping compaction this turn")
+        else:
+            logger.warning("Summary model returned empty text; falling back to the run model")
 
     @staticmethod
     def _summary_count_message(summary_text: str) -> HumanMessage:
@@ -303,15 +486,30 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         runtime: Runtime,
         *,
         force: bool = False,
+        raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
+        """Summarize old context and retain the active tail.
+
+        ``force`` bypasses the automatic trigger threshold (a manual caller always
+        wants to compact). ``raise_on_failure`` is a *separate* concern: when set (the
+        manual ``/compact`` path), a generation failure raises ``SummaryGenerationError``
+        so it can be reported distinctly from "nothing to compact"; the automatic path
+        leaves it False and swallows the failure, retrying on a later triggered turn.
+        """
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
+            if raise_on_failure:
+                raise SummaryGenerationError("summary generation failed")
             return None
+        # Fire hooks only once a replacement summary exists — flushing pre-compaction
+        # messages into durable memory for a summary that never materializes would
+        # duplicate that work on the next attempt. Messages are still removed after
+        # this returns (in _maybe_summarize), so hooks run before they are gone.
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -325,15 +523,20 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         runtime: Runtime,
         *,
         force: bool = False,
+        raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
+        """Async counterpart of :meth:`compact_state` (see it for ``raise_on_failure``)."""
         prepared = self._prepare_compaction(state, force=force)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
+            if raise_on_failure:
+                raise SummaryGenerationError("summary generation failed")
             return None
+        # Fire hooks only once a replacement summary exists (see compact_state).
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -444,17 +647,50 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 logger.exception("before_summarization hook %s failed", hook_name)
 
 
+def _build_summary_anchor(candidate_names: list[str | None], app_config: Any) -> tuple[Any | None, str | None]:
+    """Build the first constructible model among ``candidate_names`` (guarded).
+
+    The returned model is tagged for RunJournal attribution but *not* TAG_NOSTREAM (the
+    middleware wraps a nostream copy). It becomes the parent's token-counter / profile
+    anchor and is reused for generation when a candidate matches its name. A per-name
+    construction failure is swallowed and the next candidate tried, so a broken primary
+    constructor neither breaks agent construction nor skips the healthy run model; a
+    trailing ``None`` name asks ``create_chat_model`` for its own default. Returns
+    ``(None, None)`` when nothing can be constructed.
+    """
+    tried: set[str | None] = set()
+    for name in candidate_names:
+        if name in tried:
+            continue
+        tried.add(name)
+        try:
+            model = create_chat_model(name=name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        except Exception:
+            logger.exception("Failed to build summary anchor model %r; trying the next candidate", name)
+            continue
+        return model.with_config(tags=["middleware:summarize"]), name
+    return None, None
+
+
 def create_summarization_middleware(
     *,
     app_config: Any | None = None,
     keep: tuple[str, int | float] | None = None,
     skip_memory_flush: bool = False,
+    run_model_name: str | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
     Both the lead-agent automatic path and the manual context-compaction path
     use this factory so model resolution, hooks, prompt config, and retention
     defaults cannot drift.
+
+    ``run_model_name`` is the model the run actually executes with, resolved by the
+    caller (the lead / subagent / manual builders each already resolve it) and passed
+    in as the authoritative source of truth for ``model_name: null`` summarization and
+    the explicit-summary-model fallback. The middleware does not re-derive it from
+    ``runtime.context`` / ``get_config()``, which do not carry a custom agent's or a
+    subagent's resolved model.
 
     ``skip_memory_flush`` omits the ``memory_flush_hook`` that otherwise
     flushes pre-compaction messages into the durable memory queue. The lead
@@ -477,23 +713,25 @@ def create_summarization_middleware(
         else:
             trigger = config.trigger.to_tuple()
 
-    if config.model_name:
-        model = create_chat_model(
-            name=config.model_name,
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
-    else:
-        model = create_chat_model(
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
-    model = model.with_config(tags=["middleware:summarize"])
+    default_name = resolved_app_config.models[0].name if getattr(resolved_app_config, "models", None) else None
+    # Build the anchor (token-counter / profile model, reused for generation) guarded,
+    # rather than eagerly building the configured/default model and letting a broken
+    # constructor escape. Candidates in order: the primary generation model (configured
+    # summary model, else the run's own model), then the run model, then the default,
+    # then ``None`` (create_chat_model's default) as a last resort. So the null case
+    # builds from ``run_model_name`` — not ``config.models[0]`` — and a broken primary
+    # falls through to the healthy run model instead of failing agent construction.
+    primary_name = config.model_name or run_model_name or default_name
+    anchor_model, anchor_name = _build_summary_anchor(
+        [primary_name, run_model_name or default_name, default_name, None],
+        resolved_app_config,
+    )
+    if anchor_model is None:
+        logger.warning("Summarization is enabled but no summary model could be constructed; compaction is unavailable for this build")
+        return None
 
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": anchor_model,
         "trigger": trigger,
         "keep": keep or config.keep.to_tuple(),
     }
@@ -511,4 +749,8 @@ def create_summarization_middleware(
     return DeerFlowSummarizationMiddleware(
         **kwargs,
         before_summarization=hooks,
+        app_config=resolved_app_config,
+        configured_model_name=config.model_name,
+        run_model_name=run_model_name,
+        anchor_model_name=anchor_name,
     )

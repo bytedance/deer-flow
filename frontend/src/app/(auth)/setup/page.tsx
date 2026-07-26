@@ -16,14 +16,17 @@ import {
   isSystemAlreadyInitializedError,
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 
-type SetupMode = "loading" | "init_admin" | "change_password";
+type SetupMode = "loading" | "init_admin" | "change_password" | "unavailable";
 
 export default function SetupPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
+  const { t } = useI18n();
   const [mode, setMode] = useState<SetupMode>("loading");
+  const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
   // --- Shared state ---
   const [email, setEmail] = useState("");
@@ -44,7 +47,9 @@ export default function SetupPage() {
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
     } else if (!isAuthenticated) {
-      // Check if the system has no users yet
+      // Check if the system has no users yet. A slow Gateway must not leave the
+      // setup page in an infinite loading state or silently redirect away.
+      setMode("loading");
       void fetchSetupStatus()
         .then((data: { needs_setup?: boolean }) => {
           if (cancelled) return;
@@ -56,7 +61,7 @@ export default function SetupPage() {
           }
         })
         .catch(() => {
-          if (!cancelled) router.replace("/login");
+          if (!cancelled) setMode("unavailable");
         });
     } else {
       // Authenticated but needs_setup is false — already set up
@@ -66,7 +71,7 @@ export default function SetupPage() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, user, router]);
+  }, [isAuthenticated, user, router, setupStatusAttempt]);
 
   // ── Init-admin handler ─────────────────────────────────────────────
   const handleInitAdmin = async (e: React.SubmitEvent) => {
@@ -162,6 +167,41 @@ export default function SetupPage() {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-muted-foreground text-sm">Loading…</p>
+      </div>
+    );
+  }
+
+  if (mode === "unavailable") {
+    return (
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <div className="w-full max-w-md space-y-4 text-center">
+          <div>
+            <h1 className="text-xl font-semibold">
+              {t.login.serviceUnavailableTitle}
+            </h1>
+            <p className="text-muted-foreground mt-2 text-sm">
+              {t.login.serviceUnavailableDescription}
+            </p>
+          </div>
+          <div className="flex justify-center gap-3">
+            <Button
+              type="button"
+              onClick={() => {
+                setMode("loading");
+                setSetupStatusAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {t.login.retry}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => router.replace("/login")}
+            >
+              {t.login.signIn}
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }

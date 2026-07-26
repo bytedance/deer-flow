@@ -9,7 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -23,6 +23,24 @@ class SandboxMiddlewareState(AgentState):
 
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
+
+
+def _unwrap_sandbox(sandbox: object) -> tuple[object, bool]:
+    """Unwrap an ``Overwrite``-wrapped sandbox channel value, if present.
+
+    Fork-restored checkpoints can deliver the sandbox channel still wrapped in
+    ``langgraph.types.Overwrite`` (the rollback restore applies replace-style
+    writes through a state-mutation graph in delta checkpoint mode). Reading
+    ``sandbox["sandbox_id"]`` on the wrapper itself crashes with ``TypeError:
+    'Overwrite' object is not subscriptable``, so unwrap before use.
+
+    Returns ``(value, fork_restored)``. The wrapped form replays the parent
+    thread's sandbox state, so callers must not treat the sandbox as owned by
+    this run (e.g. release it).
+    """
+    if isinstance(sandbox, Overwrite):
+        return sandbox.value, True
+    return sandbox, False
 
 
 class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
@@ -99,9 +117,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = _unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             get_sandbox_provider().release(sandbox_id)
             return None
@@ -117,9 +140,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = _unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             await self._release_sandbox_async(sandbox_id)
             return None

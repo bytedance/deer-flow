@@ -19,7 +19,7 @@ def _seed(messages):
     return build_branch_history_seed_events(
         messages,
         thread_id="branch-thread",
-        run_id="branch-seed-branch-thread",
+        run_id_prefix="branch-seed-branch-thread",
         parent_thread_id="parent-thread",
     )
 
@@ -36,7 +36,7 @@ def test_seed_serializes_visible_history_in_order() -> None:
     assert [event["event_type"] for event in events] == ["llm.human.input", "llm.ai.response", "llm.tool.result"]
     assert all(event["category"] == "message" for event in events)
     assert all(event["thread_id"] == "branch-thread" for event in events)
-    assert all(event["run_id"] == "branch-seed-branch-thread" for event in events)
+    assert all(event["run_id"] == "branch-seed-branch-thread-1" for event in events)
     assert [event["content"]["id"] for event in events] == ["h1", "a1", "t1"]
     # Human/AI rows carry the journal's caller tag; every row carries the
     # seed provenance marker.
@@ -157,6 +157,60 @@ def test_seed_restores_original_user_content() -> None:
 
     assert events[0]["content"]["content"] == "question"
     assert "original_user_content" not in events[0]["content"]["additional_kwargs"]
+
+
+def test_seed_scopes_one_synthetic_run_per_inherited_turn() -> None:
+    """``run_id`` is a turn identity to the feed, not a provenance tag: the
+    regenerate path supersedes a whole ``run_id``, so packing every inherited
+    turn into one id deleted the complete history on the first regenerate
+    (#4458). Each human message opens the next synthetic run."""
+    events = _seed(
+        [
+            HumanMessage(id="h1", content="turn one"),
+            AIMessage(id="a1", content="answer one"),
+            HumanMessage(id="h2", content="turn two"),
+            AIMessage(id="a2", content="calling a tool", tool_calls=[{"name": "search", "args": {}, "id": "call-1", "type": "tool_call"}]),
+            ToolMessage(id="t2", content="tool output", tool_call_id="call-1"),
+            AIMessage(id="a2b", content="answer two"),
+        ]
+    )
+
+    assert [(event["content"]["id"], event["run_id"]) for event in events] == [
+        ("h1", "branch-seed-branch-thread-1"),
+        ("a1", "branch-seed-branch-thread-1"),
+        ("h2", "branch-seed-branch-thread-2"),
+        ("a2", "branch-seed-branch-thread-2"),
+        ("t2", "branch-seed-branch-thread-2"),
+        ("a2b", "branch-seed-branch-thread-2"),
+    ]
+
+
+def test_seed_opens_a_new_turn_at_a_hidden_clarification_reply() -> None:
+    """An answered clarification resumes as its own run, so the reply is a turn
+    boundary exactly like a visible user message."""
+    response = {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": "req-1",
+        "value": "yes",
+        "response_kind": "text",
+    }
+    events = _seed(
+        [
+            HumanMessage(id="h1", content="question"),
+            AIMessage(id="a1", content="which one?"),
+            HumanMessage(id="h-response", content="yes", additional_kwargs={"hide_from_ui": True, "human_input_response": response}),
+            AIMessage(id="a2", content="answer"),
+        ]
+    )
+
+    assert [event["run_id"] for event in events] == [
+        "branch-seed-branch-thread-1",
+        "branch-seed-branch-thread-1",
+        "branch-seed-branch-thread-2",
+        "branch-seed-branch-thread-2",
+    ]
 
 
 def test_seed_roundtrips_through_memory_store_feed() -> None:

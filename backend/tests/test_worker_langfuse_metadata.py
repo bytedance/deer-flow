@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.trace_context import (
@@ -42,6 +42,9 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def try_start(self, _run_id: str) -> RunStartOutcome:
+        return RunStartOutcome.started
+
     async def wait_for_prior_finalizing(self, *_args, **_kwargs) -> None:
         return None
 

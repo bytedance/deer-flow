@@ -1001,6 +1001,8 @@ export function InputBox({
         signal,
         agentName:
           typeof context.agent_name === "string" ? context.agent_name : null,
+        modelName:
+          typeof context.model_name === "string" ? context.model_name : null,
       });
       if (
         !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
@@ -1039,6 +1041,7 @@ export function InputBox({
     }
   }, [
     context.agent_name,
+    context.model_name,
     queryClient,
     t.inputBox.compactFailed,
     t.inputBox.compactSkipped,
