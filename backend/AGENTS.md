@@ -926,7 +926,9 @@ footprint. Summarize with
 the decision inputs for the production snapshot-frequency and accessor-cache
 defaults). Harness tests live in `tests/test_bench_checkpoint_production.py`
 and `tests/test_summarize_checkpoint_production.py`; timing thresholds are
-not CI gates.
+not CI gates. The matrix test pins that every `(repetition, turns)` group
+contains both modes and that their execution order flips between consecutive
+groups, including across repetition boundaries.
 
 Operational limits learned from the first runs (the default matrix is too
 large to run blindly):

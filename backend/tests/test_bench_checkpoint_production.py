@@ -47,8 +47,13 @@ def test_expand_cases_alternates_mode_order() -> None:
         repetitions=2,
         seed=1,
     )
-    ordering = [(c.repetition, c.turns, c.mode) for c in cases]
-    assert ordering[0][2] != ordering[1][2] or ordering[0][:2] != ordering[1][:2]
+    grouped_modes: dict[tuple[int, int], list[str]] = {}
+    for case in cases:
+        grouped_modes.setdefault((case.repetition, case.turns), []).append(case.mode)
+
+    mode_orders = list(grouped_modes.values())
+    assert all(set(order) == {"full", "delta"} for order in mode_orders)
+    assert all(current == list(reversed(previous)) for previous, current in zip(mode_orders, mode_orders[1:], strict=False))
 
 
 def test_case_rejects_nonpositive_turns() -> None:

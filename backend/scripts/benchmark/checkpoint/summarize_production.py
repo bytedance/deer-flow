@@ -3,7 +3,7 @@
 
 Full rows carry snapshot_frequency=None; each delta frequency group pairs
 against the full row at the same (turns, payload_bytes, repetition). Ratios
-Ratios are always delta/full. Decision metrics: snapshot_write_spike (delta
+are always delta/full. Decision metrics: snapshot_write_spike (delta
 checkpoint_write p99/p50), cache_effect_ms (state cold - warm p50), and
 checkpoint_write_share (checkpoint_write p50 / run_turn p50). Unless
 --metrics is given, history_limit_*_cold_ms / history_limit_*_warm_p50_ms

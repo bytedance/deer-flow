@@ -85,11 +85,12 @@ def expand_cases(
 ) -> list[ProductionCase]:
     """Build the matrix with alternating mode order to reduce order bias."""
     cases: list[ProductionCase] = []
+    group_index = 0
     for repetition in range(repetitions):
         for payload in payload_bytes:
-            for turn_index, turns in enumerate(turn_counts):
+            for turns in turn_counts:
                 ordered_modes = list(modes)
-                if (repetition + turn_index) % 2 == 1:
+                if group_index % 2 == 1:
                     ordered_modes.reverse()
                 for mode in ordered_modes:
                     frequencies: list[int | None] = snapshot_frequencies if mode == "delta" else [None]
@@ -106,6 +107,7 @@ def expand_cases(
                                 seed=seed,
                             )
                         )
+                group_index += 1
     return cases
 
 
@@ -517,7 +519,7 @@ def _make_gateway_app(saver: Any, mode: str, store: Any) -> Any:
     return app
 
 
-async def _read_phase(case: ProductionCase, saver: Any, timing: _TimingSaver, run_info: dict[str, Any]) -> dict[str, Any]:
+async def _read_phase(case: ProductionCase, saver: Any, timing: _TimingSaver) -> dict[str, Any]:
     """Measure state/history endpoint latency through the real route stack.
 
     Runs in the same event loop as the run phase (the AsyncSqliteSaver is
@@ -531,8 +533,6 @@ async def _read_phase(case: ProductionCase, saver: Any, timing: _TimingSaver, ru
     ``saver_read_attribution: False``; the ``*_saver_ms`` fields remain in
     the schema but report 0.0.
     """
-    del run_info  # thread identity derives from the case; run graph unused here
-
     from langgraph.store.memory import InMemoryStore
 
     from app.gateway import services as gateway_services
@@ -687,7 +687,7 @@ def _run_case(case: ProductionCase, *, work_dir: Path) -> dict:
             messages = list(snapshot.values.get("messages", []))
             seed_digest = common.canonical_messages_digest(messages)
 
-            read_metrics = await _read_phase(case, saver, timing, run_info)
+            read_metrics = await _read_phase(case, saver, timing)
             storage_metrics = _storage_file_stats(db_path)
 
         metrics = {
