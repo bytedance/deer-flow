@@ -76,6 +76,12 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
+        """Search threads by materializing matches, then sorting in Python.
+
+        The memory backend loads all matching rows in chunks before slicing so
+        it can mirror SQL's pinned-first ordering. Use the SQL store for
+        scalable paginated I/O.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.search")
         filter_dict: dict[str, Any] = {}
         if metadata:

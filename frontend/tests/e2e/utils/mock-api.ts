@@ -16,6 +16,8 @@ export const MOCK_THREAD_ID = "00000000-0000-0000-0000-000000000001";
 export const MOCK_THREAD_ID_2 = "00000000-0000-0000-0000-000000000002";
 export const MOCK_SIDECAR_THREAD_ID = "00000000-0000-0000-0000-0000000000aa";
 export const MOCK_RUN_ID = "00000000-0000-0000-0000-000000000099";
+// Keep in sync with frontend runtime thread utils and the backend thread_meta
+// constant; the mock must mirror the same metadata contract for pin ordering.
 export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
 
 const MOCK_AUTH_USER = {

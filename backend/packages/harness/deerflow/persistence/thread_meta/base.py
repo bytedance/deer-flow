@@ -19,6 +19,9 @@ from typing import Any
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
+# Cross-component metadata key. Keep in sync with
+# ``frontend/src/core/threads/utils.ts`` and
+# ``frontend/tests/e2e/utils/mock-api.ts``.
 THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
 
 

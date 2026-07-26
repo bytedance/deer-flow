@@ -225,8 +225,9 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row.updated_at = datetime.now(UTC)
             else:
                 # ``updated_at`` has an ``onupdate`` hook that fires on any row
-                # UPDATE. Force the existing value into the SET clause so the
-                # hook is skipped and recency ordering is preserved.
+                # UPDATE unless the column has an explicit SET value. Mark the
+                # current value dirty so SQLAlchemy emits it in SET, skips the
+                # hook, and preserves recency ordering.
                 flag_modified(row, "updated_at")
             await session.commit()
 
