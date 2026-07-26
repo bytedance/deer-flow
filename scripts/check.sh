@@ -27,17 +27,12 @@ fi
 
 echo ""
 echo "Checking pnpm..."
-# Use Corepack fallback: check pnpm first, then corepack pnpm
-PNPM_CMD=""
-if command -v pnpm >/dev/null 2>&1; then
-    PNPM_CMD="pnpm"
-elif command -v pnpm.cmd >/dev/null 2>&1; then
-    PNPM_CMD="pnpm.cmd"
-elif command -v corepack >/dev/null 2>&1; then
-    PNPM_CMD="corepack pnpm"
-elif command -v corepack.cmd >/dev/null 2>&1; then
-    PNPM_CMD="corepack.cmd pnpm"
-fi
+# Source the canonical pnpm resolver (also used by serve.sh and the Makefile)
+REPO_ROOT="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1 && pwd -P)"
+_pnpm_sh="${REPO_ROOT}/scripts/_pnpm.sh"
+# shellcheck source=../scripts/_pnpm.sh
+if [ -f "$_pnpm_sh" ]; then source "$_pnpm_sh"; fi
+PNPM_CMD=$(_get_pnpm_cmd 2>/dev/null) || PNPM_CMD=""
 
 if [ -n "$PNPM_CMD" ]; then
     PNPM_VERSION=$($PNPM_CMD -v)
