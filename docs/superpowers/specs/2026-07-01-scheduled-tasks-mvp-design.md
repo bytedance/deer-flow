@@ -274,8 +274,8 @@ For each poll cycle:
 
 MVP must extract or reuse a non-router helper based on existing logic in:
 
-- [backend/app/gateway/services.py](/Users/nowcoder/Desktop/auto-code-work/deer-flow/.worktrees/scheduled-tasks-mvp/backend/app/gateway/services.py)
-- [backend/app/gateway/routers/thread_runs.py](/Users/nowcoder/Desktop/auto-code-work/deer-flow/.worktrees/scheduled-tasks-mvp/backend/app/gateway/routers/thread_runs.py)
+- [backend/app/gateway/services.py](../../../backend/app/gateway/services.py)
+- [backend/app/gateway/routers/thread_runs.py](../../../backend/app/gateway/routers/thread_runs.py)
 
 Required property:
 

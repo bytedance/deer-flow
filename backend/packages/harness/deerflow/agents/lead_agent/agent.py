@@ -36,6 +36,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
@@ -133,9 +134,14 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
-    """Create and configure the summarization middleware from config."""
-    return create_summarization_middleware(app_config=app_config)
+def _create_summarization_middleware(*, app_config: AppConfig | None = None, run_model_name: str | None = None) -> DeerFlowSummarizationMiddleware | None:
+    """Create and configure the summarization middleware from config.
+
+    ``run_model_name`` is the resolved run model; it is the source of truth for
+    ``model_name: null`` summarization and the explicit-summary-model fallback, so a
+    custom agent's model is used instead of ``config.models[0]``.
+    """
+    return create_summarization_middleware(app_config=app_config, run_model_name=run_model_name)
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -359,7 +365,7 @@ def build_middlewares(
     )
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, run_model_name=model_name)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -446,6 +452,12 @@ def build_middlewares(
     # final response once, then persist a visible error fallback rather than
     # allowing LangChain's no-tool-call router to end a silent successful run.
     middlewares.append(TerminalResponseMiddleware())
+
+    # A provider may also cap the final assistant response at the model output
+    # limit. Preserve the assistant content unchanged, but stamp a run-level
+    # stop_reason so Gateway consumers can tell a length-capped completion from
+    # a clean one.
+    middlewares.append(ModelLengthFinishReasonMiddleware())
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after the terminal-response

@@ -50,6 +50,7 @@ deer-flow/
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
+│                                    # Managed integration skill packs are installed per user under .deer-flow/users/{user_id}/skills/integrations/
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)

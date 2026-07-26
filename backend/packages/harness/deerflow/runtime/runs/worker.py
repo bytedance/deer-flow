@@ -761,6 +761,7 @@ async def run_agent(
             #   token_budget        -> "token_capped"
             #   safety_finish_reason -> "safety_capped"
             #   subagent_limit       -> "subagent_limit_capped"
+            #   model_length_finish_reason -> "model_length_capped"
             #
             # If more guards grow stop_reason semantics, consider a publish/
             # collect pattern (e.g. each guard middleware publishes its cap
