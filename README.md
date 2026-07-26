@@ -664,6 +664,70 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
+Managed integrations install shared read-only skill packs without mixing them
+into custom skills. The Lark/Feishu CLI integration is available under
+`Settings → Integrations → Lark / Feishu CLI`; an administrator installs or
+upgrades the official `lark-*` pack once under
+`{DEER_FLOW_HOME}/integrations/skills/lark-cli`, and every user discovers that
+same pack with an independent enabled state. Each user's app configuration and
+OAuth data remain isolated under
+`{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
+secret directories are restricted to `0700`, regular credential files to
+`0600`, and symlinks are rejected.
+
+After installation, users can click **Connect Lark** to open a browser
+authorization link; no terminal authorization is required. The same UI can
+request additional permission domains such as Calendar, Docs, or Drive, or a
+specific OAuth scope reported by `lark-cli`. A cheap status refresh only
+inspects the local credential tree, so the UI reports **Credentials configured
+(not live-verified)** until an explicit browser completion performs live token
+verification. The action then remains **Reconnect Lark** so users can replace
+or extend authorization. If an agent hits missing Lark authorization during a
+conversation, the managed `lark-shared` guidance points the user back to the
+same settings entry with `?settings=integrations`.
+
+Installing the Lark skill pack resolves the latest official `larksuite/cli`
+release from GitHub and downloads that version's skills at install time, so the
+Gateway needs outbound internet access for that step (it falls back to a
+bottom-line pinned version if the release lookup fails). The settings page shows
+the installed version and, when available, the newest published version so an
+admin can reinstall to upgrade. Air-gapped deployments can pre-stage the archive
+and point `DEER_FLOW_LARK_CLI_SKILLS_ARCHIVE` at the local file. Integrity does
+not depend on a pinned archive byte hash (GitHub does not guarantee stable
+source-archive bytes); instead the download is restricted to the official GitHub
+host, every archive member passes structural safety guards, and a content hash
+of the effective installed skill tree (including DeerFlow's injected shared
+guidance) is recorded so content changes are auditable across reinstalls.
+
+When `sandbox.use` selects the AIO provider, the same install also downloads the
+official Linux amd64 and arm64 CLI release archives, verifies their published
+SHA-256 checksums, safely extracts one executable per architecture, and mounts
+the resulting runtime read-only at `/mnt/integrations/lark-cli/runtime`. An
+architecture-selecting launcher in that mount makes `lark-cli` available in the
+sandbox `PATH`. Air-gapped AIO deployments can pre-stage a symlink-free runtime
+tree containing `bin/lark-cli` plus both `linux-{amd64,arm64}/lark-cli` files and
+set `DEER_FLOW_LARK_CLI_SANDBOX_RUNTIME_DIR` to that directory.
+
+> **Sandbox trust boundary:** the browser never receives the Lark app secret, but
+> agent conversations run `lark-cli` inside the sandbox, so the per-user
+> credential directories are mounted into it: `config` (holding the long-lived
+> `appSecret`) is mounted **read-only** and `data` (refreshable OAuth tokens)
+> writable. Both remain *readable* by any process the agent runs there, so code
+> reached via prompt injection in a tool result could read them. Treat the
+> sandbox as inside the Lark credential trust boundary until the sidecar
+> credential-broker follow-up removes these mounts from sandbox execution.
+
+For remote/Kubernetes deployments (the provisioner backend), the sandbox
+`lark-cli` runtime can instead be supplied by an optional init container that
+copies the binaries into a shared `emptyDir` — no install-time GitHub download and
+no hostPath/PVC runtime mount. Publish the image under
+[`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
+`LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
+unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
+`sandbox_runtime_mode` and `sandbox_runtime_ready` so the Settings UI shows
+whether `lark-cli` will actually be present in the sandbox at chat time, rather
+than a green status hiding a later `command not found`.
+
 If a trusted operator manages the configured skills directory through an external mount such as MinIO, NFS, or CSI, an administrator can call `POST /api/skills/reload` after changing files. This invalidates skill prompt caches for the current Gateway process and waits up to the bounded refresh timeout so subsequent runs rescan the latest files; running tasks are unchanged. A loader-level filesystem failure returns a generic server error and preserves the last successfully loaded process cache rather than publishing an empty catalog. Uvicorn workers and Kubernetes Pods must each be targeted separately. Direct mount writes bypass the validation, SkillScan, and history applied by DeerFlow's install/edit APIs, so only operator-controlled systems should have write access.
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
@@ -713,6 +777,9 @@ Web UI chat links percent-encode custom thread identifiers before placing them i
 
 /mnt/skills/custom
 └── your-custom-skill/SKILL.md      ← yours
+
+/mnt/skills/integrations
+└── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
 #### Claude Code Integration

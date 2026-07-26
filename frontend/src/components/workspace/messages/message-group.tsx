@@ -36,7 +36,7 @@ import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
-  findToolCallResult,
+  extractTextFromMessage,
 } from "@/core/messages/utils";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
@@ -895,27 +895,41 @@ interface BrowserViewMeta {
   title?: string;
 }
 
-function findBrowserViewMeta(
-  toolCallId: string,
-  messages: Message[],
-): BrowserViewMeta | undefined {
+function indexToolCallData(messages: Message[]) {
+  const toolCallResults = new Map<string, string>();
+  const browserViews = new Map<string, BrowserViewMeta>();
+
   for (const message of messages) {
-    if (message.type === "tool" && message.tool_call_id === toolCallId) {
-      const meta = (
+    if (message.type !== "tool" || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (!toolCallResults.has(toolCallId)) {
+      const result = extractTextFromMessage(message);
+      if (result) {
+        toolCallResults.set(toolCallId, result);
+      }
+    }
+
+    if (!browserViews.has(toolCallId)) {
+      const browserView = (
         message.additional_kwargs as
           | { browser_view?: BrowserViewMeta }
           | undefined
       )?.browser_view;
-      if (meta && typeof meta.screenshot === "string") {
-        return meta;
+      if (browserView && typeof browserView.screenshot === "string") {
+        browserViews.set(toolCallId, browserView);
       }
     }
   }
-  return undefined;
+
+  return { browserViews, toolCallResults };
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
+  const { browserViews, toolCallResults } = indexToolCallData(messages);
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       const content = extractContentFromMessage(message);
@@ -950,7 +964,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
+          const toolCallResult = toolCallResults.get(toolCallId);
           if (toolCallResult) {
             try {
               const json = JSON.parse(toolCallResult);
@@ -959,7 +973,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
               step.result = toolCallResult;
             }
           }
-          step.browserView = findBrowserViewMeta(toolCallId, messages);
+          step.browserView = browserViews.get(toolCallId);
         }
         steps.push(step);
       }
