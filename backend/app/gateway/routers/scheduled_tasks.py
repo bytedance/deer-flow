@@ -91,18 +91,19 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
             if not isinstance(raw_cron, str):
                 raise HTTPException(status_code=422, detail="cron schedule requires schedule_spec.cron")
             schedule_spec["cron"] = normalize_cron_expression(raw_cron)
+        now = datetime.now(UTC)
         next_run_at = compute_next_run_at(
             body.schedule_type,
             schedule_spec,
             body.timezone,
-            now=datetime.now(UTC),
+            now=now,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if body.schedule_type == "once" and next_run_at is None:
         raise HTTPException(status_code=422, detail="once schedule must be in the future")
-    if body.schedule_type == "once" and next_run_at is not None and (next_run_at - datetime.now(UTC)).total_seconds() < config.scheduler.min_once_delay_seconds:
+    if body.schedule_type == "once" and next_run_at is not None and (next_run_at - now).total_seconds() < config.scheduler.min_once_delay_seconds:
         raise HTTPException(
             status_code=422,
             detail=(f"once schedule must be at least {config.scheduler.min_once_delay_seconds} seconds in the future"),
@@ -183,17 +184,18 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
                         detail="cron schedule requires schedule_spec.cron",
                     )
                 schedule_spec["cron"] = normalize_cron_expression(raw_cron)
+            now = datetime.now(UTC)
             next_run_at = compute_next_run_at(
                 existing["schedule_type"],
                 schedule_spec,
                 timezone,
-                now=datetime.now(UTC),
+                now=now,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if existing["schedule_type"] == "once" and next_run_at is None:
             raise HTTPException(status_code=422, detail="once schedule must be in the future")
-        if existing["schedule_type"] == "once" and next_run_at is not None and (next_run_at - datetime.now(UTC)).total_seconds() < config.scheduler.min_once_delay_seconds:
+        if existing["schedule_type"] == "once" and next_run_at is not None and (next_run_at - now).total_seconds() < config.scheduler.min_once_delay_seconds:
             raise HTTPException(
                 status_code=422,
                 detail=(f"once schedule must be at least {config.scheduler.min_once_delay_seconds} seconds in the future"),
