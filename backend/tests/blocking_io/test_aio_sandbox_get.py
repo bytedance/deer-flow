@@ -82,6 +82,8 @@ def _make_provider(tmp_path: Path):
     provider._thread_locks = {}
     provider._last_activity = {}
     provider._warm_pool = {}
+    provider._active_sandbox_identity = {}
+    provider._warm_pool_identity = {}
     provider._local_teardown = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0

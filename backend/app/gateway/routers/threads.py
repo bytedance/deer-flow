@@ -45,6 +45,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -97,6 +98,14 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
+# Thread-scoped runtime channels a branch must NOT inherit from its parent:
+# ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to the
+# *parent* thread, so copying it would make the branch read/write the parent's
+# workspace (bypassing the per-branch user-data clone) and release the
+# parent's sandbox after its first run; the branch lazily acquires its own
+# sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
+# from the branch's thread_id by ThreadDataMiddleware on every run.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 
@@ -106,6 +115,11 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not metadata:
         return metadata or {}
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
+
+
+def _is_pin_metadata_patch(metadata: dict[str, Any]) -> bool:
+    """Return True for the narrow pin/unpin PATCH shape."""
+    return set(metadata) == {THREAD_PINNED_METADATA_KEY} and isinstance(metadata.get(THREAD_PINNED_METADATA_KEY), bool)
 
 
 def _message_id(message: Any) -> str | None:
@@ -830,6 +844,8 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     def branch_values(source_snapshot: Any) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for key, value in dict(source_snapshot.values).items():
+            if key in _BRANCH_EXCLUDED_CHANNELS:
+                continue
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
@@ -963,13 +979,17 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
+    # Pin/unpin is not conversation activity, so it must not bump ``updated_at``.
+    # Other metadata PATCH callers keep the public endpoint's existing recency
+    # contract unless they get their own explicit no-touch API surface.
+    touch = not _is_pin_metadata_patch(body.metadata)
     try:
-        await thread_store.update_metadata(thread_id, body.metadata)
+        await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
 
-    # Re-read to get the merged metadata + refreshed updated_at
+    # Re-read to get the merged metadata and the store's timestamp decision.
     record = await thread_store.get(thread_id) or record
     return ThreadResponse(
         thread_id=thread_id,
