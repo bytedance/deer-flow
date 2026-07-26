@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 
 import httpx
 import requests
@@ -13,6 +15,30 @@ import requests
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+def sandbox_http_trust_env(sandbox_url: str) -> bool:
+    """Whether HTTP clients for *sandbox_url* should inherit proxy settings.
+
+    Local Docker, DooD, and Kubernetes sandbox endpoints are control-plane
+    connections, not internet traffic. Sending them through ``HTTP_PROXY`` can
+    produce a misleading proxy-generated 502 even though the sandbox container
+    is healthy (#3441). External fully-qualified hosts retain normal environment
+    proxy behavior.
+    """
+    try:
+        hostname = (urlparse(sandbox_url).hostname or "").rstrip(".").lower()
+    except ValueError:
+        return True
+    if not hostname:
+        return True
+    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return "." in hostname
+    return not (address.is_loopback or address.is_private or address.is_link_local)
 
 
 def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
@@ -26,14 +52,16 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
         True if sandbox is ready, False otherwise.
     """
     start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(f"{sandbox_url}/v1/sandbox", timeout=5)
-            if response.status_code == 200:
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(1)
+    with requests.Session() as session:
+        session.trust_env = sandbox_http_trust_env(sandbox_url)
+        while time.time() - start_time < timeout:
+            try:
+                response = session.get(f"{sandbox_url}/v1/sandbox", timeout=5)
+                if response.status_code == 200:
+                    return True
+            except requests.exceptions.RequestException:
+                pass
+            time.sleep(1)
     return False
 
 
@@ -47,7 +75,7 @@ async def wait_for_sandbox_ready_async(sandbox_url: str, timeout: int = 30, poll
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(timeout=5, trust_env=sandbox_http_trust_env(sandbox_url)) as client:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:

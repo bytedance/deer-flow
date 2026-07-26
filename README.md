@@ -249,6 +249,11 @@ make docker-start   # Start services (auto-detects sandbox mode from config.yaml
 
 Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
 
+Local AIO sandbox control traffic is always direct: loopback/private addresses,
+single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
+`HTTP_PROXY` or `HTTPS_PROXY`. External sandbox FQDNs and public IPs still
+honor environment proxy settings.
+
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
 > [!TIP]
