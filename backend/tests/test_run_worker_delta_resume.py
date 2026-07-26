@@ -11,7 +11,9 @@ current head (which has no siblings) and the run proceeds linearly.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
@@ -24,7 +26,9 @@ from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
-from deerflow.runtime.runs.worker import _linearize_delta_checkpoint_resume
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.worker import RunContext, _linearize_delta_checkpoint_resume, run_agent
 
 pytestmark = pytest.mark.anyio
 
@@ -40,6 +44,17 @@ class _DeltaChannelState(TypedDict):
 
 class _FullChannelState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _replace_optional_state(existing: dict[str, str] | None, new: dict[str, str] | None) -> dict[str, str] | None:
+    return existing if new is None else new
+
+
+class _ExtendedDeltaChannelState(_DeltaChannelState):
+    notes: Annotated[list[AnyMessage], add_messages]
+    marker: str | None
+    head_only: Annotated[dict[str, str] | None, _replace_optional_state]
+    head_last_only: str | None
 
 
 def _build_answer_graph(state_schema: type, checkpointer: Any, answer_id: str):
@@ -101,6 +116,52 @@ async def test_linearizes_a_delta_resume_onto_the_head():
     assert new_head.config["configurable"]["checkpoint_id"] != head.config["configurable"]["checkpoint_id"]
 
 
+async def test_linearization_restores_all_selected_state_and_clears_newer_channels():
+    checkpointer = InMemorySaver()
+    config = _run_config("thread-state")
+
+    first_graph = _build_answer_graph(_ExtendedDeltaChannelState, checkpointer, "a1")
+    await first_graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="q1", id="h1")],
+            "notes": [HumanMessage(content="selected", id="note-selected")],
+            "marker": "selected",
+        },
+        config,
+    )
+    accessor = CheckpointStateAccessor.bind(first_graph, checkpointer, mode="delta")
+    selected = await accessor.aget(config)
+
+    second_graph = _build_answer_graph(_ExtendedDeltaChannelState, checkpointer, "a2")
+    await second_graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="q2", id="h2")],
+            "notes": [HumanMessage(content="newer", id="note-newer")],
+            "marker": "newer",
+            "head_only": {"value": "must-not-leak"},
+            "head_last_only": "must-not-leak",
+        },
+        config,
+    )
+    accessor = CheckpointStateAccessor.bind(second_graph, checkpointer, mode="delta")
+    selected_id = selected.config["configurable"]["checkpoint_id"]
+
+    await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=_run_config("thread-state", selected_id),
+        thread_id="thread-state",
+        run_id="run-state",
+    )
+
+    rewritten = await accessor.aget(config)
+    assert _ids(rewritten) == ["h1", "a1"]
+    assert [message.id for message in rewritten.values["notes"]] == ["note-selected"]
+    assert rewritten.values["marker"] == "selected"
+    assert rewritten.values.get("head_only") is None
+    assert rewritten.values.get("head_last_only") is None
+
+
 async def test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answer(tmp_path):
     """The #4458 shape end-to-end on a persistent saver.
 
@@ -145,6 +206,68 @@ async def test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answ
         await graph.ainvoke({"messages": [HumanMessage(content="q2", id="h2")]}, config)
 
         final = await accessor.aget(_run_config("branch"))
+        assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
+
+
+async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
+    """Pin selector removal through ``run_agent`` and its stream config.
+
+    Helper-level tests would still pass if the worker later streamed from the
+    stale ``RunnableConfig`` built before linearization. This exercises the
+    production boundary that hands the rewritten config to ``agent.astream``.
+    """
+    db_path = tmp_path / "worker-branch.sqlite3"
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        await checkpointer.setup()
+        _, source_head, source_pre_turn = await _seed_two_turns(checkpointer, _DeltaChannelState, "worker-parent")
+
+        mutation_graph = build_state_mutation_graph("branch", "delta", _DeltaChannelState)
+        branch_writer = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode="delta")
+        replay_base_config = await branch_writer.aupdate(
+            _run_config("worker-branch"),
+            {"messages": Overwrite(list(source_pre_turn.values["messages"]))},
+            as_node="branch",
+        )
+        await branch_writer.aupdate(
+            replay_base_config,
+            {"messages": Overwrite(list(source_head.values["messages"]))},
+            as_node="branch",
+        )
+
+        read_graph = _build_answer_graph(_DeltaChannelState, checkpointer, "unused")
+        read_accessor = CheckpointStateAccessor.bind(read_graph, checkpointer, mode="delta")
+        branch_history = await read_accessor.ahistory(_run_config("worker-branch"), limit=20)
+        base = next(snapshot for snapshot in branch_history if "h2" not in _ids(snapshot))
+
+        run_manager = RunManager()
+        record = await run_manager.create("worker-branch")
+        bridge = SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(),
+            cleanup=AsyncMock(),
+        )
+        created_graphs: list[Any] = []
+
+        def agent_factory(*, config):
+            del config
+            graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a2-new")
+            created_graphs.append(graph)
+            return graph
+
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+            agent_factory=agent_factory,
+            graph_input={"messages": [HumanMessage(content="q2", id="h2")]},
+            config=_run_config("worker-branch", base.config["configurable"]["checkpoint_id"]),
+            stream_modes=["values"],
+        )
+
+        assert record.status == RunStatus.success
+        final_accessor = CheckpointStateAccessor.bind(created_graphs[-1], checkpointer, mode="delta")
+        final = await final_accessor.aget(_run_config("worker-branch"))
         assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
 
 

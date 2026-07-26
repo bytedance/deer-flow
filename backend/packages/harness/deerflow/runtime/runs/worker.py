@@ -40,7 +40,13 @@ from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
 )
-from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph, graph_state_schema
+from deerflow.runtime.checkpoint_state import (
+    CheckpointStateAccessor,
+    build_state_mutation_graph,
+    graph_reducer_channels,
+    graph_state_schema,
+    graph_writable_channels,
+)
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -611,7 +617,7 @@ async def run_agent(
                 run_id=run_id,
             )
             if resumed_messages is not None:
-                # The graph now starts from the rolled-back state, so the
+                # The graph now starts from the selected state, so the
                 # current-run message boundary is that state, not the head we
                 # captured for rollback.
                 pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
@@ -1331,10 +1337,12 @@ async def _linearize_delta_checkpoint_resume(
     The upstream contract (`BaseCheckpointSaver.get_delta_channel_history` and
     the savers overriding it) is where write-to-child ownership belongs, so
     this does not reimplement it. Instead the fork is expressed as what it
-    means: materialize the requested checkpoint's state and write it as an
-    ``Overwrite`` on the **current head**, which has no other children, then
-    run linearly. The abandoned turn stays in checkpoint history as the
-    rewritten head's ancestry.
+    means: materialize the requested checkpoint's state and write it with
+    replace semantics on the **current head**, which has no other children,
+    then run linearly. Every materialized channel is restored; channels that
+    exist only on the newer head are reset to their schema default (or
+    ``None`` when the channel has no constructible default). The abandoned
+    turn stays in checkpoint history as the rewritten head's ancestry.
 
     Returns the materialized messages when the resume was linearized, or
     ``None`` when there was nothing to do (full mode, no checkpoint selector,
@@ -1368,11 +1376,34 @@ async def _linearize_delta_checkpoint_resume(
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
 
-    # Same shape as the rollback restore: a state-only mutation graph writing
-    # through the thread's effective schema so middleware channels survive.
+    # Write through the thread's effective schema so every application and
+    # middleware channel can be restored. Reducer channels need Overwrite to
+    # replace their already-aggregated value instead of merging it again.
     mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
+    writable_fields = graph_writable_channels(mutation_graph)
+    reducer_fields = graph_reducer_channels(mutation_graph)
+    if writable_fields is None or reducer_fields is None:
+        raise RuntimeError(f"Run {run_id} could not inspect the resume state schema")
+
+    selected_values = dict(values)
+    head_values = getattr(head, "values", None) or {}
+    head_values = dict(head_values) if isinstance(head_values, dict) else {}
+    replacement_values: dict[str, Any] = {}
+    for field_name in writable_fields:
+        if field_name in selected_values:
+            replacement = copy.deepcopy(selected_values[field_name])
+        elif field_name in head_values:
+            # LangGraph has no public "unset channel" update. A fresh channel
+            # exposes its schema default when one exists (for example [] / {});
+            # optional and otherwise-unconstructible channels reset to None.
+            channel = mutation_graph.channels.get(field_name)
+            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
+        else:
+            continue
+        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
+
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
-    await mutation_accessor.aupdate(head_config, {"messages": Overwrite(list(messages))}, as_node="checkpoint_resume")
+    await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
 
     configurable.pop("checkpoint_id", None)
     configurable.pop("checkpoint_map", None)
