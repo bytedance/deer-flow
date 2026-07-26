@@ -97,6 +97,14 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
+# Thread-scoped runtime channels a branch must NOT inherit from its parent:
+# ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to the
+# *parent* thread, so copying it would make the branch read/write the parent's
+# workspace (bypassing the per-branch user-data clone) and release the
+# parent's sandbox after its first run; the branch lazily acquires its own
+# sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
+# from the branch's thread_id by ThreadDataMiddleware on every run.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 
@@ -830,6 +838,8 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     def branch_values(source_snapshot: Any) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for key, value in dict(source_snapshot.values).items():
+            if key in _BRANCH_EXCLUDED_CHANNELS:
+                continue
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:

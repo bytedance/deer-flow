@@ -2054,6 +2054,124 @@ def test_branch_history_seed_failure_keeps_branch_usable(monkeypatch) -> None:
     assert branch_response.json()["history_seed_mode"] == "failed"
 
 
+async def _seed_union_channel_source(checkpointer, custom_factory, mode, source_thread_id):
+    """Seed a completed turn plus Union-typed reducer channels (sandbox/goal/todos)."""
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    await accessor.aupdate(
+        config,
+        {"messages": [HumanMessage(id="h1", content="question")], "goal": {"objective": "ship the fix"}},
+        as_node="model",
+    )
+    await accessor.aupdate(
+        config,
+        {
+            "messages": [AIMessage(id="a1", content="answer")],
+            "todos": [{"content": "write tests", "status": "pending"}],
+            "sandbox": {"sandbox_id": "local:parent-thread"},
+            "thread_data": {"workspace_path": "/parent/workspace"},
+        },
+        as_node="model",
+    )
+
+
+def _branch_union_channel_thread(monkeypatch, mode):
+    """Drive POST /branches on a source seeded with Union-typed channels; return branch values."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    source_thread_id = f"union-branch-source-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_union_channel_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        branch_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+        assert branch_response.status_code == 200, branch_response.text
+        branch_thread_id = branch_response.json()["thread_id"]
+
+    async def materialize():
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        snapshot = await accessor.aget({"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}})
+        return snapshot.values
+
+    return asyncio.run(materialize())
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_copies_union_typed_reducer_channels_as_plain_values(monkeypatch, mode) -> None:
+    """Branching must not persist Overwrite wrappers into the fresh thread (#4380).
+
+    Union-typed reducer channels (``goal``, ``todos``, ``promoted``,
+    ``sandbox``) have no constructible default, so they start MISSING on the
+    branch thread; an ``Overwrite`` first write that isn't unwrapped is stored
+    literally and the next consumer crashes with ``TypeError: 'Overwrite'
+    object is not subscriptable``.
+    """
+    branch_values = _branch_union_channel_thread(monkeypatch, mode)
+
+    # The exact crash shape from #4380: subscripting the copied channel value.
+    assert branch_values["goal"]["objective"] == "ship the fix"
+    assert branch_values["todos"] == [{"content": "write tests", "status": "pending"}]
+    assert not any(isinstance(value, Overwrite) for value in branch_values.values())
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_inherit_thread_scoped_channels(monkeypatch, mode) -> None:
+    """The branch must acquire its own sandbox and thread paths, not the parent's.
+
+    ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to
+    the parent thread, so inheriting it would make the branch read/write the
+    parent's workspace and release the parent's sandbox after its first run;
+    ``thread_data`` is recomputed from the branch's own thread_id by
+    ThreadDataMiddleware on every run.
+    """
+    branch_values = _branch_union_channel_thread(monkeypatch, mode)
+
+    assert branch_values.get("sandbox") is None
+    assert branch_values.get("thread_data") is None
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, mode) -> None:
+    """POST /state must store a plain value when the reducer channel was never written.
+
+    Same mechanism as the branch case (#4380): ``goal`` starts MISSING on a
+    thread that never wrote it, and the endpoint's replace-style ``Overwrite``
+    wrapping must not be persisted literally.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    source_thread_id = f"never-written-goal-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        update_response = client.post(
+            f"/api/threads/{source_thread_id}/state",
+            json={"values": {"goal": {"objective": "finish"}}},
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["values"]["goal"] == {"objective": "finish"}
+
+        read_response = client.get(f"/api/threads/{source_thread_id}/state")
+        assert read_response.status_code == 200, read_response.text
+        assert read_response.json()["values"]["goal"] == {"objective": "finish"}
+
+
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
     """Unknown fields fail 422 instead of a false-success 200."""
     app, _store, checkpointer = _build_thread_app()
