@@ -24,6 +24,7 @@ from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.runtime.events.store.base import RunEventStore
     from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,7 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
+        event_store: RunEventStore | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -234,6 +236,7 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
+        self._event_store = event_store
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -757,7 +760,15 @@ class RunManager:
                 logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return records_by_id
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> None:
+    async def set_status(
+        self,
+        run_id: str,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        persist: bool = True,
+    ) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -770,8 +781,42 @@ class RunManager:
                 record.error = error
             if stop_reason is not None:
                 record.stop_reason = stop_reason
-        await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        if persist:
+            await self._persist_status(record, status, error=error, stop_reason=stop_reason)
         logger.info("Run %s -> %s", run_id, status.value)
+
+    async def persist_current_status(self, run_id: str) -> bool:
+        """Persist the status already staged on the in-memory run record."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                logger.warning("persist_current_status called for unknown run %s", run_id)
+                return False
+            status = record.status
+            error = record.error
+            stop_reason = record.stop_reason
+        return await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+
+    async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
+        """Idempotently persist a zero-delivery receipt during recovery."""
+        if self._event_store is None:
+            return True
+        try:
+            await self._event_store.put_if_absent(
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content={"presented": 0, "paths": [], "by_tool": {}},
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
@@ -1047,6 +1092,51 @@ class RunManager:
             user_id=user_id,
         )
 
+    async def _close_cancelled_admission(self, record: RunRecord) -> None:
+        """Terminalize an unseen replacement and confirm its durable state."""
+        await self.cancel(record.run_id)
+        if self._store is None:
+            return
+
+        stored = await self._call_store_with_retry(
+            "verify cancelled admission",
+            record.run_id,
+            lambda: self._store.get(record.run_id, user_id=record.user_id),
+        )
+        active_statuses = (RunStatus.pending.value, RunStatus.running.value)
+        if stored is not None and stored.get("status") in active_statuses:
+            # `_persist_status` is deliberately best-effort. This compensation
+            # path needs a strict second CAS attempt because the caller never
+            # receives the record and no worker can attach after it returns.
+            # A peer terminal transition wins the CAS and is preserved below.
+            await self._call_store_with_retry(
+                "terminalize cancelled admission",
+                record.run_id,
+                lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
+            )
+            stored = await self._call_store_with_retry(
+                "verify terminal cancelled admission",
+                record.run_id,
+                lambda: self._store.get(record.run_id, user_id=record.user_id),
+            )
+            if stored is not None and stored.get("status") in active_statuses:
+                raise RuntimeError(f"Cancelled admission {record.run_id} remains active in the run store")
+
+        if stored is None:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record:
+                    self._runs.pop(record.run_id, None)
+                    self._unindex_run_locked(record.run_id, record.thread_id)
+            return
+
+        stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
+        async with self._lock:
+            if self._runs.get(record.run_id) is record:
+                record.status = stored_status
+                record.error = stored.get("error")
+                record.stop_reason = stored.get("stop_reason")
+                record.updated_at = _now_iso()
+
     async def _admit_thread_operation(
         self,
         thread_id: str,
@@ -1215,9 +1305,29 @@ class RunManager:
                     interrupted_records.append(r)
 
         # Outside the lock: persist interrupted status for locally-cancelled
-        # runs. Store-side claimed rows are already finalised.
-        for interrupted_record in interrupted_records:
-            await self._persist_status(interrupted_record, RunStatus.interrupted)
+        # runs. Store-side claimed rows are already finalised. Cancellation at
+        # this point happens after the replacement was admitted, so close that
+        # new run before propagating cancellation to the caller.
+        try:
+            for interrupted_record in interrupted_records:
+                await self._persist_status(interrupted_record, RunStatus.interrupted)
+        except asyncio.CancelledError:
+            cleanup = asyncio.create_task(self._close_cancelled_admission(record))
+            cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    break
+            try:
+                cleanup.result()
+            except asyncio.CancelledError:
+                logger.error("Cancelled admission cleanup task was itself cancelled for run %s", record.run_id)
+            except Exception:
+                logger.exception("Failed to close run %s after admission was cancelled", record.run_id)
+            raise
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
@@ -1355,6 +1465,12 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
+                # The atomic takeover above must win before writing a zero-delivery
+                # receipt; otherwise a stale scan could race a heartbeat renewal and
+                # permanently overwrite a live run's later detailed receipt. The
+                # receipt remains best-effort, matching normal terminal delivery
+                # when its event store is unavailable.
+                await self._ensure_delivery_receipt(record)
                 recovered.append(record)
 
         if recovered:

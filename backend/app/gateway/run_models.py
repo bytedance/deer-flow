@@ -28,7 +28,7 @@ class RunCreateRequest(BaseModel):
     interrupt_after: list[str] | Literal["*"] | None = Field(default=None, description="Nodes to interrupt after")
     stream_mode: list[RunStreamMode] | RunStreamMode | None = Field(default=None, description="Supported stream mode(s)")
     stream_subgraphs: bool = Field(default=False, description="Include subgraph events")
-    stream_resumable: None = Field(default=None, description="Compatibility placeholder; resumable SSE is not supported")
+    stream_resumable: Literal[False] | None = Field(default=None, description="Compatibility placeholder; only the SDK's non-resumable default (null/false) is accepted")
     on_disconnect: Literal["cancel", "continue"] = Field(default="cancel", description="Behaviour on SSE disconnect")
     on_completion: None = Field(default=None, description="Compatibility placeholder; completion behavior is not supported")
     multitask_strategy: Literal["reject", "rollback", "interrupt"] = Field(default="reject", description="Concurrency strategy")
@@ -38,7 +38,6 @@ class RunCreateRequest(BaseModel):
 
     @field_validator(
         "webhook",
-        "stream_resumable",
         "on_completion",
         "multitask_strategy",
         "after_seconds",
@@ -53,7 +52,6 @@ class RunCreateRequest(BaseModel):
 
         supported_defaults = {
             "webhook": None,
-            "stream_resumable": None,
             "on_completion": None,
             "multitask_strategy": {"reject", "rollback", "interrupt"},
             "after_seconds": None,
@@ -72,6 +70,20 @@ class RunCreateRequest(BaseModel):
                 {"option": info.field_name},
             )
         return value
+
+    @field_validator("stream_resumable", mode="before")
+    @classmethod
+    def reject_resumable_streams(cls, value: Any) -> Any:
+        # LangGraph SDK clients always send this field (its default is ``False``, which the
+        # payload's ``None`` filter keeps). ``False`` asks for the non-resumable stream
+        # DeerFlow already serves, so only an explicit ``True`` requests the unsupported feature.
+        if value is None or value is False:
+            return value
+        raise PydanticCustomError(
+            "unsupported_run_option",
+            "Run option '{option}' is not supported by DeerFlow",
+            {"option": "stream_resumable"},
+        )
 
     @field_validator("stream_mode", mode="before")
     @classmethod
