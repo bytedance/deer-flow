@@ -11,7 +11,8 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +29,7 @@ from app.gateway.internal_auth import (
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -35,13 +37,16 @@ from deerflow.config.app_config import get_app_config
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    ORPHAN_RECOVERY_STOP_REASON,
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
+    RunContext,
     RunManager,
     RunRecord,
     RunStatus,
     StreamBridge,
+    ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
     run_agent,
@@ -56,10 +61,30 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import redact_config_secrets
+from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def reserve_checkpoint_write(
+    request: Request,
+    thread_id: str,
+    *,
+    user_id: str | None = None,
+) -> AsyncIterator[None]:
+    """Serialize an out-of-run checkpoint writer against all thread operations."""
+    run_manager = get_run_manager(request)
+    async with goal_thread_lock(thread_id):
+        async with run_manager.reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=user_id,
+        ):
+            yield
+
 
 _TERMINAL_RUN_STATUSES = {
     RunStatus.success,
@@ -67,6 +92,8 @@ _TERMINAL_RUN_STATUSES = {
     RunStatus.timeout,
     RunStatus.interrupted,
 }
+
+_THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
     {
@@ -102,6 +129,51 @@ def _run_is_terminal(record: RunRecord) -> bool:
     return record.status in _TERMINAL_RUN_STATUSES
 
 
+def _consume_task_result(task: asyncio.Task) -> None:
+    """Retrieve a detached task's exception without propagating cancellation."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> None:
+    """Log detached metadata setup failures while ignoring cancellation."""
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.warning(
+            "Failed to ensure thread_meta for %s after worker detached (non-fatal)",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+
+
+async def _ensure_thread_metadata(
+    run_ctx: RunContext,
+    record: RunRecord,
+    *,
+    owner_user_id: str | None,
+) -> None:
+    """Ensure an admitted run's thread exists without delaying task attachment."""
+    thread_store = run_ctx.thread_store
+    existing = await thread_store.get(record.thread_id)
+    if existing is None and owner_user_id:
+        unscoped = await thread_store.get(record.thread_id, user_id=None)
+        if unscoped is not None:
+            if unscoped.get("user_id") != owner_user_id:
+                await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
+            existing = await thread_store.get(record.thread_id)
+    if existing is None:
+        await thread_store.create(
+            record.thread_id,
+            assistant_id=record.assistant_id,
+            metadata=record.metadata,
+        )
+
+
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
     """True when a terminal run has no retained stream on bridges that can tell."""
     if not _run_is_terminal(record):
@@ -120,21 +192,27 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
         return False
 
 
+async def _orphan_recovery_observed_after_heartbeat(
+    record: RunRecord,
+    run_mgr: RunManager,
+) -> bool:
+    """Return whether durable orphan recovery is the consumer's liveness edge.
+
+    A normal terminal status is not sufficient: the producer persists status
+    before publishing its final error/data frames and END. Orphan recovery is
+    different because the producer is known to be gone and the durable
+    ``stop_reason`` is written atomically with the terminal status. Only that
+    explicit signal may synthesize END after a heartbeat.
+    """
+    if not record.store_only:
+        return False
+    refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
+    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+
+
 # ---------------------------------------------------------------------------
 # Input / config helpers
 # ---------------------------------------------------------------------------
-
-
-def normalize_stream_modes(raw: list[str] | str | None) -> list[str]:
-    """Normalize the stream_mode parameter to a list.
-
-    Default matches what ``useStream`` expects: values + messages-tuple.
-    """
-    if raw is None:
-        return ["values"]
-    if isinstance(raw, str):
-        return [raw]
-    return raw if raw else ["values"]
 
 
 def _strip_external_message_metadata(message: Any) -> Any:
@@ -629,9 +707,10 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
+        self.checkpoint_exists = tup is not None
         self.config = getattr(tup, "config", None) or config
         checkpoint = getattr(tup, "checkpoint", None) or {}
         self.values = dict(checkpoint.get("channel_values") or {})
@@ -883,7 +962,7 @@ async def apply_checkpoint_to_run_config(
 
 
 async def start_run(
-    body: Any,
+    body: RunCreateRequest,
     thread_id: str,
     request: Request,
 ) -> RunRecord:
@@ -892,13 +971,13 @@ async def start_run(
     Parameters
     ----------
     body : RunCreateRequest
-        The validated request body (typed as Any to avoid circular import
-        with the router module that defines the Pydantic model).
+        The validated request body shared by HTTP and internal launch paths.
     thread_id : str
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
@@ -948,49 +1027,6 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
-        try:
-            async with goal_thread_lock(thread_id):
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=body.metadata or {},
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built below keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                )
-        except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedStrategyError as exc:
-            raise HTTPException(status_code=501, detail=str(exc)) from exc
-
-        # Upsert thread metadata so the thread appears in /threads/search,
-        # even for threads that were never explicitly created via POST /threads
-        # (e.g. stateless runs).
-        try:
-            existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None and owner_user_id:
-                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
-                if unscoped_existing is not None:
-                    if unscoped_existing.get("user_id") != owner_user_id:
-                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None:
-                await run_ctx.thread_store.create(
-                    thread_id,
-                    assistant_id=body.assistant_id,
-                    metadata=body.metadata,
-                )
-            else:
-                await run_ctx.thread_store.update_status(thread_id, "running")
-        except Exception:
-            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
-
         agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
@@ -1018,10 +1054,59 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
-        stream_modes = normalize_stream_modes(body.stream_mode)
-
-        task = asyncio.create_task(
-            run_agent(
+        async def run_after_metadata(record: RunRecord) -> None:
+            metadata_task = asyncio.create_task(
+                _ensure_thread_metadata(
+                    run_ctx,
+                    record,
+                    owner_user_id=owner_user_id,
+                )
+            )
+            abort_task = asyncio.create_task(record.abort_event.wait())
+            metadata_failure_logged = False
+            try:
+                done, _ = await asyncio.wait(
+                    (metadata_task, abort_task),
+                    timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if metadata_task in done:
+                    try:
+                        metadata_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        metadata_failure_logged = True
+                        logger.warning(
+                            "Failed to ensure thread_meta for %s (non-fatal)",
+                            sanitize_log_param(thread_id),
+                            exc_info=True,
+                        )
+                elif abort_task not in done:
+                    logger.warning(
+                        "Timed out ensuring thread_meta for %s after %.1fs",
+                        sanitize_log_param(thread_id),
+                        _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+                    )
+            finally:
+                if metadata_task.done():
+                    if not metadata_failure_logged:
+                        _log_thread_metadata_task_result(metadata_task, thread_id=thread_id)
+                else:
+                    metadata_task.cancel()
+                    metadata_task.add_done_callback(
+                        lambda task: _log_thread_metadata_task_result(
+                            task,
+                            thread_id=thread_id,
+                        )
+                    )
+                if not abort_task.done():
+                    abort_task.cancel()
+                    abort_task.add_done_callback(_consume_task_result)
+            # Continue through run_agent even after metadata abort/timeout:
+            # its startup barrier is the single path that turns pending
+            # cancellation into no-agent-construction plus publish_end.
+            await run_agent(
                 bridge,
                 run_mgr,
                 record,
@@ -1034,8 +1119,43 @@ async def start_run(
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
             )
-        )
-        record.task = task
+
+        try:
+            async with goal_thread_lock(thread_id):
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=body.metadata or {},
+                    # Persist a secret-redacted copy of the config: the run record is
+                    # written to runs.kwargs_json and echoed by the run API, so a
+                    # request-scoped secret (#3861) must not ride along. The live
+                    # config built above keeps the secrets for the actual run.
+                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                )
+
+                worker = run_after_metadata(record)
+                try:
+                    # No await is allowed between durable admission and task
+                    # attachment. Metadata setup runs inside the attached
+                    # worker so a pending cancellation can bypass stalled
+                    # thread-store IO and still reach run_agent's startup
+                    # barrier / stream finalization.
+                    record.task = asyncio.create_task(worker)
+                except Exception as exc:
+                    worker.close()
+                    await run_mgr.fail_start_if_pending(
+                        record.run_id,
+                        error=f"Failed to attach run worker: {exc}",
+                    )
+                    raise
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except UnsupportedStrategyError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name
@@ -1069,10 +1189,7 @@ async def launch_scheduled_thread_run(
             ),
             cookies={},
         )
-    # SimpleNamespace stands in for the Pydantic run-request body that the
-    # HTTP path parses. If start_run gains a new body.* attribute that it reads
-    # directly, add the matching field here so the scheduler path stays in sync.
-    body = SimpleNamespace(
+    body = RunCreateRequest(
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
@@ -1092,10 +1209,10 @@ async def launch_scheduled_thread_run(
         stream_subgraphs=False,
         stream_resumable=None,
         on_disconnect="continue",
-        on_completion="keep",
+        on_completion=None,
         multitask_strategy="reject",
         after_seconds=None,
-        if_not_exists="reject",
+        if_not_exists="create",
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)
@@ -1125,7 +1242,7 @@ async def sse_consumer(
                 break
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _terminal_record_stream_missing(bridge, record):
+                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
@@ -1188,7 +1305,7 @@ async def wait_for_run_completion(
             if entry is END_SENTINEL:
                 completed = True
                 return True
-            if entry is HEARTBEAT_SENTINEL and await _terminal_record_stream_missing(bridge, record):
+            if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
                 completed = True
                 return True
             if await request.is_disconnected():

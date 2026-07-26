@@ -54,6 +54,12 @@ jobs:
         env:
           SKIP_ENV_VALIDATION: '1'
 
+      - name: Run auth recovery E2E tests
+        working-directory: frontend
+        run: pnpm exec playwright test -c playwright.auth.config.ts
+        env:
+          SKIP_ENV_VALIDATION: '1'
+
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

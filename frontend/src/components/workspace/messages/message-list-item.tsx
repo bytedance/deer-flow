@@ -205,17 +205,22 @@ function MessageImage({
 }) {
   if (!src) return null;
 
-  const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
+  // `maxWidth` is applied inline rather than through a `max-w-[${maxWidth}]`
+  // class: Tailwind's JIT only generates utilities it can find as literal
+  // source tokens, so an interpolated arbitrary value would never be emitted.
+  const imgClassName = cn("overflow-hidden rounded-lg", props.className);
+  const imgStyle: React.CSSProperties = { maxWidth, ...props.style };
 
   if (typeof src !== "string") {
     return (
       <img
+        {...props}
         className={imgClassName}
+        style={imgStyle}
         src={src}
         alt={alt}
         loading="lazy"
         decoding="async"
-        {...props}
       />
     );
   }
@@ -225,12 +230,13 @@ function MessageImage({
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
       <img
+        {...props}
         className={imgClassName}
+        style={imgStyle}
         src={url}
         alt={alt}
         loading="lazy"
         decoding="async"
-        {...props}
       />
     </a>
   );
@@ -319,8 +325,11 @@ function MessageContent_({
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+      if (
+        rawContent.includes("<current_uploads>") ||
+        rawContent.includes("<uploaded_files>")
+      ) {
+        // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
         return parseUploadedFiles(rawContent);
       }
       return null;

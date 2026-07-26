@@ -47,4 +47,12 @@ def resolve_authorization_provider(
     if not isinstance(instance, AuthorizationProvider):
         raise ValueError(f"Authorization provider '{class_path}' does not satisfy the AuthorizationProvider Protocol")
 
+    from deerflow.authz.rbac import RbacAuthorizationProvider
+
+    if isinstance(instance, RbacAuthorizationProvider):
+        try:
+            instance.validate_role(config.default_role, field="authorization.default_role")
+        except ValueError as err:
+            raise ValueError(f"Invalid authorization default_role for provider '{class_path}': {err}") from err
+
     return instance

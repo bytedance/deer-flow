@@ -7,7 +7,7 @@ Uses ``graph.astream(stream_mode=[...])`` which gives correct full-state
 snapshots for ``values`` mode, proper ``{node: writes}`` for ``updates``,
 and ``(chunk, metadata)`` tuples for ``messages`` mode.
 
-Note: ``events`` mode is not supported through the gateway — it requires
+Note: ``events`` mode is rejected by the gateway — it requires
 ``graph.astream_events()`` which cannot simultaneously produce ``values``
 snapshots.  The JS open-source LangGraph API server works around this via
 internal checkpoint callbacks that are not exposed in the Python public API.
@@ -63,6 +63,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
+from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
@@ -74,7 +75,7 @@ from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord
+from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
@@ -102,8 +103,6 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
         yield
 
 
-# Valid stream_mode values for LangGraph's graph.astream()
-_VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
 # Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
@@ -397,7 +396,6 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
-    requested_modes: set[str] = set(stream_modes or ["values"])
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -419,16 +417,29 @@ async def run_agent(
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
-
-    # Track whether "events" was requested but skipped
-    if "events" in requested_modes:
-        logger.info(
-            "Run %s: 'events' stream_mode not supported in gateway (requires astream_events + checkpoint callbacks). Skipping.",
-            run_id,
-        )
+    started = False
 
     try:
-        await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+        normalized_stream_modes = normalize_stream_modes(stream_modes)
+        requested_modes: set[str] = set(normalized_stream_modes)
+        lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
+        await run_manager.wait_for_prior_finalizing(
+            thread_id,
+            run_id,
+            abort_event=record.abort_event,
+        )
+
+        start_outcome = await run_manager.try_start(run_id)
+        if start_outcome is not RunStartOutcome.started:
+            return
+        started = True
+
+        if thread_store is not None:
+            try:
+                await thread_store.update_status(thread_id, "running")
+            except Exception:
+                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -477,9 +488,6 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
-
-        # 1. Mark running
-        await run_manager.set_status(run_id, RunStatus.running)
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
@@ -616,30 +624,6 @@ async def run_agent(
         if interrupt_after:
             agent.interrupt_after_nodes = interrupt_after
 
-        # 6. Build LangGraph stream_mode list
-        #    "events" is NOT a valid astream mode — skip it
-        #    "messages-tuple" maps to LangGraph's "messages" mode
-        lg_modes: list[str] = []
-        for m in requested_modes:
-            if m == "messages-tuple":
-                lg_modes.append("messages")
-            elif m == "events":
-                # Skipped — see log above
-                continue
-            elif m in _VALID_LG_MODES:
-                lg_modes.append(m)
-        if not lg_modes:
-            lg_modes = ["values"]
-
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for m in lg_modes:
-            if m not in seen:
-                seen.add(m)
-                deduped.append(m)
-        lg_modes = deduped
-
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
         # Buffer subagent step events and persist them in batches (#3779) instead
@@ -687,21 +671,24 @@ async def run_agent(
                             logger.info("Run %s abort requested — stopping", run_id)
                             break
 
-                        mode, chunk = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                        mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
                         if mode is None:
                             continue
 
-                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        sse_event = _lg_mode_to_sse_event(mode)
-                        if file_tool_chunk_batcher is not None and mode != "messages":
-                            pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
-                            for publish_chunk in pending_chunks:
-                                await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
-                        chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
-                        for publish_chunk in chunks_to_publish:
-                            await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
-                        if mode == "custom":
-                            await subagent_events.add(chunk)
+                        if not namespace:
+                            # Only root-graph frames may decide the parent run's error
+                            # fallback: a delegated subagent's marked fallback is the
+                            # executor's to map (task_failed), not this run's.
+                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        await _publish_stream_item(
+                            bridge=bridge,
+                            run_id=run_id,
+                            mode=mode,
+                            chunk=chunk,
+                            namespace=namespace,
+                            file_tool_chunk_batcher=file_tool_chunk_batcher,
+                            subagent_events=subagent_events,
+                        )
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
@@ -774,6 +761,7 @@ async def run_agent(
             #   token_budget        -> "token_capped"
             #   safety_finish_reason -> "safety_capped"
             #   subagent_limit       -> "subagent_limit_capped"
+            #   model_length_finish_reason -> "model_length_capped"
             #
             # If more guards grow stop_reason semantics, consider a publish/
             # collect pattern (e.g. each guard middleware publishes its cap
@@ -849,7 +837,7 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if checkpointer is not None and record.status == RunStatus.interrupted:
+        if started and checkpointer is not None and record.status == RunStatus.interrupted:
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -858,7 +846,7 @@ async def run_agent(
                 logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
         # Sync title from checkpoint to threads_meta.display_name
-        if checkpointer is not None and thread_store is not None:
+        if started and checkpointer is not None and thread_store is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
@@ -872,7 +860,7 @@ async def run_agent(
 
         # Persist run duration to checkpoint metadata so history reads
         # don't need to correlate runs and events.
-        if checkpointer is not None and record.status == RunStatus.success:
+        if started and checkpointer is not None and record.status == RunStatus.success:
             try:
                 created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                 updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
@@ -890,7 +878,7 @@ async def run_agent(
                 logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
-        if thread_store is not None:
+        if started and thread_store is not None:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
                 await thread_store.update_status(thread_id, final_status)
@@ -1776,23 +1764,77 @@ def _unpack_stream_item(
     item: Any,
     lg_modes: list[str],
     stream_subgraphs: bool,
-) -> tuple[str | None, Any]:
-    """Unpack a multi-mode or subgraph stream item into (mode, chunk).
+) -> tuple[str | None, Any, tuple[str, ...]]:
+    """Unpack a multi-mode or subgraph stream item into (mode, chunk, namespace).
 
-    Returns ``(None, None)`` if the item cannot be parsed.
+    ``namespace`` is the subgraph namespace tuple LangGraph prefixes onto each
+    frame when ``subgraphs=True``; it is empty for root-graph frames. Delegated
+    subagent graphs inherit the parent's checkpoint namespace (see
+    ``subagents/executor.py``), so their frames arrive here with a non-empty
+    namespace and must not be mistaken for root frames.
+
+    Returns ``(None, None, ())`` if the item cannot be parsed.
     """
     if stream_subgraphs:
         if isinstance(item, tuple) and len(item) == 3:
-            _ns, mode, chunk = item
-            return str(mode), chunk
+            ns, mode, chunk = item
+            namespace = tuple(str(part) for part in ns) if isinstance(ns, (list, tuple)) else (str(ns),)
+            return str(mode), chunk, namespace
         if isinstance(item, tuple) and len(item) == 2:
             mode, chunk = item
-            return str(mode), chunk
-        return None, None
+            return str(mode), chunk, ()
+        return None, None, ()
 
     if isinstance(item, tuple) and len(item) == 2:
         mode, chunk = item
-        return str(mode), chunk
+        return str(mode), chunk, ()
 
     # Fallback: single-element output from first mode
-    return lg_modes[0] if lg_modes else None, item
+    return lg_modes[0] if lg_modes else None, item, ()
+
+
+def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
+    """Namespace-qualified SSE event name, LangGraph Platform style.
+
+    Root frames keep the bare event name; subgraph frames become
+    ``mode|ns1|ns2`` so clients can tell them apart. The LangGraph SDK parses
+    exactly this shape (``event.split("|").slice(1)``) and routes
+    subagent-namespaced values away from the thread view.
+    """
+    if not namespace:
+        return sse_event
+    return "|".join((sse_event, *namespace))
+
+
+async def _publish_stream_item(
+    *,
+    bridge: Any,
+    run_id: str,
+    mode: str,
+    chunk: Any,
+    namespace: tuple[str, ...],
+    file_tool_chunk_batcher: Any,
+    subagent_events: Any,
+) -> None:
+    """Publish one stream frame, preserving the subgraph namespace.
+
+    A subgraph frame published under a bare event name impersonates the root
+    graph: a delegated subagent's ``values`` snapshot then replaces the whole
+    thread view in SDK clients and its token chunks flood the parent message
+    stream (#4399). Subgraph frames therefore keep their namespace in the event
+    name and bypass the root-only consumers (file-tool chunk batcher, subagent
+    event persistence — task_* lifecycle events are root frames already).
+    """
+    sse_event = _compose_sse_event(_lg_mode_to_sse_event(mode), namespace)
+    if namespace:
+        await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+        return
+    if file_tool_chunk_batcher is not None and mode != "messages":
+        pending_chunks = file_tool_chunk_batcher.finish() if mode == "values" else file_tool_chunk_batcher.flush()
+        for publish_chunk in pending_chunks:
+            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
+    chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
+    for publish_chunk in chunks_to_publish:
+        await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
+    if mode == "custom":
+        await subagent_events.add(chunk)

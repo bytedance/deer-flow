@@ -29,15 +29,15 @@ DeerFlow 内置两个子 Agent：
 
 通用推理和执行 Agent，适合委派需要多步骤推理、网络搜索、文件操作和产出物生成的复杂子任务。
 
-- **默认超时**：900 秒（15 分钟）
-- **默认最大轮次**：160
+- **默认超时**：1800 秒（30 分钟）
+- **默认最大轮次**：150
 
 ### bash
 
 专门用于在沙箱内执行命令行任务的子 Agent，适合脚本编写、数据处理、文件转换和环境设置任务。
 
-- **默认超时**：900 秒（15 分钟）
-- **默认最大轮次**：80
+- **默认超时**：1800 秒（30 分钟）
+- **默认最大轮次**：60
 - **可用性**：仅当沙箱的 `bash` 工具可用时才暴露（`allow_host_bash: true` 或配置了容器沙箱）
 
 ## 委派流程
@@ -56,32 +56,44 @@ task(
 
 1. 从注册表查找子 Agent 配置，应用任何 `config.yaml` 覆盖。
 2. 用子 Agent 自己的提示词和工具创建新的 Agent 调用。
-3. 将子 Agent 运行到完成（或直到超时/最大轮次）。
+3. 将子 Agent 运行到完成——受 `max_turns`、`timeout` 以及镜像 Lead Agent 的**中间件防护链**（循环检测、token 预算、摘要压缩）共同约束。详见下方[失控行为防护](#失控行为防护)。
 4. 将子 Agent 的最终输出作为工具结果返回给 Lead Agent。
 
 ## 配置
 
-子 Agent 超时和最大轮次通过 `config.yaml` 中的 `subagents:` 部分控制：
+子 Agent 的超时、最大轮次以及单次运行的 token 预算通过 `config.yaml` 中的 `subagents:` 部分控制：
 
 ```yaml
 subagents:
-  # 所有子 Agent 的默认超时（秒，默认：900 = 15 分钟）
-  timeout_seconds: 900
+  # 所有子 Agent 的默认超时（秒，默认：1800 = 30 分钟）
+  timeout_seconds: 1800
 
-  # 可选：覆盖所有子 Agent 的最大轮次
+  # 可选：覆盖所有子 Agent 的最大轮次。
+  # 内置默认值：general-purpose=150、bash=60。留空则保持默认。
   # max_turns: 120
+
+  # 单次运行的 token 上限——防止子 Agent 在琐碎任务上烧 token 的兜底。
+  # 触达硬停止时，进行中的那轮会被截断（清空 tool calls，强制 finish_reason
+  # 为 "stop"），使运行自然完成；结果会被标记为 completed +
+  # subagent_stop_reason=token_capped，以便 Lead/UI 区分预算截断与正常完成（#3875）。
+  token_budget:
+    enabled: true
+    max_tokens: 2000000 # 宽松的默认值——调低以收紧成本控制
+    warn_threshold: 0.7 # 预算消耗达到此比例时记录一条 warning
 
   # 可选：按 Agent 覆盖
   agents:
     general-purpose:
       timeout_seconds: 1800 # 复杂任务 30 分钟
       max_turns: 160
+      # token_budget:        # 对上面全局 token_budget 的按 Agent 覆盖
+      #   max_tokens: 3000000
     bash:
       timeout_seconds: 300 # 快速命令 5 分钟
       max_turns: 80
 ```
 
-按 Agent 覆盖优先于全局 `timeout_seconds` 和 `max_turns` 设置。
+按 Agent 覆盖优先于全局 `timeout_seconds`、`max_turns` 和 `token_budget` 设置。
 
 ## 委派限制
 
@@ -92,6 +104,16 @@ subagents:
 - `max_total_subagents`：可选的每次请求总量上限；默认使用 `config.yaml` 中的 `subagents.max_total_per_run`（默认：6，有效范围：1-50）
 
 如果 Agent 尝试调用超过限制的子 Agent，中间件会裁剪多余的调用。当总量上限耗尽时，它会停止本次 run 的新 `task` 调用，让 Agent 基于已收集结果进行综合。
+
+## 失控行为防护
+
+子 Agent 运行各自的 Agent 循环，因此需要和 Lead Agent 一样的失控兜底。子 Agent 中间件链镜像了 Lead Agent 的三个防护（#3875）：
+
+- **`LoopDetectionMiddleware`** —— 打破子 Agent 不取得进展却反复调用同一工具的循环。子 Agent 不允许调用 `task`，因此这里只会触发工具循环启发式判定。硬停止会将结果标记为 `completed` + `subagent_stop_reason=loop_capped`，与下方 token 预算对称。由现有的 `loop_detection` 配置控制。
+- **`TokenBudgetMiddleware`** —— 强制执行 `subagents.token_budget` 单次运行上限。预算触达时，进行中的那轮会被截断（强制产出最终答案），结果标记为 `completed` + `subagent_stop_reason=token_capped`，使 Lead Agent 能区分预算截断与正常完成。触达 `max_turns` 同样以 `turn_capped` 上报。
+- **`SummarizationMiddleware`** —— 以和 Lead Agent 相同的方式压缩较长的子 Agent transcript，由同一个 `summarization.enabled` 开关控制，使一份配置同时覆盖两条链。
+
+这些防护与 `max_turns`、`timeout` 限制叠加生效。token 预算的默认 `max_tokens` 与 `summarization.enabled` 联动——压缩开启时为 1M，关闭时为 2M；但显式设置的 `subagents.token_budget.max_tokens`（全局或按 Agent）始终优先，因此切换摘要开关绝不会悄悄改动你已固定的值。
 
 ## ACP Agent（外部 Agent）
 
