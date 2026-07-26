@@ -46,6 +46,9 @@ class TestLocalPathFromUri:
         assert mcp_tools._local_path_from_uri("https://example.com/a.png") is None
         assert mcp_tools._local_path_from_uri("data:image/png;base64,AAAA") is None
 
+    def test_malformed_uri_is_ignored(self):
+        assert mcp_tools._local_path_from_uri("//[::1/foo.png") is None
+
     def test_relative_path_is_ignored_without_base_dir(self):
         assert mcp_tools._local_path_from_uri("relative/path.txt") is None
 
@@ -186,6 +189,14 @@ class TestRewriteLocalPathsInText:
         src.parent.mkdir()
         src.write_bytes(b"png")
         text = f"Saved to {src}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
+
+        assert result == text
+
+    def test_malformed_path_like_text_is_left_untouched(self, paths: Paths):
+        text = "Saved at //[::1/foo.png"
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
@@ -507,6 +518,15 @@ class TestConvertCallToolResultRewrites:
 
         assert content[0]["type"] == "text"
         assert content[0]["text"] == "hello"
+
+    def test_malformed_path_like_text_result_does_not_raise(self, paths: Paths):
+        result = CallToolResult(content=[TextContent(type="text", text="Saved at //[::1/foo.png")], isError=False)
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "Saved at //[::1/foo.png"
 
     def test_image_content_passthrough(self, paths: Paths):
         from mcp.types import ImageContent

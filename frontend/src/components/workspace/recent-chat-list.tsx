@@ -174,12 +174,25 @@ export function RecentChatList() {
 
   const handleRenameSubmit = useCallback(() => {
     if (renameThreadId && renameValue.trim()) {
-      renameThread({ threadId: renameThreadId, title: renameValue.trim() });
-      setRenameDialogOpen(false);
-      setRenameThreadId(null);
-      setRenameValue("");
+      renameThread(
+        { threadId: renameThreadId, title: renameValue.trim() },
+        {
+          onSuccess: () => {
+            setRenameDialogOpen(false);
+            setRenameThreadId(null);
+            setRenameValue("");
+          },
+          onError: (error) => {
+            toast.error(
+              error instanceof Error && error.message
+                ? error.message
+                : t.common.renameFailed,
+            );
+          },
+        },
+      );
     }
-  }, [renameThread, renameThreadId, renameValue]);
+  }, [renameThread, renameThreadId, renameValue, t.common.renameFailed]);
 
   const handleTogglePin = useCallback(
     (thread: AgentThread) => {

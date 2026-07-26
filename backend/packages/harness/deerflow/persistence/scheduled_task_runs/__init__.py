@@ -1,4 +1,4 @@
 from .model import ScheduledTaskRunRow
-from .sql import ScheduledTaskRunRepository
+from .sql import ActiveScheduledRunConflict, ScheduledTaskRunRepository
 
-__all__ = ["ScheduledTaskRunRow", "ScheduledTaskRunRepository"]
+__all__ = ["ActiveScheduledRunConflict", "ScheduledTaskRunRow", "ScheduledTaskRunRepository"]

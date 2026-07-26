@@ -6,15 +6,29 @@ import asyncio
 import logging
 import threading
 import time
+from collections.abc import Coroutine
 from typing import Any
 
 from app.channels.base import Channel
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
+from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+# Telegram's hosted Bot API documents this as 20 MB (decimal bytes).
+TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
+# Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
+TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS = 4.0
+TELEGRAM_BRIDGE_DRAIN_TIMEOUT_SECONDS = 1.0
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
 # Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
 # so stream edits there must pace well below the private-chat 1 msg/s guideline.
@@ -41,6 +55,9 @@ class TelegramChannel(Channel):
         self._thread: threading.Thread | None = None
         self._tg_loop: asyncio.AbstractEventLoop | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        # Tasks submitted from the main dispatcher loop back to PTB's loop.
+        # Only the Telegram loop mutates this set.
+        self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
         self._allowed_users: set[int] = set()
         for uid in config.get("allowed_users", []):
             try:
@@ -96,6 +113,10 @@ class TelegramChannel(Channel):
         # General message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
+        # Telegram keeps attachment captions separate from message.text, and
+        # photo/document updates do not match filters.TEXT.
+        app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, self._on_text))
+
         self._application = app
 
         # Run polling in a dedicated thread with its own event loop
@@ -106,12 +127,47 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._tg_loop and self._tg_loop.is_running():
-            self._tg_loop.call_soon_threadsafe(self._tg_loop.stop)
-        if self._thread:
-            self._thread.join(timeout=10)
-            self._thread = None
-        self._application = None
+        shutdown_loop = asyncio.get_running_loop()
+        deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
+        telegram_loop = self._tg_loop
+        worker_thread = self._thread
+
+        try:
+            if telegram_loop and telegram_loop.is_running():
+                drain_future = asyncio.run_coroutine_threadsafe(self._cancel_telegram_bridge_tasks(), telegram_loop)
+                try:
+                    remaining = max(0.0, deadline - shutdown_loop.time())
+                    await asyncio.wait_for(asyncio.wrap_future(drain_future), timeout=remaining)
+                except asyncio.CancelledError:
+                    drain_future.cancel()
+                    raise
+                except TimeoutError:
+                    drain_future.cancel()
+                    logger.warning("[Telegram] timed out cancelling inbound file downloads during shutdown")
+                except Exception as exc:
+                    logger.warning("[Telegram] failed to cancel inbound file downloads during shutdown: %s", type(exc).__name__)
+        finally:
+            if telegram_loop and telegram_loop.is_running():
+                try:
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                except RuntimeError:
+                    pass
+            try:
+                if worker_thread is not None and worker_thread.is_alive():
+                    remaining = max(0.0, deadline - shutdown_loop.time())
+                    if remaining:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(worker_thread.join, remaining),
+                                timeout=remaining,
+                            )
+                        except TimeoutError:
+                            logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
+            finally:
+                if worker_thread is not None and worker_thread.is_alive():
+                    logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
+                self._thread = None
+                self._application = None
         logger.info("Telegram channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -293,7 +349,136 @@ class TelegramChannel(Channel):
             logger.exception("[Telegram] failed to send file: %s", attachment.filename)
             return False
 
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
+        """Download inbound Telegram attachments for the shared upload pipeline.
+
+        The Bot API download URL contains the bot token, so this adapter never
+        exposes that URL to ``InboundMessage`` or logs. Instead it hands the
+        downloaded bytes to ``ChannelManager`` through a short-lived private
+        field that the manager consumes before persisting safe upload metadata.
+        """
+        # Owner/thread scoping is intentionally applied by ChannelManager when
+        # it persists these bytes through _ingest_inbound_files().
+        del thread_id, user_id
+        if not msg.files:
+            return msg
+
+        bot = self._application.bot if self._application is not None else None
+        materialized: list[dict[str, Any]] = []
+        unavailable: list[str] = []
+
+        for file_info in msg.files:
+            if not isinstance(file_info, dict):
+                continue
+
+            filename = self._safe_inbound_filename(file_info.get("filename"), "attachment")
+            file_id = file_info.get("file_id") if isinstance(file_info.get("file_id"), str) else ""
+            declared_size = self._file_size(file_info.get("size"))
+            if declared_size is not None and declared_size > TELEGRAM_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Telegram] inbound file exceeds 20 MB download limit, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the 20 MB download limit)")
+                continue
+
+            if bot is None or not file_id:
+                logger.error("[Telegram] cannot download inbound file: %s", filename)
+                unavailable.append(f"{filename} (download unavailable)")
+                continue
+
+            try:
+                resolved_size, content = await self._run_on_telegram_loop(self._download_inbound_file(bot, file_id))
+            except Exception as exc:
+                # Exception strings from HTTP clients can contain request URLs.
+                # Log only the class name so a Bot API token can never leak.
+                logger.error("[Telegram] failed to download inbound file %s: %s", filename, type(exc).__name__)
+                unavailable.append(f"{filename} (download failed)")
+                continue
+
+            if content is None:
+                logger.warning("[Telegram] resolved inbound file exceeds 20 MB download limit, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the 20 MB download limit)")
+                continue
+
+            if len(content) > TELEGRAM_MAX_INBOUND_FILE_BYTES:
+                logger.warning("[Telegram] downloaded inbound file exceeds 20 MB limit, skipping: %s", filename)
+                unavailable.append(f"{filename} (exceeds the 20 MB download limit)")
+                continue
+
+            materialized.append(
+                {
+                    "type": "image" if file_info.get("type") == "image" else "file",
+                    "filename": filename,
+                    "mime_type": file_info.get("mime_type") if isinstance(file_info.get("mime_type"), str) else "application/octet-stream",
+                    "size": len(content),
+                    INBOUND_FILE_CONTENT_KEY: content,
+                }
+            )
+
+        msg.files = materialized
+        if unavailable:
+            notice = f"[Telegram attachment unavailable: {', '.join(unavailable)}]"
+            msg.text = f"{msg.text}\n\n{notice}" if msg.text else notice
+        return msg
+
     # -- helpers -----------------------------------------------------------
+
+    async def _download_inbound_file(self, bot: Any, file_id: str) -> tuple[int | None, bytearray | None]:
+        """Fetch one file entirely on the event loop that owns PTB's HTTP client."""
+        telegram_file = await bot.get_file(file_id)
+        resolved_size = self._file_size(getattr(telegram_file, "file_size", None))
+        if resolved_size is not None and resolved_size > TELEGRAM_MAX_INBOUND_FILE_BYTES:
+            return resolved_size, None
+        return resolved_size, await telegram_file.download_as_bytearray()
+
+    async def _track_telegram_bridge_task(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        """Keep a main-loop submission visible to Telegram-loop shutdown."""
+        task = asyncio.current_task()
+        if task is None:
+            coroutine.close()
+            raise RuntimeError("Telegram bridge task is unavailable")
+        self._tg_bridge_tasks.add(task)
+        try:
+            return await coroutine
+        finally:
+            self._tg_bridge_tasks.discard(task)
+
+    async def _cancel_telegram_bridge_tasks(self) -> None:
+        """Cancel and drain cross-loop PTB work before its event loop exits."""
+        current = asyncio.current_task()
+        pending = [task for task in self._tg_bridge_tasks if task is not current and not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            done, still_pending = await asyncio.wait(pending, timeout=TELEGRAM_BRIDGE_DRAIN_TIMEOUT_SECONDS)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            if still_pending:
+                logger.warning("[Telegram] %d inbound file download task(s) did not cancel promptly", len(still_pending))
+
+    async def _run_on_telegram_loop(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        """Await a PTB coroutine without using its HTTP client across event loops."""
+        telegram_loop = self._tg_loop
+        current_loop = asyncio.get_running_loop()
+        if telegram_loop is None or telegram_loop is current_loop:
+            return await coroutine
+
+        if not telegram_loop.is_running():
+            coroutine.close()
+            raise RuntimeError("Telegram event loop is not running")
+
+        tracked_coroutine = self._track_telegram_bridge_task(coroutine)
+        try:
+            future = asyncio.run_coroutine_threadsafe(tracked_coroutine, telegram_loop)
+        except BaseException:
+            # A concurrent shutdown can close the loop between the running
+            # check and scheduling. Close the unscheduled coroutine explicitly.
+            tracked_coroutine.close()
+            coroutine.close()
+            raise
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
 
     @staticmethod
     def _stream_key(chat_id: str, thread_ts: str | None) -> str:
@@ -303,8 +488,83 @@ class TelegramChannel(Channel):
     def _parse_message_id(value: str | None) -> int | None:
         try:
             return int(value) if value else None
+        except (OverflowError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _file_size(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            size = int(value)
         except (TypeError, ValueError):
             return None
+        return size if size >= 0 else None
+
+    @staticmethod
+    def _safe_inbound_filename(value: Any, fallback: str) -> str:
+        if not isinstance(value, str):
+            return fallback
+        try:
+            candidate = normalize_filename(value.strip())
+        except (UnicodeError, ValueError):
+            return fallback
+        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
+            return fallback
+        return candidate
+
+    @classmethod
+    def _extract_inbound_files(cls, message: Any) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        message_id = str(getattr(message, "message_id", "message"))
+
+        # Materialize the PTB sequence once. Test doubles and partially shaped
+        # update objects can expose a truthy but empty iterable here.
+        photo_sizes = tuple(getattr(message, "photo", None) or ())
+        if photo_sizes:
+            photo = max(
+                photo_sizes,
+                key=lambda item: (
+                    (cls._file_size(getattr(item, "width", None)) or 0) * (cls._file_size(getattr(item, "height", None)) or 0),
+                    cls._file_size(getattr(item, "file_size", None)) or 0,
+                ),
+            )
+            file_id = getattr(photo, "file_id", None)
+            if isinstance(file_id, str) and file_id:
+                file_unique_id = getattr(photo, "file_unique_id", None)
+                files.append(
+                    {
+                        "type": "image",
+                        "file_id": file_id,
+                        "file_unique_id": file_unique_id if isinstance(file_unique_id, str) else None,
+                        "filename": f"telegram-photo-{message_id}.jpg",
+                        "mime_type": "image/jpeg",
+                        "size": cls._file_size(getattr(photo, "file_size", None)),
+                    }
+                )
+
+        document = getattr(message, "document", None)
+        document_id = getattr(document, "file_id", None) if document is not None else None
+        if isinstance(document_id, str) and document_id:
+            file_unique_id = getattr(document, "file_unique_id", None)
+            mime_type = getattr(document, "mime_type", None)
+            if not isinstance(mime_type, str) or not mime_type:
+                mime_type = "application/octet-stream"
+            # Avoid the lazy system MIME database lookup on the Telegram event
+            # loop. The original name is preferred; an opaque extension is safe.
+            fallback = f"telegram-document-{message_id}.bin"
+            files.append(
+                {
+                    "type": "file",
+                    "file_id": document_id,
+                    "file_unique_id": file_unique_id if isinstance(file_unique_id, str) else None,
+                    "filename": cls._safe_inbound_filename(getattr(document, "file_name", None), fallback),
+                    "mime_type": mime_type,
+                    "size": cls._file_size(getattr(document, "file_size", None)),
+                }
+            )
+
+        return files
 
     def _register_stream_message(self, key: str, *, message_id: int, last_text: str, last_edit_at: float) -> None:
         self._stream_messages.pop(key, None)
@@ -358,15 +618,18 @@ class TelegramChannel(Channel):
 
     def _run_polling(self) -> None:
         """Run telegram polling in a dedicated thread."""
+        application = self._application
+        if application is None:
+            return
         self._tg_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._tg_loop)
         try:
             # Cannot use run_polling() because it calls add_signal_handler(),
             # which only works in the main thread.  Instead, manually
             # initialize the application and start the updater.
-            self._tg_loop.run_until_complete(self._application.initialize())
-            self._tg_loop.run_until_complete(self._application.start())
-            self._tg_loop.run_until_complete(self._application.updater.start_polling())
+            self._tg_loop.run_until_complete(application.initialize())
+            self._tg_loop.run_until_complete(application.start())
+            self._tg_loop.run_until_complete(application.updater.start_polling())
             self._tg_loop.run_forever()
         except Exception:
             if self._running:
@@ -374,10 +637,11 @@ class TelegramChannel(Channel):
         finally:
             # Graceful shutdown
             try:
-                if self._application.updater.running:
-                    self._tg_loop.run_until_complete(self._application.updater.stop())
-                self._tg_loop.run_until_complete(self._application.stop())
-                self._tg_loop.run_until_complete(self._application.shutdown())
+                self._tg_loop.run_until_complete(self._cancel_telegram_bridge_tasks())
+                if application.updater.running:
+                    self._tg_loop.run_until_complete(application.updater.stop())
+                self._tg_loop.run_until_complete(application.stop())
+                self._tg_loop.run_until_complete(application.shutdown())
             except Exception:
                 logger.exception("Error during Telegram shutdown")
 
@@ -517,12 +781,19 @@ class TelegramChannel(Channel):
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
     async def _on_text(self, update, context) -> None:
-        """Handle regular text messages."""
+        """Handle regular text, photo, and document messages."""
         if not self._check_user(update.effective_user.id):
             return
 
-        text = self._strip_bot_username_from_leading_command(update.message.text.strip(), self._get_bot_username(context))
-        if not text:
+        message = update.message
+        message_text = getattr(message, "text", None)
+        caption = getattr(message, "caption", None)
+        raw_text = message_text if isinstance(message_text, str) else caption if isinstance(caption, str) else ""
+        text = raw_text.strip()
+        if text:
+            text = self._strip_bot_username_from_leading_command(text, self._get_bot_username(context))
+        files = self._extract_inbound_files(message)
+        if not text and not files:
             return
 
         chat_id = str(update.effective_chat.id)
@@ -549,6 +820,7 @@ class TelegramChannel(Channel):
             text=text,
             msg_type=InboundMessageType.CHAT,
             thread_ts=msg_id,
+            files=files,
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
