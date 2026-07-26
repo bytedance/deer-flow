@@ -1092,6 +1092,10 @@ export const enUS: Translations = {
     haveAccountSignIn: "Already have an account? Sign in",
     backToHome: "← Back to home",
     networkError: "Network error. Please try again.",
+    serviceUnavailableTitle: "Service temporarily unavailable",
+    serviceUnavailableDescription:
+      "The Gateway is taking too long to respond. Check that it is running, then try again.",
+    retry: "Try again",
     authFailed: "Authentication failed.",
     errors: {
       sso_failed: "SSO login failed. Please try again or use email login.",
