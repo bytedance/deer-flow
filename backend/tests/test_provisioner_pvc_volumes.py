@@ -1,5 +1,6 @@
 """Regression tests for provisioner three-way skills + PVC volume support."""
 
+import pytest
 
 # ── _build_volumes ─────────────────────────────────────────────────────
 
@@ -112,6 +113,67 @@ class TestBuildVolumes:
         volumes = provisioner_module._build_volumes("thread-1")
         assert volumes[0].name == "skills"
         assert volumes[-1].name == "user-data"
+
+    def test_extra_mount_uses_hostpath_when_userdata_pvc_is_disabled(self, provisioner_module):
+        """Controlled extra mounts should become extra hostPath volumes by default."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            )
+        ]
+
+        volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
+
+        # skills-public + skills-custom + user-data (3 base) + 1 extra volume.
+        assert len(volumes) == 4
+        extra_vol = volumes[-1]
+        assert extra_vol.name == "extra-0"
+        assert extra_vol.host_path.path == "/state/users/alice/integrations/lark-cli/config"
+        assert extra_vol.host_path.type == "DirectoryOrCreate"
+
+    def test_extra_mount_uses_userdata_pvc_when_configured(self, provisioner_module):
+        """PVC mode should use the same DeerFlow data PVC for runtime config mounts."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            )
+        ]
+
+        volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
+
+        # skills-public + skills-custom + user-data (3 base) + 1 extra volume.
+        assert len(volumes) == 4
+        extra_vol = volumes[-1]
+        assert extra_vol.name == "extra-0"
+        assert extra_vol.persistent_volume_claim is not None
+        assert extra_vol.persistent_volume_claim.claim_name == "userdata-pvc"
+        assert extra_vol.host_path is None
+
+    def test_extra_mount_rejects_paths_outside_deerflow_state(self, provisioner_module):
+        """Provisioner must not accept arbitrary hostPath mounts from clients."""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/etc",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            )
+        ]
+
+        with pytest.raises(provisioner_module.HTTPException) as exc_info:
+            provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
+
+        assert exc_info.value.status_code == 400
 
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
@@ -226,6 +288,64 @@ class TestBuildVolumeMounts:
         userdata_mount = mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/default/threads/thread-42/user-data"
 
+    # ── Managed integration extra mounts ───────────────────────────────
+
+    def test_extra_mount_adds_volume_mount(self, provisioner_module):
+        """Controlled extra mounts should be mounted at their requested container path."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            )
+        ]
+
+        mounts = provisioner_module._build_volume_mounts("thread-1", extra_mounts=extra_mounts)
+
+        extra_mount = mounts[-1]
+        assert extra_mount.name == "extra-0"
+        assert extra_mount.mount_path == "/mnt/integrations/lark-cli/config"
+        assert extra_mount.read_only is False
+        assert extra_mount.sub_path is None
+
+    def test_extra_mount_uses_pvc_subpath(self, provisioner_module):
+        """PVC extra mounts should point at the same user-scoped DeerFlow path."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            )
+        ]
+
+        mounts = provisioner_module._build_volume_mounts("thread-1", extra_mounts=extra_mounts)
+
+        extra_mount = mounts[-1]
+        assert extra_mount.name == "extra-0"
+        assert extra_mount.sub_path == "deer-flow/users/alice/integrations/lark-cli/config"
+
+    def test_extra_mount_rejects_unknown_container_path(self, provisioner_module):
+        """Only first-party managed mount paths are accepted."""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/secrets",
+                read_only=False,
+            )
+        ]
+
+        with pytest.raises(provisioner_module.HTTPException) as exc_info:
+            provisioner_module._build_volume_mounts("thread-1", extra_mounts=extra_mounts)
+
+        assert exc_info.value.status_code == 400
+
 
 # ── _build_pod integration ─────────────────────────────────────────────
 
@@ -293,6 +413,37 @@ class TestBuildPodVolumes:
         userdata_mount = pod.spec.containers[0].volume_mounts[-1]
         assert userdata_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/user-data"
 
+    def test_pod_includes_extra_mounts(self, provisioner_module):
+        """Provisioner-created pods should include managed integration runtime mounts."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/data",
+                container_path="/mnt/integrations/lark-cli/data",
+                read_only=False,
+            ),
+        ]
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=extra_mounts,
+        )
+
+        # skills-public + skills-custom + user-data (3 base) + 2 extra mounts.
+        assert len(pod.spec.volumes) == 5
+        mount_paths = {mount.mount_path for mount in pod.spec.containers[0].volume_mounts}
+        assert "/mnt/integrations/lark-cli/config" in mount_paths
+        assert "/mnt/integrations/lark-cli/data" in mount_paths
+
     def test_pod_three_way_skills_mount_paths(self, provisioner_module):
         """Ensure public/custom/legacy mount paths are correct."""
         provisioner_module.SKILLS_PVC_NAME = ""
@@ -315,3 +466,98 @@ class TestBuildPodVolumes:
         pod = provisioner_module._build_pod("sandbox-1", "thread-1", user_id="user-7")
         skills_mount = pod.spec.containers[0].volume_mounts[0]
         assert skills_mount.sub_path == "deer-flow/users/user-7/threads/thread-1/skills"
+
+
+class TestLarkCliInitContainer:
+    """Init-container + emptyDir provisioning of the sandbox lark-cli runtime."""
+
+    def test_no_init_container_when_image_unset(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_INIT_IMAGE = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_runtime=True,
+        )
+        assert not pod.spec.init_containers
+        volume_names = {v.name for v in pod.spec.volumes}
+        assert provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME not in volume_names
+
+    def test_no_init_container_when_flag_disabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_INIT_IMAGE = "deer-flow/lark-cli-init:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_runtime=False,
+        )
+        assert not pod.spec.init_containers
+
+    def test_init_container_and_emptydir_when_enabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_INIT_IMAGE = "deer-flow/lark-cli-init:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_runtime=True,
+        )
+
+        # emptyDir volume shared by init + sandbox containers.
+        runtime_volumes = [v for v in pod.spec.volumes if v.name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME]
+        assert len(runtime_volumes) == 1
+        assert runtime_volumes[0].empty_dir is not None
+
+        # Exactly one init container, pointing at the configured image and
+        # writing the runtime path.
+        assert pod.spec.init_containers is not None
+        assert len(pod.spec.init_containers) == 1
+        init = pod.spec.init_containers[0]
+        assert init.image == "deer-flow/lark-cli-init:v1.0.65"
+        init_mount = init.volume_mounts[0]
+        assert init_mount.name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME
+        assert init_mount.mount_path == provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH
+        assert init_mount.read_only is False
+
+        # Sandbox container gets a read-only runtime mount at the same path.
+        sandbox_runtime_mounts = [m for m in pod.spec.containers[0].volume_mounts if m.name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME]
+        assert len(sandbox_runtime_mounts) == 1
+        assert sandbox_runtime_mounts[0].mount_path == provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH
+        assert sandbox_runtime_mounts[0].read_only is True
+
+    def test_runtime_extra_mount_dropped_when_init_container_enabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_INIT_IMAGE = "deer-flow/lark-cli-init:v1.0.65"
+        extra_mounts = [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=False,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/integrations/lark-cli/sandbox-cli",
+                container_path="/mnt/integrations/lark-cli/runtime",
+                read_only=True,
+            ),
+        ]
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=extra_mounts,
+            provision_lark_cli_runtime=True,
+        )
+
+        # The credential config mount stays; the hostPath runtime extra mount is
+        # replaced by the emptyDir supplied by the init container (so the runtime
+        # path is not backed by an extra-* hostPath volume).
+        runtime_mounts = [m for m in pod.spec.containers[0].volume_mounts if m.mount_path == "/mnt/integrations/lark-cli/runtime"]
+        assert len(runtime_mounts) == 1
+        assert runtime_mounts[0].name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME
+        mount_paths = {m.mount_path for m in pod.spec.containers[0].volume_mounts}
+        assert "/mnt/integrations/lark-cli/config" in mount_paths

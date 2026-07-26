@@ -706,6 +706,7 @@ export const enUS: Translations = {
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
+      integrations: "Integrations",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -816,6 +817,203 @@ export const enUS: Translations = {
         "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
       disabled:
         "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
+    },
+    integrations: {
+      title: "Integrations",
+      description:
+        "Connect third-party tools and work platforms so agents can use them directly.",
+      refresh: "Refresh",
+      install: "Install",
+      reinstall: "Reinstall",
+      installing: "Installing...",
+      ready: "Ready",
+      pending: "Pending",
+      available: "Available",
+      unavailable: "Unavailable",
+      connected: "Connected",
+      loadFailed: "Failed to load integration status",
+      adminRequired: "Admin privileges are required to install integrations.",
+      lark: {
+        title: "Lark / Feishu CLI",
+        description:
+          "Install the official Lark/Feishu agent skills and let agents use Lark after authorization.",
+        skillPack: "Skill pack",
+        gatewayCli: "Gateway CLI",
+        auth: "Auth",
+        sandboxRuntime: "Sandbox runtime",
+        sandboxRuntimeInitContainer: "Provisioned by init container",
+        sandboxRuntimeGatewayDownload: "Provisioned by Gateway",
+        sandboxRuntimeNotReady:
+          "Not ready — lark-cli may be missing at chat time",
+        notInstalled: "Not installed",
+        skillsInstalled: (installed, expected) =>
+          `${installed}/${expected} skills installed`,
+        installedVersion: (version) => `Installed: ${version}`,
+        updateAvailable: (version) =>
+          `Update available: ${version} — admin reinstall updates the managed Gateway CLI and skill pack`,
+        runtimeVersionMismatch:
+          "Skill pack version differs from the Gateway runtime lark-cli; admin reinstall attempts to update the managed Gateway CLI and realign the skill pack",
+        authNotConfigured: "Not connected",
+        authConfigured: "Credentials configured (not live-verified)",
+        authConfiguredFor: (user) =>
+          `${user} · credentials configured (not live-verified)`,
+        connect: "Connect Lark",
+        authStarting: "Opening connection link...",
+        checkingConnection: "Checking connection...",
+        connectedAction: "Reconnect Lark",
+        requestPermissions: "Request permissions",
+        alreadyConnected:
+          "Lark is already connected. If authorization expires, refresh the status and reconnect.",
+        connectionStarted: "Connection link opened",
+        connectionReady: "Connection is ready. Opening authorization...",
+        authStarted:
+          "Authorization page opened. DeerFlow will detect completion automatically.",
+        authorizationStillPending:
+          'Authorization is not complete yet. Finish it in the browser; DeerFlow keeps checking automatically. You can click "I completed authorization" if the page does not update.',
+        permissionTitle: "Authorization scope",
+        permissionDescription:
+          "By default, DeerFlow only completes the base sign-in and does not request any business permissions. Select the domains you need here; connected users can re-authorize to add more (scopes accumulate).",
+        authDomains: {
+          calendar: {
+            label: "Calendar",
+            description:
+              "Events, free/busy, RSVP, and meeting-room scheduling.",
+          },
+          im: {
+            label: "Messenger",
+            description:
+              "Send/reply messages, manage group chats, search history, download media.",
+          },
+          docs: {
+            label: "Docs",
+            description: "Create, read, update, and search documents.",
+          },
+          drive: {
+            label: "Drive",
+            description:
+              "Upload/download files, search docs & wiki, manage comments.",
+          },
+          sheets: {
+            label: "Sheets",
+            description: "Read, write, append, find, and export spreadsheets.",
+          },
+          base: {
+            label: "Base",
+            description:
+              "Bitable tables, fields, records, views, dashboards, and workflows.",
+          },
+          wiki: {
+            label: "Wiki",
+            description: "Knowledge spaces, nodes, and wiki documents.",
+          },
+          task: {
+            label: "Tasks",
+            description:
+              "Tasks, task lists, subtasks, comments, and reminders.",
+          },
+          mail: {
+            label: "Mail",
+            description:
+              "Browse, search, read, send, reply, forward, and manage drafts.",
+          },
+          vc: {
+            label: "Meetings",
+            description: "Meeting records, minutes artifacts, and recordings.",
+          },
+          minutes: {
+            label: "Minutes",
+            description: "Meeting minutes content and transcripts.",
+          },
+          note: {
+            label: "Notes",
+            description: "Meeting notes and related content.",
+          },
+          slides: {
+            label: "Slides",
+            description: "Presentations and slide content.",
+          },
+          markdown: {
+            label: "Markdown",
+            description:
+              "Create, fetch, patch, and overwrite Drive-native .md files.",
+          },
+          mindnotes: {
+            label: "Mind notes",
+            description: "Mind notes content.",
+          },
+          contact: {
+            label: "Contacts",
+            description: "Look up users by name/email/phone and read profiles.",
+          },
+          approval: {
+            label: "Approval",
+            description:
+              "Query and act on approval tasks; cancel and CC instances.",
+          },
+          attendance: {
+            label: "Attendance",
+            description: "Query personal attendance check-in records.",
+          },
+          okr: {
+            label: "OKR",
+            description:
+              "Objectives, key results, alignments, indicators, and progress.",
+          },
+          event: {
+            label: "Events",
+            description: "Subscribe to and consume real-time platform events.",
+          },
+          apps: {
+            label: "Apps",
+            description:
+              "Create Spark/Miaoda apps, publish sites, and manage access scope.",
+          },
+          all: {
+            label: "All",
+            description:
+              "Request every business domain supported by lark-cli. Use this only when the missing permission is unclear.",
+          },
+        },
+        customScopeLabel: "Exact OAuth scope",
+        customScopePlaceholder: "For example calendar:calendar.event:read",
+        customScopeDescription:
+          "Advanced: if an error reports a missing scope, paste it here. Examples: calendar:calendar.event:read, calendar:calendar.free_busy:read.",
+        openConnectionLinkTitle: "Continue connecting Lark",
+        openConnectionLinkDescription:
+          "The first connection needs one browser confirmation from Lark. Open the link below and finish the prompt, then return here to continue authorization.",
+        openAuthLinkTitle: "Authorize Lark in your browser",
+        openAuthLinkDescription:
+          "Open the link below to authorize. DeerFlow keeps checking automatically and will save the connection after approval.",
+        waitingAuthTitle: "Waiting for Lark authorization",
+        waitingAuthDescription:
+          "Finish authorization in the browser page that just opened. DeerFlow will update this panel automatically; the button below is only a fallback.",
+        openAuthLink: "Open link",
+        copyAuthLink: "Copy link",
+        completeAuth: "I completed authorization",
+        continueAuth: "I completed browser confirmation, continue",
+        preparingAuthorization: "Preparing authorization...",
+        completingAuth: "Checking...",
+        authExpiresIn: (seconds) =>
+          `This link expires in about ${seconds} seconds.`,
+        installingTitle: "Installing official skill pack",
+        installingDescription:
+          "This usually finishes within 30 seconds; slower networks may take about 1 minute. The status refreshes automatically when installation completes.",
+        installNextTitle: "Install the official skill pack first",
+        installNextDescription:
+          "After installation, /lark-doc, /lark-im, /lark-sheets and related skills appear in the skill index.",
+        cliNextTitle: "Install Gateway CLI",
+        cliNextDescription:
+          "The skill pack is installed, but the Gateway cannot find lark-cli. Admin reinstall attempts to download the managed Gateway CLI; offline deployments can use an image with @larksuite/cli built in.",
+        configuredTitle: "Lark credentials are configured locally",
+        configuredDescription:
+          "Credentials are present, but their current validity has not been checked with Lark. Reconnect to refresh and live-verify authorization.",
+        connectedTitle: "Lark authorization is live-verified",
+        connectedDescription:
+          "The current user's authorization was verified with Lark during this connection flow. Reconnect whenever you need to refresh it or add permissions.",
+        authNextTitle: "Complete browser authorization next",
+        authNextDescription:
+          "Click “Connect Lark”; DeerFlow checks the current status first and opens browser authorization only when disconnected or expired.",
+      },
     },
     skills: {
       title: "Agent Skills",

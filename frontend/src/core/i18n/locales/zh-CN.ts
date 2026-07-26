@@ -679,6 +679,7 @@ export const zhCN: Translations = {
       account: "账号",
       appearance: "外观",
       channels: "渠道",
+      integrations: "集成",
       memory: "记忆",
       tools: "工具",
       skills: "技能",
@@ -785,6 +786,188 @@ export const zhCN: Translations = {
       description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
       disabled:
         "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
+    },
+    integrations: {
+      title: "集成",
+      description: "连接第三方工具和办公生态，让 Agent 能直接使用对应能力。",
+      refresh: "刷新",
+      install: "安装",
+      reinstall: "重新安装",
+      installing: "安装中...",
+      ready: "就绪",
+      pending: "待处理",
+      available: "可用",
+      unavailable: "不可用",
+      connected: "已连接",
+      loadFailed: "加载集成状态失败",
+      adminRequired: "需要管理员权限才能安装集成。",
+      lark: {
+        title: "Lark / 飞书 CLI",
+        description:
+          "安装官方 Lark/Feishu Agent Skills，并在授权后让 Agent 直接使用飞书能力。",
+        skillPack: "技能包",
+        gatewayCli: "Gateway CLI",
+        auth: "授权",
+        sandboxRuntime: "沙箱运行时",
+        sandboxRuntimeInitContainer: "由 init container 提供",
+        sandboxRuntimeGatewayDownload: "由 Gateway 提供",
+        sandboxRuntimeNotReady: "未就绪 —— 对话时 lark-cli 可能不可用",
+        notInstalled: "尚未安装",
+        skillsInstalled: (installed, expected) =>
+          `已安装 ${installed}/${expected} 个技能`,
+        installedVersion: (version) => `已安装版本：${version}`,
+        updateAvailable: (version) =>
+          `有新版本：${version} —— 管理员重新安装会更新 managed Gateway CLI 和技能包`,
+        runtimeVersionMismatch:
+          "技能包版本与 Gateway 运行时 lark-cli 不一致；管理员重新安装会尝试更新 managed Gateway CLI 并重新对齐技能包",
+        authNotConfigured: "尚未连接",
+        authConfigured: "凭证已配置（未实时验证）",
+        authConfiguredFor: (user) => `${user} · 凭证已配置（未实时验证）`,
+        connect: "连接飞书",
+        authStarting: "正在打开连接链接...",
+        checkingConnection: "正在检查连接状态...",
+        connectedAction: "重新连接飞书",
+        requestPermissions: "申请新权限",
+        alreadyConnected:
+          "飞书已连接，无需重复授权。如果授权已过期，刷新状态后可重新连接。",
+        connectionStarted: "连接链接已打开",
+        connectionReady: "连接准备已完成，正在打开授权链接",
+        authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",
+        authorizationStillPending:
+          "还没有检测到授权完成。请在浏览器完成授权；DeerFlow 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
+        permissionTitle: "授权范围",
+        permissionDescription:
+          "默认只完成基础登录，不会申请任何业务权限。按需在这里勾选要授权的业务域；已连接用户可以重新授权继续追加（scope 会累积）。",
+        authDomains: {
+          calendar: {
+            label: "日历",
+            description: "日程、忙闲、日程回复与会议室预定。",
+          },
+          im: {
+            label: "消息",
+            description: "收发/回复消息、管理群聊、搜索记录、下载媒体。",
+          },
+          docs: {
+            label: "文档",
+            description: "创建、读取、编辑和搜索云文档。",
+          },
+          drive: {
+            label: "云空间",
+            description: "上传/下载文件、搜索文档与知识库、管理评论。",
+          },
+          sheets: {
+            label: "电子表格",
+            description: "读取、写入、追加、查找和导出电子表格。",
+          },
+          base: {
+            label: "多维表格",
+            description: "多维表格的表、字段、记录、视图、仪表盘与工作流。",
+          },
+          wiki: {
+            label: "知识库",
+            description: "知识空间、节点与知识库文档。",
+          },
+          task: {
+            label: "任务",
+            description: "任务、清单、子任务、评论与提醒。",
+          },
+          mail: {
+            label: "邮件",
+            description: "浏览、搜索、阅读、发送、回复、转发与管理草稿。",
+          },
+          vc: {
+            label: "视频会议",
+            description: "会议记录、纪要产物与录制。",
+          },
+          minutes: {
+            label: "妙记",
+            description: "会议纪要内容与逐字稿。",
+          },
+          note: {
+            label: "笔记",
+            description: "会议笔记及相关内容。",
+          },
+          slides: {
+            label: "幻灯片",
+            description: "演示文稿与幻灯片内容。",
+          },
+          markdown: {
+            label: "Markdown",
+            description: "创建、获取、局部修改和覆盖云盘原生 .md 文件。",
+          },
+          mindnotes: {
+            label: "思维笔记",
+            description: "思维笔记内容。",
+          },
+          contact: {
+            label: "通讯录",
+            description: "按姓名/邮箱/电话查用户并读取资料。",
+          },
+          approval: {
+            label: "审批",
+            description: "查询和处理审批任务、撤销与抄送实例。",
+          },
+          attendance: {
+            label: "考勤",
+            description: "查询个人考勤打卡记录。",
+          },
+          okr: {
+            label: "OKR",
+            description: "目标、关键结果、对齐、指标与进展。",
+          },
+          event: {
+            label: "实时事件",
+            description: "订阅并消费平台实时事件。",
+          },
+          apps: {
+            label: "妙搭应用",
+            description: "创建 Spark/妙搭应用、发布站点并管理可见范围。",
+          },
+          all: {
+            label: "全部",
+            description:
+              "申请 lark-cli 支持的全部业务域权限。仅在不确定缺哪个权限时使用。",
+          },
+        },
+        customScopeLabel: "具体 OAuth scope",
+        customScopePlaceholder: "例如 calendar:calendar.event:read",
+        customScopeDescription:
+          "高级用法：如果错误里给出了缺失 scope，可直接填在这里。例如 calendar:calendar.event:read、calendar:calendar.free_busy:read。",
+        openConnectionLinkTitle: "继续完成飞书连接",
+        openConnectionLinkDescription:
+          "首次连接需要在浏览器里完成一次飞书确认。打开下面的链接按提示完成；完成后回到这里继续授权。",
+        openAuthLinkTitle: "在浏览器中完成飞书授权",
+        openAuthLinkDescription:
+          "打开下面的链接完成授权。DeerFlow 会持续自动检测，并在授权通过后保存连接状态。",
+        waitingAuthTitle: "等待飞书授权完成",
+        waitingAuthDescription:
+          "请在刚打开的浏览器页面完成授权。DeerFlow 会自动更新这里的状态；下方按钮只是兜底操作。",
+        openAuthLink: "打开链接",
+        copyAuthLink: "复制链接",
+        completeAuth: "我已完成授权",
+        continueAuth: "我已完成浏览器确认，继续授权",
+        preparingAuthorization: "正在准备授权...",
+        completingAuth: "确认中...",
+        authExpiresIn: (seconds) => `链接将在约 ${seconds} 秒后过期。`,
+        installingTitle: "正在安装官方技能包",
+        installingDescription:
+          "通常 30 秒内完成，网络较慢时可能需要约 1 分钟。安装完成后会自动刷新状态。",
+        installNextTitle: "先安装官方技能包",
+        installNextDescription:
+          "安装后，/lark-doc、/lark-im、/lark-sheets 等技能会出现在技能索引中。",
+        cliNextTitle: "需要安装 Gateway CLI",
+        cliNextDescription:
+          "技能包已安装，但 Gateway 找不到 lark-cli。管理员重新安装集成会尝试下载 managed Gateway CLI；离线部署可使用内置 @larksuite/cli 的镜像。",
+        configuredTitle: "飞书凭证已在本地配置",
+        configuredDescription:
+          "当前只确认本地存在凭证，尚未向飞书实时验证有效性。重新连接可刷新并实时验证授权。",
+        connectedTitle: "飞书授权已实时验证",
+        connectedDescription:
+          "本次连接流程已向飞书验证当前用户授权。需要刷新授权或追加权限时，可重新连接。",
+        authNextTitle: "下一步完成浏览器授权",
+        authNextDescription:
+          "点击“连接飞书”后，DeerFlow 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
+      },
     },
     skills: {
       title: "技能",
