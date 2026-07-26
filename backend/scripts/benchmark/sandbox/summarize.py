@@ -3,9 +3,9 @@
 
 Usage::
 
-    python scripts/benchmark/summarize_bench.py results.jsonl
-    python scripts/benchmark/summarize_bench.py results/*.jsonl --group provider,scenario,workload
-    python scripts/benchmark/summarize_bench.py results.jsonl --csv > summary.csv
+    python scripts/benchmark/sandbox/summarize.py results.jsonl
+    python scripts/benchmark/sandbox/summarize.py results/*.jsonl --group provider,scenario,workload
+    python scripts/benchmark/sandbox/summarize.py results.jsonl --csv > summary.csv
 """
 
 from __future__ import annotations
@@ -148,7 +148,7 @@ def _print_table(rows: list[dict[str, Any]], fmt: str = "plain") -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Aggregate JSONL benchmark results")
-    p.add_argument("inputs", nargs="+", help="JSONL file(s) from bench_sandbox_provider.py")
+    p.add_argument("inputs", nargs="+", help="JSONL file(s) from sandbox/bench_provider.py")
     p.add_argument(
         "--group",
         default="provider,scenario,workload,concurrency",

@@ -9,7 +9,7 @@ import pytest
 
 
 def _load_module():
-    path = Path(__file__).resolve().parents[1] / "scripts/benchmark/summarize_checkpoint_channels.py"
+    path = Path(__file__).resolve().parents[1] / "scripts/benchmark/checkpoint/summarize_channels.py"
     spec = importlib.util.spec_from_file_location("summarize_checkpoint_channels", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
