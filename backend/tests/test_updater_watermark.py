@@ -162,3 +162,22 @@ def test_emergency_flush_bypasses_watermark_and_does_not_regress() -> None:
     # A subsequent normal feed of the full conversation still extracts the tail.
     updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
     assert llm.invoke_count == 2
+
+
+def test_watermark_cache_is_bounded_lru() -> None:
+    """The watermark cache is a bounded LRU: over capacity it drops the
+    least-recently-used key, and a dropped key re-extracts one batch on the
+    next turn for that thread (no loss)."""
+    llm = _FakeLLM()
+    updater = MemoryUpdater(_config(watermark_max_keys=2), _FakeStorage(), llm)
+    msgs = _msgs("first")
+    # Three distinct threads fill the cache (cap=2); the least-recently-used
+    # key (t1) is evicted.
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    updater.update_memory(msgs, thread_id="t2", agent_name="a", user_id="u")
+    updater.update_memory(msgs, thread_id="t3", agent_name="a", user_id="u")
+    assert len(updater._watermarks) == 2
+    assert ("t1", "u", "a") not in updater._watermarks  # evicted (LRU)
+    # t1's next turn finds no watermark -> re-extracts one batch (not skipped).
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 4  # t1, t2, t3, then t1 re-extract

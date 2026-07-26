@@ -659,8 +659,9 @@ def _host_default_llm() -> Any:
 def _host_default_extraction_callback(payload: Any) -> None:
     """deer-flow default for DeerMem's ``extraction_callback`` slot.
 
-    Logs post-extraction metrics (token usage, facts accepted/rejected, gate
-    rejection rate) for ops observability, and flags a high rejection rate
+    Logs post-extraction metrics (token usage, facts passing/rejected by the
+    confidence filter, gate rejection rate) for ops observability, and flags a
+    high rejection rate
     (>60%) so a prompt/threshold regression is visible without inspecting every
     trace. A Langfuse-aware callback can replace this to emit a dedicated
     extraction span; the metrics keys are stable for that handoff. Exceptions
@@ -669,18 +670,18 @@ def _host_default_extraction_callback(payload: Any) -> None:
     if not isinstance(payload, dict):
         return
     extracted = payload.get("facts_extracted")
-    accepted = payload.get("facts_accepted")
+    passed_confidence = payload.get("facts_passed_confidence")
     rejected = payload.get("rejected_low_confidence", 0)
     thread_id = payload.get("thread_id")
     model_name = payload.get("model_name")
-    if isinstance(extracted, int) and isinstance(accepted, int) and extracted > 0:
-        rejection_rate = (extracted - accepted) / extracted
+    if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
+        rejection_rate = (extracted - passed_confidence) / extracted
         logger.info(
-            "Memory extraction metrics: thread=%s model=%s extracted=%d accepted=%d rejected=%d rejection_rate=%.2f",
+            "Memory extraction metrics: thread=%s model=%s extracted=%d passed_confidence=%d rejected=%d rejection_rate=%.2f",
             thread_id,
             model_name,
             extracted,
-            accepted,
+            passed_confidence,
             rejected,
             rejection_rate,
         )

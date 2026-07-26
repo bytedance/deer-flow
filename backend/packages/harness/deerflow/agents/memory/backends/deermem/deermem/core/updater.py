@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import uuid
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -679,9 +680,12 @@ class MemoryUpdater:
         self._llm = llm
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
-        # Watermark: last-extracted message index per (thread_id, user_id,
-        # agent_name), held in memory so a restart re-extracts one batch.
-        self._watermarks: dict[tuple[str | None, str | None, str | None], int] = {}
+        # Watermark: last-extracted message identity per (thread_id, user_id,
+        # agent_name), held in memory so a restart re-extracts one batch. The
+        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
+        # gateway handling many threads cannot grow it without limit; a dropped
+        # key re-extracts one batch on that thread's next turn.
+        self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -1114,9 +1118,9 @@ class MemoryUpdater:
             extracted = update_data.get("newFacts", [])
             extracted_list = extracted if isinstance(extracted, list) else []
             metrics["facts_extracted"] = len(extracted_list)
-            # facts_accepted / rejected_low_confidence are populated inside
-            # _apply_updates at the real confidence-filter site, so the metric
-            # tracks the actual filter rather than a re-derived copy here.
+            # facts_passed_confidence / rejected_low_confidence are populated
+            # inside _apply_updates at the real confidence-filter site, so the
+            # metric tracks the actual filter rather than a re-derived copy here.
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 # Deep-copy before in-place mutation so a failed commit cannot
@@ -1239,6 +1243,35 @@ class MemoryUpdater:
             bypass_watermark=bypass_watermark,
         )
 
+    def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Return the watermark for ``key``, marking it most-recently-used.
+
+        Uses key presence (not value truthiness) so a stored ``None`` identity
+        still counts as a live entry for LRU ordering.
+        """
+        if key not in self._watermarks:
+            return None
+        self._watermarks.move_to_end(key)
+        return self._watermarks[key]
+
+    def _watermark_set(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Store ``value`` for ``key``, evicting the least-recently-used entry
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+
+        A dropped key is safe: the next turn for that thread finds no watermark
+        and re-extracts one batch (the documented restart behavior). ``0`` =
+        unbounded (no eviction).
+        """
+        self._watermarks[key] = value
+        self._watermarks.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(self._watermarks) > cap:
+            self._watermarks.popitem(last=False)
+
     def _feed_after_watermark(
         self,
         watermark_key: tuple[str | None, str | None, str | None],
@@ -1253,7 +1286,7 @@ class MemoryUpdater:
         is safe over-extraction -- it never skips a turn, which is the only
         failure direction that would lose facts.
         """
-        last_id = self._watermarks.get(watermark_key)
+        last_id = self._watermark_get(watermark_key)
         if last_id is None:
             return messages
         for i, msg in enumerate(messages):
@@ -1356,7 +1389,7 @@ class MemoryUpdater:
                 # suffix, so this is messages[-1]). Skipped on the emergency
                 # path -- the subset's last message is older than the
                 # conversation's latest, so advancing from it would regress.
-                self._watermarks[watermark_key] = _message_identity(messages[-1])
+                self._watermark_set(watermark_key, _message_identity(messages[-1]))
             return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -1464,10 +1497,10 @@ class MemoryUpdater:
             update_data: Updates from LLM.
             thread_id: Optional thread ID for tracking.
             metrics: Optional observability dict. When provided, populated with
-                ``facts_accepted`` / ``rejected_low_confidence`` counted at the
-                real confidence-filter site below (the only acceptance gate for
-                new facts), so the metric cannot drift from the actual filter the
-                way a re-derived count in the caller could.
+                ``facts_passed_confidence`` / ``rejected_low_confidence`` counted
+                at the real confidence-filter site below (the only acceptance
+                gate for new facts), so the metric cannot drift from the actual
+                filter the way a re-derived count in the caller could.
 
         Returns:
             Updated memory data.
@@ -1603,10 +1636,12 @@ class MemoryUpdater:
         # both fact-creation sites apply the identical bound in one place.
         creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
         # Counted at the confidence-gate site (the only real accept filter for new
-        # facts) so the ``facts_accepted`` metric mirrors the actual filter and
-        # cannot drift from it. Facts below the threshold are the reject count;
-        # duplicate / empty / over-cap facts that pass the threshold are still
-        # counted as accepted, matching the historical metric semantics.
+        # facts) so the ``facts_passed_confidence`` metric mirrors the actual
+        # filter and cannot drift from it. Facts below the threshold are the
+        # reject count; duplicate / empty / over-cap facts that pass the
+        # threshold are still counted here -- the metric is a confidence-gate
+        # signal (the host's rejection-rate warning monitors confidence
+        # filtering, not dedup / over-cap), not a persisted-fact count.
         passed_threshold = 0
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
@@ -1651,7 +1686,7 @@ class MemoryUpdater:
                     existing_fact_keys.add(fact_key)
 
         if metrics is not None:
-            metrics["facts_accepted"] = passed_threshold
+            metrics["facts_passed_confidence"] = passed_threshold
             metrics["rejected_low_confidence"] = len(new_facts) - passed_threshold
 
         # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).

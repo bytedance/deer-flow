@@ -209,10 +209,22 @@ class DeerMemConfig(BaseModel):
         default=None,
         description=(
             "Optional ``callback(metrics)`` invoked AFTER the extraction LLM "
-            "call (token usage, facts accepted/rejected by the confidence "
+            "call (token usage, facts passing/rejected by the confidence "
             "filter, rejection rate, prompt version). The host injects a "
             "Langfuse-based callback to emit an extraction span; None = no "
             "post-invoke observability. Set programmatically (not from YAML)."
+        ),
+    )
+    # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
+    watermark_max_keys: int = Field(
+        default=4096,
+        ge=0,
+        description=(
+            "Soft cap on the in-memory conversation-watermark cache (one entry "
+            "per distinct thread/user/agent). The cache is a bounded LRU: when "
+            "over capacity the least-recently-used entry is dropped, and a "
+            "dropped key re-extracts one batch on that thread's next turn (the "
+            "same as a restart). 0 = unbounded."
         ),
     )
     # ── Message processing (externalized patterns / prompts) ──

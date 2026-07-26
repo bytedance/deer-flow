@@ -1,10 +1,11 @@
-"""Tests for the 07 message-processing additions: detect_signals (6 classes),
-filter_trivial, and _prepare_update's projection onto the legacy 3-tuple.
+"""Tests for message-processing signal detection and trivial filtering.
 
-The 3-tuple ``(filtered, correction_detected, reinforcement_detected)`` is the
-signals seam; these tests pin that the new signal classes are detected but only
-correction/reinforcement flow through the bools until the seam is swapped to a
-set.
+Pins three behaviors: ``detect_signals`` recognizes all six signal classes
+(correction, reinforcement, preference, identity, goal, decision);
+``filter_trivial`` drops pure-ack turns and their replies while keeping
+substantive turns; and ``_prepare_update`` returns the full signal set as a
+``frozenset`` (not just correction/reinforcement), so every detected class
+flows through to the extraction prompt.
 """
 
 from __future__ import annotations
