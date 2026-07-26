@@ -29,6 +29,7 @@ PNPM = $(shell bash -c ' \
     elif command -v corepack.cmd >/dev/null 2>&1; then \
         echo "corepack.cmd pnpm"; \
     else \
+        # Fall back to bare "pnpm" — fails with a clear "command not found" at the call site. \
         echo pnpm; \
     fi')
 
