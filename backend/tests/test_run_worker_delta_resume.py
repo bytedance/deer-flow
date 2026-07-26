@@ -271,6 +271,82 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
         assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
 
 
+async def test_cancelled_delta_resume_rolls_back_to_pre_linearization_head(tmp_path):
+    """Rollback must restore the head captured before resume linearization.
+
+    The worker deliberately captures its rollback point before rewriting a
+    selected delta checkpoint onto the head. If that ordering is reversed,
+    cancelling the resumed run would restore the selected historical state
+    and silently discard the abandoned turn that was present before the run.
+    """
+    db_path = tmp_path / "worker-rollback-branch.sqlite3"
+    async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
+        await checkpointer.setup()
+        _, source_head, source_pre_turn = await _seed_two_turns(checkpointer, _DeltaChannelState, "worker-rollback-parent")
+
+        mutation_graph = build_state_mutation_graph("branch", "delta", _DeltaChannelState)
+        branch_writer = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode="delta")
+        replay_base_config = await branch_writer.aupdate(
+            _run_config("worker-rollback-branch"),
+            {"messages": Overwrite(list(source_pre_turn.values["messages"]))},
+            as_node="branch",
+        )
+        await branch_writer.aupdate(
+            replay_base_config,
+            {"messages": Overwrite(list(source_head.values["messages"]))},
+            as_node="branch",
+        )
+
+        read_graph = _build_answer_graph(_DeltaChannelState, checkpointer, "unused")
+        read_accessor = CheckpointStateAccessor.bind(read_graph, checkpointer, mode="delta")
+        pre_run_head = await read_accessor.aget(_run_config("worker-rollback-branch"))
+        assert _ids(pre_run_head) == ["h1", "a1", "h2", "a2"]
+        branch_history = await read_accessor.ahistory(_run_config("worker-rollback-branch"), limit=20)
+        base = next(snapshot for snapshot in branch_history if "h2" not in _ids(snapshot))
+
+        run_manager = RunManager()
+        record = await run_manager.create("worker-rollback-branch")
+        bridge = SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(),
+            cleanup=AsyncMock(),
+        )
+        created_graphs: list[Any] = []
+
+        def agent_factory(*, config):
+            del config
+
+            async def _answer_then_abort(state: dict[str, Any]) -> dict[str, Any]:
+                del state
+                record.abort_action = "rollback"
+                record.abort_event.set()
+                return {"messages": [AIMessage(content="answer for a2-new", id="a2-new")]}
+
+            builder = StateGraph(_DeltaChannelState)
+            builder.add_node("answer", _answer_then_abort)
+            builder.set_entry_point("answer")
+            builder.set_finish_point("answer")
+            graph = builder.compile(checkpointer=checkpointer)
+            created_graphs.append(graph)
+            return graph
+
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+            agent_factory=agent_factory,
+            graph_input={"messages": [HumanMessage(content="q2", id="h2")]},
+            config=_run_config("worker-rollback-branch", base.config["configurable"]["checkpoint_id"]),
+            stream_modes=["values"],
+        )
+
+        assert record.status == RunStatus.error
+        final_accessor = CheckpointStateAccessor.bind(created_graphs[-1], checkpointer, mode="delta")
+        final = await final_accessor.aget(_run_config("worker-rollback-branch"))
+        assert _ids(final) == ["h1", "a1", "h2", "a2"]
+
+
 async def test_full_mode_keeps_the_fork():
     """Full checkpoints carry complete channel values, so the fork materializes
     correctly and LangGraph's branching semantics stay untouched."""

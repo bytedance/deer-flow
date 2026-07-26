@@ -1266,15 +1266,16 @@ async def _prepare_goal_continuation_input(
 
 @dataclass(frozen=True)
 class RollbackPoint:
-    """Materialized pre-run state used to fork the pre-run checkpoint lineage.
+    """Materialized pre-run state used to restore the thread after cancellation.
 
     Raw checkpoint blobs cannot reconstruct Delta-channel messages (their
-    checkpoints omit ``channel_values``), so rollback restores messages by
-    applying an ``Overwrite`` through a state-mutation graph anchored at the
-    pre-run checkpoint instead of cloning the raw blob.
+    checkpoints omit the materialized value), so rollback preserves those
+    messages plus delta mode's materialized non-message state in addition to
+    the raw pending writes.
     """
 
     config: dict[str, Any]
+    state_values: dict[str, Any]
     messages: tuple[Any, ...]
     metadata: dict[str, Any]
     pending_writes: tuple[tuple[str, str, Any], ...]
@@ -1296,8 +1297,9 @@ async def _capture_rollback_point(
     if not configurable.get("checkpoint_id"):
         return None
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", snapshot_config)
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages") if isinstance(values, dict) else None
+    raw_values = getattr(snapshot, "values", None) or {}
+    messages = raw_values.get("messages") if isinstance(raw_values, dict) else None
+    state_values = copy.deepcopy({key: value for key, value in raw_values.items() if key != "messages"}) if accessor.mode == "delta" and isinstance(raw_values, dict) else {}
     return RollbackPoint(
         config={
             "configurable": {
@@ -1306,10 +1308,41 @@ async def _capture_rollback_point(
                 "checkpoint_id": configurable.get("checkpoint_id"),
             }
         },
+        state_values=state_values,
         messages=tuple(messages or ()),
         metadata=dict(getattr(snapshot, "metadata", None) or {}),
         pending_writes=tuple(getattr(checkpoint_tuple, "pending_writes", ()) or ()),
     )
+
+
+def _complete_state_replacement_values(
+    *,
+    mutation_graph: Any,
+    selected_values: dict[str, Any],
+    current_values: dict[str, Any],
+    run_id: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Build a whole-state replacement through the graph's effective schema."""
+    writable_fields = graph_writable_channels(mutation_graph)
+    reducer_fields = graph_reducer_channels(mutation_graph)
+    if writable_fields is None or reducer_fields is None:
+        raise RuntimeError(f"Run {run_id} could not inspect the state schema for {operation}")
+
+    replacement_values: dict[str, Any] = {}
+    for field_name in writable_fields:
+        if field_name in selected_values:
+            replacement = copy.deepcopy(selected_values[field_name])
+        elif field_name in current_values:
+            # LangGraph has no public "unset channel" update. A fresh channel
+            # exposes its schema default when one exists (for example [] / {});
+            # optional and otherwise-unconstructible channels reset to None.
+            channel = mutation_graph.channels.get(field_name)
+            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
+        else:
+            continue
+        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
+    return replacement_values
 
 
 async def _linearize_delta_checkpoint_resume(
@@ -1380,27 +1413,16 @@ async def _linearize_delta_checkpoint_resume(
     # middleware channel can be restored. Reducer channels need Overwrite to
     # replace their already-aggregated value instead of merging it again.
     mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
-    writable_fields = graph_writable_channels(mutation_graph)
-    reducer_fields = graph_reducer_channels(mutation_graph)
-    if writable_fields is None or reducer_fields is None:
-        raise RuntimeError(f"Run {run_id} could not inspect the resume state schema")
-
     selected_values = dict(values)
     head_values = getattr(head, "values", None) or {}
     head_values = dict(head_values) if isinstance(head_values, dict) else {}
-    replacement_values: dict[str, Any] = {}
-    for field_name in writable_fields:
-        if field_name in selected_values:
-            replacement = copy.deepcopy(selected_values[field_name])
-        elif field_name in head_values:
-            # LangGraph has no public "unset channel" update. A fresh channel
-            # exposes its schema default when one exists (for example [] / {});
-            # optional and otherwise-unconstructible channels reset to None.
-            channel = mutation_graph.channels.get(field_name)
-            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
-        else:
-            continue
-        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
+    replacement_values = _complete_state_replacement_values(
+        mutation_graph=mutation_graph,
+        selected_values=selected_values,
+        current_values=head_values,
+        run_id=run_id,
+        operation="checkpoint resume",
+    )
 
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
     await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
@@ -1420,13 +1442,14 @@ async def _rollback_to_pre_run_checkpoint(
     rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
 ) -> None:
-    """Fork the pre-run checkpoint lineage with the pre-run messages restored.
+    """Restore the complete pre-run state after a cancelled run.
 
-    The fork is written through a state-only mutation graph (the synthetic
-    ``rollback_restore`` node must be registered for ``as_node`` and finishes
-    immediately so no agent nodes are scheduled). LangGraph owns the restored
-    checkpoint's source/step/channel versions/parent/timestamp; the parent
-    pointer back to the pre-run checkpoint is the audit trail.
+    Full mode forks the captured pre-run checkpoint and overwrites messages;
+    all other channels inherit from that parent. Delta mode cannot safely fork
+    once the cancelled path has attached writes to the same parent, so it
+    replaces every captured channel on the current head instead. Both writes
+    use a state-only mutation graph whose synthetic ``rollback_restore`` node
+    finishes immediately and schedules no agent work.
     """
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
@@ -1452,15 +1475,35 @@ async def _rollback_to_pre_run_checkpoint(
         logger.warning("Run %s rollback skipped: agent accessor unavailable", run_id)
         return
 
-    # The restored checkpoint inherits every channel from the pre-run fork;
-    # compile the mutation graph with the thread's effective schema so
-    # middleware-contributed channels survive (the base ThreadState fallback
-    # would silently drop them).
+    # Compile with the thread's effective schema so middleware-contributed
+    # channels survive (the base ThreadState fallback would silently drop
+    # them).
     mutation_graph = build_state_mutation_graph("rollback_restore", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    if accessor.mode == "delta":
+        # A delta rollback fork has the same write-ownership problem as a
+        # checkpoint resume: the captured parent now carries writes from the
+        # cancelled sibling. Restore linearly on the current head instead.
+        restore_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        current = await accessor.aget(restore_config)
+        raw_current_values = getattr(current, "values", None) or {}
+        current_values = dict(raw_current_values) if isinstance(raw_current_values, dict) else {}
+        selected_values = copy.deepcopy(rollback_point.state_values)
+        selected_values["messages"] = list(rollback_point.messages)
+        replacement_values = _complete_state_replacement_values(
+            mutation_graph=mutation_graph,
+            selected_values=selected_values,
+            current_values=current_values,
+            run_id=run_id,
+            operation="rollback",
+        )
+    else:
+        restore_config = rollback_point.config
+        replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
     restored_config = await mutation_accessor.aupdate(
-        rollback_point.config,
-        {"messages": Overwrite(list(rollback_point.messages))},
+        restore_config,
+        replacement_values,
         as_node="rollback_restore",
     )
     if not isinstance(restored_config, dict):
