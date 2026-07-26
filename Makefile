@@ -16,6 +16,22 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
+# Resolve pnpm command with Corepack fallback.
+# Prefer pnpm directly, then pnpm.cmd, then corepack pnpm.
+# This ensures consistency with scripts/check.py.
+PNPM = $(shell bash -c ' \
+    if command -v pnpm >/dev/null 2>&1; then \
+        echo pnpm; \
+    elif command -v pnpm.cmd >/dev/null 2>&1; then \
+        echo pnpm.cmd; \
+    elif command -v corepack >/dev/null 2>&1; then \
+        echo "corepack pnpm"; \
+    elif command -v corepack.cmd >/dev/null 2>&1; then \
+        echo "corepack.cmd pnpm"; \
+    else \
+        echo pnpm; \
+    fi')
+
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
@@ -80,7 +96,7 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && pnpm install
+	@cd frontend && $(PNPM) install
 	@echo "Installing pre-commit hooks..."
 	@uv tool install pre-commit
 	@pre-commit install --overwrite
