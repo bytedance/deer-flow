@@ -12,6 +12,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
+  limit. The default `wait` policy waits for `acquire_timeout`, then fails the
+  agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
+  `burst_limit` to permit bounded extra VMs. The `reject` policy can remove one
+  warm VM before it returns a capacity error. ([#4391])
 - **skills:** A directory containing `SKILL.md` is now a runtime package
   boundary. Nested `SKILL.md` files inside that package are supporting data and
   are no longer registered as independent skills; unusual custom layouts must
@@ -193,6 +198,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Thread metadata now switches to `running` only after the run passes
+  the startup barrier, so pending-cancelled runs no longer briefly project
+  `running`; clients may observe the prior thread status during worker startup.
+  ([#4450])
+- **runtime:** Re-check orphan candidates through an atomic, lease-aware takeover
+  claim so a successful heartbeat after the scan keeps the run active and only
+  one reconciler reports recovery. ([#4424])
 - **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
   lead-agent skills, preventing passive enabled skills and evaluation fixtures
   from removing MCP, web, file, and delegation tools from every run. ([#4095],
@@ -1109,3 +1121,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4287]: https://github.com/bytedance/deer-flow/pull/4287
 [#4288]: https://github.com/bytedance/deer-flow/pull/4288
 [#4324]: https://github.com/bytedance/deer-flow/issues/4324
+[#4424]: https://github.com/bytedance/deer-flow/issues/4424

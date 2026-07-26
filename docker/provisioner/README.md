@@ -145,6 +145,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
+| `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
@@ -162,6 +163,29 @@ Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environme
 For persistent dependencies, build an image that extends the default `all-in-one-sandbox` image and set `SANDBOX_IMAGE` to your published tag. A from-scratch image must remain compatible with the AIO sandbox HTTP API consumed by `agent-sandbox`, keep `/mnt/user-data` writable, and listen on the configured sandbox port.
 
 See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
+
+### Lark CLI sandbox runtime (Pattern A)
+
+Agents run `lark-cli` **inside** the sandbox, so the binary must exist in the
+sandbox container. Instead of the Gateway downloading Linux binaries from GitHub
+at install time and mounting them via hostPath/PVC, the provisioner can inject
+`lark-cli` with an **init container + shared `emptyDir`**:
+
+1. Publish a lark-cli init image (see [`docker/lark-cli-init`](../lark-cli-init/README.md))
+   and set `LARK_CLI_INIT_IMAGE` on the provisioner.
+2. When a sandbox is created with `provision_lark_cli_runtime: true` (the Gateway
+   sends this automatically once the managed Lark skill pack is installed), the
+   Pod gets a `lark-cli-runtime` `emptyDir`, an `lark-cli-init` init container
+   that copies the runtime into it, and a read-only runtime mount on the sandbox
+   container at `/mnt/integrations/lark-cli/runtime`. Any hostPath/PVC extra
+   mount at that path is dropped (the init container supersedes it); the per-user
+   `config`/`data` credential mounts are unchanged.
+
+`GET /api/capabilities` returns `{"lark_cli_init_image": true|false}` so the
+Gateway can surface a sandbox-runtime readiness signal in
+`/api/integrations/lark/status` — a green UI can't then hide a chat-time
+`lark-cli: command not found`.
+
 
 ### PVC User-Data Upgrade Note
 

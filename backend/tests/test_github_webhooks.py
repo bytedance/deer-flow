@@ -547,16 +547,25 @@ def test_dispatch_failure_returns_503_not_200(client: TestClient, monkeypatch: p
 
     The earlier behaviour swallowed every fan-out exception into a 200 OK
     response (``dispatch={"error": "fanout failed"}``). GitHub treats 200
-    as final success and does not automatically retry any failure,
+    as final success and never automatically retries any failure,
     including 5xx (see
     https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)
-    — so a 200 ack permanently drops the delivery. The route now lets
-    runtime failures propagate as 503 so the delivery is correctly
-    recorded as failed, recoverable via a manual "Redeliver", the REST
-    API, or an operator's own recovery script. The startup-time
-    ``is_route_enabled`` check still handles *configuration* failures
-    fail-closed (route absent → 404); 503 is reserved for runtime
-    failures worth making recoverable this way.
+    — so a mistaken 200 ack hides the failure from GitHub's Recent
+    Deliveries status and from any recovery script filtering on non-OK
+    deliveries (the pattern GitHub's own docs recommend). That is a
+    discoverability gap, not literal unrecoverability: GitHub's manual
+    "Redeliver" button and its REST redelivery endpoint place no
+    failed-status precondition on the delivery id (see
+    https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks),
+    so a 200'd delivery can still be redelivered by an operator who
+    independently finds it — they just get no signal to. The route now
+    lets runtime failures propagate as 503 instead, so the delivery is
+    correctly recorded as failed and actually surfaces for a manual
+    "Redeliver" click, the REST API, or an operator's own recovery
+    script to find and recover. The startup-time ``is_route_enabled``
+    check still handles *configuration* failures fail-closed (route
+    absent → 404); 503 is reserved for runtime failures worth making
+    discoverable and recoverable this way.
     """
 
     async def fake_fanout(*args, **kwargs) -> dict:
