@@ -897,25 +897,20 @@ class WechatChannel(Channel):
         return headers
 
     @staticmethod
-    def _extract_cdn_full_url(media: Mapping[str, Any] | None) -> str | None:
-        if not isinstance(media, Mapping):
+    def _extract_str_field(data: Mapping[str, Any] | None, key: str) -> str | None:
+        if not isinstance(data, Mapping):
             return None
-        full_url = media.get("full_url")
-        return full_url.strip() if isinstance(full_url, str) and full_url.strip() else None
+        value = data.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
-    @staticmethod
-    def _extract_upload_full_url(upload_data: Mapping[str, Any] | None) -> str | None:
-        if not isinstance(upload_data, Mapping):
-            return None
-        upload_full_url = upload_data.get("upload_full_url")
-        return upload_full_url.strip() if isinstance(upload_full_url, str) and upload_full_url.strip() else None
+    def _extract_cdn_full_url(self, media: Mapping[str, Any] | None) -> str | None:
+        return self._extract_str_field(media, "full_url")
 
-    @staticmethod
-    def _extract_upload_param(upload_data: Mapping[str, Any] | None) -> str | None:
-        if not isinstance(upload_data, Mapping):
-            return None
-        upload_param = upload_data.get("upload_param")
-        return upload_param.strip() if isinstance(upload_param, str) and upload_param.strip() else None
+    def _extract_upload_full_url(self, upload_data: Mapping[str, Any] | None) -> str | None:
+        return self._extract_str_field(upload_data, "upload_full_url")
+
+    def _extract_upload_param(self, upload_data: Mapping[str, Any] | None) -> str | None:
+        return self._extract_str_field(upload_data, "upload_param")
 
     def _build_upload_request(
         self,
