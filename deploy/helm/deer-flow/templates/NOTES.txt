@@ -39,24 +39,33 @@ Provisioner / sandbox notes:
   • PVC mode is enabled: sandbox Pods mount the `{{ include "deer-flow.homePVC" . }}`
     PVC for per-thread user-data.
 
-  ⚠️  Sandbox NodePort reachability:
-    The provisioner returns `http://{NODE_HOST}:{NodePort}` to the gateway so
-    the agent can talk to its sandbox. NODE_HOST defaults to the provisioner
-    pod's node IP via the Kubernetes downward API, which routes on most clusters
-    because a NodePort is exposed on every node.
-
-    If your CNI or network policy blocks pod->node-IP traffic, set
-    `provisioner.nodeHost` to an address the gateway can reach that routes to
-    a node IP:
+  • Sandbox reachability: per-sandbox Services are type
+    `{{ .Values.provisioner.sandboxServiceType | default "ClusterIP" }}`.
+{{- if eq (default "ClusterIP" .Values.provisioner.sandboxServiceType) "NodePort" }}
+    The provisioner returns `http://{NODE_HOST}:{NodePort}` to the gateway.
+    NODE_HOST defaults to the provisioner pod's node IP via the downward API; a
+    NodePort is exposed on every node, so `<node-IP>:<NodePort>` routes from the
+    gateway on most clusters. If your CNI or network policy blocks pod->node-IP
+    traffic, set `provisioner.nodeHost` to an address the gateway can reach:
 
       kubectl get nodes -o wide
 
       provisioner:
         nodeHost: <node-InternalIP-or-ExternalIP>
 
-    On multi-node clusters you additionally need `persistence.home.accessMode:
-    ReadWriteMany` (e.g. NFS) so sandbox Pods on other nodes can mount the
-    shared user-data PVC.
+    ⚠️  NodePort binds the code-execution sandbox on every node's interfaces,
+    including externally-reachable ones. Prefer `ClusterIP` (the default) when
+    the gateway runs in-cluster.
+{{- else }}
+    The provisioner returns a cluster-DNS URL
+    (`http://sandbox-<id>-svc.{{ include "deer-flow.namespace" . }}.svc.cluster.local:{{ .Values.provisioner.sandboxPort }}`)
+    so the gateway reaches its sandbox inside the cluster - no node IP, no
+    external port, no exposure on node interfaces.
+{{- end }}
+
+  • On multi-node clusters you additionally need
+    `persistence.home.accessMode: ReadWriteMany` (e.g. NFS) so sandbox Pods on
+    other nodes can mount the shared user-data PVC.
 
 Generated secrets (persisted across upgrades):
 

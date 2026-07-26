@@ -6,12 +6,14 @@ const ARTIFACT_PATH = "/artifact-fixtures/report.html";
 const MARKDOWN_ARTIFACT_PATH = "/artifact-fixtures/report.md";
 const JSON_ARTIFACT_PATH = "/artifact-fixtures/report.json";
 const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
+const PDF_ARTIFACT_PATH = "/artifact-fixtures/report.pdf";
 const IN_PROGRESS_THREAD_ID = "00000000-0000-0000-0000-000000003119";
 const COMPLETE_THREAD_ID = "00000000-0000-0000-0000-000000003120";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
 const MARKDOWN_ANCHOR_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
 const PRESENTED_THREAD_ID = "00000000-0000-0000-0000-000000003123";
+const PDF_THREAD_ID = "00000000-0000-0000-0000-000000003124";
 
 function writeFileMessages({
   path = ARTIFACT_PATH,
@@ -109,6 +111,9 @@ test.describe("Artifact preview stability", () => {
     await expect(
       artifactsPanel.locator('iframe[title="Artifact preview"]'),
     ).toBeVisible();
+    await expect(
+      artifactsPanel.locator('iframe[title="Artifact preview"]'),
+    ).toHaveAttribute("sandbox", "allow-scripts allow-forms");
   });
 
   test("renders preview iframe after the write artifact succeeds", async ({
@@ -319,5 +324,45 @@ test.describe("Artifact preview stability", () => {
     await expect(presentedOption).toBeVisible();
     await presentedOption.click();
     await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+  });
+
+  test("renders sandboxed iframe for a browser-previewable non-code file (urlOfArtifact path)", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: PDF_THREAD_ID,
+          title: "PDF artifact preview",
+          messages: writeFileMessages({
+            path: PDF_ARTIFACT_PATH,
+            content: "%PDF-fake-content",
+          }),
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${PDF_THREAD_ID}/artifacts${PDF_ARTIFACT_PATH}`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/pdf",
+          body: "%PDF-1.4 fake pdf",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${PDF_THREAD_ID}`);
+
+    await expect(page.getByText(PDF_ARTIFACT_PATH)).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText(PDF_ARTIFACT_PATH).click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("report.pdf")).toBeVisible();
+
+    const urlOfArtifactIframe = artifactsPanel.locator("iframe:not([title])");
+    await expect(urlOfArtifactIframe).toBeVisible();
+    await expect(urlOfArtifactIframe).toHaveAttribute("sandbox", "");
   });
 });

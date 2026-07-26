@@ -136,6 +136,35 @@ class TestSkillLoading:
         assert len(public_skills) == 1
         assert public_skills[0].name == "deep-research"
 
+    def test_managed_integration_skills_are_global_but_enabled_per_user(self, base_dir: Path, skills_root: Path, config):
+        integration_dir = base_dir / "integrations" / "skills" / "lark-cli" / "lark-doc"
+        integration_dir.mkdir(parents=True)
+        (integration_dir / "SKILL.md").write_text(_skill_content("lark-doc"), encoding="utf-8")
+
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            alice = UserScopedSkillStorage("alice", host_path=str(skills_root), app_config=config)
+            bob = UserScopedSkillStorage("bob", host_path=str(skills_root), app_config=config)
+
+        alice.set_skill_enabled_state("lark-doc", False)
+
+        alice_skill = next(skill for skill in alice.load_skills(enabled_only=False) if skill.name == "lark-doc")
+        bob_skill = next(skill for skill in bob.load_skills(enabled_only=False) if skill.name == "lark-doc")
+        assert alice_skill.category == SkillCategory.INTEGRATION
+        assert alice_skill.skill_file == integration_dir / "SKILL.md"
+        assert alice_skill.enabled is False
+        assert bob_skill.enabled is True
+
+    def test_public_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        public_dir = skills_root / "public" / "reviewer"
+        fixture_dir = public_dir / "evals" / "fixtures" / "injection"
+        fixture_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("reviewer"), encoding="utf-8")
+        (fixture_dir / "SKILL.md").write_text(_skill_content("injection-example"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"reviewer"}
+
     def test_custom_skills_loaded_from_user_dir(self, user_storage: UserScopedSkillStorage, base_dir: Path):
         user_storage.write_custom_skill("my-skill", "SKILL.md", _skill_content("my-skill"))
 

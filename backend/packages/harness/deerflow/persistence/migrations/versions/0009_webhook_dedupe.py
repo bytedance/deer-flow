@@ -1,7 +1,7 @@
 """Cross-pod inbound webhook dedupe table (issue #4120).
 
-Revision ID: 0006_webhook_dedupe
-Revises: 0005_run_stop_reason
+Revision ID: 0009_webhook_dedupe
+Revises: 0008_thread_operation_kind
 Create Date: 2026-07-15
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0006_webhook_dedupe"
-down_revision: str | Sequence[str] | None = "0005_run_stop_reason"
+revision: str = "0009_webhook_dedupe"
+down_revision: str | Sequence[str] | None = "0008_thread_operation_kind"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

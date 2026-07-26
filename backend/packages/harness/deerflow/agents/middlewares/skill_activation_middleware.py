@@ -17,12 +17,17 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.events.catalog import (
+    MIDDLEWARE_SKILL_ACTIVATION_TAG,
+    MIDDLEWARE_SKILL_SECRETS_TAG,
+)
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
-    _SLASH_SECRET_SOURCE_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
     extract_request_secrets,
+    read_slash_skill_source_path,
+    write_slash_skill_source_path,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -40,7 +45,7 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
 # never values) so unchanged bindings are not re-recorded each call.
-# _SLASH_SECRET_SOURCE_KEY: latest slash activation as a secret source, holding
+# The shared slash-source context contract holds the latest slash activation,
 # ONLY the activated skill's canonical container path (never its declared
 # secrets — those are read from the live registry on each call, #3938). The
 # injection set is recomputed every model call, but a slash-activated skill must
@@ -92,11 +97,15 @@ class SkillActivationMiddleware(AgentMiddleware):
         available_skills: set[str] | None = None,
         app_config: AppConfig | None = None,
         user_id: str | None = None,
+        slash_source_owner_token: str,
     ) -> None:
         super().__init__()
+        if not isinstance(slash_source_owner_token, str) or not slash_source_owner_token:
+            raise ValueError("slash_source_owner_token must be a non-empty string")
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._app_config = app_config
         self._user_id = user_id
+        self._slash_source_owner_token = slash_source_owner_token
 
     def _storage(self) -> SkillStorage:
         if self._user_id is not None:
@@ -289,7 +298,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_activation",
+                MIDDLEWARE_SKILL_ACTIVATION_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="activate",
@@ -301,7 +310,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 },
             )
         except Exception:
-            logger.debug("Failed to record slash skill activation audit event", exc_info=True)
+            logger.warning("Failed to record slash skill activation audit event", exc_info=True)
 
     def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
@@ -380,13 +389,16 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if not isinstance(context, dict):
             return
 
-        # The slash source records only the canonical container path of the
-        # activated skill — never its declared secrets. Both sources resolve the
-        # live registry skill by path on read, so a caller-forged source (the
-        # context is caller-mergeable) can never inject secrets a real, enabled,
-        # allowlisted skill did not declare (#3938).
+        # The slash source records the canonical container path plus a
+        # middleware-chain-local owner token — never declared secrets. Both
+        # consumers authenticate the source and resolve the live registry skill
+        # by path, so caller-mergeable context cannot forge an activation.
         if activation is not None:
-            context[_SLASH_SECRET_SOURCE_KEY] = {"path": activation.container_file_path}
+            write_slash_skill_source_path(
+                context,
+                activation.container_file_path,
+                owner_token=self._slash_source_owner_token,
+            )
 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
@@ -395,8 +407,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             if registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
-                slash_source = context.get(_SLASH_SECRET_SOURCE_KEY)
-                slash_path = slash_source.get("path") if isinstance(slash_source, dict) else None
+                slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
                 slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
                     sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
@@ -526,14 +537,14 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_secrets",
+                MIDDLEWARE_SKILL_SECRETS_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="bind_secrets",
                 changes=audit_state,
             )
         except Exception:
-            logger.debug("Failed to record skill secret binding audit event", exc_info=True)
+            logger.warning("Failed to record skill secret binding audit event", exc_info=True)
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:

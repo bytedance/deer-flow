@@ -81,10 +81,16 @@ export function RecentChatList() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteThreads();
-  const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
-    [infiniteThreads],
-  );
+  const threads = useMemo(() => {
+    const seen = new Set<string>();
+    return (infiniteThreads?.pages.flat() ?? []).filter((thread) => {
+      if (seen.has(thread.thread_id)) {
+        return false;
+      }
+      seen.add(thread.thread_id);
+      return true;
+    });
+  }, [infiniteThreads]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -161,12 +167,25 @@ export function RecentChatList() {
 
   const handleRenameSubmit = useCallback(() => {
     if (renameThreadId && renameValue.trim()) {
-      renameThread({ threadId: renameThreadId, title: renameValue.trim() });
-      setRenameDialogOpen(false);
-      setRenameThreadId(null);
-      setRenameValue("");
+      renameThread(
+        { threadId: renameThreadId, title: renameValue.trim() },
+        {
+          onSuccess: () => {
+            setRenameDialogOpen(false);
+            setRenameThreadId(null);
+            setRenameValue("");
+          },
+          onError: (error) => {
+            toast.error(
+              error instanceof Error && error.message
+                ? error.message
+                : t.common.renameFailed,
+            );
+          },
+        },
+      );
     }
-  }, [renameThread, renameThreadId, renameValue]);
+  }, [renameThread, renameThreadId, renameValue, t.common.renameFailed]);
 
   const handleShare = useCallback(
     async (thread: AgentThread) => {

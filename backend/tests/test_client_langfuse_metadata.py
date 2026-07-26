@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from deerflow.client import DeerFlowClient
+from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, request_trace_context
 
 
@@ -49,8 +50,9 @@ def _stub_agent_creation(monkeypatch, fake_agent: _FakeAgent) -> dict[str, Any]:
     """
     captured: dict[str, Any] = {}
 
-    def _stub_ensure_agent(self, config):
+    def _stub_ensure_agent(self, config, **kwargs):
         captured["config"] = config
+        captured["context"] = kwargs.get("context")
         self._agent = fake_agent
         self._agent_config_key = ("stub",)
 
@@ -69,9 +71,11 @@ def _make_client(_monkeypatch, *, enhance_enabled: bool = True) -> DeerFlowClien
     fake_app_config = SimpleNamespace(
         models=[SimpleNamespace(name="stub-model")],
         logging=SimpleNamespace(enhance=SimpleNamespace(enabled=enhance_enabled)),
+        authorization=AuthorizationConfig(enabled=False),
     )
     client = DeerFlowClient.__new__(DeerFlowClient)
     client._app_config = fake_app_config
+    client._checkpoint_channel_mode = "full"
     client._extensions_config = None
     client._model_name = "stub-model"
     client._thinking_enabled = False

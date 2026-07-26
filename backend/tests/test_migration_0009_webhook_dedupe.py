@@ -1,4 +1,4 @@
-"""Migration ``0006_webhook_dedupe`` regression test (issue #4120).
+"""Migration ``0009_webhook_dedupe`` regression test (issue #4120).
 
 Verifies the migration creates ``webhook_deliveries`` with the composite
 primary key (channel, workspace_id, chat_id, message_id) and no legacy
@@ -21,13 +21,13 @@ from deerflow.persistence.engine import close_engine, init_engine
 pytestmark = pytest.mark.asyncio
 
 
-async def test_migration_0006_creates_composite_pk_table_and_is_idempotent(tmp_path: Path) -> None:
+async def test_migration_0009_creates_composite_pk_table_and_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "deer.db"
     url = f"sqlite+aiosqlite:///{db_path}"
     engine = create_async_engine(url)
     try:
         # Seed all baseline tables, then drop ONLY webhook_deliveries so the
-        # 0005 upgrade actually exercises its create_table path (not the
+        # 0009 upgrade actually exercises its create_table path (not the
         # idempotent early-return). Stamp at 0004 so bootstrap upgrades to head.
         sync = sa.create_engine(f"sqlite:///{db_path}")
         Base.metadata.create_all(sync)
@@ -38,7 +38,7 @@ async def test_migration_0006_creates_composite_pk_table_and_is_idempotent(tmp_p
             conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('0004_run_ownership')"))
 
         await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
-        # Runs upgrade head -> executes 0005.create_table.
+        # Runs upgrade head -> executes 0009.create_table.
         await bootstrap_schema(engine, backend="sqlite")
 
         async with engine.connect() as conn:
