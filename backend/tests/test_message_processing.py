@@ -107,13 +107,12 @@ def test_prepare_update_missing_role_returns_none(tmp_path):
     assert m._prepare_update([]) is None
 
 
-def test_prepare_update_returns_3tuple_with_correction_true(tmp_path):
+def test_prepare_update_returns_signals_with_correction(tmp_path):
     m = _make_deermem(tmp_path)
     r = m._prepare_update([_human("That's wrong, use uv"), _ai("ok")])
-    assert r is not None and len(r) == 3
-    filtered, corr, rein = r
-    assert corr is True
-    assert rein is False
+    assert r is not None and len(r) == 2
+    filtered, signals = r
+    assert "correction" in signals
     assert len(filtered) == 2
 
 

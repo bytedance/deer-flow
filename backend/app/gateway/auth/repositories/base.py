@@ -30,7 +30,10 @@ class UserRepository(ABC):
             user: User object to create
 
         Returns:
-            Created User with ID assigned
+            Created User with ID assigned. ``email`` is the canonical
+            (lowercase) stored form, which may differ in case from what was
+            passed in -- implementations mutate the input ``user`` in place
+            to reflect this rather than returning a fresh object.
 
         Raises:
             ValueError: If email already exists
@@ -69,7 +72,9 @@ class UserRepository(ABC):
             user: User object with updated fields
 
         Returns:
-            Updated User
+            Updated User. ``email`` is the canonical (lowercase) stored
+            form -- implementations mutate the input ``user`` in place to
+            reflect this rather than returning a fresh object.
 
         Raises:
             UserNotFoundError: If no row exists for ``user.id``. This is

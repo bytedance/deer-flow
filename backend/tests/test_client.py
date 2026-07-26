@@ -691,6 +691,47 @@ class TestStream:
         assert tool_events[0].data["content"] == "file.txt"
         assert tool_events[0].data["name"] == "bash"
         assert tool_events[0].data["tool_call_id"] == "tc-1"
+        assert "artifact" not in tool_events[0].data
+
+    def test_messages_mode_tool_message_preserves_human_input_artifact(self, client):
+        """Structured clarification data survives both embedded stream paths."""
+        artifact = {
+            "human_input": {
+                "request_id": "request-1",
+                "tool_call_id": "tc-1",
+                "question": "Which environment should be used?",
+                "options": [{"label": "Production", "value": "production"}],
+            }
+        }
+        tool_message = ToolMessage(
+            content="Which environment should be used?",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="ask_clarification",
+            artifact=artifact,
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (tool_message, {})),
+                ("values", {"messages": [HumanMessage(content="deploy", id="h-1"), tool_message]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("deploy", thread_id="t-tool-artifact"))
+
+        tool_event = next(event for event in events if event.type == "messages-tuple" and event.data.get("type") == "tool")
+        values_event = next(event for event in events if event.type == "values")
+        serialized_tool_message = next(message for message in values_event.data["messages"] if message["type"] == "tool")
+
+        assert tool_event.data["artifact"] == artifact
+        assert serialized_tool_message["artifact"] == artifact
+        assert tool_event.data["artifact"] is artifact
+        assert serialized_tool_message["artifact"] is artifact
 
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
@@ -3658,6 +3699,35 @@ class TestSerializeMessage:
         result = DeerFlowClient._serialize_message(msg)
         assert result["type"] == "tool"
         assert isinstance(result["content"], str)
+        assert "artifact" not in result
+
+    def test_tool_message_event_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._tool_message_event(msg)
+
+        assert result.data["artifact"] is msg.artifact
+
+    def test_tool_message_values_serialization_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._serialize_message(msg)
+
+        assert result["artifact"] is msg.artifact
 
 
 # ===========================================================================

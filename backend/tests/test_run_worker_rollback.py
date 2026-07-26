@@ -18,7 +18,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.runs.manager import ConflictError, RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
     RollbackPoint,
@@ -45,7 +45,50 @@ class FakeCheckpointer:
         self.aput_writes = AsyncMock()
 
 
+@pytest.mark.anyio
+async def test_pending_cancel_stops_waiting_for_prior_finalization():
+    run_manager = RunManager()
+    prior = await run_manager.create("thread-cancel-while-waiting")
+    prior.status = RunStatus.interrupted
+    prior.finalizing = True
+    record = await run_manager.create("thread-cancel-while-waiting")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    factory_called = False
+
+    def agent_factory(**_kwargs):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("cancelled pending run must not build an agent")
+
+    record.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={},
+        )
+    )
+    await asyncio.sleep(0)
+
+    outcome = await run_manager.cancel(record.run_id)
+    await asyncio.wait_for(record.task, timeout=0.2)
+
+    assert outcome == CancelOutcome.cancelled
+    assert prior.finalizing is True
+    assert factory_called is False
+    assert record.status == RunStatus.interrupted
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
+    materialized_messages = tuple(messages)
     return RollbackPoint(
         config={
             "configurable": {
@@ -54,7 +97,8 @@ def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pendin
                 "checkpoint_id": checkpoint_id,
             }
         },
-        messages=tuple(messages),
+        state_values={},
+        messages=materialized_messages,
         metadata={"source": "input"},
         pending_writes=tuple(pending_writes),
     )
@@ -639,8 +683,6 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
     """
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.abort_action = "rollback"
-    record.abort_event.set()
     bridge = SimpleNamespace(
         publish=AsyncMock(),
         publish_end=AsyncMock(),
@@ -664,6 +706,10 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
 
     class DummyAgent:
         async def aget_state(self, _config):
+            # Cancel after the worker crosses its startup barrier so this test
+            # exercises the running rollback path, not pending cancellation.
+            record.abort_action = "rollback"
+            record.abort_event.set()
             raise RuntimeError("materialization failed")
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
@@ -1274,11 +1320,14 @@ async def test_rollback_propagates_aput_writes_failure(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints():
-    """Delta channels omit messages from checkpoint blobs, so rollback must
-    fork the pre-run lineage through the graph: the restored checkpoint's
-    messages are reconstructed by replaying ancestor writes, and writes from
-    the cancelled run (not ancestors of the fork) must not leak back in."""
+async def test_rollback_linearizes_delta_restore_onto_cancelled_head():
+    """Delta rollback replaces state on the head instead of creating a fork.
+
+    The cancelled path has already attached writes to the pre-run checkpoint,
+    so forking that checkpoint would replay sibling writes. The restored
+    checkpoint must instead descend from the cancelled head and replace the
+    captured messages there.
+    """
     checkpointer = InMemorySaver()
     graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
     accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
@@ -1311,7 +1360,7 @@ async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints():
     assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
 
     restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
+    assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
     assert restored_tuple.metadata.get("source") == "update"
     # A non-snapshot Delta checkpoint must not persist the full message list.
     raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
@@ -1320,7 +1369,7 @@ async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints():
 
 @pytest.mark.anyio
 async def test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints():
-    """Pre-run pending writes are re-attached to the restored fork; writes
+    """Pre-run pending writes are re-attached to the restored checkpoint; writes
     attached to the cancelled run are not."""
     checkpointer = InMemorySaver()
     graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
@@ -1364,8 +1413,8 @@ async def test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints():
 
 
 @pytest.mark.anyio
-async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints_sqlite_reopen(tmp_path):
-    """Same lineage contract against a disk-backed saver, verified after a
+async def test_rollback_linearizes_delta_restore_sqlite_reopen(tmp_path):
+    """Same linear restore contract against a disk-backed saver, verified after a
     close/reopen so only persisted bytes can satisfy the assertions."""
     db_path = tmp_path / "rollback.sqlite3"
 
@@ -1382,6 +1431,8 @@ async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints_sqlite_reope
         pre_run_checkpoint_id = rollback_point.config["configurable"]["checkpoint_id"]
 
         await graph.ainvoke({}, thread_config)  # cancelled run
+        cancelled_snapshot = await accessor.aget(thread_config)
+        cancelled_checkpoint_id = cancelled_snapshot.config["configurable"]["checkpoint_id"]
 
         await _rollback_to_pre_run_checkpoint(
             accessor=accessor,
@@ -1394,8 +1445,10 @@ async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints_sqlite_reope
 
         restored_snapshot = await accessor.aget(thread_config)
         restored_checkpoint_id = restored_snapshot.config["configurable"]["checkpoint_id"]
-        assert restored_checkpoint_id != pre_run_checkpoint_id
+        assert restored_checkpoint_id not in (pre_run_checkpoint_id, cancelled_checkpoint_id)
         assert [message.content for message in restored_snapshot.values["messages"]] == ["turn-0", "turn-1"]
+        restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
+        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
 
     async with AsyncSqliteSaver.from_conn_string(str(db_path)) as checkpointer:
         graph = _build_message_append_graph(_DeltaChannelState, checkpointer)
@@ -1407,7 +1460,7 @@ async def test_rollback_forks_pre_run_lineage_for_delta_checkpoints_sqlite_reope
         assert [message.content for message in latest_snapshot.values["messages"]] == ["turn-0", "turn-1"]
 
         restored_tuple = await checkpointer.aget_tuple({"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": restored_checkpoint_id}})
-        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == pre_run_checkpoint_id
+        assert restored_tuple.parent_config["configurable"]["checkpoint_id"] == cancelled_checkpoint_id
         raw_messages = restored_tuple.checkpoint.get("channel_values", {}).get("messages")
         assert not isinstance(raw_messages, list)
 
@@ -2729,14 +2782,16 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     """
     import deerflow.runtime.runs.worker as worker_module
 
+    helper_called = asyncio.Event()
+
     async def _boom(*_args, **_kwargs):
+        helper_called.set()
         raise RuntimeError("forced helper failure")
 
     monkeypatch.setattr(worker_module, "_ensure_interrupted_title", _boom)
 
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
-    record.status = RunStatus.interrupted
 
     bridge = SimpleNamespace(
         publish=AsyncMock(),
@@ -2792,5 +2847,6 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
     # The helper raised, but the run still reaches the threads_meta status sync
     # and ``publish_end`` — i.e. the SSE stream is closed cleanly and the row
     # reflects the run outcome.
+    assert helper_called.is_set()
     assert captured_status.get("status") == ("thread-1", "interrupted")
     bridge.publish_end.assert_awaited_once_with(record.run_id)

@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0007_scheduled_run_active_index"
+HEAD = "0008_thread_operation_kind"
 BASELINE = "0001_baseline"
 
 
@@ -147,6 +147,8 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
         }:
             assert required in tables, f"missing table: {required}"
         assert "token_usage_by_model" in await _runs_columns(engine)
+        operation_kind = await _runs_column_meta(engine, "operation_kind")
+        assert operation_kind["nullable"] is False
         assert await _alembic_version(engine) == HEAD
         # The partial unique index on (thread_id WHERE status IN pending/running)
         # must exist on a fresh DB because the empty-branch stamps head without
