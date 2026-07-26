@@ -514,6 +514,9 @@ export const enUS: Translations = {
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+    pinChat: "Pin chat",
+    unpinChat: "Unpin chat",
+    pinChatFailed: "Failed to update pinned chat",
   },
 
   // Sidecar

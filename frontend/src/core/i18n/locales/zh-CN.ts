@@ -491,6 +491,9 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+    pinChat: "置顶对话",
+    unpinChat: "取消置顶",
+    pinChatFailed: "更新对话置顶状态失败",
   },
 
   // Sidecar
