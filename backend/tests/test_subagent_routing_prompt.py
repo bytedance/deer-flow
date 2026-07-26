@@ -6,9 +6,9 @@ from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
 from deerflow.tools.builtins.task_tool import task_tool
 
 
-def _build_section(monkeypatch, names: list[str] | None = None) -> str:
+def _build_section(monkeypatch, names: list[str] | None = None, max_concurrent: int = 3) -> str:
     monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: names or ["general-purpose"])
-    return prompt_module._build_subagent_section(3)
+    return prompt_module._build_subagent_section(max_concurrent)
 
 
 def test_routing_requires_clear_net_benefit(monkeypatch) -> None:
@@ -64,6 +64,18 @@ def test_multi_batch_example_preserves_reassessment_and_synthesis(monkeypatch) -
     assert "Wait for the batch, then re-evaluate" in section
     assert "Batch 2" in section
     assert "Synthesize all retained results" in section
+
+
+def test_single_subagent_limit_omits_parallel_batch_guidance(monkeypatch) -> None:
+    section = _build_section(monkeypatch, max_concurrent=1)
+
+    assert "Expected benefit = specialist capability + context isolation" in section
+    assert "delegate only for material specialist or context-isolation benefit" in section
+    assert "Parallel dispatch cannot reduce wall-clock latency" in section
+    assert "parallel wall-clock savings" not in section
+    assert "material within-batch parallel savings" not in section
+    assert "Multi-batch example" not in section
+    assert "Compare independent providers" not in section
 
 
 def test_general_purpose_and_task_descriptions_match_routing_policy() -> None:

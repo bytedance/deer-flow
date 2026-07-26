@@ -305,7 +305,12 @@ def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypa
     )
 
     assert f"MAXIMUM {enforced} `task` CALLS PER RESPONSE" in prompt
-    assert f"HARD LIMITS: max {enforced} `task` calls per response" in prompt
+    assert f"HARD LIMITS ARE NON-NEGOTIABLE: max {enforced} `task` calls per response" in prompt
+    assert "Expected benefit = specialist capability + context isolation" in prompt
+    assert "delegate only for material specialist or context-isolation benefit" in prompt
+    assert "expected benefit from real parallel latency" not in prompt
+    assert "material within-batch parallel savings" not in prompt
+    assert "Multi-batch example" not in prompt
 
 
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):

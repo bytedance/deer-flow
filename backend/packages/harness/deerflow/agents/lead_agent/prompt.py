@@ -367,6 +367,60 @@ def _build_subagent_section(
         if bash_available
         else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
     )
+    if n == 1:
+        expected_benefit = "specialist capability + context isolation"
+        parallel_dispatch_guidance = ""
+        valid_benefits = """- **Specialist capability**: A subagent has tools, skills, a model, or domain instructions that materially improve the result.
+- **Context isolation**: A bounded, unusually context-heavy investigation would otherwise displace important lead-agent context.
+
+With a per-response limit of 1, delegate only for material specialist or context-isolation benefit. Parallel dispatch cannot reduce wall-clock latency in this configuration."""
+        limit_action_guidance = """- When the per-response limit is reached, verify and synthesize the returned result or continue directly."""
+        followup_guidance = """- After any delegated result, re-evaluate whether the remaining work still has specialist or context-isolation benefit. Do not chain delegations merely to work around the per-response limit."""
+        workflow = """1. Establish the cheapest credible direct-execution path.
+2. Include all negative signals in expected cost.
+3. Compare specialist or context-isolation benefit with all listed costs.
+4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+5. Launch at most 1 call and stay within the remaining run allowance.
+6. Verify and synthesize the returned result against primary evidence."""
+        examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+- Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
+- Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
+- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+        multi_batch_example = ""
+    else:
+        expected_benefit = "parallel wall-clock savings + specialist capability + context isolation"
+        parallel_dispatch_guidance = """**Hard vetoes for parallel dispatch - do not launch these scopes concurrently:**
+- **Inter-agent dependencies**: One delegated task needs another delegated task's result. Keep the dependency chain together instead of splitting it across parallel subagents.
+- **Unsafe shared state**: Tasks may touch overlapping files, shared mutable state, or external side effects without disjoint ownership.
+
+A bounded sequential chain may still be delegated to one subagent when specialist capability or context isolation clearly outweighs delegation overhead.
+"""
+        valid_benefits = """- **Parallel latency**: Two or more independent, non-overlapping tasks can run concurrently and materially reduce wall-clock time.
+- **Specialist capability**: A subagent has tools, skills, a model, or domain instructions that materially improve the result.
+- **Context isolation**: A bounded, unusually context-heavy investigation would otherwise displace important lead-agent context.
+
+A single subagent is justified only by material specialist or context-isolation benefit. Parallelism requires independent scopes with no output dependency. **Use the fewest subagents needed** to realize the benefit."""
+        limit_action_guidance = """- Never start a batch that would exceed either limit. When a limit is reached, synthesize existing results or continue directly."""
+        followup_guidance = (
+            "- **Re-evaluate the remaining work after every batch.** Later batches cannot overlap earlier batches, but can still deliver "
+            "material within-batch parallel savings. Recompute benefit and cost instead of automatically continuing or stopping."
+        )
+        workflow = f"""1. Establish the cheapest credible direct-execution path.
+2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
+3. Compare expected benefit with all listed costs.
+4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
+6. Verify and synthesize returned results. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
+        examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+- Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
+- Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
+- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+        multi_batch_example = f"""**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
+- **Batch 1: launch up to {n} independent scopes.**
+- Wait for the batch, then re-evaluate the remaining work and net benefit.
+- **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
+- **Synthesize all retained results** at the end.
+"""
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
 
@@ -374,17 +428,13 @@ Subagents are optional. **Default to direct execution.** Do not delegate merely 
 
 **DELEGATION CHECK (required before every `task` call):**
 
-Expected benefit = parallel wall-clock savings + specialist capability + context isolation
+Expected benefit = {expected_benefit}
 
 Expected cost = delegation and startup overhead + duplicate context and repository discovery + coordination and synthesis + state-conflict risk + side-effect risk
 
 **Delegate only when the expected benefit is clearly greater than the expected cost.** When uncertain, execute directly.
 
-**Hard vetoes for parallel dispatch - do not launch these scopes concurrently:**
-- **Inter-agent dependencies**: One delegated task needs another delegated task's result. Keep the dependency chain together instead of splitting it across parallel subagents.
-- **Unsafe shared state**: Tasks may touch overlapping files, shared mutable state, or external side effects without disjoint ownership.
-
-A bounded sequential chain may still be delegated to one subagent when specialist capability or context isolation clearly outweighs delegation overhead.
+{parallel_dispatch_guidance}
 
 **Delegation costs and negative signals - include these in the net-benefit comparison:**
 - **Duplicate discovery**: Each subagent would need to read the same repository area or reconstruct context the lead agent already has.
@@ -394,40 +444,24 @@ A bounded sequential chain may still be delegated to one subagent when specialis
 **Clarify first**: Requirements that need user input must be resolved before direct execution or delegation.
 
 **Valid sources of delegation benefit:**
-- **Parallel latency**: Two or more independent, non-overlapping tasks can run concurrently and materially reduce wall-clock time.
-- **Specialist capability**: A subagent has tools, skills, a model, or domain instructions that materially improve the result.
-- **Context isolation**: A bounded, unusually context-heavy investigation would otherwise displace important lead-agent context.
-
-A single subagent is justified only by material specialist or context-isolation benefit. Parallelism requires independent scopes with no output dependency. **Use the fewest subagents needed** to realize the benefit.
+{valid_benefits}
 
 **HARD LIMITS - NON-NEGOTIABLE:**
 - **MAXIMUM {n} `task` CALLS PER RESPONSE - NEVER emit more. VIOLATION IS A HARD ERROR.** Excess calls are discarded and their work is lost.
 - **MAXIMUM {total} `task` CALLS PER RUN - NEVER exceed it. VIOLATION IS A HARD ERROR.** Count only delegations for the current user request/run; older thread history does not consume this run's allowance.
-- Never start a batch that would exceed either limit. When a limit is reached, synthesize existing results or continue directly.
-- **Re-evaluate the remaining work after every batch.** Later batches cannot overlap earlier batches, but can still deliver material within-batch parallel savings. Recompute benefit and cost instead of automatically continuing or stopping.
+{limit_action_guidance}
+{followup_guidance}
 
 **Available Subagents:**
 {available_subagents}
 
 **Delegation workflow:**
-1. Establish the cheapest credible direct-execution path.
-2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
-3. Compare expected benefit with all listed costs.
-4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
-5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
-6. Verify and synthesize returned results. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions.
+{workflow}
 
 **Examples:**
-- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
-- Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
-- Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
-- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit.
+{examples}
 
-**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
-- **Batch 1: launch up to {n} independent scopes.**
-- Wait for the batch, then re-evaluate the remaining work and net benefit.
-- **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
-- **Synthesize all retained results** at the end.
+{multi_batch_example}
 
 Otherwise execute directly using available tools ({direct_tool_examples}):
 
@@ -966,22 +1000,30 @@ def apply_prompt_template(
     subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
+    reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"
     subagent_reminder = (
-        "- **Benefit-Based Delegation**: Default to direct execution. Use `task` only when expected benefit from real parallel latency, "
-        "specialist capability, or context isolation clearly exceeds delegation, duplicate-discovery, synthesis, conflict, and side-effect costs. "
+        f"- **Benefit-Based Delegation**: Default to direct execution. Use `task` only when expected benefit from {reminder_benefits} "
+        "clearly exceeds delegation, duplicate-discovery, synthesis, conflict, and side-effect costs. "
         f"Use the fewest subagents needed. HARD LIMITS ARE NON-NEGOTIABLE: max {n} `task` calls per response, max {total} per run; excess calls are discarded and their work is lost.\n"
         if subagent_enabled
         else ""
     )
 
     # Add subagent thinking guidance if enabled
-    subagent_thinking = (
-        "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
-        "require clear positive net benefit; before parallel calls, rule out inter-agent dependencies and overlapping state or side effects. "
-        f"If delegating, use the fewest agents needed and never exceed {n} `task` calls in one response or {total} total in this run.**\n"
-        if subagent_enabled
-        else ""
-    )
+    if subagent_enabled and n == 1:
+        subagent_thinking = (
+            "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
+            "require clear positive net benefit from specialist capability or context isolation. "
+            f"Never exceed {n} `task` call in one response or {total} total in this run.**\n"
+        )
+    elif subagent_enabled:
+        subagent_thinking = (
+            "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
+            "require clear positive net benefit; before parallel calls, rule out inter-agent dependencies and overlapping state or side effects. "
+            f"If delegating, use the fewest agents needed and never exceed {n} `task` calls in one response or {total} total in this run.**\n"
+        )
+    else:
+        subagent_thinking = ""
 
     # Get skills section (deferred discovery when skill_names is provided)
     skills_section = get_skills_prompt_section(
