@@ -27,7 +27,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config import get_app_config
-from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
@@ -129,6 +129,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         replicas = _opt("replicas")
         idle_timeout = _opt("idle_timeout")
         max_duration = _opt("max_duration")
+        environment = dict(_opt("environment") or {})
+        # Fail fast on a misconfigured key (e.g. "bad-key"): the per-call env goes
+        # through the same POSIX-name check in execute_command, but this static
+        # config env is merged into every command and would otherwise only surface
+        # as a confusing SDK error at create/exec time.
+        _validate_extra_env(environment)
         return {
             "max_duration": float(max_duration if max_duration is not None else DEFAULT_MAX_DURATION),
             # Off by default (the SDK default). Warm-pool sandboxes stay running
@@ -143,7 +149,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             "workspace_id": _opt("workspace_id"),
             "cpu_cores": _opt("cpu_cores"),
             "memory_mb": _opt("memory_mb"),
-            "environment": dict(_opt("environment") or {}),
+            "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
         }

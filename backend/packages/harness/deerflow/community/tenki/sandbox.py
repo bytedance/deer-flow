@@ -54,7 +54,12 @@ _STREAM_CHUNK = 1024 * 1024
 # Tenki SDK exception *class names* that mean the remote session is gone for
 # good — matched as strings so this module imports without ``tenki-sandbox``.
 # A terminated/not-found/closed session is unrecoverable; the provider drops it
-# and rebuilds on the next call. Transport hiccups are NOT in this set.
+# and rebuilds on the next call. This is only the named-error half of the rule:
+# _is_terminal_failure ALSO treats the builtin ConnectionError / BrokenPipeError
+# / EOFError as terminal via isinstance, so a transport reset evicts the sandbox
+# and cold-starts the next acquire too. That is a deliberate fail-safe (a reset
+# often means the microVM is gone); the cost is churning a warm sandbox on a
+# one-off flaky-network blip.
 _TERMINAL_ERROR_NAMES = frozenset(
     {
         "SessionTerminatedError",
@@ -318,6 +323,15 @@ class TenkiSandbox(Sandbox):
                 raise RuntimeError("sandbox has been closed")
             fs = self._sandbox.fs
 
+        # Deliberate: the lock is dropped before streaming, unlike _fs_op which
+        # holds it across its op. _fs_op's serialization guards short, bounded
+        # calls; a download can be up to _MAX_DOWNLOAD_SIZE (100 MB), and holding
+        # the instance lock across it would block every other tool on this
+        # sandbox for the whole transfer. The Tenki read stream is safe to run
+        # alongside other ops (the SDK multiplexes over its connection), so we
+        # accept the interleave here for latency and still evict on a terminal
+        # transport error via _note_failure below.
+        #
         # The cap is enforced on bytes actually received, so a file that grows
         # mid-transfer still can't exceed it (a stat-then-read check could).
         chunks: list[bytes] = []

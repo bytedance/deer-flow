@@ -543,6 +543,48 @@ def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
     assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
 
 
+def _grep_script(fake: _FakeSandbox) -> list[str]:
+    scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    assert scripts, "no grep command was issued"
+    return shlex.split(scripts[0])
+
+
+def test_grep_literal_uses_fixed_string_flag() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "a.b\n")
+    box.grep("/mnt/user-data/workspace", "a.b", literal=True)
+    tokens = _grep_script(fake)
+    assert "-F" in tokens and "-E" not in tokens  # -F matches the pattern literally
+    assert "-i" in tokens  # case-insensitive is still the default
+
+
+def test_grep_case_sensitive_omits_ignore_case_flag() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "Needle\n")
+    box.grep("/mnt/user-data/workspace", "Needle", case_sensitive=True)
+    tokens = _grep_script(fake)
+    assert "-i" not in tokens  # case-sensitive → no -i
+    assert "-E" in tokens
+
+
+def test_glob_include_dirs_adds_directory_type_to_find() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.glob("/mnt/user-data/workspace", "*", include_dirs=True)
+    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    assert find_scripts and "-type d" in find_scripts[-1]  # dirs requested, not just files
+
+
+def test_list_dir_forwards_max_depth() -> None:
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    box.list_dir("/mnt/user-data/workspace", max_depth=4)
+    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    assert find_scripts and "-maxdepth 4" in find_scripts[-1]
+
+
 def test_paths_outside_the_virtual_prefix_are_reported_as_is() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     assert box._virtual_path("/etc/hostname") == "/etc/hostname"
@@ -568,6 +610,21 @@ def test_idle_timeout_zero_disables_reaper(monkeypatch):
     provider = _install(monkeypatch, config_attrs={"idle_timeout": 0})
     assert provider._config["idle_timeout"] == 0
     assert provider._idle_checker_thread is None
+    provider.shutdown()
+
+
+def test_load_config_rejects_invalid_environment_key(monkeypatch):
+    # The config `environment` is merged into every command; a bad key must
+    # fail fast at load time, like the per-call env in execute_command, not
+    # surface as a confusing SDK error at create/exec time.
+    monkeypatch.setattr("deerflow.community.tenki.provider.get_app_config", lambda: _stub_config({"environment": {"bad-key": "1"}}))
+    with pytest.raises(ValueError, match=r"POSIX"):
+        TenkiSandboxProvider()
+
+
+def test_load_config_accepts_valid_environment_key(monkeypatch):
+    provider = _install(monkeypatch, config_attrs={"environment": {"PYTHONUNBUFFERED": "1"}})
+    assert provider._config["environment"] == {"PYTHONUNBUFFERED": "1"}
     provider.shutdown()
 
 
@@ -618,6 +675,25 @@ def test_create_terminates_the_microvm_when_readiness_fails(monkeypatch):
     # The session exists remotely even though create() failed — it must not leak.
     assert client.last_sandbox.closed is True
     assert provider._sandboxes == {}
+    provider.shutdown()
+
+
+def test_create_survives_bootstrap_failure(monkeypatch, caplog):
+    # Bootstrap is best-effort: the file APIs still work via the home remap, so a
+    # non-zero bootstrap must warn, not fail the acquire.
+    class _BootstrapFailSandbox(_FakeSandbox):
+        def _run_script(self, script: str) -> _FakeResult:
+            if "BOOTSTRAP_OK" in script:
+                return _FakeResult(exit_code=1, stderr=b"permission denied")
+            return super()._run_script(script)
+
+    client = _FakeClient(sandbox_factory=lambda: _BootstrapFailSandbox())
+    provider = _install(monkeypatch, client=client)
+    with caplog.at_level("WARNING"):
+        sid = provider.acquire("thread-1", user_id="u1")
+    box = provider.get(sid)
+    assert box is not None and not box.is_closed  # usable despite bootstrap failure
+    assert any("bootstrap" in r.message.lower() for r in caplog.records)
     provider.shutdown()
 
 

@@ -1354,6 +1354,27 @@ sandbox:
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
+# Option 5: Tenki cloud microVM Sandbox
+# Runs each sandbox as an isolated Tenki cloud microVM. Released sandboxes stay
+# in an in-process warm pool and are reclaimed by the same user/thread without a
+# cold start. Requires the optional SDK: pip install "deerflow-harness[tenki]".
+# sandbox:
+#   use: deerflow.community.tenki:TenkiSandboxProvider
+#   # api_key: $TENKI_API_KEY        # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
+#   # base_url: https://tenki.cloud  # optional; SDK default when omitted
+#   # image: my-base-image           # optional; Tenki account default base image when omitted
+#   # project_id: proj_...           # optional; auto-selected if the account has exactly one
+#   # workspace_id: ws_...           # optional; auto-selected if the account has exactly one
+#   # cpu_cores: 2                   # optional per-sandbox vCPUs
+#   # memory_mb: 2048                # optional per-sandbox memory
+#   # replicas: 3                    # active + warm microVM cap per gateway process
+#   # idle_timeout: 600              # warm microVM idle seconds before terminate; 0 disables
+#   # max_duration: 14400            # Tenki sandbox lifetime in seconds; 0 uses the account default
+#   # sticky: false                  # pin the microVM to its host (only matters with pause/resume)
+#   # home_dir: /home/tenki          # writable dir backing /mnt/user-data
+#   # environment:                   # injected into every command (and as create-time env)
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
