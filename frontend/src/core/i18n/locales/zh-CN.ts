@@ -1043,6 +1043,10 @@ export const zhCN: Translations = {
     haveAccountSignIn: "已有账号？立即登录",
     backToHome: "← 返回首页",
     networkError: "网络错误，请重试。",
+    serviceUnavailableTitle: "服务暂时不可用",
+    serviceUnavailableDescription:
+      "网关响应时间过长。请确认服务正在运行，然后重试。",
+    retry: "重试",
     authFailed: "身份验证失败。",
     errors: {
       sso_failed: "SSO 登录失败，请重试或使用邮箱登录。",
