@@ -7,7 +7,8 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -19,13 +20,17 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus
+from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
     from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
+
+ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
+STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
+LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
 
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
@@ -154,6 +159,7 @@ class RunRecord:
     assistant_id: str | None
     status: RunStatus
     on_disconnect: DisconnectMode
+    operation_kind: ThreadOperationKind = ThreadOperationKind.run
     multitask_strategy: str = "reject"
     metadata: dict = field(default_factory=dict)
     kwargs: dict = field(default_factory=dict)
@@ -161,6 +167,8 @@ class RunRecord:
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task | None = field(default=None, repr=False)
+    # Serializes startup if an admitted run is ever handed to more than one worker path.
+    start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
     error: str | None = None
@@ -184,6 +192,20 @@ class RunRecord:
     stop_reason: str | None = None
 
 
+class RunStartOutcome(StrEnum):
+    """Result of the pending-to-running startup barrier."""
+
+    started = "started"
+    cancelled = "cancelled"
+
+
+class RunStartupError(RuntimeError):
+    """Raised when durable startup cannot be resolved safely."""
+
+
+OrphanRecoveryCallback = Callable[[list[RunRecord]], Awaitable[None]]
+
+
 class RunManager:
     """In-memory run registry with optional persistent RunStore backing.
 
@@ -199,6 +221,7 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
+        on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
@@ -211,8 +234,10 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
+        self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
+        self._orphan_recovery_task: asyncio.Task[None] | None = None
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -250,6 +275,7 @@ class RunManager:
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
             "status": record.status.value,
+            "operation_kind": record.operation_kind.value,
             "multitask_strategy": record.multitask_strategy,
             "metadata": record.metadata or {},
             "kwargs": record.kwargs or {},
@@ -388,6 +414,7 @@ class RunManager:
             assistant_id=row.get("assistant_id"),
             status=RunStatus(row.get("status") or RunStatus.pending.value),
             on_disconnect=DisconnectMode(row.get("on_disconnect") or DisconnectMode.cancel.value),
+            operation_kind=ThreadOperationKind(row.get("operation_kind") or ThreadOperationKind.run.value),
             multitask_strategy=row.get("multitask_strategy") or "reject",
             metadata=row.get("metadata") or {},
             kwargs=row.get("kwargs") or {},
@@ -483,7 +510,7 @@ class RunManager:
 
         Note: this method assumes no active run exists for the thread. It
         persists via ``store.put`` (upsert) rather than the atomic
-        ``create_run_atomic`` primitive, so a concurrent insert for the
+        ``create_thread_operation_atomic`` primitive, so a concurrent insert for the
         same thread will hit the partial unique index and surface as a
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
@@ -576,11 +603,16 @@ class RunManager:
             limit: Maximum number of runs to return.
         """
         async with self._lock:
-            memory_records = self._thread_records_locked(thread_id)
+            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run]
         if self._store is None:
             return sorted(memory_records, key=lambda r: r.created_at, reverse=True)[:limit]
         records_by_id = {record.run_id: record for record in memory_records}
-        store_limit = max(0, limit - len(memory_records))
+        # Query enough rows to cover both the requested page and every possible
+        # in-memory/store duplicate. Local records can be older than persisted
+        # rows, so subtracting them from the store limit can hide the actual
+        # newest run before the merge; querying only ``limit`` can still lose a
+        # distinct row when that page is occupied by duplicate local records.
+        store_limit = limit + len(memory_records)
         try:
             rows = await self._store.list_by_thread(thread_id, user_id=user_id, limit=store_limit)
         except Exception:
@@ -611,7 +643,7 @@ class RunManager:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_successful_regenerate_sources")
         async with self._lock:
-            memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
         sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
         # _thread_records_locked preserves the insertion order of the thread
@@ -627,6 +659,69 @@ class RunManager:
                 sources.add(source)
         return sources
 
+    async def try_start(self, run_id: str) -> RunStartOutcome:
+        """Transition an uncancelled pending run to running before building the agent."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is None:
+            raise RunStartupError(f"Cannot start unknown run {run_id}")
+
+        async with record.start_lock:
+            async with self._lock:
+                if record.abort_event.is_set() or record.status != RunStatus.pending:
+                    return RunStartOutcome.cancelled
+
+            if self._store is not None:
+                try:
+                    updated = await self._call_store_with_retry(
+                        "start_run",
+                        run_id,
+                        lambda: self._store.start_run(run_id),
+                    )
+                except Exception as exc:
+                    raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc
+                if updated is False:
+                    async with self._lock:
+                        if record.status == RunStatus.pending:
+                            record.status = RunStatus.interrupted
+                            record.abort_event.set()
+                            record.updated_at = _now_iso()
+                    return RunStartOutcome.cancelled
+
+            async with self._lock:
+                if record.abort_event.is_set() or record.status != RunStatus.pending:
+                    restore_status = record.status
+                    restore_error = record.error
+                    restore_stop_reason = record.stop_reason
+                else:
+                    record.status = RunStatus.running
+                    record.updated_at = _now_iso()
+                    logger.info("Run %s -> %s", run_id, RunStatus.running.value)
+                    return RunStartOutcome.started
+
+            if self._store is not None:
+                await self._persist_status(
+                    record,
+                    restore_status,
+                    error=restore_error,
+                    stop_reason=restore_stop_reason,
+                )
+            return RunStartOutcome.cancelled
+
+    async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
+        """Mark an admitted run as failed if its worker task could not be attached."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.pending:
+                return False
+            record.status = RunStatus.error
+            record.error = error
+            record.abort_event.set()
+            record.updated_at = _now_iso()
+
+        await self._persist_status(record, RunStatus.error, error=error)
+        return True
+
     async def get_many_by_thread(
         self,
         thread_id: str,
@@ -639,7 +734,9 @@ class RunManager:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
         async with self._lock:
-            records_by_id = {record.run_id: record for record in self._thread_records_locked(thread_id) if record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)}
+            records_by_id = {
+                record.run_id: record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
+            }
         if self._store is None:
             return records_by_id
 
@@ -692,6 +789,7 @@ class RunManager:
         run_id: str,
         *,
         poll_interval: float = 0.01,
+        abort_event: asyncio.Event | None = None,
     ) -> None:
         """Wait until older same-thread runs have finished post-cancel cleanup."""
         while True:
@@ -708,7 +806,14 @@ class RunManager:
                 if not found_current or not prior_finalizing:
                     return
 
-            await asyncio.sleep(poll_interval)
+            if abort_event is None:
+                await asyncio.sleep(poll_interval)
+                continue
+            try:
+                await asyncio.wait_for(abort_event.wait(), timeout=poll_interval)
+            except TimeoutError:
+                continue
+            return
 
     async def has_later_run(self, thread_id: str, run_id: str) -> bool:
         """Return whether a newer in-memory run has been admitted for the thread."""
@@ -803,7 +908,7 @@ class RunManager:
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
-                if task_active:
+                if task_active and record.status == RunStatus.running:
                     record.task.cancel()
                 record.status = RunStatus.interrupted
                 record.updated_at = _now_iso()
@@ -929,6 +1034,32 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
     ) -> RunRecord:
+        """Atomically admit a normal agent run for a thread."""
+        return await self._admit_thread_operation(
+            thread_id,
+            assistant_id,
+            operation_kind=ThreadOperationKind.run,
+            on_disconnect=on_disconnect,
+            metadata=metadata,
+            kwargs=kwargs,
+            multitask_strategy=multitask_strategy,
+            model_name=model_name,
+            user_id=user_id,
+        )
+
+    async def _admit_thread_operation(
+        self,
+        thread_id: str,
+        assistant_id: str | None = None,
+        *,
+        operation_kind: ThreadOperationKind,
+        on_disconnect: DisconnectMode = DisconnectMode.cancel,
+        metadata: dict | None = None,
+        kwargs: dict | None = None,
+        multitask_strategy: str = "reject",
+        model_name: str | None = None,
+        user_id: str | None = None,
+    ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
         For ``reject`` strategy, raises ``ConflictError`` if thread
@@ -960,6 +1091,7 @@ class RunManager:
             assistant_id=assistant_id,
             status=RunStatus.pending,
             on_disconnect=on_disconnect,
+            operation_kind=operation_kind,
             multitask_strategy=multitask_strategy,
             metadata=metadata or {},
             kwargs=kwargs or {},
@@ -975,6 +1107,9 @@ class RunManager:
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
+
+            if multitask_strategy in ("interrupt", "rollback") and any(record.operation_kind != ThreadOperationKind.run for record in local_inflight):
+                raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
 
             if multitask_strategy == "reject" and local_inflight:
                 raise ConflictError(f"Thread {thread_id} already has an active run")
@@ -993,13 +1128,14 @@ class RunManager:
                 if multitask_strategy == "reject":
                     try:
                         await self._call_store_with_retry(
-                            "create_run_atomic",
+                            "create_thread_operation_atomic",
                             run_id,
-                            lambda: self._store.create_run_atomic(
+                            lambda: self._store.create_thread_operation_atomic(
                                 run_id=run_id,
                                 thread_id=thread_id,
                                 owner_worker_id=self._worker_id,
                                 lease_expires_at=lease_expires_at,
+                                operation_kind=operation_kind.value,
                                 multitask_strategy="reject",
                                 assistant_id=assistant_id,
                                 user_id=user_id,
@@ -1024,13 +1160,14 @@ class RunManager:
                     for attempt in range(max_retries):
                         try:
                             await self._call_store_with_retry(
-                                "create_run_atomic",
+                                "create_thread_operation_atomic",
                                 run_id,
-                                lambda: self._store.create_run_atomic(
+                                lambda: self._store.create_thread_operation_atomic(
                                     run_id=run_id,
                                     thread_id=thread_id,
                                     owner_worker_id=self._worker_id,
                                     lease_expires_at=lease_expires_at,
+                                    operation_kind=operation_kind.value,
                                     multitask_strategy=multitask_strategy,
                                     assistant_id=assistant_id,
                                     user_id=user_id,
@@ -1053,7 +1190,7 @@ class RunManager:
                                 # worker won the race for this thread.
                                 raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                             raise
-                    # ``create_run_atomic`` already marked any claimed store
+                    # ``create_thread_operation_atomic`` already marked any claimed store
                     # rows as interrupted in the same transaction; no extra
                     # store write is needed for them.
 
@@ -1085,11 +1222,71 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    @asynccontextmanager
+    async def reserve_thread_operation(
+        self,
+        thread_id: str,
+        *,
+        kind: ThreadOperationKind,
+        user_id: str | None = None,
+    ) -> AsyncIterator[None]:
+        """Hold exclusive durable admission for a non-run thread operation.
+
+        The reservation is a short-lived pending row, so the same durable
+        uniqueness constraint used by ``create_or_reject`` closes both sides of
+        the race across Gateway workers.
+        """
+        if kind == ThreadOperationKind.run:
+            raise ValueError("Normal runs must be admitted with create_or_reject()")
+        record = await self._admit_thread_operation(
+            thread_id,
+            operation_kind=kind,
+            multitask_strategy="reject",
+            user_id=user_id,
+        )
+        try:
+            reservation_task = asyncio.current_task()
+            if reservation_task is None:
+                raise RuntimeError("Thread operation reservation requires an active asyncio task")
+            lease_lost = True
+            async with self._lock:
+                if self._runs.get(record.run_id) is record:
+                    record.task = reservation_task
+                    lease_lost = record.abort_event.is_set()
+            if lease_lost:
+                raise asyncio.CancelledError()
+            yield
+        except asyncio.CancelledError:
+            if record.abort_event.is_set():
+                raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
+            raise
+        finally:
+            try:
+                if self._store is not None:
+                    try:
+                        await self._call_store_with_retry(
+                            "release thread operation",
+                            record.run_id,
+                            lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to release persisted thread operation %s; leaving it for orphan reconciliation",
+                            record.run_id,
+                            exc_info=True,
+                        )
+            finally:
+                async with self._lock:
+                    removed = self._runs.pop(record.run_id, None)
+                    if removed is not None:
+                        self._unindex_run_locked(record.run_id, removed.thread_id)
+
     async def reconcile_orphaned_inflight_runs(
         self,
         *,
         error: str,
         before: str | None = None,
+        stop_reason: str | None = None,
     ) -> list[RunRecord]:
         """Mark persisted active runs as failed when their lease has expired.
 
@@ -1100,7 +1297,10 @@ class RunManager:
 
         Rows with a still-valid lease are skipped — they belong to another live
         worker. Rows with a NULL lease (pre-ownership data) are reclaimed as
-        well, matching the original single-worker recovery behaviour.
+        well, matching the original single-worker recovery behaviour. The
+        candidate scan is only an optimization: each row is claimed with a
+        lease-aware conditional update so a heartbeat renewal after the scan
+        always wins over reconciliation.
         """
         if self._store is None:
             return []
@@ -1130,14 +1330,32 @@ class RunManager:
                     # Still owned by a local task — skip
                     continue
 
+            try:
+                claimed = await self._call_store_with_retry(
+                    "claim_for_takeover",
+                    record.run_id,
+                    lambda: self._store.claim_for_takeover(
+                        record.run_id,
+                        grace_seconds=grace_seconds,
+                        error=error,
+                        stop_reason=stop_reason,
+                    ),
+                )
+            except Exception:
+                logger.warning("Failed to claim orphaned run %s for reconciliation", record.run_id, exc_info=True)
+                continue
+            if not claimed:
+                logger.info(
+                    "Skipped orphaned run %s recovery because the takeover claim no longer matched",
+                    record.run_id,
+                )
+                continue
             record.status = RunStatus.error
             record.error = error
+            record.stop_reason = stop_reason
             record.updated_at = now
-            persisted = await self._persist_status(record, RunStatus.error, error=error)
-            if not persisted:
-                logger.warning("Skipped orphaned run %s recovery because error status was not persisted", record.run_id)
-                continue
-            recovered.append(record)
+            if record.operation_kind == ThreadOperationKind.run:
+                recovered.append(record)
 
         if recovered:
             logger.warning("Recovered %d orphaned inflight run(s) as error", len(recovered))
@@ -1146,7 +1364,7 @@ class RunManager:
     async def has_inflight(self, thread_id: str) -> bool:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._lock:
-            return any(r.status in (RunStatus.pending, RunStatus.running) or r.finalizing for r in self._thread_records_locked(thread_id))
+            return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay."""
@@ -1200,21 +1418,21 @@ class RunManager:
         self._heartbeat_task = task
         logger.info("Run lease heartbeat started for worker %s", self._worker_id)
 
-    async def stop_heartbeat(self) -> None:
-        """Stop the background heartbeat task."""
+    async def stop_heartbeat(self, *, timeout: float = 5.0) -> None:
+        """Stop the background heartbeat task within ``timeout`` seconds."""
         if self._heartbeat_stop is not None:
             self._heartbeat_stop.set()
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
-            try:
-                await asyncio.wait_for(self._heartbeat_task, timeout=5.0)
-            except TimeoutError:
+            _, pending = await asyncio.wait(
+                (self._heartbeat_task,),
+                timeout=max(0.0, timeout),
+            )
+            if pending:
                 self._heartbeat_task.cancel()
                 try:
                     await self._heartbeat_task
                 except asyncio.CancelledError:
                     pass
-            except asyncio.CancelledError:
-                pass
         self._heartbeat_task = None
         self._heartbeat_stop = None
         logger.info("Run lease heartbeat stopped for worker %s", self._worker_id)
@@ -1258,10 +1476,7 @@ class RunManager:
             # replacement starts before the lease expires, and the
             # startup pass skips the still-valid lease.
             if cycle % 3 == 0:
-                try:
-                    await self._reconcile_orphans_periodic()
-                except Exception:
-                    logger.warning("Periodic orphan reconciliation failed", exc_info=True)
+                self._schedule_orphan_reconciliation()
 
     async def _renew_leases(self) -> None:
         """Renew the lease on every locally-owned active run."""
@@ -1274,7 +1489,7 @@ class RunManager:
             # Renew any pending/running run owned by this worker unless its
             # background task has already completed. A pending run whose task
             # has not been spawned yet (``task is None``) is still live from
-            # this worker's perspective — between ``create_run_atomic``
+            # this worker's perspective — between ``create_thread_operation_atomic``
             # inserting the row and the worker layer spawning the agent task
             # there is a brief window. If we drop those records here and the
             # window stretches past ``lease_seconds`` (e.g. event-loop
@@ -1308,38 +1523,92 @@ class RunManager:
                     # or ``owner_worker_id`` changed). Stop the local task so
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
-                    logger.warning(
-                        "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
-                        run_id,
-                        record.status.value,
-                        record.owner_worker_id,
-                    )
-                    record.abort_event.set()
-                    task_active = record.task is not None and not record.task.done()
-                    if task_active:
-                        record.task.cancel()
+                    async with self._lock:
+                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        if still_active:
+                            logger.warning(
+                                "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
+                                run_id,
+                                record.status.value,
+                                record.owner_worker_id,
+                            )
+                            record.abort_event.set()
+                            if record.task is not None:
+                                record.task.cancel()
             except Exception:
                 logger.warning("Failed to renew lease for run %s", run_id, exc_info=True)
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.
 
-        Called from ``_heartbeat_loop`` every ``lease_seconds``. Startup
-        reconciliation handles the initial sweep; this periodic pass
-        catches orphans whose lease expires between restarts.
+        Scheduled as a single-flight background task by ``_heartbeat_loop``.
+        This keeps both the store scan/status writes and the Gateway callback
+        off the lease-renewal loop. Startup reconciliation handles the initial
+        sweep; this periodic pass catches orphans whose lease expires between
+        restarts.
         """
-        error_msg = "Run lease expired — owning worker is unreachable."
-        recovered = await self.reconcile_orphaned_inflight_runs(error=error_msg)
+        recovered = await self.reconcile_orphaned_inflight_runs(
+            error=LEASE_ORPHAN_RECOVERY_ERROR,
+            stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+        )
         if recovered:
             logger.warning(
                 "Periodic reconciliation recovered %d orphaned run(s) as error",
                 len(recovered),
             )
+            if self._on_orphans_recovered is not None:
+                try:
+                    await self._on_orphans_recovered(recovered)
+                except Exception:
+                    logger.warning(
+                        "Periodic orphan recovery callback failed for %d run(s): run_ids=%s",
+                        len(recovered),
+                        [record.run_id for record in recovered],
+                        exc_info=True,
+                    )
+
+    def _schedule_orphan_reconciliation(self) -> None:
+        """Start one supervised recovery pass unless one is already running."""
+        task = self._orphan_recovery_task
+        if task is not None and not task.done():
+            logger.debug("Skipping periodic orphan reconciliation: previous pass is still running")
+            return
+        task = asyncio.create_task(self._reconcile_orphans_periodic())
+        task.set_name("deerflow-periodic-orphan-recovery")
+        self._orphan_recovery_task = task
+        task.add_done_callback(self._orphan_reconciliation_done)
+
+    def _orphan_reconciliation_done(self, task: asyncio.Task[None]) -> None:
+        """Clear and inspect the supervised single-flight recovery task."""
+        if self._orphan_recovery_task is task:
+            self._orphan_recovery_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.warning("Periodic orphan reconciliation failed", exc_info=True)
+
+    async def _drain_orphan_recovery_task(self, *, timeout: float) -> None:
+        """Boundedly await the supervised recovery pass during shutdown."""
+        task = self._orphan_recovery_task
+        if task is None or task.done():
+            return
+        _, pending = await asyncio.wait((task,), timeout=max(0.0, timeout))
+        if pending:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            logger.warning(
+                "Orphan recovery drain exceeded %.1fs on shutdown; cancelled the active pass",
+                timeout,
+            )
 
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
-        Stops the lease heartbeat first so no renewal races against the drain.
+        Signals active runs first so their cancellation/cleanup can overlap a
+        bounded heartbeat stop. The heartbeat may perform one final benign
+        lease renewal before it observes the stop event.
 
         Chat runs execute in fire-and-forget background ``asyncio`` tasks that
         write checkpoints through a shared checkpointer. On shutdown the
@@ -1365,7 +1634,6 @@ class RunManager:
         ``app.gateway.app._SHUTDOWN_HOOK_TIMEOUT_SECONDS``. Runs still active
         after ``timeout`` are logged and may still race teardown.
         """
-        await self.stop_heartbeat()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
@@ -1378,11 +1646,14 @@ class RunManager:
                 # Status is decided AFTER the drain (below), not here: a run that
                 # completes on its own during the drain must keep its real status.
 
+        await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
+
         if not inflight:
+            await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
             return
 
         tasks = [record.task for record in inflight]
-        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
 
         # Only mark/persist ``interrupted`` for runs that did not settle on their
         # own (still pending after the timeout, or ended cancelled). A run that
@@ -1430,6 +1701,7 @@ class RunManager:
         if pending:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
+        await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
 
 
 class CancelOutcome(StrEnum):

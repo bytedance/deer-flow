@@ -36,7 +36,7 @@ _TOTAL_LIMIT_STOP_MSG = (
 
 
 def _clamp_subagent_limit(value: int) -> int:
-    """Clamp subagent limit to valid range [2, 4]."""
+    """Clamp subagent limit to valid range [1, 4]."""
     return clamp_subagent_concurrency(value)
 
 
@@ -104,7 +104,7 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [2, 4].
+            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [1, 4].
         max_total: Maximum number of subagent calls allowed across the run.
             Defaults to 6. Clamped to [1, 50].
     """
