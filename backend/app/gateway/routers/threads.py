@@ -888,7 +888,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         seed_events = build_branch_history_seed_events(
             _checkpoint_messages(snapshot),
             thread_id=new_thread_id,
-            run_id=f"branch-seed-{new_thread_id}",
+            run_id_prefix=f"branch-seed-{new_thread_id}",
             parent_thread_id=thread_id,
         )
         if seed_events:
