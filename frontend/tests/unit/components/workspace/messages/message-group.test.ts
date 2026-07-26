@@ -204,6 +204,160 @@ describe("MessageGroup", () => {
     expect(visibleHtml).toContain('decoding="async"');
     expect(deferredHtml).not.toContain("<img");
   });
+
+  it("keeps the first non-empty result for a tool call and skips task calls", () => {
+    const html = renderGroup([
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-fetch",
+            name: "web_fetch",
+            args: { url: "https://example.com" },
+          },
+          {
+            id: "call-task",
+            name: "task",
+            args: { description: "Do not render this subagent call" },
+          },
+        ],
+      } as Message,
+      {
+        id: "tool-empty",
+        type: "tool",
+        name: "web_fetch",
+        tool_call_id: "call-fetch",
+        content: "",
+      } as Message,
+      {
+        id: "tool-first",
+        type: "tool",
+        name: "web_fetch",
+        tool_call_id: "call-fetch",
+        content: "# First fetched title\n\nFirst result.",
+      } as Message,
+      {
+        id: "tool-later",
+        type: "tool",
+        name: "web_fetch",
+        tool_call_id: "call-fetch",
+        content: "# Later fetched title\n\nLater result.",
+      } as Message,
+    ]);
+
+    expect(html).toContain("First fetched title");
+    expect(html).not.toContain("Later fetched title");
+    expect(html).not.toContain("Do not render this subagent call");
+  });
+
+  it("keeps the first browser view that includes a screenshot", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-browser",
+              name: "browser_navigate",
+              args: { url: "https://example.com" },
+            },
+          ],
+        } as Message,
+        {
+          id: "tool-without-shot",
+          type: "tool",
+          name: "browser_navigate",
+          tool_call_id: "call-browser",
+          content: "Opened without a preview.",
+          additional_kwargs: {
+            browser_view: { url: "https://example.com" },
+          },
+        } as Message,
+        {
+          id: "tool-first-shot",
+          type: "tool",
+          name: "browser_navigate",
+          tool_call_id: "call-browser",
+          content: "Opened with the first preview.",
+          additional_kwargs: {
+            browser_view: {
+              screenshot: "/mnt/user-data/outputs/first-browser.png",
+              url: "https://example.com/first",
+            },
+          },
+        } as Message,
+        {
+          id: "tool-later-shot",
+          type: "tool",
+          name: "browser_navigate",
+          tool_call_id: "call-browser",
+          content: "Opened with a later preview.",
+          additional_kwargs: {
+            browser_view: {
+              screenshot: "/mnt/user-data/outputs/later-browser.png",
+              url: "https://example.com/later",
+            },
+          },
+        } as Message,
+      ],
+      { threadId: "thread-1" },
+    );
+
+    expect(html).toContain("first-browser.png");
+    expect(html).not.toContain("later-browser.png");
+    expect(html).toContain("https://example.com/first");
+  });
+
+  it("renders the earliest JSON tool result after an empty streamed update", () => {
+    const html = renderGroup([
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-search",
+            name: "web_search",
+            args: { query: "DeerFlow" },
+          },
+        ],
+      } as Message,
+      {
+        id: "tool-empty",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "call-search",
+        content: "",
+      } as Message,
+      {
+        id: "tool-first",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "call-search",
+        content: JSON.stringify([
+          { title: "First source", url: "https://first.example" },
+        ]),
+      } as Message,
+      {
+        id: "tool-later",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "call-search",
+        content: JSON.stringify([
+          { title: "Later source", url: "https://later.example" },
+        ]),
+      } as Message,
+    ]);
+
+    expect(html).toContain("First source");
+    expect(html).toContain("https://first.example");
+    expect(html).not.toContain("Later source");
+    expect(html).not.toContain("https://later.example");
+  });
 });
 
 function renderGroup(

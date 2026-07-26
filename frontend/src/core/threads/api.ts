@@ -17,6 +17,7 @@ export type ThreadCompactResponse = {
 export type CompactThreadContextOptions = {
   signal?: AbortSignal;
   agentName?: string | null;
+  modelName?: string | null;
 };
 
 export type ThreadBranchResponse = {
@@ -110,6 +111,7 @@ export async function compactThreadContext(
       body: JSON.stringify({
         force: true,
         ...(options.agentName ? { agent_name: options.agentName } : {}),
+        ...(options.modelName ? { model_name: options.modelName } : {}),
       }),
       signal: options.signal,
     },
