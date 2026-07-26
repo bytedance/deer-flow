@@ -103,6 +103,57 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
         yield
 
 
+_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+
+
+async def _persist_delivery_receipt(
+    event_store: Any,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+) -> bool:
+    """Persist a terminal receipt with short bounded retries.
+
+    The owning worker still knows the real terminal outcome and renews its
+    lease while this coroutine runs. Retrying here handles transient event
+    store failures without handing a successful run to orphan recovery, which
+    cannot reconstruct either the terminal status or the detailed receipt.
+    """
+    attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            await event_store.put_if_absent(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content=content,
+            )
+            return True
+        except Exception:
+            if attempt == attempts - 1:
+                logger.warning(
+                    "Failed to persist delivery receipt for run %s after %d attempts; preserving the real terminal status without a receipt",
+                    run_id,
+                    attempts,
+                    exc_info=True,
+                )
+                return False
+            delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                run_id,
+                attempt + 1,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+    return False  # pragma: no cover - loop always returns
+
+
 # Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
@@ -393,6 +444,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
+    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -413,6 +465,12 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    # Journal construction moved ahead of preflight so every terminal run can
+    # emit a receipt. Completion persistence keeps its prior boundary: before
+    # #4272 the journal did not exist until preflight had succeeded, so early
+    # checkpoint failures / cancellation while waiting did not write an empty
+    # completion snapshot into RunStore.
+    persist_completion = False
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
@@ -423,6 +481,22 @@ async def run_agent(
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
+        # Initialize the run-scoped journal before any fallible or cancellable
+        # preflight work. Every terminal run with an event store must reach the
+        # shared finally block with a journal available for its run.delivery
+        # receipt, including checkpoint validation failures and cancellation
+        # while waiting for an earlier run to finish finalizing.
+        if event_store is not None:
+            from deerflow.runtime.journal import RunJournal
+
+            journal = RunJournal(
+                run_id=run_id,
+                thread_id=thread_id,
+                event_store=event_store,
+                track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+            )
+
         await run_manager.wait_for_prior_finalizing(
             thread_id,
             run_id,
@@ -439,7 +513,6 @@ async def run_agent(
                 await thread_store.update_status(thread_id, "running")
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -472,22 +545,7 @@ async def run_agent(
                     mode,
                 )
 
-        # Initialize RunJournal + write human_message event.
-        # These are inside the try block so any exception (e.g. a DB
-        # error writing the event) flows through the except/finally
-        # path that publishes an "end" event to the SSE bridge —
-        # otherwise a failure here would leave the stream hanging
-        # with no terminator.
-        if event_store is not None:
-            from deerflow.runtime.journal import RunJournal
-
-            journal = RunJournal(
-                run_id=run_id,
-                thread_id=thread_id,
-                event_store=event_store,
-                track_token_usage=getattr(run_events_config, "track_token_usage", True),
-                progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
-            )
+        persist_completion = True
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
@@ -731,7 +789,12 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.error,
+                    error="Rolled back by user",
+                    **terminal_status_kwargs,
+                )
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         accessor=accessor,
@@ -745,13 +808,22 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.interrupted,
+                    **terminal_status_kwargs,
+                )
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=error_msg,
+                **terminal_status_kwargs,
+            )
         else:
             runtime_context = runtime.context if isinstance(runtime.context, dict) else None
             # Guard middlewares that hard-stop a run by stripping tool_calls
@@ -769,13 +841,23 @@ async def run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
-            await run_manager.set_status(run_id, RunStatus.success, stop_reason=stop_reason)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.success,
+                stop_reason=stop_reason,
+                **terminal_status_kwargs,
+            )
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
         if action == "rollback":
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error="Rolled back by user",
+                **terminal_status_kwargs,
+            )
             try:
                 await _rollback_to_pre_run_checkpoint(
                     accessor=accessor,
@@ -789,13 +871,22 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await run_manager.set_status(run_id, RunStatus.interrupted)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.interrupted,
+                **terminal_status_kwargs,
+            )
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+        await run_manager.set_status(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            **terminal_status_kwargs,
+        )
         await bridge.publish(
             run_id,
             "error",
@@ -823,13 +914,34 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
 
-        # Flush any buffered journal events and persist completion data
+        # Flush buffered journal events before the terminal receipt. The
+        # receipt uses a run-scoped idempotent write shared with recovery, then
+        # the staged terminal status is persisted. This ordering closes the
+        # crash window where a terminal run could otherwise outlive its receipt.
         if journal is not None:
             try:
                 await journal.flush()
             except Exception:
                 logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
+            await _persist_delivery_receipt(
+                event_store,
+                thread_id=thread_id,
+                run_id=run_id,
+                content=journal.get_delivery_content(),
+            )
+
+        if event_store is not None:
+            try:
+                # Even after bounded receipt retries are exhausted, persist the
+                # real worker outcome. Leaving a successful row inflight would
+                # let lease recovery rewrite it as an error with a synthetic
+                # zero receipt.
+                await run_manager.persist_current_status(run_id)
+            except Exception:
+                logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+
+        if journal is not None and persist_completion:
             try:
                 # Persist token usage + convenience fields to RunStore
                 completion = journal.get_completion_data()

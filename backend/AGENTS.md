@@ -219,7 +219,9 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   for #1917); `test_sqlite_lifespan.py` (locks the offload around
   SQLite path resolution plus `ensure_sqlite_parent_dir`, fix for #1912);
   `test_jsonl_run_event_store.py` (locks `JsonlRunEventStore`'s async
-  API offloading its file IO via `asyncio.to_thread`);
+  API — including idempotent singleton-event writes — offloading its file IO
+  via `asyncio.to_thread`); `test_run_journal_callbacks.py` (locks
+  `RunJournal.run_inline` tool callbacks to in-memory/event-loop-safe work);
   `test_integrations_router.py` (locks Lark integration install and auth
   completion route handlers offloading archive filesystem work and `lark-cli`
   subprocesses);
@@ -450,6 +452,44 @@ captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `workspace` when changes exist. Uploads are intentionally excluded. Text diffs
 are size-limited; binary, large, and sensitive-looking paths are persisted as
 metadata only.
+
+**Run delivery receipts**: `RunJournal` records each non-empty artifact update
+once per tool `Command` for the terminal `run.delivery` event. When a command
+contains multiple messages, a unique tool name resolved from matching
+`ToolMessage` entries supplies attribution; additional command messages do not
+duplicate artifact paths or counts. If multiple different tool names resolve
+for one flat artifact update, the paths remain counted but unattributed because
+the command does not carry a per-path mapping. `RunJournal` callbacks set
+`run_inline=True`: they do only in-memory bookkeeping or schedule async writes,
+and staying on the run's event-loop thread serializes parallel tool callbacks
+before terminal delivery recording and flushing. Each worker creates a separate
+journal per run before cancellable/fallible preflight work, so checkpoint
+compatibility failures and cancellation while waiting for prior finalization
+still emit a zero-delivery receipt. The worker flushes ordinary journal events,
+idempotently persists the run-scoped receipt, and only then persists the staged
+terminal run status. A receipt failure is retried on a short bounded schedule
+while the owning worker still knows the real outcome and holds the lease. If
+all attempts fail, the worker persists that real terminal status instead of
+leaving a successful run inflight for orphan recovery to rewrite as an error;
+the receipt remains best-effort in that outage case. Orphan recovery first
+atomically claims an expired lease, then uses the same singleton write to
+backfill a zero-delivery receipt. This ordering prevents a stale recovery scan
+from overwriting a live run's later detailed receipt; an event-store outage
+does not undo the terminal takeover. An existing detailed receipt is preserved
+when a worker crashed after writing it. Event stores
+serialize `put_if_absent` with ordinary thread writers: memory and JSONL provide
+the documented single-process guarantee, while the DB store adds per-thread
+in-process locks and PostgreSQL advisory locks for cross-process writers.
+Moving journal construction ahead of preflight is receipt-only on early failure
+paths: a separate boundary flag preserves the previous completion-data
+semantics, so checkpoint incompatibility or cancellation while waiting for an
+older finalizing run does not persist an empty completion snapshot. Worker tests
+pin one accumulated receipt across multiple goal-continuation `_stream_once`
+calls; journal tests drive LangChain's real async callback dispatcher against a
+single journal to pin serialized, deduplicated parallel tool callbacks.
+Multi-worker deployments therefore require `run_events.backend: db` for shared,
+ordered delivery events; the startup gate rejects process-local memory and
+JSONL event stores when `GATEWAY_WORKERS > 1`.
 
 **RunManager / RunStore contract**:
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is shared by HTTP and internal scheduled launch paths, retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves — rejecting it 422'd every IM channel run (#4466). `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary; channel tests mock the SDK client and cannot catch this class of drift.

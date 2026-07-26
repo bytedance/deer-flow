@@ -11,6 +11,7 @@ from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -504,6 +505,66 @@ async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
         "running-run": "error",
         "success-run": "success",
     }
+
+
+@pytest.mark.anyio
+async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover():
+    """Lease recovery must durably backfill the terminal receipt exactly once."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    manager = RunManager(store=store, event_store=events)
+
+    first = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+    second = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in first] == ["running-run"]
+    assert second == []
+    delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert (await store.get("running-run"))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_reconcile_preserves_delivery_written_before_worker_crash():
+    """A crash after the receipt but before status persistence keeps its facts."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    await events.put_if_absent(
+        thread_id="thread-1",
+        run_id="running-run",
+        event_type="run.delivery",
+        category="outputs",
+        content={"presented": 1, "paths": ["report.md"], "by_tool": {"present_files": ["report.md"]}},
+    )
+    manager = RunManager(store=store, event_store=events)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"]["presented"] == 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_preserves_terminal_takeover_when_delivery_backfill_fails():
+    """A receipt-store outage must not undo an atomically claimed orphan."""
+
+    class FailingReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    store = MemoryRunStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    manager = RunManager(store=store, event_store=FailingReceiptStore())
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    assert (await store.get("running-run"))["status"] == "error"
 
 
 @pytest.mark.anyio

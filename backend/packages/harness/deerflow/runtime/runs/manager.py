@@ -24,6 +24,7 @@ from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.runtime.events.store.base import RunEventStore
     from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,7 @@ class RunManager:
         persistence_retry_policy: PersistenceRetryPolicy | None = None,
         worker_id: str | None = None,
         run_ownership_config: RunOwnershipConfig | None = None,
+        event_store: RunEventStore | None = None,
         on_orphans_recovered: OrphanRecoveryCallback | None = None,
     ) -> None:
         self._runs: dict[str, RunRecord] = {}
@@ -234,6 +236,7 @@ class RunManager:
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
         self._run_ownership_config = run_ownership_config
+        self._event_store = event_store
         self._on_orphans_recovered = on_orphans_recovered
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
@@ -757,7 +760,15 @@ class RunManager:
                 logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return records_by_id
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> None:
+    async def set_status(
+        self,
+        run_id: str,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        persist: bool = True,
+    ) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -770,8 +781,42 @@ class RunManager:
                 record.error = error
             if stop_reason is not None:
                 record.stop_reason = stop_reason
-        await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        if persist:
+            await self._persist_status(record, status, error=error, stop_reason=stop_reason)
         logger.info("Run %s -> %s", run_id, status.value)
+
+    async def persist_current_status(self, run_id: str) -> bool:
+        """Persist the status already staged on the in-memory run record."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                logger.warning("persist_current_status called for unknown run %s", run_id)
+                return False
+            status = record.status
+            error = record.error
+            stop_reason = record.stop_reason
+        return await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+
+    async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
+        """Idempotently persist a zero-delivery receipt during recovery."""
+        if self._event_store is None:
+            return True
+        try:
+            await self._event_store.put_if_absent(
+                thread_id=record.thread_id,
+                run_id=record.run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content={"presented": 0, "paths": [], "by_tool": {}},
+            )
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to backfill delivery receipt for recovered run %s; preserving its terminal status",
+                record.run_id,
+                exc_info=True,
+            )
+            return False
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
         """Mark whether a run is performing post-cancel cleanup."""
@@ -1355,6 +1400,12 @@ class RunManager:
             record.stop_reason = stop_reason
             record.updated_at = now
             if record.operation_kind == ThreadOperationKind.run:
+                # The atomic takeover above must win before writing a zero-delivery
+                # receipt; otherwise a stale scan could race a heartbeat renewal and
+                # permanently overwrite a live run's later detailed receipt. The
+                # receipt remains best-effort, matching normal terminal delivery
+                # when its event store is unavailable.
+                await self._ensure_delivery_receipt(record)
                 recovered.append(record)
 
         if recovered:
