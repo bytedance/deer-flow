@@ -85,6 +85,30 @@ class _FakeRedis:
         self.closed = True
 
 
+class _DelayedBlockingReadRedis:
+    """Hold the first blocking XREAD response while the stream is trimmed."""
+
+    def __init__(self, redis) -> None:
+        self._delegate = redis
+        self.blocking_read_started = asyncio.Event()
+        self.wake_response_captured = asyncio.Event()
+        self.release_wake_response = asyncio.Event()
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+    async def xread(self, streams, count=None, block=None):
+        if block is None:
+            return await self._delegate.xread(streams, count=count, block=block)
+
+        self.blocking_read_started.set()
+        response = await self._delegate.xread(streams, count=count, block=block)
+        if response:
+            self.wake_response_captured.set()
+            await self.release_wake_response.wait()
+        return response
+
+
 class _FakeRedisPipeline:
     def __init__(self, redis: _FakeRedis) -> None:
         self.redis = redis
@@ -595,6 +619,41 @@ async def test_redis_slow_subscriber_yields_gap_after_buffer_trim(
 
 
 @pytest.mark.anyio
+async def test_redis_initial_subscriber_yields_gap_when_first_wake_falls_behind():
+    """An established no-cursor wait must not silently replay a trimmed tail."""
+    fake = _FakeRedis()
+    delayed = _DelayedBlockingReadRedis(fake)
+    bridge = RedisStreamBridge(
+        redis_url="redis://fake",
+        queue_maxsize=2,
+        client=delayed,
+    )
+    run_id = "redis-run-initial-subscriber-gap"
+    subscriber = bridge.subscribe(run_id, heartbeat_interval=1.0)
+    first_item = asyncio.create_task(anext(subscriber))
+
+    with anyio.fail_after(2):
+        await delayed.blocking_read_started.wait()
+        await bridge.publish(run_id, "e1", {"step": 1})
+        await delayed.wake_response_captured.wait()
+        await bridge.publish(run_id, "e2", {"step": 2})
+        await bridge.publish(run_id, "e3", {"step": 3})
+        await bridge.publish(run_id, "e4", {"step": 4})
+        delayed.release_wake_response.set()
+        gap = await first_item
+
+    key = bridge._stream_key(run_id)
+    retained_ids = [event_id for event_id, _fields in fake.streams[key]]
+    assert gap == StreamGap(
+        requested_event_id=None,
+        earliest_available_event_id=retained_ids[0],
+        latest_available_event_id=retained_ids[-1],
+    )
+    with pytest.raises(StopAsyncIteration):
+        await anext(subscriber)
+
+
+@pytest.mark.anyio
 async def test_redis_recovery_cursor_at_end_yields_end_immediately(
     redis_bridge: RedisStreamBridge,
 ):
@@ -953,6 +1012,25 @@ async def test_resolve_start_offset_matches_linear_scan():
 
 
 @pytest.mark.anyio
+async def test_memory_low_numeric_foreign_cursor_conservatively_yields_gap():
+    """An unverifiable numeric cursor below the watermark takes the safe path."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-low-foreign-cursor"
+    for index in range(3):
+        await bridge.publish(run_id, f"e{index}", {"index": index})
+
+    stream = bridge._streams[run_id]
+    timestamp, _, _sequence = stream.events[0].id.rpartition("-")
+    foreign_evicted_id = f"{int(timestamp) + 1}-0"
+
+    assert bridge._resolve_start_offset(stream, foreign_evicted_id) == StreamGap(
+        requested_event_id=foreign_evicted_id,
+        earliest_available_event_id=stream.events[0].id,
+        latest_available_event_id=stream.events[-1].id,
+    )
+
+
+@pytest.mark.anyio
 async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
     """A foreign/garbage Last-Event-ID falls back to replaying retained events."""
     bridge = MemoryStreamBridge(queue_maxsize=10)
@@ -1206,6 +1284,41 @@ async def test_redis_integration_evicted_cursor_yields_gap(real_redis_bridge):
             latest_available_event_id=retained[-1][0],
         )
     ]
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_integration_initial_subscriber_yields_gap_when_first_wake_falls_behind(
+    real_redis_bridge,
+):
+    """A real blocking XREAD wake must be validated before first delivery."""
+    raw_redis = real_redis_bridge._redis
+    delayed = _DelayedBlockingReadRedis(raw_redis)
+    real_redis_bridge._redis = delayed
+    run_id = "integ-initial-subscriber-gap"
+    subscriber = real_redis_bridge.subscribe(run_id, heartbeat_interval=1.0)
+    first_item = asyncio.create_task(anext(subscriber))
+
+    with anyio.fail_after(2):
+        await delayed.blocking_read_started.wait()
+        await real_redis_bridge.publish(run_id, "e1", {"step": 1})
+        await delayed.wake_response_captured.wait()
+        await real_redis_bridge.publish(run_id, "e2", {"step": 2})
+        await real_redis_bridge.publish(run_id, "e3", {"step": 3})
+        await real_redis_bridge.publish(run_id, "e4", {"step": 4})
+        delayed.release_wake_response.set()
+        gap = await first_item
+
+    key = real_redis_bridge._stream_key(run_id)
+    retained = await raw_redis.xrange(key)
+    assert gap == StreamGap(
+        requested_event_id=None,
+        earliest_available_event_id=retained[0][0],
+        latest_available_event_id=retained[-1][0],
+    )
+    with pytest.raises(StopAsyncIteration):
+        await anext(subscriber)
 
 
 @pytest.mark.integration

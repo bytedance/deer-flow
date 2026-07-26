@@ -809,8 +809,10 @@ data: {"code":"stream_replay_gap","run_id":"run-123","requested_event_id":"17180
 The frame deliberately has no SSE `id:`. Consumers must reload durable thread
 state and persisted run events/messages, then may reconnect from
 `latest_available_event_id` to follow newer live events. A gap does not cancel
-the active run. Malformed cursor handling is backend-specific and is not the
-same as a valid cursor that was evicted.
+the active run. The same signal applies when a no-cursor subscriber has already
+established an empty-stream wait but the first Redis wake-up falls behind before
+delivery; in that case `requested_event_id` is `null`. Malformed cursor handling
+is backend-specific and is not the same as a valid cursor that was evicted.
 
 ---
 

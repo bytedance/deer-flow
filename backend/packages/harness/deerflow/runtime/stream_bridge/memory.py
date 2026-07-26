@@ -77,9 +77,12 @@ class MemoryStreamBridge(StreamBridge):
 
         # Event ids embed a per-run, monotonically increasing ``seq`` that equals
         # the event's absolute offset, so locate the event by arithmetic in O(1)
-        # rather than scanning the retained buffer. The id is verified at the
-        # computed index, so a stale/evicted/foreign/malformed id still falls back
-        # to replay-from-earliest — identical to the previous linear scan.
+        # rather than scanning the retained buffer. Retained ids are verified at
+        # the computed index. Once an id is below the retained watermark there is
+        # nothing left to verify its timestamp against, so even a numeric foreign
+        # id takes the conservative gap path; reloading durable state is safer
+        # than silently claiming a complete replay. Unknown ids at or above the
+        # watermark keep the legacy replay-from-earliest behavior.
         seq = self._parse_event_seq(last_event_id)
         if seq is not None:
             if stream.events and seq < stream.start_offset:

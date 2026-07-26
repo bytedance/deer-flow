@@ -161,7 +161,9 @@ data: {"code":"stream_replay_gap","run_id":"...","requested_event_id":"...","ear
 
 `gap` 帧没有 SSE `id:`，后面也没有正常 `end`；当前订阅随即关闭。它是恢复边界而不是客户端断开，因此不会触发 `on_disconnect=cancel`。客户端必须丢弃不再可信的瞬时状态，重新读取 thread checkpoint 和持久化 run-event/message history，再以 `latest_available_event_id` 为游标跟随新事件。DeerFlow Web UI 自动执行此流程并最多连续恢复五次。
 
-“有效但已淘汰”和 malformed cursor 是不同策略：本契约只要求前者产生 `gap`。Redis 的 malformed ID 仍从 live tail 等待；Memory 对未知 ID 仍采用既有的最早保留事件策略。
+Redis 对无游标、空 stream 上已经建立的阻塞等待也遵循相同契约：第一次 `XREAD` 唤醒的数据在交付前仍是 provisional baseline，bridge 会用下一次事务快照确认其尾 ID 仍在保留窗口。若生产者已经裁剪了该基线，订阅直接返回 `requested_event_id: null` 的 `gap`，不会先交付 retained tail。这个检查有明确的性能代价：每轮订阅需要一个包含 `XRANGE`、`XREVRANGE`、非阻塞 `XREAD` 的事务快照；空闲时还需要单独的阻塞 `XREAD` 来唤醒。
+
+“有效但已淘汰”和 malformed cursor 是不同策略：本契约只要求前者产生 `gap`。Redis 的 malformed ID 仍从 live tail 等待；Memory 对 malformed ID 及序号不低于水位线的未知 ID 仍采用既有的最早保留事件策略。对于序号已经低于水位线的数字格式 foreign ID，Memory 无法再校验已淘汰的 timestamp，因此保守返回 `gap`，优先保证客户端不会把不完整重放误认为完整。
 
 ---
 

@@ -67,6 +67,8 @@ const TERMINAL_RUN_STATUSES = new Set([
   "interrupted",
 ]);
 
+// This is a rejoin budget: the original stream is not counted, so exhausting
+// five recovery attempts can consume six streams in total.
 const MAX_STREAM_GAP_RECOVERIES = 5;
 
 export type StreamReplayGapData = {
@@ -309,6 +311,9 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
 
   const originalRunStream = client.runs.stream.bind(client.runs);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
+  // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
+  // this return value with `for await`, so run creation still starts on first
+  // iteration rather than when `runs.stream()` is called.
   client.runs.stream = async function* (threadId, assistantId, payload) {
     const sanitizedPayload = sanitizeRunStreamOptions(payload);
     const originalOnRunCreated = sanitizedPayload?.onRunCreated;
