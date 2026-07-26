@@ -298,6 +298,27 @@ async function* recoverStreamReplayGaps({
   }
 }
 
+async function* handleInactiveRunStream({
+  threadId,
+  expectedRunId,
+  stream,
+}: {
+  threadId: string | null | undefined;
+  expectedRunId: () => string | undefined;
+  stream: AsyncIterable<StreamPart>;
+}): AsyncGenerator<StreamPart> {
+  try {
+    yield* stream;
+  } catch (error) {
+    const runId = expectedRunId();
+    if (runId && isInactiveRunStreamError(error)) {
+      clearReconnectRun(threadId, runId);
+      return;
+    }
+    throw error;
+  }
+}
+
 function createCompatibleClient(isMock?: boolean): LangGraphClient {
   if (isStaticWebsiteOnly() && !isMock) {
     return createStaticClient();
@@ -326,17 +347,26 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       },
     });
 
-    yield* recoverStreamReplayGaps({
+    const recoveredStream = recoverStreamReplayGaps({
       client,
       threadId,
       expectedRunId: () => runId,
       initialStream,
-      resume: (resolvedRunId, lastEventId) =>
-        originalJoinStream(threadId, resolvedRunId, {
+      resume: (resolvedRunId, lastEventId) => {
+        // Keep the recovery run id available to the shared inactive-stream
+        // handler even if the SDK omitted its onRunCreated callback.
+        runId = resolvedRunId;
+        return originalJoinStream(threadId, resolvedRunId, {
           lastEventId,
           signal: sanitizedPayload?.signal,
           streamMode: sanitizedPayload?.streamMode,
-        }),
+        });
+      },
+    });
+    yield* handleInactiveRunStream({
+      threadId,
+      expectedRunId: () => runId,
+      stream: recoveredStream,
     });
   } as typeof client.runs.stream;
 
@@ -368,9 +398,11 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
       clearReconnectRun(threadId, runId);
       return;
     }
-    try {
-      const sanitizedOptions = sanitizeRunStreamOptions(options);
-      yield* recoverStreamReplayGaps({
+    const sanitizedOptions = sanitizeRunStreamOptions(options);
+    yield* handleInactiveRunStream({
+      threadId,
+      expectedRunId: () => runId,
+      stream: recoverStreamReplayGaps({
         client,
         threadId,
         expectedRunId: () => runId,
@@ -380,14 +412,8 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
             ...sanitizedOptions,
             lastEventId,
           }),
-      });
-    } catch (error) {
-      if (isInactiveRunStreamError(error)) {
-        clearReconnectRun(threadId, runId);
-        return;
-      }
-      throw error;
-    }
+      }),
+    });
   } as typeof client.runs.joinStream;
 
   return client;

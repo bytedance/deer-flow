@@ -450,6 +450,79 @@ test("recovers a gap emitted by the initial run stream", async () => {
   expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
 });
 
+test("clears reconnect metadata when an initial stream gap resume is inactive", async () => {
+  const sessionStorage = makeSessionStorage();
+  const gap = {
+    code: "stream_replay_gap",
+    run_id: "run-inactive-resume",
+    requested_event_id: null,
+    earliest_available_event_id: "4-0",
+    latest_available_event_id: "5-0",
+    recovery: "reload_durable_state",
+  };
+  let recoveryRequests = 0;
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = url.toString();
+    if (path.endsWith("/threads/thread-inactive-resume/runs/stream")) {
+      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+        "Content-Location":
+          "/threads/thread-inactive-resume/runs/run-inactive-resume",
+      });
+    }
+    if (path.includes("/threads/thread-inactive-resume/state")) {
+      return new Response(
+        JSON.stringify({
+          values: { messages: [{ type: "ai", content: "checkpoint" }] },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.includes("/runs/run-inactive-resume/stream")) {
+      recoveryRequests += 1;
+      return new Response(
+        JSON.stringify({
+          detail:
+            "Run run-inactive-resume is not active on this worker and cannot be streamed",
+        }),
+        { status: 409 },
+      );
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const stream = getAPIClient(true).runs.stream(
+    "thread-inactive-resume",
+    "lead_agent",
+    { streamResumable: true },
+  );
+
+  await expect(stream.next()).resolves.toMatchObject({
+    done: false,
+    value: {
+      event: "custom",
+      data: { type: "stream_replay_gap", ...gap },
+    },
+  });
+  await expect(stream.next()).resolves.toMatchObject({
+    done: false,
+    value: {
+      event: "values",
+      data: { messages: [{ type: "ai", content: "checkpoint" }] },
+    },
+  });
+  await expect(stream.next()).resolves.toMatchObject({ done: true });
+
+  expect(recoveryRequests).toBe(1);
+  expect(sessionStorage.getItem("lg:stream:thread-inactive-resume")).toBeNull();
+});
+
 test("stops after five consecutive stream gap recoveries", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-gap-loop", "run-gap-loop");
