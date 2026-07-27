@@ -54,5 +54,15 @@
       }
     }
   },
-  "skills": {}
+  "skills": {
+    "lark-shared": {
+      "enabled": false
+    },
+    "lark-im": {
+      "enabled": false
+    },
+    "lark-base": {
+      "enabled": false
+    }
+  }
 }
