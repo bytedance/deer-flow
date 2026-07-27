@@ -219,7 +219,10 @@ class ScheduledTaskService:
                 )
                 await self._task_repo.update_after_launch(
                     task["id"],
-                    status=task.get("status") or "running",
+                    # Parity with the success path: once tasks stay "running" until
+                    # handle_run_completion observes the real terminal outcome, so
+                    # cancel_stuck_once_tasks can reconcile them on restart.
+                    status="running",
                     next_run_at=next_at,
                     last_run_at=now,
                     last_run_id=_launch_run_result["run_id"],

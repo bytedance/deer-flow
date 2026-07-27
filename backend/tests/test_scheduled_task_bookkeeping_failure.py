@@ -85,6 +85,27 @@ async def _seed_task(task_repo: ScheduledTaskRepository, task_id: str) -> dict:
     return task
 
 
+async def _seed_once_task(task_repo: ScheduledTaskRepository, task_id: str) -> dict:
+    """Seed a once task for testing bookkeeping-failure recovery."""
+    run_at = datetime.now(UTC).replace(microsecond=0)
+    await task_repo.create(
+        task_id=task_id,
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title=task_id,
+        prompt="do the thing",
+        schedule_type="once",
+        schedule_spec={"run_at": run_at.isoformat()},
+        timezone="UTC",
+        next_run_at=run_at,
+    )
+    task = await task_repo.get(task_id, user_id="user-1")
+    assert task is not None
+    return task
+
+
 async def test_launch_succeeds_but_bookkeeping_fails_keeps_slot_occupied(tmp_path):
     """Verify that when _launch_run succeeds but update_status fails, the slot is NOT released."""
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
@@ -179,5 +200,49 @@ async def test_launch_fails_before_launch_does_release_slot(tmp_path):
 
         # Second dispatch attempted launch (will also fail, but it tried)
         assert len(launched) == 1, "Second dispatch should also attempt launch"
+    finally:
+        await close_engine()
+
+
+async def test_once_task_bookkeeping_failure_keeps_status_running(tmp_path):
+    """Verify once task stays 'running' (not 'enabled') after bookkeeping-failure recovery.
+
+    For 'once' tasks the success path deliberately parks the parent task in
+    'running' so cancel_stuck_once_tasks can reconcile it on restart.
+    The recovery branch must match this, otherwise the task is orphaned
+    on restart-after-crash: mark_stale_active_runs releases the run row
+    but cancel_stuck_once_tasks never touches the parent (it only sweeps
+    tasks with status == 'running').
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = _FailingUpdateStatusRunRepo(sf, fail_first_update=True)
+        launched: list = []
+        service = _make_service(task_repo, run_repo, launched)
+        task = await _seed_once_task(task_repo, "task-once-bookkeeping-fail")
+        now = datetime.now(UTC)
+
+        # Dispatch: launch succeeds, but first update_status fails
+        result = await service.dispatch_task(dict(task), now=now, trigger="scheduled")
+
+        # Launch was called
+        assert len(launched) == 1
+        assert result["outcome"] == "failed"
+        assert result["run_id"] is not None, "run_id should be preserved"
+
+        # Slot is still occupied (run row is 'running')
+        assert await run_repo.has_active_runs("task-once-bookkeeping-fail") is True
+
+        # The parent task's status must be 'running' (not 'enabled') so
+        # cancel_stuck_once_tasks can reconcile it on restart.
+        updated_task = await task_repo.get("task-once-bookkeeping-fail", user_id="user-1")
+        assert updated_task is not None
+        assert updated_task["status"] == "running", (
+            f"Once task should have status 'running' after recovery, got '{updated_task['status']}'. "
+            "Without this, cancel_stuck_once_tasks cannot reconcile the task on restart."
+        )
     finally:
         await close_engine()
