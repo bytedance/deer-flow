@@ -17,9 +17,10 @@ Examples::
         --backends sqlite --updates 1000 --payload-bytes 128 \
         --repetitions 7 --output snapshot-boundary.jsonl
 
-The controller suppresses matrix pairs whose estimated cumulative full-mode
-message payload exceeds ``--max-estimated-full-bytes``. Both modes are skipped
-as a pair so every emitted full/delta result remains comparable. Use
+The controller suppresses matrix cells whose estimated cumulative full-mode
+message payload exceeds ``--max-estimated-full-bytes``. Full mode and every
+swept delta cadence are skipped together so every emitted result remains
+comparable and subject to the same safety cap. Use
 ``--allow-large-cases`` only on a machine provisioned for the resulting disk
 and memory use.
 """
@@ -37,6 +38,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -48,6 +50,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 
 from deerflow.agents.thread_state import merge_message_writes
+from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY
 from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
@@ -70,7 +73,7 @@ Backend = Literal["memory", "sqlite"]
 
 SCHEMA_VERSION = 1
 BENCHMARK_VERSION = 1
-PRODUCTION_SNAPSHOT_FREQUENCY = 1000
+PRODUCTION_SNAPSHOT_FREQUENCY = DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY
 DEFAULT_MAX_ESTIMATED_FULL_BYTES = 1024**3
 _MODES: tuple[Mode, ...] = ("full", "delta")
 _BACKENDS: tuple[Backend, ...] = ("memory", "sqlite")
@@ -86,11 +89,13 @@ class _FullBenchmarkState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 
 
-class _DeltaBenchmarkState(TypedDict):
-    messages: Annotated[
-        list[AnyMessage],
-        DeltaChannel(merge_message_writes, snapshot_frequency=PRODUCTION_SNAPSHOT_FREQUENCY),
-    ]
+@cache
+def _delta_benchmark_state(snapshot_frequency: int) -> type:
+    """Delta benchmark schema for one snapshot cadence (cached per value)."""
+    return TypedDict(
+        f"_DeltaBenchmarkState_f{snapshot_frequency}",
+        {"messages": Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=snapshot_frequency)]},
+    )
 
 
 @dataclass(frozen=True)
@@ -115,8 +120,8 @@ class BenchmarkCase:
             raise ValueError("payload_bytes must be positive")
         if self.repetition < 0:
             raise ValueError("repetition must be non-negative")
-        if self.snapshot_frequency != PRODUCTION_SNAPSHOT_FREQUENCY:
-            raise ValueError(f"Phase 1 supports only production snapshot_frequency={PRODUCTION_SNAPSHOT_FREQUENCY}")
+        if self.snapshot_frequency <= 0:
+            raise ValueError("snapshot_frequency must be positive")
         if self.scenario != "append":
             raise ValueError(f"unsupported scenario: {self.scenario!r}")
 
@@ -129,8 +134,15 @@ def _expand_cases(
     payload_bytes: list[int],
     repetitions: int,
     seed: int,
+    snapshot_frequencies: list[int] | None = None,
 ) -> list[BenchmarkCase]:
-    """Build a matrix with alternating mode order to reduce order bias."""
+    """Build a matrix with alternating mode order to reduce order bias.
+
+    ``snapshot_frequencies`` sweeps delta cases across cadences. Full-mode
+    cases ignore the cadence and run once per cell at the production default,
+    so a sweep costs no duplicate full-mode measurements.
+    """
+    frequencies = snapshot_frequencies or [PRODUCTION_SNAPSHOT_FREQUENCY]
     cases: list[BenchmarkCase] = []
     for repetition in range(repetitions):
         for backend in backends:
@@ -140,16 +152,19 @@ def _expand_cases(
                     if (repetition + update_index) % 2 == 1:
                         ordered_modes.reverse()
                     for mode in ordered_modes:
-                        cases.append(
-                            BenchmarkCase(
-                                mode=mode,  # type: ignore[arg-type]
-                                backend=backend,  # type: ignore[arg-type]
-                                update_count=update_count,
-                                payload_bytes=payload,
-                                repetition=repetition,
-                                seed=seed,
+                        mode_frequencies = frequencies if mode == "delta" else [PRODUCTION_SNAPSHOT_FREQUENCY]
+                        for snapshot_frequency in mode_frequencies:
+                            cases.append(
+                                BenchmarkCase(
+                                    mode=mode,  # type: ignore[arg-type]
+                                    backend=backend,  # type: ignore[arg-type]
+                                    update_count=update_count,
+                                    payload_bytes=payload,
+                                    repetition=repetition,
+                                    seed=seed,
+                                    snapshot_frequency=snapshot_frequency,
+                                )
                             )
-                        )
     return cases
 
 
@@ -161,7 +176,10 @@ def _estimated_full_payload_bytes(case: BenchmarkCase) -> int:
 def _filter_oversized_pairs(cases: list[BenchmarkCase], *, max_bytes: int | None) -> tuple[list[BenchmarkCase], list[BenchmarkCase]]:
     if max_bytes is None:
         return cases, []
-    group_fields = ("backend", "scenario", "snapshot_frequency", "update_count", "payload_bytes", "repetition")
+    # Cadence is a delta-only sweep dimension: full mode runs once per benchmark
+    # cell at the production default. Excluding it ensures an oversized full
+    # case suppresses every delta cadence in that same cell.
+    group_fields = ("backend", "scenario", "update_count", "payload_bytes", "repetition")
     oversized_keys = {tuple(getattr(case, field) for field in group_fields) for case in cases if case.mode == "full" and _estimated_full_payload_bytes(case) > max_bytes}
     kept = [case for case in cases if tuple(getattr(case, field) for field in group_fields) not in oversized_keys]
     skipped = [case for case in cases if tuple(getattr(case, field) for field in group_fields) in oversized_keys]
@@ -180,8 +198,8 @@ def _noop(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _build_graph(mode: Mode, saver: Any) -> Any:
-    schema = _DeltaBenchmarkState if mode == "delta" else _FullBenchmarkState
+def _build_graph(mode: Mode, saver: Any, snapshot_frequency: int) -> Any:
+    schema = _delta_benchmark_state(snapshot_frequency) if mode == "delta" else _FullBenchmarkState
     builder = StateGraph(schema)
     builder.add_node("noop", _noop)
     builder.set_entry_point("noop")
@@ -283,7 +301,7 @@ def _sqlite_storage_stats(saver: SqliteSaver, thread_id: str) -> dict[str, int]:
 
 
 def _write_and_read(case: BenchmarkCase, saver: Any, messages: list[BaseMessage]) -> tuple[dict[str, Any], list[AnyMessage]]:
-    graph = _build_graph(case.mode, saver)
+    graph = _build_graph(case.mode, saver, case.snapshot_frequency)
     accessor = CheckpointStateAccessor.bind(graph, saver, mode=case.mode)
     config = _config(case)
     update_latencies: list[float] = []
@@ -312,7 +330,7 @@ def _write_and_read(case: BenchmarkCase, saver: Any, messages: list[BaseMessage]
 
 
 def _cold_read(case: BenchmarkCase, saver: Any) -> tuple[float, list[AnyMessage]]:
-    graph = _build_graph(case.mode, saver)
+    graph = _build_graph(case.mode, saver, case.snapshot_frequency)
     accessor = CheckpointStateAccessor.bind(graph, saver, mode=case.mode)
     gc.collect()
     start = time.perf_counter()
@@ -455,7 +473,7 @@ def _failure_row(case: BenchmarkCase, error: str) -> dict[str, Any]:
 
 
 def _profile_filename(case: BenchmarkCase) -> str:
-    return f"{case.backend}-{case.mode}-updates-{case.update_count}-payload-{case.payload_bytes}-rep-{case.repetition}.prof"
+    return f"{case.backend}-{case.mode}-freq-{case.snapshot_frequency}-updates-{case.update_count}-payload-{case.payload_bytes}-rep-{case.repetition}.prof"
 
 
 def _run_child_case(case: BenchmarkCase, *, timeout_seconds: float, git_sha: str, profile_dir: Path | None = None) -> dict[str, Any]:
@@ -477,6 +495,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backends", default="memory,sqlite", help="Comma-separated backends (default: memory,sqlite)")
     parser.add_argument("--updates", default="10,100", help="Comma-separated message update counts (default: 10,100)")
     parser.add_argument("--payload-bytes", default="128", help="Comma-separated exact message content sizes (default: 128)")
+    parser.add_argument(
+        "--snapshot-frequencies",
+        default=str(PRODUCTION_SNAPSHOT_FREQUENCY),
+        help=(
+            "Comma-separated DeltaChannel snapshot cadences for delta cases "
+            f"(default: {PRODUCTION_SNAPSHOT_FREQUENCY}). Full-mode cases ignore "
+            "the cadence and run once per cell at the production default. "
+            "Sweep 100,250,500,1000 to compare cadence tradeoffs."
+        ),
+    )
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=900)
@@ -521,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
         backends = _parse_choice_csv(args.backends, option="--backends", choices=_BACKENDS)
         updates = _parse_positive_int_csv(args.updates, option="--updates")
         payload_bytes = _parse_positive_int_csv(args.payload_bytes, option="--payload-bytes")
+        snapshot_frequencies = _parse_positive_int_csv(args.snapshot_frequencies, option="--snapshot-frequencies")
         if args.repetitions <= 0:
             raise ValueError("--repetitions must be positive")
         if args.timeout_seconds <= 0:
@@ -537,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
         payload_bytes=payload_bytes,
         repetitions=args.repetitions,
         seed=args.seed,
+        snapshot_frequencies=snapshot_frequencies,
     )
     cases, skipped = _filter_oversized_pairs(cases, max_bytes=None if args.allow_large_cases else args.max_estimated_full_bytes)
     if skipped:
@@ -552,8 +582,9 @@ def main(argv: list[str] | None = None) -> int:
     git_sha = _resolve_git_sha()
     rows: list[dict[str, Any]] = []
     for index, case in enumerate(cases, start=1):
+        cadence = f" freq={case.snapshot_frequency}" if case.mode == "delta" else ""
         print(
-            f"[{index}/{len(cases)}] {case.backend} {case.mode} updates={case.update_count} payload={case.payload_bytes} repetition={case.repetition}",
+            f"[{index}/{len(cases)}] {case.backend} {case.mode}{cadence} updates={case.update_count} payload={case.payload_bytes} repetition={case.repetition}",
             file=sys.stderr,
         )
         rows.append(_run_child_case(case, timeout_seconds=args.timeout_seconds, git_sha=git_sha, profile_dir=args.profile_dir))

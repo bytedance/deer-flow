@@ -256,9 +256,9 @@ honor environment proxy settings.
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
-`database.checkpoint_delta_snapshot_frequency` are exceptions: both are frozen
-when the process first builds an agent (including through `DeerFlowClient`) and
-require a process restart to change safely.
+`database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
+both are frozen when the process first builds an agent (including through
+`DeerFlowClient`) and require a process restart to change safely.
 
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.

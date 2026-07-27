@@ -37,7 +37,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
-from deerflow.agents.thread_state import freeze_delta_snapshot_frequency, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
@@ -48,6 +48,7 @@ from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
     inject_checkpoint_mode,
 )
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
@@ -192,7 +193,7 @@ class DeerFlowClient:
             reload_app_config(config_path)
         self._app_config = get_app_config()
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
-        freeze_delta_snapshot_frequency(self._app_config.database.checkpoint_delta_snapshot_frequency)
+        self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
@@ -288,6 +289,7 @@ class DeerFlowClient:
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
             authorization_identity,
         )
 
@@ -359,6 +361,7 @@ class DeerFlowClient:
                     authorization_provider=_authz_provider,
                 ),
                 self._checkpoint_channel_mode,
+                self._checkpoint_snapshot_frequency,
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -372,7 +375,7 @@ class DeerFlowClient:
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
             ),
-            "state_schema": get_thread_state_schema(self._checkpoint_channel_mode),
+            "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
         checkpointer = self._checkpointer
         if checkpointer is None:

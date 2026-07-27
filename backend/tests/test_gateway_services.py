@@ -726,6 +726,62 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
+def test_state_accessor_graph_cache_keys_on_snapshot_frequency():
+    """The accessor-graph cache must not serve a graph compiled at a different
+    delta snapshot cadence."""
+    from app.gateway import services as gateway_services
+
+    builds = []
+
+    def fake_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    try:
+        first = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        again = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        assert again is first
+        assert len(builds) == 1
+
+        other_cadence = gateway_services._state_accessor_graph(fake_factory, None, "delta", 250, {})
+        assert other_cadence is not first
+        assert len(builds) == 2
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
+def test_state_accessor_graph_cache_honors_configured_cap():
+    """database.checkpoint_graph_cache.accessor_graph_max bounds the cache;
+    it is re-read per eviction check (hot-reloadable)."""
+    from types import SimpleNamespace
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+
+    def fake_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        return graph
+
+    app_config = SimpleNamespace(database=SimpleNamespace(checkpoint_graph_cache=SimpleNamespace(accessor_graph_max=2)))
+    config = {"context": {"app_config": app_config}}
+
+    gateway_services._state_accessor_graph_cache.clear()
+    try:
+        gateway_services._state_accessor_graph(fake_factory, "a", "full", None, config)
+        gateway_services._state_accessor_graph(fake_factory, "b", "full", None, config)
+        assert len(builds) == 2
+        # Third distinct key exceeds the configured cap of 2: wholesale clear.
+        gateway_services._state_accessor_graph(fake_factory, "c", "full", None, config)
+        assert len(gateway_services._state_accessor_graph_cache) == 1
+        assert len(builds) == 3
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in

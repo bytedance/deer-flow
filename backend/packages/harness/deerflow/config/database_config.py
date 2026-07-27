@@ -32,11 +32,67 @@ need to do any environment variable processing.
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+
+def resolve_checkpoint_graph_cache_max(database_config: Any, field_name: str, default: int) -> int:
+    """Read a graph-cache cap from a database config-ish object.
+
+    Tolerates stub configs (SimpleNamespace/MagicMock in tests, missing
+    section): anything that is not a plain int >= 1 falls back to
+    ``default``.
+    """
+    section = getattr(database_config, "checkpoint_graph_cache", None)
+    value = getattr(section, field_name, None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return default
+    return value
+
+
 CheckpointChannelMode = Literal["full", "delta"]
+
+DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY = 10
+
+
+class CheckpointDeltaConfig(BaseModel):
+    """Tuning knobs for ``checkpoint_channel_mode: delta``.
+
+    Ignored in ``full`` mode. Like the mode itself, these values are
+    restart-required and must match across every process sharing one
+    checkpoint database: the snapshot cadence is baked into each compiled
+    graph's channel table, not stored in the checkpoint, so a mismatched
+    process would apply a different cadence to the same threads.
+    """
+
+    snapshot_frequency: int = Field(
+        default=DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+        ge=1,
+        description=(
+            "DeltaChannel snapshot cadence: a full messages snapshot is stored "
+            "every N per-step writes (higher = smaller checkpoints, slower "
+            "materialization). Restart is required, and all processes sharing "
+            "one checkpoint database must use the same value."
+        ),
+    )
+
+
+class CheckpointGraphCacheConfig(BaseModel):
+    """Size cap for the process-local compiled checkpoint graph cache.
+
+    Unlike the mode and snapshot cadence, this is NOT restart-required:
+    a larger/smaller cap only changes when the cache evicts, never graph
+    semantics, so a hot-reloaded value takes effect on the next eviction
+    check. The cache is keyed by (assistant, mode, cadence, app_config) and
+    cleared wholesale at the cap.
+    """
+
+    accessor_graph_max: int = Field(
+        default=64,
+        ge=1,
+        description=("Max compiled thread-state accessor graphs cached by the gateway (keyed per assistant, channel mode, and snapshot cadence)."),
+    )
 
 
 class DatabaseConfig(BaseModel):
@@ -53,15 +109,13 @@ class DatabaseConfig(BaseModel):
             "processes sharing one checkpoint database must use the same value."
         ),
     )
-    checkpoint_delta_snapshot_frequency: int = Field(
-        default=1000,
-        ge=1,
-        description=(
-            "DeltaChannel snapshot frequency used in checkpoint 'delta' mode: "
-            "every N message-channel writes the saver stores a full snapshot "
-            "instead of a delta sentinel. Restart-required, and all processes "
-            "sharing one checkpoint database must use the same value."
-        ),
+    checkpoint_delta: CheckpointDeltaConfig = Field(
+        default_factory=CheckpointDeltaConfig,
+        description="Delta-mode checkpoint tuning. Only applies when checkpoint_channel_mode is 'delta'.",
+    )
+    checkpoint_graph_cache: CheckpointGraphCacheConfig = Field(
+        default_factory=CheckpointGraphCacheConfig,
+        description="Size caps for the compiled checkpoint graph caches. Hot-reloadable; not restart-required.",
     )
     sqlite_dir: str = Field(
         default=".deer-flow/data",
