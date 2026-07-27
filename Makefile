@@ -16,6 +16,13 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
+# Resolve pnpm through a single helper (scripts/pnpm_resolver.py) so `make
+# install`, `make dev` and `make start` agree with `make check` even when only
+# Corepack is available and no `pnpm` shim is on PATH. Falls back to a bare
+# `pnpm` if the resolver itself is unavailable (e.g. fresh checkout with no
+# Python yet) to preserve the historical behaviour. See issue #4404.
+PNPM := $(shell $(PYTHON) ./scripts/pnpm_resolver.py 2>/dev/null || echo pnpm)
+
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
@@ -80,7 +87,7 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && pnpm install
+	@cd frontend && $(PNPM) install
 	@echo "Installing pre-commit hooks..."
 	@uv tool install pre-commit
 	@pre-commit install --overwrite

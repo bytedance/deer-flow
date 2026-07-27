@@ -14,6 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# Shared pnpm resolver — same logic as check.py / Makefile / serve.sh (#4404).
+from pnpm_resolver import find_pnpm_command
+
 try:
     import yaml
 except Exception:  # pragma: no cover - exercised only in broken environments
@@ -200,6 +203,9 @@ def _version_command(name: str, args: list[str], cwd: Path) -> dict[str, Any]:
 
 def collect_environment(project_root: Path) -> dict[str, Any]:
     """Collect non-secret environment and toolchain metadata."""
+    # Resolve pnpm through the shared helper so a Corepack-only machine still
+    # reports a version instead of ``pnpm: command not found`` (issue #4404).
+    pnpm_command = find_pnpm_command() or ["pnpm"]
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "platform": {
@@ -210,7 +216,7 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
         },
         "commands": [
             _version_command("node", ["node", "--version"], project_root),
-            _version_command("pnpm", ["pnpm", "--version"], project_root),
+            _version_command("pnpm", [*pnpm_command, "--version"], project_root),
             _version_command("uv", ["uv", "--version"], project_root),
             _version_command("nginx", ["nginx", "-v"], project_root),
             _version_command("docker", ["docker", "--version"], project_root),

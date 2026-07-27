@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Shared with the Makefile / serve.sh / doctor.py / support_bundle.py so the
+# check path and the execution path resolve pnpm identically (issue #4404).
+from pnpm_resolver import find_pnpm_command
+
 
 def configure_stdio() -> None:
     """Prefer UTF-8 output so Unicode status markers render on Windows."""
@@ -27,24 +31,6 @@ def run_command(command: list[str]) -> str | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or result.stderr.strip()
-
-
-def find_pnpm_command() -> list[str] | None:
-    """Return a pnpm-compatible command that exists on this machine."""
-    pnpm_path = shutil.which("pnpm")
-    if pnpm_path:
-        return [str(Path(pnpm_path))]
-
-    pnpm_cmd_path = shutil.which("pnpm.cmd")
-    if pnpm_cmd_path:
-        return [str(Path(pnpm_cmd_path))]
-
-    corepack_path = shutil.which("corepack")
-    if not corepack_path:
-        corepack_path = shutil.which("corepack.cmd")
-    if corepack_path:
-        return [str(Path(corepack_path)), "pnpm"]
-    return None
 
 
 def parse_node_major(version_text: str) -> int | None:

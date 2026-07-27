@@ -19,6 +19,9 @@ from importlib import import_module
 from pathlib import Path
 from typing import Literal
 
+# Shared pnpm resolver — same logic as check.py / Makefile / serve.sh (#4404).
+from pnpm_resolver import find_pnpm_command
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -165,13 +168,10 @@ def check_node() -> CheckResult:
 
 
 def check_pnpm() -> CheckResult:
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
-    for cmd in candidates:
-        if shutil.which(cmd[0]):
-            out = _run([*cmd, "-v"]) or ""
-            return CheckResult("pnpm", "ok", out)
+    cmd = find_pnpm_command()
+    if cmd:
+        out = _run([*cmd, "-v"]) or ""
+        return CheckResult("pnpm", "ok", out)
     return CheckResult(
         "pnpm",
         "fail",
