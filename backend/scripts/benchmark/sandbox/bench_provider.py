@@ -6,7 +6,7 @@ workloads, and concurrency levels.  Outputs JSONL for aggregation.
 
 Usage::
 
-    python scripts/benchmark/bench_sandbox_provider.py \\
+    python scripts/benchmark/sandbox/bench_provider.py \\
         --provider boxlite \\
         --scenario warm_same_thread \\
         --workload noop \\
@@ -14,7 +14,7 @@ Usage::
         --concurrency 4 \\
         --output results.jsonl
 
-    python scripts/benchmark/bench_sandbox_provider.py \\
+    python scripts/benchmark/sandbox/bench_provider.py \\
         --provider boxlite \\
         --scenario cold_unique_thread \\
         --no-warmpool \\

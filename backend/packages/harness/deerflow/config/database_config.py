@@ -53,6 +53,16 @@ class DatabaseConfig(BaseModel):
             "processes sharing one checkpoint database must use the same value."
         ),
     )
+    checkpoint_delta_snapshot_frequency: int = Field(
+        default=1000,
+        ge=1,
+        description=(
+            "DeltaChannel snapshot frequency used in checkpoint 'delta' mode: "
+            "every N message-channel writes the saver stores a full snapshot "
+            "instead of a delta sentinel. Restart-required, and all processes "
+            "sharing one checkpoint database must use the same value."
+        ),
+    )
     sqlite_dir: str = Field(
         default=".deer-flow/data",
         description=("Directory for the SQLite database file. Both checkpointer and application data share {sqlite_dir}/deerflow.db."),
