@@ -33,6 +33,11 @@ _CONVERSATION_TYPE_GROUP = "2"
 
 _MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024
 
+# Inbound attachments are buffered in memory before being persisted and synced
+# into the sandbox, so bound them. DingTalk chats accept far larger files than
+# an agent can usefully read; oversized ones surface as a failed-load marker.
+_MAX_INBOUND_FILE_SIZE_BYTES = 50 * 1024 * 1024
+
 
 def _normalize_conversation_type(raw: Any) -> str:
     """Normalize ``conversationType`` to ``"1"`` (P2P) or ``"2"`` (group).
@@ -65,6 +70,16 @@ def _normalize_allowed_users(allowed_users: Any) -> set[str]:
 
 def _is_dingtalk_command(text: str) -> bool:
     return is_known_channel_command(text)
+
+
+def _display_filename(filename: str) -> str:
+    """Collapse whitespace and cap length for embedding a filename in message text.
+
+    ``fileName`` is webhook-supplied data: embedded raw in a failed-load marker,
+    a newline could forge a standalone ``/mnt/user-data/uploads/...`` line and an
+    over-long name would bloat the message text.
+    """
+    return re.sub(r"\s+", " ", filename).strip()[:80]
 
 
 def _extract_text_from_rich_text(rich_text_list: list) -> str:
@@ -557,11 +572,19 @@ class DingTalkChannel(Channel):
                 continue
             file_type = "image" if f.get("type") == "image" else "file"
             filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
-            virtual_path = await self._receive_single_file(download_code, file_type, filename, thread_id, user_id=user_id)
+            # Per-attachment isolation: the manager awaits receive_file without a
+            # try, so anything escaping here would kill the chat turn with no
+            # reply — the silent-drop failure mode this feature exists to fix.
+            try:
+                virtual_path = await self._receive_single_file(download_code, file_type, filename, thread_id, user_id=user_id)
+            except Exception:
+                logger.exception("[DingTalk] unexpected error receiving inbound %s", file_type)
+                virtual_path = ""
             if virtual_path:
                 virtual_paths.append(virtual_path)
             else:
-                failures.append(f"[failed to load {file_type}: {filename}]" if filename else f"[failed to load {file_type}]")
+                display = _display_filename(filename)
+                failures.append(f"[failed to load {file_type}: {display}]" if display else f"[failed to load {file_type}]")
 
         prefix_lines = virtual_paths + failures
         if prefix_lines:
@@ -590,8 +613,6 @@ class DingTalkChannel(Channel):
 
         paths = get_paths()
         effective_user_id = user_id or get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
 
         default_ext = "png" if file_type == "image" else "bin"
         # ``download_code`` is attacker-controllable webhook data, so restrict it to
@@ -609,11 +630,15 @@ class DingTalkChannel(Channel):
             safe_filename = fallback_name
 
         def _persist() -> Path:
-            # Claim the name and write it under one lock. Generated names repeat
-            # across messages ("image.png" for every picture message), so without
-            # a uniqueness claim a later attachment silently overwrites an earlier
-            # one whose path was already handed to the agent. Claiming and writing
-            # must not interleave, or two attachments resolve to the same free name.
+            # Directory prep, the uniqueness claim, and the write are blocking
+            # filesystem IO — the whole sequence stays off the event loop. The
+            # claim and the write share one lock because generated names repeat
+            # across messages ("image.png" for every picture message): without a
+            # claim a later attachment silently overwrites an earlier one whose
+            # path was already handed to the agent, and letting the claim and
+            # write interleave would resolve two attachments to the same free name.
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
             with self._file_write_lock:
                 seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
                 unique_name = claim_unique_filename(safe_filename, seen)
@@ -633,11 +658,14 @@ class DingTalkChannel(Channel):
 
         try:
             sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
+            # acquire_async keeps provider lifecycle work (Docker discovery,
+            # readiness polls) off the event loop; update_file is blocking
+            # transport IO on remote sandboxes, so it is offloaded too.
+            sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
             if sandbox_id != "local":
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is not None:
-                    sandbox.update_file(virtual_path, content)
+                    await asyncio.to_thread(sandbox.update_file, virtual_path, content)
         except Exception:
             logger.exception("[DingTalk] failed to sync downloaded file into non-local sandbox: %s", virtual_path)
 
@@ -650,8 +678,11 @@ class DingTalkChannel(Channel):
         1. ``POST /v1.0/robot/messageFiles/download`` -> ``{downloadUrl}``
         2. ``GET downloadUrl`` -> binary content
         """
-        token = await self._get_access_token()
         try:
+            # Token acquisition stays inside the try: the manager awaits
+            # receive_file without a try, so a token failure escaping here would
+            # abort the whole chat turn instead of degrading to a failed-load marker.
+            token = await self._get_access_token()
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
                 response = await client.post(
                     f"{DINGTALK_API_BASE}/v1.0/robot/messageFiles/download",
@@ -669,9 +700,20 @@ class DingTalkChannel(Channel):
                     logger.warning("[DingTalk] messageFiles/download returned no downloadUrl")
                     return None
 
-                file_response = await client.get(download_url, follow_redirects=True)
-                file_response.raise_for_status()
-                return file_response.content
+                # Stream with a size cap: the bytes are buffered in memory before
+                # being persisted, so an oversized attachment must be refused
+                # before it is fully read, not after.
+                chunks: list[bytes] = []
+                total = 0
+                async with client.stream("GET", download_url, follow_redirects=True) as file_response:
+                    file_response.raise_for_status()
+                    async for chunk in file_response.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_INBOUND_FILE_SIZE_BYTES:
+                            logger.warning("[DingTalk] inbound file exceeds %d bytes, dropping", _MAX_INBOUND_FILE_SIZE_BYTES)
+                            return None
+                        chunks.append(chunk)
+                return b"".join(chunks)
         except (httpx.HTTPError, ValueError):
             logger.exception("[DingTalk] failed to download file by code")
             return None
