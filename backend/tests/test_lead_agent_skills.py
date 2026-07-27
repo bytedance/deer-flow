@@ -273,6 +273,9 @@ def test_make_lead_agent_empty_skills_passed_correctly(monkeypatch):
         supports_thinking = False
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = MockModelConfig()
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
@@ -315,6 +318,9 @@ def test_make_lead_agent_custom_skill_allowlist_does_not_activate_tool_policy(mo
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("task"), NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")])
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     mock_app_config.tool_search.enabled = True
     mock_app_config.skills.container_path = "/mnt/skills"
@@ -357,6 +363,9 @@ def test_make_lead_agent_all_legacy_skills_preserve_all_tools(monkeypatch):
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
@@ -410,6 +419,9 @@ def test_make_lead_agent_passive_empty_skill_policy_preserves_mcp_and_other_tool
     )
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     mock_app_config.tool_search.enabled = True
     mock_app_config.tool_search.auto_promote_top_k = 3
@@ -456,6 +468,9 @@ def test_default_lead_agent_does_not_apply_installed_skill_allowlists(monkeypatc
     )
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     mock_app_config.tool_search.enabled = True
     mock_app_config.skills.container_path = "/mnt/skills"
@@ -485,6 +500,9 @@ def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
     monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x: AgentConfig(name="test", skills=["restricted"]))
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
 
     def fail_storage(*args, **kwargs):
@@ -530,6 +548,9 @@ def test_make_lead_agent_drops_update_agent_on_github_channel(monkeypatch):
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash"), NamedTool("read_file")])
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 
@@ -566,6 +587,9 @@ def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash")])
 
     mock_app_config = MagicMock()
+    # make_lead_agent freezes the delta snapshot frequency from the app config;
+    # a bare MagicMock attribute cannot survive the freeze's positivity check.
+    mock_app_config.database.checkpoint_delta_snapshot_frequency = 1000
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
 

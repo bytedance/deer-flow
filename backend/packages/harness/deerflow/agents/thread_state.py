@@ -352,14 +352,59 @@ def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list
     return [message for message in messages if message is not None]
 
 
-DELTA_MESSAGES_FIELD = Annotated[
-    list[AnyMessage],
-    DeltaChannel(merge_message_writes, snapshot_frequency=1000),
-]
+DEFAULT_DELTA_SNAPSHOT_FREQUENCY = 1000
+
+_frozen_delta_snapshot_frequency: int | None = None
+
+
+def delta_messages_field(snapshot_frequency: int) -> Any:
+    return Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=snapshot_frequency),
+    ]
+
+
+DELTA_MESSAGES_FIELD = delta_messages_field(DEFAULT_DELTA_SNAPSHOT_FREQUENCY)
 
 
 class DeltaThreadState(ThreadState):
     messages: DELTA_MESSAGES_FIELD
+
+
+def freeze_delta_snapshot_frequency(frequency: int) -> int:
+    """Freeze the process-wide delta snapshot frequency (restart-required)."""
+    # Lazy import: deerflow.runtime.__init__ imports checkpoint_state, which
+    # imports this module — a top-level import would be circular.
+    from deerflow.runtime.checkpoint_mode import CheckpointModeReconfigurationError
+
+    global _frozen_delta_snapshot_frequency
+    if frequency <= 0:
+        raise ValueError("snapshot frequency must be positive")
+    if _frozen_delta_snapshot_frequency is None:
+        _frozen_delta_snapshot_frequency = frequency
+    elif _frozen_delta_snapshot_frequency != frequency:
+        raise CheckpointModeReconfigurationError(f"checkpoint delta snapshot frequency is frozen at {_frozen_delta_snapshot_frequency}; refusing to reconfigure to {frequency} — restart the process to change it")
+    return _frozen_delta_snapshot_frequency
+
+
+def resolved_delta_snapshot_frequency() -> int:
+    return _frozen_delta_snapshot_frequency or DEFAULT_DELTA_SNAPSHOT_FREQUENCY
+
+
+def reset_delta_snapshot_frequency_for_tests() -> None:
+    global _frozen_delta_snapshot_frequency
+    _frozen_delta_snapshot_frequency = None
+
+
+@cache
+def _delta_thread_state_for_frequency(snapshot_frequency: int) -> type:
+    if snapshot_frequency == DEFAULT_DELTA_SNAPSHOT_FREQUENCY:
+        # Preserve the canonical class so identity checks (and its public
+        # re-export) keep holding at the default frequency.
+        return DeltaThreadState
+    annotations = get_type_hints(ThreadState, include_extras=True)
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
+    return TypedDict(f"DeltaThreadState_f{snapshot_frequency}", annotations, total=True)
 
 
 THREAD_STATE_REDUCER_FIELDS = frozenset(
@@ -378,17 +423,23 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
 
 
 def get_thread_state_schema(mode: CheckpointChannelMode) -> type:
-    return DeltaThreadState if mode == "delta" else ThreadState
+    if mode == "delta":
+        return _delta_thread_state_for_frequency(resolved_delta_snapshot_frequency())
+    return ThreadState
 
 
-@cache
 def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode) -> type:
     if mode == "full":
         return schema
+    return _adapt_state_schema_for_mode(schema, mode, resolved_delta_snapshot_frequency())
+
+
+@cache
+def _adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode, snapshot_frequency: int) -> type:
     annotations = get_type_hints(schema, include_extras=True)
-    annotations["messages"] = DELTA_MESSAGES_FIELD
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
     return TypedDict(
-        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}",
+        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}_f{snapshot_frequency}",
         annotations,
         total=getattr(schema, "__total__", True),
     )
