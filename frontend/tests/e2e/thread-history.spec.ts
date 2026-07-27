@@ -99,8 +99,8 @@ test.describe("Thread history", () => {
   }) => {
     const originalPrompt = "/ppt-master Build the quarterly presentation";
     const followUpPrompt = "Continue with the approved default layout";
-    const initialRows = Array.from({ length: 50 }, (_, index) => {
-      const seq = index + 51;
+    const olderRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 1;
       if (index === 0) {
         return {
           run_id: "run-initial",
@@ -142,6 +142,20 @@ test.describe("Thread history", () => {
         created_at: "2025-06-03T12:00:02Z",
       };
     });
+    const initialRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 51;
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:03Z",
+      };
+    });
     const shiftedRows = Array.from({ length: 50 }, (_, index) => {
       const seq = index + 101;
       return {
@@ -156,7 +170,8 @@ test.describe("Thread history", () => {
         created_at: "2025-06-03T12:01:00Z",
       };
     });
-    let historyRequestCount = 0;
+    let latestPageRequestCount = 0;
+    let cursorPageRequestCount = 0;
 
     mockLangGraphAPI(page, {
       threads: [
@@ -164,42 +179,66 @@ test.describe("Thread history", () => {
           thread_id: MOCK_THREAD_ID,
           title: "Long presentation task",
           updated_at: "2025-06-03T12:00:00Z",
+          // This scenario exercises persisted run-event pagination. Keep the
+          // checkpoint empty so its generic mock messages do not interfere
+          // with optimistic -> server reconciliation after the follow-up.
+          messages: [],
         },
       ],
     });
     await page.route(
-      `**/api/threads/${MOCK_THREAD_ID}/messages/page`,
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/messages/page(?:\\?.*)?$`),
       async (route) => {
         if (route.request().method() !== "GET") {
           return route.fallback();
         }
-        historyRequestCount += 1;
-        const rows = historyRequestCount === 1 ? initialRows : shiftedRows;
+
+        const beforeSeq = new URL(route.request().url()).searchParams.get(
+          "before_seq",
+        );
+        const isLatestPage = beforeSeq === null;
+        const rows = isLatestPage
+          ? latestPageRequestCount === 0
+            ? initialRows
+            : shiftedRows
+          : beforeSeq === "101"
+            ? initialRows
+            : olderRows;
+        const hasMore = isLatestPage || beforeSeq === "101";
         await route.fulfill({
           status: 200,
           contentType: "application/json",
           body: JSON.stringify({
             data: rows,
-            has_more: true,
-            next_before_seq: rows[0]?.seq ?? null,
+            has_more: hasMore,
+            next_before_seq: hasMore ? (rows[0]?.seq ?? null) : null,
           }),
         });
+        if (isLatestPage) {
+          latestPageRequestCount += 1;
+        } else {
+          cursorPageRequestCount += 1;
+        }
       },
     );
 
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect
+      .poll(() => cursorPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(0);
     await expect(page.getByText(originalPrompt)).toBeVisible({
       timeout: 15_000,
     });
     await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
 
+    const latestPageRequestsBeforeSubmit = latestPageRequestCount;
     const textarea = page.locator("textarea[name='message']");
     await textarea.fill(followUpPrompt);
     await textarea.press("Enter");
 
     await expect
-      .poll(() => historyRequestCount, { timeout: 15_000 })
-      .toBeGreaterThan(1);
+      .poll(() => latestPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(latestPageRequestsBeforeSubmit);
     await expect(page.getByText(originalPrompt)).toBeVisible();
     await expect(page.getByText(followUpPrompt)).toBeVisible();
     await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
