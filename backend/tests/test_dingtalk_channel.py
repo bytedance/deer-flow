@@ -2254,6 +2254,34 @@ class TestReceiveFile:
 
         _run(go())
 
+    def test_missing_sandbox_after_acquire_yields_marker(self, tmp_path, monkeypatch):
+        """A non-local sandbox that cannot be resolved must not yield a path.
+
+        The agent's sandbox cannot see the file in that case, so handing it the
+        virtual path would point at nothing readable; mirror Feishu and surface
+        a failed-load marker instead.
+        """
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"BYTES")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads, sandbox_id="aio:box1", sandbox=None)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="hi",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc", "filename": "a.pdf"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert out.text == "[failed to load file: a.pdf]\n\nhi"
+
+        _run(go())
+
     def test_non_local_sandbox_is_synced(self, tmp_path, monkeypatch):
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})
@@ -2357,12 +2385,6 @@ class TestDownloadByCode:
                 def json():
                     return {"downloadUrl": "https://dl.dingtalk/big"}
 
-            class GetResponse:  # legacy non-streaming path
-                content = b"x" * 32
-
-                def raise_for_status(self):
-                    pass
-
             class FakeStream:
                 async def __aenter__(self):
                     return self
@@ -2386,9 +2408,6 @@ class TestDownloadByCode:
 
                 async def post(self, url, **kwargs):
                     return PostResponse()
-
-                async def get(self, url, **kwargs):
-                    return GetResponse()
 
                 def stream(self, method, url, **kwargs):
                     return FakeStream()

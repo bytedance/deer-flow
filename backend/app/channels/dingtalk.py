@@ -664,8 +664,13 @@ class DingTalkChannel(Channel):
             sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
             if sandbox_id != "local":
                 sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is not None:
-                    await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+                if sandbox is None:
+                    # Mirror Feishu: the agent's non-local sandbox cannot see this
+                    # file, so returning the virtual path would hand the model a
+                    # path that reads as nothing — surface a failed-load marker.
+                    logger.warning("[DingTalk] sandbox %s not found after acquire, dropping attachment: %s", sandbox_id, virtual_path)
+                    return ""
+                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
         except Exception:
             logger.exception("[DingTalk] failed to sync downloaded file into non-local sandbox: %s", virtual_path)
 
