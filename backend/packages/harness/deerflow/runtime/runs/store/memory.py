@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore
+from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore, StatusFinalization
 
 
 class MemoryRunStore(RunStore):
@@ -281,17 +281,43 @@ class MemoryRunStore(RunStore):
             cancel_action=run.get("cancel_action") if run is not None else None,
         )
 
-    async def request_cancel(self, run_id: str, *, action: str) -> bool:
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
         run = self._runs.get(run_id)
         if run is None or run["status"] not in ("pending", "running"):
-            return False
+            return None
         if run.get("cancel_action") is None:
             run["cancel_action"] = action
             run["cancel_requested_at"] = datetime.now(UTC).isoformat()
         run["updated_at"] = datetime.now(UTC).isoformat()
-        return True
+        return run["cancel_action"]
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        run = self._runs.get(run_id)
+        if run is None:
+            return StatusFinalization(finalized=False)
+        if run.get("cancel_action") is not None:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=run["cancel_action"],
+            )
+        if run["status"] not in ("pending", "running"):
+            return StatusFinalization(finalized=False)
+        run["status"] = status
+        if error is not None:
+            run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return StatusFinalization(finalized=True)
 
     async def claim_for_takeover(
         self,

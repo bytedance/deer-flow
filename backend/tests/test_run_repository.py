@@ -1005,8 +1005,8 @@ class TestRunRepository:
             lease_expires_at=lease,
         )
 
-        assert await repo.request_cancel("run-1", action="rollback") is True
-        assert await repo.request_cancel("run-1", action="interrupt") is True
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        assert await repo.request_cancel("run-1", action="interrupt") == "rollback"
 
         renewal = await repo.renew_lease(
             "run-1",
@@ -1026,7 +1026,48 @@ class TestRunRepository:
         repo = await _make_repo(tmp_path)
         await repo.put("run-1", thread_id="t1", status="success")
 
-        assert await repo.request_cancel("run-1", action="interrupt") is False
+        assert await repo.request_cancel("run-1", action="interrupt") is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancel_request_wins_before_owner_completion(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is False
+        assert result.cancel_action == "rollback"
+        assert (await repo.get("run-1"))["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_owner_completion_wins_before_cancel_request(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is True
+        assert await repo.request_cancel("run-1", action="rollback") is None
+        assert (await repo.get("run-1"))["status"] == "success"
         await _cleanup()
 
     @pytest.mark.anyio

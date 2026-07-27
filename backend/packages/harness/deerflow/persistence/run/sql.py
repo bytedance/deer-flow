@@ -15,7 +15,11 @@ from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore
+from deerflow.runtime.runs.store.base import (
+    LeaseRenewal,
+    RunStore,
+    StatusFinalization,
+)
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -541,7 +545,7 @@ class RunRepository(RunStore):
             return LeaseRenewal(renewed=False)
         return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
 
-    async def request_cancel(self, run_id: str, *, action: str) -> bool:
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
         """Atomically persist the first cancellation action on an active run."""
         if action not in ("interrupt", "rollback"):
             raise ValueError(f"Unsupported cancellation action: {action}")
@@ -564,9 +568,52 @@ class RunRepository(RunStore):
                     ),
                     updated_at=now,
                 )
+                .returning(RunRow.cancel_action)
             )
+            row = result.first()
             await session.commit()
-            return result.rowcount != 0
+        return row.cancel_action if row is not None else None
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Atomically let completion win only before cancellation."""
+        values: dict[str, Any] = {
+            "status": status,
+            "updated_at": datetime.now(UTC),
+        }
+        if error is not None:
+            values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                    RunRow.cancel_action.is_(None),
+                )
+                .values(**values)
+                .returning(RunRow.run_id)
+            )
+            if result.first() is not None:
+                await session.commit()
+                return StatusFinalization(finalized=True)
+
+            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            cancel_action = current.scalar_one_or_none()
+            await session.commit()
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
 
     async def claim_for_takeover(
         self,

@@ -60,6 +60,11 @@ third-party stores source-compatible by wrapping the existing `update_lease()`
 contract without an extra read; stock memory and SQL stores implement intent
 observation.
 
+Owner completion uses a second active-row CAS that requires
+`cancel_action IS NULL`. If cancellation commits first, the owner receives the
+winning action and runs the existing interrupt/rollback path; if completion
+commits first, a later cancellation is rejected as no longer cancellable.
+
 ## Runtime flow
 
 1. A non-owner receives `interrupt` or `rollback`.
@@ -68,11 +73,10 @@ observation.
 3. Otherwise the receiver atomically records the cancellation intent and
    returns an accepted outcome.
 4. The owner heartbeat renews the lease and reads the action.
-5. The owner sets its process-local abort state, cancels the task when running,
-   and persists the normal `interrupted` transition.
-6. Existing worker finalization performs rollback when requested, publishes the
-   final stream events and END, and leaves the durable row terminal.
-7. Only after terminalization can the thread admit another active run.
+5. After attempting all local lease renewals, heartbeat sets process-local abort
+   state and cancels running tasks without performing status writes or cleanup.
+6. Existing worker finalization persists the terminal status, performs rollback
+   when requested, and publishes the final stream events and END.
 
 If completion wins the race before the intent update, cancellation reports the
 run as no longer cancellable. If the owner dies after accepting the request,
@@ -82,7 +86,8 @@ lease expiry and orphan reconciliation remain the terminal fallback.
 
 - Local cancel and dead-owner takeover keep their existing 202 behavior.
 - A live remote owner now produces 202 instead of routing-dependent 409.
-- Repeated remote requests are idempotently accepted; the first action wins.
+- Repeated requests are idempotently accepted; the first action wins even if a
+  retry lands on the owner.
 - `wait=true` waits on the existing cross-process stream bridge for owner
   finalization. A non-standard deployment without a cross-process bridge
   returns 202 rather than blocking on an unreachable local stream.
