@@ -21,6 +21,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildInitialHumanInputFormValues,
   createHumanInputOptionResponse,
@@ -275,15 +276,14 @@ export function HumanInputCard({
   };
 
   const handleFormValueChange = (name: string, value: HumanInputFormValue) => {
-    setError("");
-    setInvalidFieldNames((previous) => {
-      if (!previous.has(name)) {
-        return previous;
-      }
-      const next = new Set(previous);
-      next.delete(name);
-      return next;
-    });
+    const remaining = new Set(invalidFieldNames);
+    remaining.delete(name);
+    setInvalidFieldNames(remaining);
+    // Keep the error node mounted while other fields are still invalid —
+    // their aria-describedby must keep pointing at an existing element.
+    if (remaining.size === 0) {
+      setError("");
+    }
     setFormValues((previous) => ({ ...previous, [name]: value }));
   };
 
@@ -297,12 +297,18 @@ export function HumanInputCard({
     }
     // Per the request-side-only protocol scope, form answers are submitted as
     // a readable v1 text response — no structured response kind is introduced.
-    const summary = buildHumanInputFormSummary(request, formValues);
-    if (!summary.trim()) {
+    // The submitted value carries a JSON block keyed by stable field names so
+    // the model can reconstruct the mapping unambiguously.
+    if (!buildHumanInputFormSummary(request, formValues).trim()) {
       setError(t.humanInput.emptyError);
       return;
     }
-    void submitResponse(createHumanInputTextResponse(request, summary));
+    void submitResponse(
+      createHumanInputTextResponse(
+        request,
+        buildHumanInputFormSubmissionValue(request, formValues),
+      ),
+    );
   };
 
   const handleTextSubmit = (event: { preventDefault(): void }) => {
@@ -415,38 +421,44 @@ export function HumanInputCard({
 
                 if (field.type === "checkbox") {
                   const checked = fieldValue === true;
+                  // Native checkbox: real role/checked semantics for assistive
+                  // technology instead of an aria-pressed button. No HTML
+                  // `required` attribute — native constraint validation would
+                  // intercept the form's custom submit handling.
                   return (
-                    <Button
+                    <label
                       key={field.name}
-                      id={controlId}
-                      className="flex w-fit items-center justify-start font-normal"
-                      aria-pressed={checked}
-                      aria-invalid={invalid || undefined}
-                      aria-describedby={invalid ? formErrorId : undefined}
-                      disabled={isDisabled}
-                      type="button"
-                      variant="ghost"
-                      onClick={() =>
-                        handleFormValueChange(field.name, !checked)
-                      }
+                      className="flex w-fit cursor-pointer items-center gap-2 text-sm leading-5"
+                      htmlFor={controlId}
                     >
-                      <span
-                        className={cn(
-                          "border-border flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                          checked &&
-                            "border-primary bg-primary text-primary-foreground",
-                        )}
-                        aria-hidden
-                      >
-                        {checked ? <CheckIcon className="size-3" /> : null}
-                      </span>
+                      <input
+                        id={controlId}
+                        checked={checked}
+                        className="accent-primary size-4"
+                        disabled={isDisabled}
+                        type="checkbox"
+                        aria-required={field.required || undefined}
+                        aria-invalid={invalid || undefined}
+                        aria-describedby={invalid ? formErrorId : undefined}
+                        onChange={(event) =>
+                          handleFormValueChange(
+                            field.name,
+                            event.target.checked,
+                          )
+                        }
+                      />
                       {field.label}
                       {field.required ? (
-                        <span className="text-destructive" aria-hidden>
-                          *
-                        </span>
+                        <>
+                          <span className="text-destructive" aria-hidden>
+                            *
+                          </span>
+                          <span className="sr-only">
+                            {t.humanInput.requiredA11yLabel}
+                          </span>
+                        </>
                       ) : null}
-                    </Button>
+                    </label>
                   );
                 }
 
@@ -459,9 +471,14 @@ export function HumanInputCard({
                     >
                       {field.label}
                       {field.required ? (
-                        <span className="text-destructive ml-0.5" aria-hidden>
-                          *
-                        </span>
+                        <>
+                          <span className="text-destructive ml-0.5" aria-hidden>
+                            *
+                          </span>
+                          <span className="sr-only">
+                            {t.humanInput.requiredA11yLabel}
+                          </span>
+                        </>
                       ) : null}
                     </label>
                     <FormFieldInput

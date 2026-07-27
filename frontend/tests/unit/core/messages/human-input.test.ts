@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
+  buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildHumanInputResponseText,
   buildInitialHumanInputFormValues,
@@ -328,6 +329,96 @@ test("builds a readable form summary submitted as a v1 text response", () => {
   });
 });
 
+test("form submission value is collision-free via the JSON block", () => {
+  const request = extractHumanInputRequest(
+    toolMessage({
+      ...formPayload,
+      fields: [
+        { name: "a", label: "A", type: "text", required: false },
+        { name: "b", label: "B", type: "text", required: false },
+      ],
+    }),
+  )!;
+
+  const first = buildHumanInputFormSubmissionValue(request, {
+    a: "x; B: y",
+    b: "z",
+  });
+  const second = buildHumanInputFormSubmissionValue(request, {
+    a: "x",
+    b: "y; B: z",
+  });
+
+  expect(first).not.toBe(second);
+  expect(first).toContain('[values: {"a":"x; B: y","b":"z"}]');
+  expect(second).toContain('[values: {"a":"x","b":"y; B: z"}]');
+  // Readable prefix is retained for display.
+  expect(first.startsWith("A: x; B: y; B: z")).toBe(true);
+});
+
+test("rejects select options with empty values or duplicates", () => {
+  const withOptions = (
+    options: Array<{ id: string; label: string; value: string }>,
+  ) =>
+    extractHumanInputRequest(
+      toolMessage({
+        ...formPayload,
+        fields: [
+          {
+            name: "category",
+            label: "Category",
+            type: "select",
+            required: true,
+            options,
+          },
+        ],
+      }),
+    );
+
+  // Empty option value would crash Radix <SelectItem value="">.
+  expect(withOptions([{ id: "o1", label: "travel", value: "" }])).toBeNull();
+  // Duplicate option ids / values.
+  expect(
+    withOptions([
+      { id: "o1", label: "travel", value: "travel" },
+      { id: "o1", label: "meals", value: "meals" },
+    ]),
+  ).toBeNull();
+  expect(
+    withOptions([
+      { id: "o1", label: "travel", value: "travel" },
+      { id: "o2", label: "travel-again", value: "travel" },
+    ]),
+  ).toBeNull();
+});
+
+test("rejects duplicate field names and enforces the form/version binding", () => {
+  expect(
+    extractHumanInputRequest(
+      toolMessage({
+        ...formPayload,
+        fields: [
+          { name: "amount", label: "Amount", type: "number", required: true },
+          { name: "amount", label: "Again", type: "text", required: false },
+        ],
+      }),
+    ),
+  ).toBeNull();
+  // form mode is a v2 construct; a v1 payload carrying it is malformed.
+  expect(
+    extractHumanInputRequest(toolMessage({ ...formPayload, version: 1 })),
+  ).toBeNull();
+  // and v2 without form has no defined meaning yet.
+  expect(
+    extractHumanInputRequest(
+      toolMessage({
+        ...requestPayload,
+        version: 2,
+      }),
+    ),
+  ).toBeNull();
+});
+
 test("rejects form fields with reserved prototype names", () => {
   for (const reserved of ["__proto__", "constructor", "toString"]) {
     expect(
@@ -386,6 +477,29 @@ test("summary renders an untouched checkbox as an explicit no", () => {
   expect(buildHumanInputFormSummary(request, values)).toBe(
     "Amount: 300; Urgent: no",
   );
+});
+
+test("a plain reply closes only the latest unanswered request", () => {
+  const olderPayload = {
+    ...formPayload,
+    request_id: "clarification:call-older",
+  };
+  const state = deriveHumanInputThreadState([
+    toolMessage(olderPayload),
+    toolMessage(formPayload),
+    {
+      type: "human",
+      content: "answer to the second question",
+    } as unknown as Message,
+  ]);
+
+  // The reply answers the request the user was looking at (the latest); the
+  // older decision must not be silently swallowed with the same text.
+  expect(state.answeredResponses.get("clarification:call-form")?.value).toBe(
+    "answer to the second question",
+  );
+  expect(state.answeredResponses.has("clarification:call-older")).toBe(false);
+  expect(state.latestOpenRequestId).toBe("clarification:call-older");
 });
 
 test("a visible plain human reply closes an open request (legacy fallback)", () => {

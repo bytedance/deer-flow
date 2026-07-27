@@ -445,6 +445,90 @@ class TestFormPayload:
             {"id": "option-2", "label": "prod", "value": "prod"},
         ]
 
+    def test_unhashable_field_type_degrades_to_text_not_crash(self, middleware):
+        """`type: []` / `type: {}` are legal JSON from a model; an unhashable
+        membership check would raise TypeError and (with return_direct=True)
+        end the turn with an error instead of any card or fallback."""
+        for bad_type in [[], {}, ["select"], {"t": "select"}]:
+            payload = middleware._build_human_input_payload(
+                {
+                    "question": "Details please",
+                    "clarification_type": "missing_info",
+                    "fields": [{"name": "amount", "type": bad_type}],
+                },
+                tool_call_id="call-abc",
+                request_id="clarification:call-abc",
+            )
+
+            assert payload["fields"][0]["type"] == "text"
+
+    def test_unhashable_clarification_type_does_not_crash(self, middleware):
+        """Same crash class as unhashable field types: `clarification_type: []`
+        must not raise in the icon lookup or payload builder."""
+        from langgraph.types import Command
+
+        request = SimpleNamespace(
+            tool_call={
+                "name": "ask_clarification",
+                "id": "call-clarify-1",
+                "args": {"question": "q?", "clarification_type": [], "fields": [{"name": "amount", "type": []}]},
+            },
+            runtime=None,
+        )
+
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert isinstance(result, Command)
+        message = result.update["messages"][0]
+        assert message.artifact["human_input"]["input_mode"] == "form"
+
+    def test_serialized_fields_over_byte_budget_degrade_whole_form(self, middleware):
+        """Per-item caps alone allow a form whose IM text fallback exceeds
+        channel limits (Slack 40k chars, Feishu ~30KB card); a total serialized
+        byte budget must bound the whole definition."""
+        fields = [
+            {
+                "name": f"field_{i}",
+                "label": "标" * 190,
+                "type": "select",
+                "options": ["选" * 190 + str(j) for j in range(20)],
+            }
+            for i in range(16)
+        ]
+        payload = middleware._build_human_input_payload(
+            {"question": "Details please", "clarification_type": "missing_info", "fields": fields},
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["input_mode"] == "free_text"
+        assert "fields" not in payload
+
+    def test_accepted_forms_keep_text_fallback_under_channel_limits(self, middleware):
+        """Boundary: any form the byte budget accepts must produce an IM text
+        fallback deliverable to the strictest supported channel (~30KB)."""
+        # Grow a form until the budget rejects it; the largest accepted form's
+        # fallback must stay under the channel bound.
+        largest_accepted_fallback = None
+        for count in range(1, 17):
+            fields = [
+                {
+                    "name": f"field_{i}",
+                    "label": "标" * 150,
+                    "type": "select",
+                    "options": ["选" * 100 + str(j) for j in range(10)],
+                }
+                for i in range(count)
+            ]
+            args = {"question": "Q", "clarification_type": "missing_info", "fields": fields}
+            payload = middleware._build_human_input_payload(args, tool_call_id="c", request_id="clarification:c")
+            if payload["input_mode"] != "form":
+                break
+            largest_accepted_fallback = middleware._format_clarification_message(args)
+
+        assert largest_accepted_fallback is not None
+        assert len(largest_accepted_fallback.encode("utf-8")) < 30_000
+
     def test_required_accepts_integer_serialization(self, middleware):
         """Some providers emit 1/0 for booleans; `required: 1` must not
         silently flip a model-intended required field to optional."""

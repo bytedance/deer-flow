@@ -601,6 +601,7 @@ export const zhCN: Translations = {
     submit: "提交",
     emptyError: "请输入回答后再提交。",
     requiredError: "请填写所有必填字段后再提交。",
+    requiredA11yLabel: "必填",
     selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
   },

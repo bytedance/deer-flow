@@ -172,6 +172,8 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
   }
 
   const options: HumanInputOption[] = [];
+  const seenIds = new Set<string>();
+  const seenValues = new Set<string>();
   for (const option of value) {
     if (!isRecord(option)) {
       return undefined;
@@ -182,10 +184,16 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
     if (
       !isNonEmptyString(id) ||
       !isNonEmptyString(label) ||
-      typeof optionValue !== "string"
+      // An empty option value crashes Radix <SelectItem value="">; a
+      // malformed/replayed artifact must fall back to plain text instead.
+      !isNonEmptyString(optionValue) ||
+      seenIds.has(id) ||
+      seenValues.has(optionValue)
     ) {
       return undefined;
     }
+    seenIds.add(id);
+    seenValues.add(optionValue);
     options.push({ id, label, value: optionValue });
   }
   return options;
@@ -200,11 +208,18 @@ function parseFields(value: unknown): HumanInputField[] | undefined {
   }
 
   const fields: HumanInputField[] = [];
+  const seenNames = new Set<string>();
   for (const field of value) {
     if (!isRecord(field)) {
       return undefined;
     }
     const name = field.name;
+    if (typeof name === "string" && seenNames.has(name)) {
+      return undefined;
+    }
+    if (typeof name === "string") {
+      seenNames.add(name);
+    }
     const label = field.label;
     const type = field.type;
     const required = field.required;
@@ -275,6 +290,11 @@ export function parseHumanInputRequest(
     return null;
   }
   if (value.input_mode === "form" && (!fields || fields.length === 0)) {
+    return null;
+  }
+  // Version/mode binding: `form` is a v2 construct and v2 defines nothing
+  // else — a mismatched pair is a malformed payload, not a variant.
+  if ((value.input_mode === "form") !== (value.version === 2)) {
     return null;
   }
 
@@ -428,20 +448,26 @@ export function deriveHumanInputThreadState(
 
     // Legacy-frontend fallback: a v1-only frontend renders a v2 request as
     // plain text and the user answers through the normal composer, so the
-    // reply carries no human_input_response metadata. Treat any visible plain
-    // human message as closing every request opened before it — otherwise an
-    // upgraded frontend would see the request as still open and lock the
-    // composer forever.
+    // reply carries no human_input_response metadata. The reply closes only
+    // the LATEST unanswered request — the one the user was presumably
+    // answering. Nothing guarantees at most one outstanding request across
+    // runs, and closing them all would silently swallow older decisions with
+    // the same text; an older request left open simply becomes the active
+    // card again.
     if (message.type === "human" && isVisibleMessage(message) && !response) {
-      for (const [requestId, request] of seenRequests) {
-        if (answeredResponses.has(requestId)) {
-          continue;
-        }
-        answeredResponses.set(requestId, {
+      const latestUnansweredId = [...requestOrder]
+        .reverse()
+        .find((requestId) => !answeredResponses.has(requestId));
+      const request =
+        latestUnansweredId === undefined
+          ? undefined
+          : seenRequests.get(latestUnansweredId);
+      if (latestUnansweredId !== undefined && request) {
+        answeredResponses.set(latestUnansweredId, {
           version: 1,
           kind: "human_input_response",
           source: request.source,
-          request_id: requestId,
+          request_id: latestUnansweredId,
           response_kind: "text",
           value: extractPlainMessageText(message) || "-",
         });
@@ -519,6 +545,25 @@ export function buildHumanInputFormSummary(
     parts.push(`${field.label}: ${formatFormValue(value!)}`);
   }
   return parts.join("; ");
+}
+
+export function buildHumanInputFormSubmissionValue(
+  request: HumanInputRequest,
+  values: Record<string, HumanInputFormValue>,
+) {
+  // The readable summary alone is ambiguous ("a: x; B: y" could come from
+  // several field mappings), so the submitted value appends the full record
+  // as one JSON block keyed by stable field names — labels/names may contain
+  // the separators themselves, so only whole-record JSON is collision-free.
+  const record: Record<string, HumanInputFormValue> = {};
+  for (const field of request.fields ?? []) {
+    const value = readHumanInputFormValue(values, field.name);
+    if (isEmptyFormValue(value)) {
+      continue;
+    }
+    record[field.name] = value!;
+  }
+  return `${buildHumanInputFormSummary(request, values)} [values: ${JSON.stringify(record)}]`;
 }
 
 export function createHumanInputTextResponse(

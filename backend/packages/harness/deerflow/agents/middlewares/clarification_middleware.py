@@ -47,6 +47,14 @@ _RESERVED_FIELD_NAMES = frozenset(
 MAX_FORM_FIELDS = 16
 MAX_FIELD_OPTIONS = 24
 MAX_FIELD_TEXT_CHARS = 200
+# Total budget over the serialized normalized fields, in UTF-8 bytes. The
+# per-item caps alone still admit forms whose plain-text IM fallback exceeds
+# channel delivery limits (Slack truncates at 40k chars per message; Feishu
+# guides ~30KB per card), which would silently drop trailing fields — the very
+# thing atomic validation exists to prevent. 16KB keeps the fallback text of
+# any accepted form comfortably inside the strictest supported channel while
+# leaving headroom for question/context.
+MAX_FORM_SERIALIZED_BYTES = 16_384
 
 
 class ClarificationMiddlewareState(AgentState):
@@ -158,7 +166,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 return []
 
             field_type = entry.get("type")
-            if field_type not in FORM_FIELD_TYPES:
+            # isinstance guard first: `type: []` / `type: {}` are legal JSON
+            # from a model, and an unhashable membership probe would raise
+            # TypeError instead of degrading.
+            if not isinstance(field_type, str) or field_type not in FORM_FIELD_TYPES:
                 field_type = "text"
 
             options = self._normalize_options(entry.get("options")) if field_type in _OPTION_FIELD_TYPES else []
@@ -188,6 +199,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                     return []
                 field["placeholder"] = placeholder.strip()
             normalized.append(field)
+
+        if len(json.dumps(normalized, ensure_ascii=False).encode("utf-8")) > MAX_FORM_SERIALIZED_BYTES:
+            return []
 
         return normalized
 
@@ -270,7 +284,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             Formatted message string
         """
         question = args.get("question", "")
-        clarification_type = args.get("clarification_type", "missing_info")
+        # str() coercion keeps the icon lookup hashable — `clarification_type:
+        # []` is legal JSON from a model and would raise TypeError as a dict key.
+        clarification_type = str(args.get("clarification_type", "missing_info"))
         context = args.get("context")
         if fields is None:
             fields = self._normalize_fields(args.get("fields"))

@@ -625,6 +625,7 @@ export const enUS: Translations = {
     submit: "Submit",
     emptyError: "Enter an answer before submitting.",
     requiredError: "Fill in all required fields before submitting.",
+    requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
   },
