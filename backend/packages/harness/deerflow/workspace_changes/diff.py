@@ -109,6 +109,16 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     return changed
 
 
+def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
+    """Return created or modified regular files under the outputs root."""
+    paths: list[str] = []
+    for path in sorted(get_changed_paths(before, after)):
+        snapshot = after.files.get(path)
+        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink:
+            paths.append(path)
+    return paths
+
+
 def _status(
     before_file: FileSnapshot | None,
     after_file: FileSnapshot | None,

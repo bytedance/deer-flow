@@ -78,7 +78,7 @@ from deerflow.trace_context import (
 )
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
-from deerflow.workspace_changes import capture_workspace_snapshot, record_workspace_changes
+from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import RunManager, RunRecord, RunStartOutcome
@@ -140,7 +140,7 @@ async def _persist_delivery_receipt(
         except Exception:
             if attempt == attempts - 1:
                 logger.warning(
-                    "Failed to persist delivery receipt for run %s after %d attempts; preserving the real terminal status without a receipt",
+                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
                     run_id,
                     attempts,
                     exc_info=True,
@@ -158,6 +158,68 @@ async def _persist_delivery_receipt(
             await asyncio.sleep(delay)
 
     return False  # pragma: no cover - loop always returns
+
+
+_DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+_DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+
+
+def _empty_delivery_content() -> dict[str, Any]:
+    return {"presented": 0, "paths": [], "by_tool": {}}
+
+
+def _presented_path_covers_output(presented_path: str, produced_path: str) -> bool:
+    presented_path = presented_path.rstrip("/")
+    return bool(presented_path) and (produced_path == presented_path or produced_path.startswith(f"{presented_path}/"))
+
+
+def _delivery_content_with_outputs(
+    content: dict[str, Any],
+    produced_paths: list[str],
+) -> dict[str, Any]:
+    """Attach a delivery verdict when this run created or modified outputs."""
+    if not produced_paths:
+        return content
+
+    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
+    satisfied = bool(matched_paths)
+    return {
+        **content,
+        "verification": {
+            "source": "outputs_changed",
+            "requirement": "present_files_matches_produced_output",
+        },
+        "produced_paths": produced_paths,
+        "presented_paths": presented_paths,
+        "matched_paths": matched_paths,
+        "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
+        "satisfied": satisfied,
+    }
+
+
+def _delivery_error(content: dict[str, Any]) -> str | None:
+    """Return the terminal error when no changed output was presented."""
+    if not content.get("produced_paths") or content.get("satisfied") is True:
+        return None
+    return _DELIVERY_INCOMPLETE_ERROR
+
+
+async def _produced_output_paths(
+    before: WorkspaceSnapshot | None,
+    *,
+    thread_id: str,
+    user_id: str | None,
+) -> list[str]:
+    """Detect regular output files created or modified by this run."""
+    if before is None:
+        return []
+    try:
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
+        return get_changed_output_paths(before, after)
+    except Exception:
+        logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
+        return []
 
 
 # Keep this streaming policy separate from middleware write-authorization sets.
@@ -471,6 +533,8 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    delivery_content: dict[str, Any] | None = None
+    produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
     # #4272 the journal did not exist until preflight had succeeded, so early
@@ -871,9 +935,20 @@ async def run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            produced_output_paths = await _produced_output_paths(
+                pre_run_workspace_snapshot,
+                thread_id=thread_id,
+                user_id=workspace_changes_user_id,
+            )
+            delivery_content = _delivery_content_with_outputs(
+                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                produced_output_paths,
+            )
+            delivery_error = _delivery_error(delivery_content)
             await run_manager.set_status(
                 run_id,
-                RunStatus.success,
+                RunStatus.error if delivery_error else RunStatus.success,
+                error=delivery_error,
                 stop_reason=stop_reason,
                 **terminal_status_kwargs,
             )
@@ -961,12 +1036,27 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
-            await _persist_delivery_receipt(
+            if delivery_content is None:
+                if produced_output_paths is None:
+                    produced_output_paths = await _produced_output_paths(
+                        pre_run_workspace_snapshot,
+                        thread_id=thread_id,
+                        user_id=workspace_changes_user_id,
+                    )
+                delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+            receipt_persisted = await _persist_delivery_receipt(
                 event_store,
                 thread_id=thread_id,
                 run_id=run_id,
-                content=journal.get_delivery_content(),
+                content=delivery_content,
             )
+            if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.error,
+                    error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                    persist=False,
+                )
 
         if not record.ownership_lost and event_store is not None:
             try:

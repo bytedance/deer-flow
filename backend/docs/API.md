@@ -109,9 +109,16 @@ Content-Type: application/json
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
+
+When outputs changed during the run, `run.delivery` events retain the Slice 1
+facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
+`presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
+`stage` (`presented`, `mismatched`, or `not_started`), and `satisfied`. Receipts
+for runs without changed outputs keep their existing shape.
 
 **Recursion Limit:**
 
