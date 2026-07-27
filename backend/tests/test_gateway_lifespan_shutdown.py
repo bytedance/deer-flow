@@ -315,3 +315,65 @@ async def _run_lifespan_with_slow_retrieval_warm() -> float:
 
 def test_lifespan_does_not_wait_for_retrieval_rebuild_before_serving() -> None:
     assert asyncio.run(_run_lifespan_with_slow_retrieval_warm()) < 1.0
+
+
+async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]:
+    from app.gateway.app import lifespan
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=True,
+            shutdown_flush_timeout_seconds=5.0,
+        ),
+    )
+    fake_service = MagicMock()
+    fake_service.get_status.return_value = {}
+    rebuild_started = threading.Event()
+    release_rebuild = threading.Event()
+    manager = MagicMock()
+
+    def block_rebuild() -> bool:
+        rebuild_started.set()
+        release_rebuild.wait(5.0)
+        return True
+
+    manager.warm_retrieval.side_effect = block_rebuild
+    manager.warm.return_value = True
+    manager.shutdown_flush.return_value = True
+
+    async def fake_start(_startup_config, **_kwargs):
+        return fake_service
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS", 0.01),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=manager),
+    ):
+        context = lifespan(app)
+        await context.__aenter__()
+        assert await asyncio.to_thread(rebuild_started.wait, 1.0)
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            await context.__aexit__(None, None, None)
+        finally:
+            release_rebuild.set()
+        shutdown_elapsed = loop.time() - started_at
+
+    return shutdown_elapsed, manager
+
+
+def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() -> None:
+    shutdown_elapsed, manager = asyncio.run(_run_shutdown_with_blocked_retrieval_warm())
+
+    assert shutdown_elapsed < 1.0
+    manager.shutdown_flush.assert_called_once_with(5.0)
+    manager.close.assert_not_called()

@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
+# The retrieval index is derived state, so shutdown only waits briefly for its
+# startup rebuild. The canonical memory flush keeps its full configured budget.
+_RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+
 
 async def _ensure_admin_user(app: FastAPI) -> None:
     """Startup hook: handle first boot and migrate orphan threads otherwise.
@@ -382,15 +386,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
         # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + this drain + buffer), set on the gateway Helm
-        # deployment -- or K8s SIGKILLs the drain mid-flight and the loss this
-        # is fixing is silently re-introduced.
+        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
+        # mid-flight and the loss this is fixing is silently re-introduced.
+        # The retrieval index is derived from canonical memory files, so its
+        # wait is independently capped and never consumes the flush budget.
         retrieval_warm_finished = True
         if retrieval_warm_task is not None and not retrieval_warm_task.done():
             try:
                 await asyncio.wait_for(
                     asyncio.shield(retrieval_warm_task),
-                    timeout=startup_config.memory.shutdown_flush_timeout_seconds,
+                    timeout=min(
+                        _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS,
+                        startup_config.memory.shutdown_flush_timeout_seconds,
+                    ),
                 )
             except TimeoutError:
                 retrieval_warm_finished = False
