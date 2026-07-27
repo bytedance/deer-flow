@@ -178,6 +178,36 @@ class JsonlRunEventStore(RunEventStore):
             results.extend(records)
         return results
 
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        async with self._get_write_lock(thread_id):
+            existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            for event in existing:
+                if event.get("event_type") == event_type:
+                    return event, False
+            await self._ensure_seq_loaded(thread_id)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": category,
+                "content": content,
+                "metadata": metadata or {},
+                "seq": self._next_seq(thread_id),
+                "created_at": created_at or datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            return record, True
+
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async with self._get_write_lock(thread_id):
             await self._ensure_seq_loaded(thread_id)

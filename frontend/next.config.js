@@ -3,6 +3,7 @@
  * for Docker builds.
  */
 import "./src/env.js";
+import { getAllowedDevOrigins } from "./src/dev-origins.js";
 
 function getInternalServiceURL(envKey, fallbackURL) {
   const configured = process.env[envKey]?.trim();
@@ -25,6 +26,7 @@ const config = {
     defaultLocale: "en",
   },
   devIndicators: false,
+  allowedDevOrigins: getAllowedDevOrigins(),
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(

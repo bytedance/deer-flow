@@ -297,6 +297,21 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_run_completion_does_not_replace_terminal_status(self, tmp_path):
+        """Late completion data cannot rewrite a peer's terminal outcome."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_status("r1", "error", error="peer takeover")
+
+        updated = await repo.update_run_completion("r1", status="success", total_tokens=1)
+
+        row = await repo.get("r1")
+        assert updated is False
+        assert row["status"] == "error"
+        assert row["error"] == "peer takeover"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_metadata_preserved(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1", metadata={"key": "value"})

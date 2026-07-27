@@ -5,6 +5,17 @@ from starlette.testclient import TestClient
 
 from app.gateway.auth_middleware import AuthMiddleware, _is_public
 from app.gateway.csrf_middleware import CSRFMiddleware
+from deerflow.config.authorization_config import AuthorizationConfig
+
+
+@pytest.fixture(autouse=True)
+def _default_route_authorization_config(monkeypatch):
+    """Keep minimal middleware apps independent of a repository config.yaml."""
+    monkeypatch.setattr(
+        "app.gateway.authz._get_route_authorization_config",
+        lambda: AuthorizationConfig(),
+    )
+
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 

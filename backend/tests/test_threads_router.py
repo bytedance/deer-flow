@@ -17,7 +17,7 @@ from langgraph.types import Overwrite
 from app.gateway import services as gateway_services
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
@@ -957,7 +957,12 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     assert response.json()["status"] == stored_status
 
 
-def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
+def test_patch_thread_pin_returns_iso_and_preserves_updated_at() -> None:
+    """A pin/unpin PATCH must not bump ``updated_at``.
+
+    Pinning or unpinning a chat does not represent conversation activity.
+    Timestamps are still surfaced as ISO via ``coerce_iso``.
+    """
     app, store, _checkpointer = _build_thread_app()
     thread_id = "patch-target"
 
@@ -982,16 +987,53 @@ def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+        response = client.patch(
+            f"/api/threads/{thread_id}",
+            json={"metadata": {THREAD_PINNED_METADATA_KEY: True}},
+        )
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
-    # Patch issues a fresh ``updated_at`` via ``MemoryThreadMetaStore.update_metadata``,
-    # so it must be > the migrated legacy ``created_at`` (both ISO strings
-    # sort lexicographically by time when the format is consistent).
-    assert body["updated_at"] > body["created_at"]
+    # ``touch=False`` preserves the original ``updated_at``; both timestamps
+    # derive from the same legacy value, so they coerce to the same ISO string.
+    assert body["updated_at"] == body["created_at"]
+    assert body["metadata"] == {"k": "v0", THREAD_PINNED_METADATA_KEY: True}
+
+
+def test_patch_thread_non_pin_metadata_bumps_updated_at() -> None:
+    """The public metadata PATCH endpoint still bumps recency by default."""
+    app, store, _checkpointer = _build_thread_app()
+    thread_id = "patch-target"
+
+    legacy_created = "946684800.000000"
+    legacy_updated = "946684800.000000"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": legacy_created,
+                "updated_at": legacy_updated,
+                "metadata": {"k": "v0"},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
+    assert body["updated_at"] != body["created_at"]
     assert body["metadata"] == {"k": "v1"}
 
 
@@ -1042,6 +1084,44 @@ def test_search_threads_normalizes_legacy_unix_seconds_to_iso() -> None:
     for item in items:
         assert _ISO_TIMESTAMP_RE.match(item["created_at"]), item
         assert _ISO_TIMESTAMP_RE.match(item["updated_at"]), item
+
+
+def test_search_threads_returns_pinned_threads_before_newer_unpinned_threads() -> None:
+    app, store, _checkpointer = _build_thread_app()
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            "newer-unpinned",
+            {
+                "thread_id": "newer-unpinned",
+                "status": "idle",
+                "created_at": "2026-07-01T00:00:00+00:00",
+                "updated_at": "2026-07-20T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await store.aput(
+            THREADS_NS,
+            "older-pinned",
+            {
+                "thread_id": "older-pinned",
+                "status": "idle",
+                "created_at": "2026-06-01T00:00:00+00:00",
+                "updated_at": "2026-06-01T00:00:00+00:00",
+                "metadata": {THREAD_PINNED_METADATA_KEY: True},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"limit": 1})
+
+    assert response.status_code == 200, response.text
+    assert [item["thread_id"] for item in response.json()] == ["older-pinned"]
 
 
 def test_memory_thread_meta_store_writes_iso_on_create() -> None:
