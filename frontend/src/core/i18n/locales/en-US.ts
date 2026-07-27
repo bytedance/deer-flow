@@ -51,6 +51,7 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    exportFailed: "Failed to export conversation.",
     regenerate: "Regenerate",
     editAndRerun: "Edit and rerun",
     updateAndRerun: "Update and rerun",

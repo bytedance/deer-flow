@@ -40,6 +40,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    exportFailed: string;
     regenerate: string;
     editAndRerun: string;
     updateAndRerun: string;
