@@ -390,10 +390,44 @@ def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
         "regenerate_from_run_id": "run-old",
         "regenerate_checkpoint_id": "ckpt-base",
     }
+    assert "title" not in response.input
     regenerated_human = response.input["messages"][0]
     assert regenerated_human["id"] == "human-1"
     assert regenerated_human["content"] == [{"type": "text", "text": "/data-analysis analyze data.csv"}]
     assert regenerated_human["additional_kwargs"] == {"files": [{"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"}]}
+
+
+def test_prepare_regenerate_payload_preserves_latest_thread_title():
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    base = _checkpoint("ckpt-base", [])
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    latest.checkpoint["channel_values"]["title"] = "User renamed title"
+    checkpointer = FakeCheckpointer([latest, base])
+    event_store = FakeEventStore(
+        [
+            {
+                "run_id": "run-old",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"id": "ai-1", "type": "ai", "content": "answer v1"},
+                "metadata": {"caller": "lead_agent"},
+            }
+        ]
+    )
+
+    response = asyncio.run(
+        thread_runs._prepare_regenerate_payload(
+            "thread-1",
+            "ai-1",
+            _request(checkpointer, event_store),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+    assert response.input["title"] == "User renamed title"
 
 
 def test_prepare_regenerate_payload_does_not_mutate_legacy_single_checkpoint_branch():

@@ -52,6 +52,26 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def put_if_absent(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        event_type: str,
+        category: str,
+        content: str | dict = "",
+        metadata: dict | None = None,
+        created_at: str | None = None,
+    ) -> tuple[dict, bool]:
+        """Write one event unless this run already has the same event type.
+
+        The check and write must be serialized with ordinary writers for the
+        thread. Returns ``(record, created)``. This is the durability primitive
+        used by terminal run receipts, whose recovery path may safely retry
+        after a worker crash.
+        """
+
+    @abc.abstractmethod
     async def list_messages(
         self,
         thread_id: str,

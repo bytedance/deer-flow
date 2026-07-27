@@ -21,7 +21,7 @@ Summarization is configured in `config.yaml` under the `summarization` key:
 ```yaml
 summarization:
   enabled: true
-  model_name: null  # Use default model or specify a lightweight model
+  model_name: null  # null = summarize with the run's own model (see below); or name a lightweight model
 
   # Trigger conditions (OR logic - any condition triggers summarization)
   trigger:
@@ -61,8 +61,11 @@ summarization:
 
 #### `model_name`
 - **Type**: String or null
-- **Default**: `null` (uses default model)
-- **Description**: Model to use for generating summaries. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+- **Default**: `null`
+- **Description**: Model to use for generating summaries.
+  - **`null` (model ownership)**: summarize with the model the run actually executes with — the lead run's resolved model, a subagent's own model, or a thread's custom-agent model — **not** `config.models[0]`. This keeps compaction working on a run whose model is healthy even when `models[0]`'s provider is broken (expired key, quota, outage).
+  - **Set to a model name**: that model generates summaries. If its provider fails, compaction **falls back to the run's own model** so a broken summary provider cannot disable compaction while a working model is available. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+  - Ownership applies to all three paths — automatic lead compaction, subagent compaction, and manual `/compact`. Manual `/compact` resolves the run model with the same precedence as a normal run: the model selected for the request (`POST /api/threads/{id}/compact` body `model_name`, sent by the frontend from the composer's current model) → the thread's custom-agent model → the default. A whitespace-only summary response is treated as a generation failure (it is never committed as a valid empty summary).
 
 #### `trigger`
 - **Type**: Single `ContextSize` or list of `ContextSize` objects
@@ -223,9 +226,9 @@ The middleware intelligently preserves message context:
   - Summaries don't require the most powerful models
   - Significant cost savings on high-volume applications
 
-- **Default**: If `model_name` is `null`, uses the default model
-  - May be more expensive but ensures consistency
-  - Good for simple setups
+- **Default**: If `model_name` is `null`, summarizes with the run's own model (not `models[0]`)
+  - Keeps compaction working when `models[0]`'s provider is broken but the run's model is healthy
+  - Good for simple setups; no separate summary provider to keep credentialed
 
 ### Optimization Tips
 

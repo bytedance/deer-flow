@@ -13,6 +13,8 @@ FROM python:3.12-slim-bookworm AS builder
 ARG NODE_MAJOR=22
 ARG APT_MIRROR
 ARG UV_INDEX_URL
+ARG NPM_REGISTRY
+ARG LARK_CLI_NPM_VERSION=1.0.65
 # Optional extras to install (e.g. "postgres" for PostgreSQL support)
 # Usage: docker build --build-arg UV_EXTRAS=postgres,discord ...
 ARG UV_EXTRAS
@@ -35,6 +37,11 @@ RUN apt-get update && apt-get install -y \
     && apt-get update \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Install the official Lark/Feishu CLI used by the managed Lark integration.
+RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+    && npm install -g @larksuite/cli@${LARK_CLI_NPM_VERSION} \
+    && lark-cli --version
 
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
@@ -95,7 +102,10 @@ ENV PYTHONIOENCODING=utf-8
 COPY --from=builder /usr/bin/node /usr/bin/node
 COPY --from=builder /usr/lib/node_modules /usr/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/bin/npx \
+    && LARK_CLI_BIN="$(node -p 'const bin=require("/usr/lib/node_modules/@larksuite/cli/package.json").bin; typeof bin === "string" ? bin : (bin["lark-cli"] || Object.values(bin)[0])')" \
+    && ln -s "../lib/node_modules/@larksuite/cli/${LARK_CLI_BIN#./}" /usr/bin/lark-cli \
+    && lark-cli --version
 
 # Install Docker CLI (for DooD: allows starting sandbox containers via host Docker socket)
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker

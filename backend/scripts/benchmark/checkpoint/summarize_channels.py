@@ -8,9 +8,9 @@ values below 1 mean delta used less time or storage.
 
 Examples::
 
-    python scripts/benchmark/summarize_checkpoint_channels.py results.jsonl
-    python scripts/benchmark/summarize_checkpoint_channels.py results/*.jsonl --json
-    python scripts/benchmark/summarize_checkpoint_channels.py results.jsonl \
+    python scripts/benchmark/checkpoint/summarize_channels.py results.jsonl
+    python scripts/benchmark/checkpoint/summarize_channels.py results/*.jsonl --json
+    python scripts/benchmark/checkpoint/summarize_channels.py results.jsonl \
         --metrics write_total_ms,cold_read_ms,logical_checkpoint_bytes --csv
 """
 

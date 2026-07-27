@@ -5,12 +5,15 @@ import shlex
 import threading
 import uuid
 
+import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+
+from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,15 @@ class AioSandbox(Sandbox):
         """
         super().__init__(id)
         self._base_url = base_url
-        self._client = AioSandboxClient(base_url=base_url, timeout=600)
+        if sandbox_http_trust_env(base_url):
+            self._client = AioSandboxClient(base_url=base_url, timeout=600)
+        else:
+            direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
+            self._client = AioSandboxClient(
+                base_url=base_url,
+                timeout=600,
+                httpx_client=direct_client,
+            )
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._closed = False

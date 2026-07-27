@@ -37,7 +37,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
-from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import freeze_delta_snapshot_frequency, get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
@@ -192,6 +192,7 @@ class DeerFlowClient:
             reload_app_config(config_path)
         self._app_config = get_app_config()
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
+        freeze_delta_snapshot_frequency(self._app_config.database.checkpoint_delta_snapshot_frequency)
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")

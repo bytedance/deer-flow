@@ -248,7 +248,7 @@ Notes:
 - `enabled: false` keeps background polling off by default.
 - `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
 - All scheduler fields are restart-required; edits need a Gateway restart.
-- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend. SQLite silently ignores row-level locks, so multiple workers can double-fire the same task. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
+- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - The MVP supports only `once` and `cron`.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
@@ -426,6 +426,15 @@ sandbox:
    home_dir: /home/user             # /mnt/user-data is remapped under this directory
    idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
    replicas: 3                      # max concurrent sandboxes per gateway process
+   ownership:                       # use Redis when more than one gateway shares E2B
+     type: redis
+     redis_url: $REDIS_URL
+   reconciliation_interval_seconds: 60
+   reconciliation_grace_seconds: 120
+   reconciliation_orphan_ttl_seconds: 3600
+   reconciliation_max_pages: 10
+   reconciliation_max_items: 200
+   reconciliation_max_seconds: 15
    mounts:                          # one-shot upload of host files at sandbox start
      - host_path: /path/on/host
        container_path: /home/user/shared
@@ -440,10 +449,19 @@ provider in `config.yaml`.
 
 Notes specific to `E2BSandboxProvider`:
 
-- Each DeerFlow thread is bound to its e2b sandbox via metadata
-  (`deer_flow_user`, `deer_flow_thread`), so the same thread reuses the same
-  sandbox across gateway restarts and across processes — no cross-process
-  file lock is needed because the e2b control plane is the source of truth.
+- Each DeerFlow thread is bound to its E2B sandbox via metadata
+  (`deer_flow_user`, `deer_flow_thread`). Startup and periodic reconciliation
+  probe every bounded candidate, adopt one healthy canonical sandbox, and reap
+  duplicates after a grace period. Provider-tagged entries without a complete
+  user/thread identity are reaped only after the orphan TTL.
+- Ownership leases prevent one gateway from adopting or destroying a sandbox
+  another live gateway is responsible for. The default in-memory store is safe
+  only for one gateway process. Multi-worker/load-balanced deployments must use
+  `sandbox.ownership.type: redis`; an existing Redis stream bridge configuration
+  is inferred automatically.
+- Reconciliation is bounded by page, item, and wall-clock limits. Its summary log
+  exposes discovered, adopted, duplicate, deferred, killed, dead, and budget-exhausted
+  counts for operational monitoring.
 - Idle expiry is enforced server-side by e2b's `set_timeout()`. The provider
   refreshes the timeout on every release so warm sandboxes stay alive long
   enough for the next acquire.
@@ -504,6 +522,12 @@ sandbox:
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
+Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
+hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
+inside the client. This prevents an inherited proxy from returning a misleading
+502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
+continue to use the normal environment proxy configuration.
 
 ### Building a Custom AIO Sandbox Image
 

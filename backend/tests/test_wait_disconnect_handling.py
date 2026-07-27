@@ -125,6 +125,36 @@ class TestWaitForRunCompletion:
 
         asyncio.run(run())
 
+    def test_gap_resumes_from_retained_tail_until_run_ends(self) -> None:
+        """The internal wait path may skip payloads but must still observe END."""
+        from app.gateway.services import wait_for_run_completion
+
+        async def run() -> None:
+            mgr = RunManager()
+            bridge = MemoryStreamBridge(queue_maxsize=2)
+            record = await _create_running_record(mgr, on_disconnect=DisconnectMode.cancel)
+            request = _FakeRequest()
+
+            async def overrun_then_finish() -> None:
+                await asyncio.sleep(0)
+                for step in range(4):
+                    await bridge.publish(record.run_id, "values", {"step": step})
+                await asyncio.sleep(0)
+                await mgr.set_status(record.run_id, RunStatus.success)
+                await bridge.publish_end(record.run_id)
+
+            asyncio.create_task(overrun_then_finish())
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, request, mgr),
+                timeout=2.0,
+            )
+
+            assert completed is True
+            assert record.status == RunStatus.success
+            assert not record.abort_event.is_set()
+
+        asyncio.run(run())
+
     def test_cancels_run_on_disconnect_when_cancel_mode(self) -> None:
         """on_disconnect=cancel: real disconnect must call run_mgr.cancel()."""
         from app.gateway.services import wait_for_run_completion

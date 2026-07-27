@@ -1,3 +1,4 @@
+import { AUTH_REQUEST_TIMEOUT_MS } from "./constants";
 import { parseAuthError } from "./types";
 
 export type SetupStatusResponse = {
@@ -16,14 +17,21 @@ export const setupStatusFetchInit = {
 } satisfies RequestInit;
 
 export async function fetchSetupStatus(): Promise<SetupStatusResponse> {
-  const response = await fetch(
-    "/api/v1/auth/setup-status",
-    setupStatusFetchInit,
-  );
-  if (!response.ok) {
-    throw new Error(`setup-status failed: ${response.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("/api/v1/auth/setup-status", {
+      ...setupStatusFetchInit,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`setup-status failed: ${response.status}`);
+    }
+    return (await response.json()) as SetupStatusResponse;
+  } finally {
+    clearTimeout(timeout);
   }
-  return (await response.json()) as SetupStatusResponse;
 }
 
 export function isSystemAlreadyInitializedError(data: unknown): boolean {

@@ -288,6 +288,26 @@ Phase 1 最低验证要求：
   `filter_tools_by_authorization()` helper；同时断言被拒绝工具不在最终 bound tools 中，
   且 Layer 2 收到的 provider 与 Layer 1 为同一对象。
 
+### 2026-07-24 — Phase 2A / Gateway route permissions
+
+- **背景：** `@require_permission` 已覆盖 Gateway 的 threads/runs 普通路由，但
+  `AuthMiddleware` 和 decorator-only `_authenticate()` 都向每个已认证用户写入固定
+  `_ALL_PERMISSIONS`，所以 Phase 1 的 provider 还不能限制 HTTP route。
+- **决策：** `resolve_route_permissions()` 是唯一 route provider 入口；两条认证路径
+  都调用它，并把结果缓存到 request-scoped `AuthContext`。每个已注册 permission
+  生成独立 `AuthzRequest(resource="route", action=<action>,
+  target="<resource>:<action>")`，通过 `aauthorize()` 求值。
+- **决策：** 单项 decision 异常只按 `authorization.fail_closed` 影响对应 permission，
+  不能因为求值其他五项的 incidental failure 扩大当前 route 的拒绝范围。provider
+  解析失败按同一配置返回空权限或 legacy 全权限。
+- **兼容性：** `authorization.enabled: false` 时不解析 provider，继续返回原有六项
+  threads/runs 权限。`owner_check` 与 `require_admin_user()` 保持独立且不变。
+- **证据：** 新增 route policy、trusted principal、async provider、fail-open /
+  fail-closed、middleware/decorator 共用和 built-in RBAC 覆盖；既有 auth 与 middleware
+  回归测试一并执行。
+- **延期：** Models、Skills、Sandbox 权限；前端 effective-permissions 展示；
+  management route 的 provider 迁移。
+
 ### 新记录模板
 
 ```markdown

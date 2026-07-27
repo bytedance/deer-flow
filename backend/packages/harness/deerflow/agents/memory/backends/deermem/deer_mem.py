@@ -33,14 +33,15 @@ from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruption
 from .deermem.config import DeerMemConfig
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
-    detect_correction,
-    detect_reinforcement,
+    SIGNAL_NAMES,
+    detect_signals,
     filter_messages_for_memory,
+    filter_trivial,
     load_patterns,
 )
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
 from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
-from .deermem.core.queue import MemoryUpdateQueue
+from .deermem.core.queue import MemoryUpdateQueue, QueueFull
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
@@ -100,8 +101,7 @@ class DeerMem(MemoryManager):
     _llm: Any = PrivateAttr(default=None)
     _updater: Any = PrivateAttr(default=None)
     _queue: Any = PrivateAttr(default=None)
-    _correction_patterns: Any = PrivateAttr(default=None)
-    _reinforcement_patterns: Any = PrivateAttr(default=None)
+    _trivial_patterns: Any = PrivateAttr(default=None)
 
     # DeerMem implements search() (case-insensitive substring over stored facts),
     # so it is valid for mode="tool" (the base invariant validator requires this
@@ -121,8 +121,12 @@ class DeerMem(MemoryManager):
         # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
         # or bundled defaults = pre-externalization behavior). Loaded once at
         # construction and reused by ``_prepare_update``'s detect_* calls.
-        self._correction_patterns = load_patterns("correction", patterns_dir=self._config.patterns_dir)
-        self._reinforcement_patterns = load_patterns("reinforcement", patterns_dir=self._config.patterns_dir)
+        # Pre-load trivial + signal patterns at construction so a misconfigured
+        # patterns_dir (missing / invalid yaml) surfaces at startup, not on the
+        # first update. Compiled patterns are cached by load_patterns.
+        self._trivial_patterns = load_patterns("trivial", patterns_dir=self._config.patterns_dir)
+        for _signal_name in SIGNAL_NAMES:
+            load_patterns(_signal_name, patterns_dir=self._config.patterns_dir)
         # host_llm (host-injected default model) takes precedence over build_llm(model)
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
@@ -168,7 +172,7 @@ class DeerMem(MemoryManager):
         ``model_post_init`` (shared with direct construction).
         """
         config_dict = dict(backend_config or {})
-        for key in ("should_keep_hidden_message", "trace_context_manager"):
+        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
         if "host_llm" not in config_dict:
@@ -207,16 +211,25 @@ class DeerMem(MemoryManager):
         prepared = self._prepare_update(messages)
         if prepared is None:
             return
-        filtered, correction_detected, reinforcement_detected = prepared
-        self._queue.add(
-            thread_id=thread_id,
-            messages=filtered,
-            agent_name=_resolve_agent_name(agent_name),
-            user_id=user_id,
-            trace_id=trace_id,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        filtered, signals = prepared
+        # DeerMem owns the queue, so it owns the backpressure degradation: a
+        # QueueFull here is logged + dropped so memory backpressure degrades to
+        # "update skipped" rather than propagating into
+        # MemoryMiddleware.after_agent and breaking the agent run (peer
+        # middlewares self-guard the same way). The dropped update is re-fed
+        # next turn (the middleware passes the full conversation each cycle, and
+        # the watermark does not advance on a non-enqueued turn).
+        try:
+            self._queue.add(
+                thread_id=thread_id,
+                messages=filtered,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+                trace_id=trace_id,
+                signals=signals,
+            )
+        except QueueFull as e:
+            logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
     def add_nowait(
         self,
@@ -234,37 +247,44 @@ class DeerMem(MemoryManager):
         prepared = self._prepare_update(messages)
         if prepared is None:
             return
-        filtered, correction_detected, reinforcement_detected = prepared
-        self._queue.add_nowait(
-            thread_id=thread_id,
-            messages=filtered,
-            agent_name=_resolve_agent_name(agent_name),
-            user_id=user_id,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        filtered, signals = prepared
+        # Defense-in-depth: the emergency path always admits under backpressure
+        # (see _enqueue_locked), so QueueFull is not expected here -- but the
+        # emergency flush is invoked from summarization_hook, so a propagated
+        # exception would break summarization. Catch + log to be safe.
+        try:
+            self._queue.add_nowait(
+                thread_id=thread_id,
+                messages=filtered,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+                signals=signals,
+            )
+        except QueueFull as e:
+            logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 
     def _prepare_update(
         self,
         messages: list[Any],
-    ) -> tuple[list[Any], bool, bool] | None:
+    ) -> tuple[list[Any], frozenset[str]] | None:
         """Filter to user+final-AI messages, require both, detect signals.
 
-        Returns ``(filtered, correction_detected, reinforcement_detected)``
-        or ``None`` when there is no meaningful conversation (missing a user
-        or an assistant turn).
+        Returns ``(filtered, signals)`` where ``signals`` is the set of signal
+        classes detected in the recent turns, or ``None`` when there is no
+        meaningful conversation (missing a user or an assistant turn, or every
+        turn dropped as a trivial pure-acknowledgment).
         """
         filtered = filter_messages_for_memory(
             messages,
             should_keep_hidden_message=self._config.should_keep_hidden_message,
         )
+        filtered = filter_trivial(filtered, patterns=self._trivial_patterns)
         user_messages = [m for m in filtered if getattr(m, "type", None) == "human"]
         assistant_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
         if not user_messages or not assistant_messages:
             return None
-        correction_detected = detect_correction(filtered, patterns=self._correction_patterns)
-        reinforcement_detected = not correction_detected and detect_reinforcement(filtered, patterns=self._reinforcement_patterns)
-        return filtered, correction_detected, reinforcement_detected
+        signals = detect_signals(filtered, patterns_dir=self._config.patterns_dir)
+        return filtered, frozenset(signals)
 
     # ── Read ─────────────────────────────────────────────────────────────
     def get_context(
