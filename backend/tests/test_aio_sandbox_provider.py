@@ -990,3 +990,141 @@ def test_aio_forced_collision_never_overwrites_active_tenant(
     assert len(create_calls) == 1
     assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
     assert provider._sandbox_infos[sandbox_id] is info_a
+
+
+# --- #4248 regression: readiness-timeout destroy ownership ---
+
+
+def _make_unready_destroy_provider(tmp_path, *, sandbox_id, base_url, monkeypatch, aio_mod):
+    """Provider wired so ``_create_sandbox`` reaches the readiness-timeout branch.
+
+    ``wait_for_sandbox_ready`` always returns False; the backend records what the
+    destroy path did. Mirrors the fixtures used by the warm-replica eviction
+    test, minus the warm pool.
+    """
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._active_sandbox_identity = {}
+    provider._warm_pool_identity = {}
+    unready_info = aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url=base_url)
+    provider._backend = SimpleNamespace(
+        create=MagicMock(return_value=unready_info),
+        destroy=MagicMock(),
+    )
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_get_extra_mounts",
+        lambda _self, _thread_id, *, user_id=None: [],
+    )
+    return provider, unready_info
+
+
+def test_create_sandbox_claims_ownership_before_readiness_timeout_destroy(tmp_path, monkeypatch):
+    """#4248: a readiness-timeout destroy must run under a `del:` teardown lease.
+
+    Before #4248 the unready container was reaped with a bare ``destroy`` call.
+    Ownership is published by ``_register_created_sandbox`` only after the
+    readiness gate, so for up to 60s the container ran unowned and a peer could
+    adopt it; the subsequent stop landed on whatever turn the peer had handed it.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(
+        tmp_path,
+        sandbox_id="unready",
+        base_url="http://unready",
+        monkeypatch=monkeypatch,
+        aio_mod=aio_mod,
+    )
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: False)
+
+    # The heartbeat releases the teardown lease on exit, so the destroy call is
+    # the only place we can observe the `del:` state. Snapshot the lease at
+    # the instant destroy runs.
+    destroy_snapshots: list = []
+
+    def destroy_spy(info):
+        destroy_snapshots.append(provider._ownership._leases.get(info.sandbox_id))
+
+    provider._backend.destroy.side_effect = destroy_spy
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-4248", "unready", user_id="user-4248")
+
+    provider._backend.destroy.assert_called_once_with(unready_info)
+    assert destroy_snapshots, "destroy must run inside the held teardown lease"
+    lease = destroy_snapshots[0]
+    assert lease is not None, "teardown lease must be held while destroy runs"
+    assert lease.owner_id == provider._owner_id
+    assert lease.destroying is True, "destroy must run under a `del:` teardown lease"
+
+
+@pytest.mark.anyio
+async def test_create_sandbox_async_claims_ownership_before_readiness_timeout_destroy(tmp_path, monkeypatch):
+    """#4248 (async path): same teardown-lease guard on the async readiness branch."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(
+        tmp_path,
+        sandbox_id="unready-async",
+        base_url="http://unready-async",
+        monkeypatch=monkeypatch,
+        aio_mod=aio_mod,
+    )
+
+    async def fake_wait_async(_url, *, timeout=60, poll_interval=1.0):
+        return False
+
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", fake_wait_async)
+    monkeypatch.setattr(
+        aio_mod,
+        "wait_for_sandbox_ready",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("sync readiness should not be used")),
+    )
+
+    destroy_snapshots: list = []
+
+    def destroy_spy(info):
+        destroy_snapshots.append(provider._ownership._leases.get(info.sandbox_id))
+
+    provider._backend.destroy.side_effect = destroy_spy
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        await provider._create_sandbox_async("thread-4248-async", "unready-async", user_id="user-4248-async")
+
+    provider._backend.destroy.assert_called_once_with(unready_info)
+    assert destroy_snapshots, "destroy must run inside the held teardown lease"
+    lease = destroy_snapshots[0]
+    assert lease is not None
+    assert lease.owner_id == provider._owner_id
+    assert lease.destroying is True, "destroy must run under a `del:` teardown lease"
+
+
+def test_create_sandbox_skips_destroy_when_unready_sandbox_owned_by_peer(tmp_path, monkeypatch):
+    """#4248 fail-closed: if a peer already owns the unready container, do not stop it.
+
+    The lease refuses our teardown claim, so the container is left for the peer
+    to reap via its own reconciliation. Stopping it anyway would be the
+    cross-instance kill this guard exists to prevent.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(
+        tmp_path,
+        sandbox_id="peer-owned",
+        base_url="http://peer-owned",
+        monkeypatch=monkeypatch,
+        aio_mod=aio_mod,
+    )
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: False)
+
+    # Every claim refuses: peer holds the lease (or the store cannot answer).
+    provider._ownership.claim = lambda _sid, *, for_destroy=False: False
+
+    with pytest.raises(RuntimeError, match="failed to become ready"):
+        provider._create_sandbox("thread-peer", "peer-owned", user_id="user-peer")
+
+    provider._backend.destroy.assert_not_called()

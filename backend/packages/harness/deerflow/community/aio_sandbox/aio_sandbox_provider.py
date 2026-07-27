@@ -1899,6 +1899,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 await asyncio.to_thread(_unlock_file, lock_file)
             await asyncio.to_thread(lock_file.close)
 
+    def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Tear down a freshly-created container whose readiness check failed.
+
+        The container was started by the backend but never reached ready, so it
+        never entered ``_register_created_sandbox`` and the ownership store has
+        no lease for it yet. For the full readiness timeout (60s) it runs
+        unowned, which is exactly the window a peer gateway's startup
+        reconciliation is built to adopt across (#4206). Without a claim, a peer
+        that adopts the not-yet-ready Pod and then has this instance's stop land
+        on it is a cross-instance kill that interrupts an active turn (#4248).
+
+        Claim the teardown lease first so this reap path is gated by the same
+        ownership guard as every other destroy (``_destroy_warm_entry``,
+        ``_drop_unhealthy_reserved``); fail closed (leave the container for the
+        peer to reap via its own reconciliation) if a peer already owns it or
+        the ownership store cannot answer.
+        """
+        if not self._claim_ownership(sandbox_id, for_destroy=True):
+            logger.warning(
+                "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
+                sandbox_id,
+            )
+            return
+        try:
+            with self._held_teardown_lease(sandbox_id):
+                self._backend.destroy(info)
+        except Exception as e:
+            logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
+
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -1933,7 +1962,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Wait for sandbox to be ready
         if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
-            self._backend.destroy(info)
+            # The container is running but unowned: ownership is published by
+            # ``_register_created_sandbox`` after this gate. Claim the teardown
+            # lease before stopping it so a peer cannot adopt the not-yet-ready
+            # Pod in the meantime (#4248).
+            self._destroy_unready_sandbox(sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
         return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
@@ -1962,7 +1995,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Wait for sandbox to be ready without blocking the event loop.
         if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60):
-            await asyncio.to_thread(self._backend.destroy, info)
+            # The container is running but unowned: ownership is published by
+            # ``_register_created_sandbox`` after this gate. Claim the teardown
+            # lease before stopping it so a peer cannot adopt the not-yet-ready
+            # Pod in the meantime (#4248).
+            await asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
         # Registration publishes ownership (blocking store IO), so it is offloaded
