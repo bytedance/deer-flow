@@ -51,7 +51,12 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    exportFailed: "导出对话失败。",
     regenerate: "重新生成",
+    editAndRerun: "编辑并重新运行",
+    updateAndRerun: "更新并重新运行",
+    editRerunWarning:
+      "重新运行只恢复对话状态，不会撤销文件、Memory 或外部操作。",
     branch: "分叉",
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
@@ -604,6 +609,9 @@ export const zhCN: Translations = {
     otherPlaceholder: "输入其他回答...",
     submit: "提交",
     emptyError: "请输入回答后再提交。",
+    requiredError: "请填写所有必填字段后再提交。",
+    requiredA11yLabel: "必填",
+    selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
   },
 

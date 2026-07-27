@@ -24,6 +24,7 @@ from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+TELEGRAM_MAX_RICH_MESSAGE_LENGTH = 32768
 # Telegram's hosted Bot API documents this as 20 MB (decimal bytes).
 TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
 # Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
@@ -188,10 +189,23 @@ class TelegramChannel(Channel):
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
+            if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
+                self._last_bot_message[msg.chat_id] = state["message_id"]
+                return
             await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
             return
 
-        await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+        if self._can_send_rich(msg.text):
+            try:
+                message_id = await self._send_new_rich_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+            except Exception as exc:
+                logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
+                message_id = None
+            if message_id is not None:
+                return
+
+        for chunk in self._split_message(msg.text):
+            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -284,6 +298,51 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] final edit failed in chat=%s: %s", chat_id, exc)
                 return False
         return False
+
+    def _can_send_rich(self, text: str) -> bool:
+        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+
+    async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
+        """Replace a streamed preview with a persistent Telegram Rich Message."""
+        from telegram.error import BadRequest, EndPointNotFound
+
+        bot = self._application.bot
+        data = {"chat_id": chat_id, "message_id": message_id, "rich_message": {"markdown": text}}
+        for attempt in range(2):
+            try:
+                await bot.do_api_request("editMessageText", api_kwargs=data)
+                return True
+            except Exception as exc:
+                if self._is_retry_after(exc) and attempt == 0:
+                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    continue
+                if isinstance(exc, (BadRequest, EndPointNotFound)):
+                    logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
+                    return False
+                logger.warning("[Telegram] final rich edit failed in chat=%s: %s", chat_id, exc)
+                return False
+        return False
+
+    async def _send_new_rich_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int) -> int | None:
+        """Send raw agent Markdown through Bot API 10.1 Rich Messages."""
+        from telegram.error import BadRequest, EndPointNotFound
+
+        bot = self._application.bot
+
+        async def send_message() -> int | None:
+            try:
+                result = await bot.do_api_request(
+                    "sendRichMessage",
+                    api_kwargs={"chat_id": chat_id, "rich_message": {"markdown": text}},
+                )
+            except (BadRequest, EndPointNotFound) as exc:
+                logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
+                return None
+            message_id = int(result["message_id"])
+            self._last_bot_message[chat_key] = message_id
+            return message_id
+
+        return await self._send_with_retry(send_message, max_retries=_max_retries, log_prefix="[Telegram]")
 
     async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
         """Send a fresh message with retry/backoff. Returns the sent message_id."""

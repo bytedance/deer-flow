@@ -40,7 +40,11 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    exportFailed: string;
     regenerate: string;
+    editAndRerun: string;
+    updateAndRerun: string;
+    editRerunWarning: string;
     branch: string;
     showArtifacts: string;
     browser: string;
@@ -515,6 +519,9 @@ export interface Translations {
     otherPlaceholder: string;
     submit: string;
     emptyError: string;
+    requiredError: string;
+    requiredA11yLabel: string;
+    selectPlaceholder: string;
     answeredValue: (value: string) => string;
   };
 
