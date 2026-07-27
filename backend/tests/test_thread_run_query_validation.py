@@ -7,6 +7,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
+from deerflow.runtime.runs.manager import EditReplayVisibility
 
 
 def _make_app():
@@ -20,6 +21,8 @@ def _make_app():
     app.state.run_event_store = event_store
 
     run_manager = MagicMock()
+    run_manager.list_successful_regenerate_sources = AsyncMock(return_value=set())
+    run_manager.list_edit_replay_visibility = AsyncMock(return_value=EditReplayVisibility())
     run_manager.list_by_thread = AsyncMock(return_value=[])
     app.state.run_manager = run_manager
     return app
@@ -61,6 +64,10 @@ def test_read_endpoints_reject_non_positive_seq_cursors(path: str, cursor: str, 
 
 def test_read_endpoints_accept_positive_limits_and_hit_store():
     app = _make_app()
+    app.state.run_event_store.list_messages.return_value = [
+        {"seq": 1, "run_id": "run-1", "event_type": "llm.human.input", "content": {"type": "human", "id": "h1"}},
+        {"seq": 2, "run_id": "run-1", "event_type": "llm.human.input", "content": {"type": "human", "id": "h2"}},
+    ]
     with TestClient(app) as client:
         thread_messages = client.get("/api/threads/thread-1/messages", params={"limit": 1})
         run_messages = client.get("/api/threads/thread-1/runs/run-1/messages", params={"limit": 1})
@@ -69,7 +76,8 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
     assert thread_messages.status_code == 200
     assert run_messages.status_code == 200
     assert run_events.status_code == 200
-    app.state.run_event_store.list_messages.assert_awaited_once_with("thread-1", limit=1, before_seq=None, after_seq=None)
+    assert len(thread_messages.json()) == 1
+    app.state.run_event_store.list_messages.assert_awaited_once_with("thread-1", limit=thread_runs.THREAD_MESSAGE_LEGACY_SCAN_BATCH, before_seq=None, user_id=None)
     app.state.run_event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-1",
         "run-1",

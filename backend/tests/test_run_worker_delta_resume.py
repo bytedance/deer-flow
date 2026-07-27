@@ -41,6 +41,7 @@ def anyio_backend():
 
 class _DeltaChannelState(TypedDict):
     messages: Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=1000)]
+    title: str | None
 
 
 class _FullChannelState(TypedDict):
@@ -226,12 +227,18 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
         branch_writer = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode="delta")
         replay_base_config = await branch_writer.aupdate(
             _run_config("worker-branch"),
-            {"messages": Overwrite(list(source_pre_turn.values["messages"]))},
+            {
+                "messages": Overwrite(list(source_pre_turn.values["messages"])),
+                "title": "Original title",
+            },
             as_node="branch",
         )
         await branch_writer.aupdate(
             replay_base_config,
-            {"messages": Overwrite(list(source_head.values["messages"]))},
+            {
+                "messages": Overwrite(list(source_head.values["messages"])),
+                "title": "User renamed title",
+            },
             as_node="branch",
         )
 
@@ -247,6 +254,10 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
             publish_end=AsyncMock(),
             cleanup=AsyncMock(),
         )
+        thread_store = SimpleNamespace(
+            update_display_name=AsyncMock(),
+            update_status=AsyncMock(),
+        )
         created_graphs: list[Any] = []
 
         def agent_factory(*, config):
@@ -260,9 +271,12 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
                 bridge,
                 run_manager,
                 record,
-                ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+                ctx=RunContext(checkpointer=checkpointer, thread_store=thread_store, checkpoint_channel_mode="delta"),
                 agent_factory=agent_factory,
-                graph_input={"messages": [HumanMessage(content="q2", id="h2")]},
+                graph_input={
+                    "messages": [HumanMessage(content="q2", id="h2")],
+                    "title": "User renamed title",
+                },
                 config=_run_config("worker-branch", base.config["configurable"]["checkpoint_id"]),
                 stream_modes=["values"],
             ),
@@ -273,6 +287,8 @@ async def test_run_agent_streams_from_the_linearized_delta_resume(tmp_path):
         final_accessor = CheckpointStateAccessor.bind(created_graphs[-1], checkpointer, mode="delta")
         final = await final_accessor.aget(_run_config("worker-branch"))
         assert _ids(final) == ["h1", "a1", "h2", "a2-new"]
+        assert final.values["title"] == "User renamed title"
+        thread_store.update_display_name.assert_awaited_once_with("worker-branch", "User renamed title")
 
 
 async def test_run_agent_serializes_resume_preparation_with_checkpoint_writes(monkeypatch):

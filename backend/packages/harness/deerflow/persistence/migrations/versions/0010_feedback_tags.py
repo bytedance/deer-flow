@@ -1,7 +1,7 @@
 """feedback tags.
 
-Revision ID: 0009_feedback_tags
-Revises: 0008_thread_operation_kind
+Revision ID: 0010_feedback_tags
+Revises: 0009_webhook_dedupe
 Create Date: 2026-07-23
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0009_feedback_tags"
-down_revision: str | Sequence[str] | None = "0008_thread_operation_kind"
+revision: str = "0010_feedback_tags"
+down_revision: str | Sequence[str] | None = "0009_webhook_dedupe"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -51,6 +51,7 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getBranchableAssistantGroupIds,
+  getLatestEditableTurn,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
@@ -333,9 +334,11 @@ export function MessageList({
   loadMoreHistory,
   isHistoryLoading,
   onRegenerateMessage,
+  onEditAndRegenerateMessage,
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
+  canEdit = false,
   canBranch = false,
   enableSidecarActions = true,
   sidecarSurface = false,
@@ -354,7 +357,11 @@ export function MessageList({
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
-  ) => void | Promise<void>;
+  ) => boolean | void | Promise<boolean | void>;
+  onEditAndRegenerateMessage?: (
+    messageId: string,
+    replacementText: string,
+  ) => boolean | Promise<boolean>;
   onSubmitHumanInput?: (
     request: HumanInputRequest,
     response: HumanInputResponse,
@@ -364,6 +371,7 @@ export function MessageList({
     messageIds: string[],
   ) => void | Promise<void>;
   canRegenerate?: boolean;
+  canEdit?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
@@ -464,6 +472,7 @@ export function MessageList({
   const [branchingMessageId, setBranchingMessageId] = useState<string | null>(
     null,
   );
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const hasActiveAssistantText = useMemo(() => {
     let lastHumanIndex = -1;
     for (let i = groupedMessages.length - 1; i >= 0; i--) {
@@ -650,6 +659,15 @@ export function MessageList({
     () => getBranchableAssistantGroupIds(groupedMessages, thread.isLoading),
     [groupedMessages, thread.isLoading],
   );
+  const latestEditableTurn = useMemo(
+    () => getLatestEditableTurn(groupedMessages, thread.isLoading),
+    [groupedMessages, thread.isLoading],
+  );
+  const latestEditableHumanMessageId = latestEditableTurn?.humanMessage.id;
+  const replayActionBusy =
+    regeneratingMessageId != null ||
+    branchingMessageId != null ||
+    editingMessageId != null;
 
   const clearSelectionToolbar = useCallback(() => {
     setSelectionToolbar(null);
@@ -835,7 +853,9 @@ export function MessageList({
                   type="button"
                   variant="ghost"
                   disabled={
-                    !canBranch || branchingMessageId === actionTarget.id
+                    !canBranch ||
+                    replayActionBusy ||
+                    branchingMessageId === actionTarget.id
                   }
                   onClick={() => {
                     const targetId = actionTarget.id;
@@ -869,7 +889,9 @@ export function MessageList({
                   type="button"
                   variant="ghost"
                   disabled={
-                    !canRegenerate || regeneratingMessageId === actionTarget.id
+                    !canRegenerate ||
+                    replayActionBusy ||
+                    regeneratingMessageId === actionTarget.id
                   }
                   onClick={() => {
                     const targetId = actionTarget.id;
@@ -904,6 +926,7 @@ export function MessageList({
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
+      replayActionBusy,
       t.common.branch,
       t.common.regenerate,
       threadId,
@@ -1058,6 +1081,36 @@ export function MessageList({
                             : undefined
                         }
                         showCopyButton={group.type !== "assistant"}
+                        canEdit={
+                          group.type === "human" &&
+                          Boolean(msg.id) &&
+                          msg.id === latestEditableHumanMessageId &&
+                          canEdit &&
+                          !replayActionBusy &&
+                          Boolean(onEditAndRegenerateMessage)
+                        }
+                        isEditPending={editingMessageId === msg.id}
+                        onEditAndRegenerate={
+                          group.type === "human" &&
+                          msg.id &&
+                          onEditAndRegenerateMessage
+                            ? async (replacementText) => {
+                                const targetId = msg.id;
+                                if (!targetId) {
+                                  return false;
+                                }
+                                setEditingMessageId(targetId);
+                                try {
+                                  return await onEditAndRegenerateMessage(
+                                    targetId,
+                                    replacementText,
+                                  );
+                                } finally {
+                                  setEditingMessageId(null);
+                                }
+                              }
+                            : undefined
+                        }
                       />
                     );
 

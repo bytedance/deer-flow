@@ -6,6 +6,7 @@ import {
   extractTextFromMessage,
   extractReasoningContentFromMessage,
   getBranchableAssistantGroupIds,
+  getLatestEditableTurn,
   getMessageCopyData,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
@@ -131,6 +132,88 @@ describe("branchable assistant groups", () => {
     expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual([
       "ai-history",
     ]);
+  });
+});
+
+describe("latest editable user turn", () => {
+  test("returns the latest completed human turn", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-history", type: "ai", content: "Historical answer" },
+      { id: "human-2", type: "human", content: "Use tools" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+      { id: "ai-final", type: "ai", content: "Final answer" },
+    ] as Message[];
+
+    const turn = getLatestEditableTurn(getMessageGroups(messages), false);
+
+    expect(turn?.humanMessage.id).toBe("human-2");
+  });
+
+  test("returns null while the current turn is loading", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      { id: "ai-1", type: "ai", content: "Answer" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), true)).toBeNull();
+  });
+
+  test("returns null when the latest turn has no final assistant text", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when the latest assistant text still has tool calls", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "Let me search first.",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when a later human turn is incomplete", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-1", type: "ai", content: "First answer" },
+      { id: "human-2", type: "human", content: "Follow up" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
   });
 });
 

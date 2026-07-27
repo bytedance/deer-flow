@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
 from deerflow.domain.feedback import Feedback
+from deerflow.runtime.runs.manager import EditReplayVisibility
 
 
 def _make_app(messages, feedback_grouped):
@@ -33,6 +34,8 @@ def _make_app(messages, feedback_grouped):
     # list_thread_messages also calls run_manager.list_by_thread to inject
     # turn durations; stub it to return no runs so that path stays inert.
     run_manager = MagicMock()
+    run_manager.list_successful_regenerate_sources = AsyncMock(return_value=set())
+    run_manager.list_edit_replay_visibility = AsyncMock(return_value=EditReplayVisibility())
     run_manager.list_by_thread = AsyncMock(return_value=[])
     app.state.run_manager = run_manager
 

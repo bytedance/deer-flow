@@ -1264,7 +1264,7 @@ class TestChannelManager:
                 outbound_received.append(msg)
                 if msg.is_final:
                     key = manager._inbound_dedupe_key(_inbound())
-                    key_present_during_final_publish.append(key in manager._recent_inbound_events)
+                    key_present_during_final_publish.append(key in manager._inbound_dedupe_store._store)
 
             bus.subscribe_outbound(capture_outbound)
 
@@ -1428,7 +1428,8 @@ class TestChannelManager:
             else:
                 CHANNEL_RUN_POLICY[channel_name] = original
 
-    def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.
 
         PR #3584 added inbound dedupe for the IM channels; the GitHub channel
@@ -1467,18 +1468,18 @@ class TestChannelManager:
         assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:alice:reviewer")
 
         # First delivery fires; an identical redelivery of the same GUID is dropped.
-        assert manager._is_duplicate_inbound(_gh("d1")) is False
-        assert manager._is_duplicate_inbound(_gh("d1")) is True
+        assert await manager._is_duplicate_inbound(_gh("d1")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1")) is True
         # A genuinely new delivery still fires.
-        assert manager._is_duplicate_inbound(_gh("d2")) is False
+        assert await manager._is_duplicate_inbound(_gh("d2")) is False
         # A second agent fanned out from the SAME delivery is not cross-deduped.
-        assert manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
         # A second user's SAME-named agent on the SAME delivery is not
         # cross-deduped either. A helper still stamping the old 2-part
         # (delivery, agent) id could not even express this case — it would
         # collide with the very first assertion's "d1"+"reviewer" key and
         # silently drop this user's run (willem-bd, PR #4104 review).
-        assert manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
 
     def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
@@ -8881,6 +8882,7 @@ class TestTelegramStreaming:
         bot = SimpleNamespace()
         bot.sent = []
         bot.edited = []
+        bot.rich = []
         bot.next_message_id = 100
 
         async def send_message(**kwargs):
@@ -8896,8 +8898,15 @@ class TestTelegramStreaming:
             result.message_id = kwargs["message_id"]
             return result
 
+        async def do_api_request(endpoint, api_kwargs):
+            bot.rich.append((endpoint, api_kwargs))
+            result = {"message_id": bot.next_message_id}
+            bot.next_message_id += 1
+            return result
+
         bot.send_message = send_message
         bot.edit_message_text = edit_message_text
+        bot.do_api_request = do_api_request
         mock_app.bot = bot
         ch._application = mock_app
         return ch, bot
@@ -9191,6 +9200,104 @@ class TestTelegramStreaming:
             assert len(bot.sent) == 1
             assert bot.sent[0]["text"] == "direct"
             assert len(bot.edited) == 0
+
+        _run(go())
+
+    def test_final_uses_telegram_rich_markdown_when_enabled(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            markdown = "# Result\n\n**Bold** and `code`"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=markdown, is_final=True))
+
+            assert bot.rich == [
+                (
+                    "sendRichMessage",
+                    {"chat_id": 12345, "rich_message": {"markdown": markdown}},
+                )
+            ]
+            assert bot.sent == []
+
+        _run(go())
+
+    def test_final_replaces_plain_stream_with_rich_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**partial", is_final=False, thread_ts="42"))
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**final**", is_final=True, thread_ts="42"))
+
+            assert bot.rich == [
+                (
+                    "editMessageText",
+                    {
+                        "chat_id": 12345,
+                        "message_id": 100,
+                        "rich_message": {"markdown": "**final**"},
+                    },
+                )
+            ]
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
+
+    def test_rich_message_bad_request_falls_back_to_plain_text_once(self):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def reject_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = reject_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True))
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_rich_message_retryable_failure_falls_back_to_plain_text_once(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise RuntimeError("network failed")
+
+            bot.do_api_request = fail_rich
+            await ch.send(
+                OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True),
+                _max_retries=1,
+            )
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_stream_rich_message_bad_request_falls_back_to_one_plain_text_edit(self, monkeypatch):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = fail_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True, thread_ts="42"))
+
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+            assert bot.edited == [{"chat_id": 12345, "message_id": 100, "text": "**answer**"}]
 
         _run(go())
 

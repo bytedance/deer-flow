@@ -8,12 +8,12 @@ warming the other.
 
 Examples::
 
-    PYTHONPATH=. uv run python scripts/benchmark/bench_checkpoint_channels.py \
+    PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
         --updates 10,100,500,999,1000,1001,2000 \
         --payload-bytes 128,4096 \
         --output checkpoint-bench.jsonl
 
-    PYTHONPATH=. uv run python scripts/benchmark/bench_checkpoint_channels.py \
+    PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
         --backends sqlite --updates 1000 --payload-bytes 128 \
         --repetitions 7 --output snapshot-boundary.jsonl
 
@@ -27,15 +27,11 @@ and memory use.
 from __future__ import annotations
 
 import argparse
-import cProfile
 import gc
-import hashlib
 import importlib.metadata
 import json
 import os
 import platform
-import statistics
-import subprocess
 import sys
 import tempfile
 import time
@@ -55,10 +51,19 @@ from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
-try:
-    import resource
-except ImportError:  # pragma: no cover - Windows only
-    resource = None  # type: ignore[assignment]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import checkpoint_bench_common as _common  # noqa: E402
+
+_GIT_SHA_ENV = _common.GIT_SHA_ENV
+_parse_positive_int_csv = _common.parse_positive_int_csv
+_parse_choice_csv = _common.parse_choice_csv
+_canonical_messages_digest = _common.canonical_messages_digest
+_percentile = _common.percentile
+_window_median = _common.window_median
+_resolve_git_sha = _common.resolve_git_sha
+_safe_error = _common.safe_error
+_file_size = _common.file_size
+_peak_rss_bytes = _common.peak_rss_bytes
 
 Mode = Literal["full", "delta"]
 Backend = Literal["memory", "sqlite"]
@@ -67,7 +72,6 @@ SCHEMA_VERSION = 1
 BENCHMARK_VERSION = 1
 PRODUCTION_SNAPSHOT_FREQUENCY = 1000
 DEFAULT_MAX_ESTIMATED_FULL_BYTES = 1024**3
-_GIT_SHA_ENV = "DEERFLOW_CHECKPOINT_BENCH_GIT_SHA"
 _MODES: tuple[Mode, ...] = ("full", "delta")
 _BACKENDS: tuple[Backend, ...] = ("memory", "sqlite")
 _STORAGE_STAT_FIELDS = (
@@ -115,53 +119,6 @@ class BenchmarkCase:
             raise ValueError(f"Phase 1 supports only production snapshot_frequency={PRODUCTION_SNAPSHOT_FREQUENCY}")
         if self.scenario != "append":
             raise ValueError(f"unsupported scenario: {self.scenario!r}")
-
-
-def _parse_positive_int_csv(value: str, *, option: str) -> list[int]:
-    if not value or value.startswith(",") or value.endswith(",") or ",," in value:
-        raise ValueError(f"{option} must be a comma-separated list of positive integers")
-    result: list[int] = []
-    seen: set[int] = set()
-    duplicates: list[int] = []
-    try:
-        parsed = [int(part.strip()) for part in value.split(",")]
-    except ValueError as exc:
-        raise ValueError(f"{option} must be a comma-separated list of positive integers") from exc
-    if any(item <= 0 for item in parsed):
-        raise ValueError(f"{option} values must be positive integers")
-    for item in parsed:
-        if item not in seen:
-            result.append(item)
-            seen.add(item)
-        elif item not in duplicates:
-            duplicates.append(item)
-    if duplicates:
-        print(
-            f"{option}: ignored duplicate value(s): {', '.join(str(item) for item in duplicates)}; use --repetitions for repeated samples.",
-            file=sys.stderr,
-        )
-    return result
-
-
-def _parse_choice_csv(value: str, *, option: str, choices: tuple[str, ...]) -> list[str]:
-    if not value or value.startswith(",") or value.endswith(",") or ",," in value:
-        raise ValueError(f"{option} must contain one or more of: {', '.join(choices)}")
-    result: list[str] = []
-    duplicates: list[str] = []
-    for raw in value.split(","):
-        item = raw.strip()
-        if item not in choices:
-            raise ValueError(f"{option} contains unsupported value {item!r}; expected: {', '.join(choices)}")
-        if item not in result:
-            result.append(item)
-        elif item not in duplicates:
-            duplicates.append(item)
-    if duplicates:
-        print(
-            f"{option}: ignored duplicate value(s): {', '.join(duplicates)}; use --repetitions for repeated samples.",
-            file=sys.stderr,
-        )
-    return result
 
 
 def _expand_cases(
@@ -219,47 +176,6 @@ def _message_for_update(index: int, payload_bytes: int) -> BaseMessage:
     return AIMessage(id=message_id, content=content)
 
 
-def _canonical_messages_digest(messages: list[AnyMessage]) -> str:
-    canonical = [
-        {
-            "id": message.id,
-            "type": message.type,
-            "content": message.content,
-        }
-        for message in messages
-    ]
-    payload = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _percentile(values: list[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = (len(ordered) - 1) * percentile / 100
-    lower = int(rank)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = rank - lower
-    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
-
-
-def _window_median(values: list[float], window: Literal["first", "middle", "last"]) -> float:
-    if not values:
-        return 0.0
-    width = max(1, len(values) // 10)
-    if window == "first":
-        selected = values[:width]
-    elif window == "last":
-        selected = values[-width:]
-    else:
-        center = len(values) // 2
-        start = max(0, center - width // 2)
-        selected = values[start : start + width]
-    return statistics.median(selected)
-
-
 def _noop(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
@@ -281,20 +197,6 @@ def _config(case: BenchmarkCase) -> dict[str, Any]:
     }
     inject_checkpoint_mode(config, case.mode)
     return config
-
-
-def _resolve_git_sha() -> str:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parents[3],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
 
 
 def _base_row(case: BenchmarkCase) -> dict[str, Any]:
@@ -322,13 +224,6 @@ def _base_row(case: BenchmarkCase) -> dict[str, Any]:
         "repetition": case.repetition,
         "seed": case.seed,
     }
-
-
-def _safe_error(error: BaseException | str, *, work_dir: Path | None = None) -> str:
-    message = str(error).replace(str(Path.home()), "<home>")
-    if work_dir is not None:
-        message = message.replace(str(work_dir), "<work-dir>")
-    return message[:2000]
 
 
 def _collect_storage_stats(collector: Callable[[], dict[str, int]]) -> dict[str, Any]:
@@ -385,20 +280,6 @@ def _sqlite_storage_stats(saver: SqliteSaver, thread_id: str) -> dict[str, int]:
         "checkpoint_rows": int(checkpoint_rows),
         "write_rows": int(write_rows),
     }
-
-
-def _file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return 0
-
-
-def _peak_rss_bytes() -> int | None:
-    if resource is None:
-        return None
-    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak_rss) if sys.platform == "darwin" else int(peak_rss * 1024)
 
 
 def _write_and_read(case: BenchmarkCase, saver: Any, messages: list[BaseMessage]) -> tuple[dict[str, Any], list[AnyMessage]]:
@@ -532,12 +413,7 @@ def _run_case(case: BenchmarkCase, *, work_dir: Path) -> dict[str, Any]:
 
 
 def _run_profiled_case(case: BenchmarkCase, *, work_dir: Path, profile_path: Path) -> dict[str, Any]:
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profiler = cProfile.Profile()
-    row = profiler.runcall(_run_case, case, work_dir=work_dir)
-    row["profiled"] = True
-    profiler.dump_stats(profile_path)
-    return row
+    return _common.run_profiled(_run_case, case, work_dir=work_dir, profile_path=profile_path)
 
 
 def _comparison_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -583,37 +459,16 @@ def _profile_filename(case: BenchmarkCase) -> str:
 
 
 def _run_child_case(case: BenchmarkCase, *, timeout_seconds: float, git_sha: str, profile_dir: Path | None = None) -> dict[str, Any]:
-    encoded_case = json.dumps(asdict(case), separators=(",", ":"))
-    command = [sys.executable, str(Path(__file__).resolve()), "--worker-case", encoded_case]
+    worker_args = ["--worker-case", json.dumps(asdict(case), separators=(",", ":"))]
     if profile_dir is not None:
-        command.extend(["--worker-profile", str(profile_dir / _profile_filename(case))])
-    started = time.perf_counter()
-    child_env = os.environ.copy()
-    child_env[_GIT_SHA_ENV] = git_sha
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=child_env,
-        )
-    except subprocess.TimeoutExpired:
-        return _failure_row(case, f"child process timed out after {timeout_seconds:g} seconds")
-    child_process_ms = (time.perf_counter() - started) * 1000
-    output_lines = [line for line in completed.stdout.splitlines() if line.strip()]
-    if not output_lines:
-        return _failure_row(case, f"child process returned {completed.returncode} without a result")
-    try:
-        row = json.loads(output_lines[-1])
-    except json.JSONDecodeError:
-        return _failure_row(case, f"child process returned {completed.returncode} with malformed JSON")
-    row["child_process_ms"] = child_process_ms
-    if completed.returncode != 0 and row.get("success"):
-        row["success"] = False
-        row["error"] = f"child process exited with status {completed.returncode}"
-    return row
+        worker_args.extend(["--worker-profile", str(profile_dir / _profile_filename(case))])
+    return _common.run_child_case(
+        script=Path(__file__).resolve(),
+        worker_args=worker_args,
+        failure_row=lambda error: _failure_row(case, error),
+        timeout_seconds=timeout_seconds,
+        git_sha=git_sha,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
