@@ -932,6 +932,51 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     assert "sb-existing" in p._owned_sandbox_ids
 
 
+def test_reconcile_bootstrap_failure_clears_inflight_after_peer_take(monkeypatch):
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    sandbox_id = "sb-racy-bootstrap"
+    fake_cls.list_return = [_info(sandbox_id, "u1", "t1")]
+    shared_leases: dict[str, tuple[str, str]] = {}
+    shared_lock = threading.Lock()
+    p._ownership = FakeOwnershipStore(
+        shared_leases,
+        owner_id=p._owner_id,
+        lock=shared_lock,
+    )
+    peer_ownership = FakeOwnershipStore(
+        shared_leases,
+        owner_id="owner-peer",
+        lock=shared_lock,
+    )
+
+    def peer_takes_before_bootstrap_fails(_command: str) -> SimpleNamespace:
+        assert peer_ownership.take(sandbox_id) is True
+        return SimpleNamespace(stdout="", stderr="permission denied", exit_code=1)
+
+    client = FakeClient(
+        sandbox_id=sandbox_id,
+        commands=FakeCommandsAPI(
+            [
+                SimpleNamespace(stdout="ok", stderr="", exit_code=0),
+                peer_takes_before_bootstrap_fails,
+            ]
+        ),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+
+    stats = p._reconcile_remote_sandboxes(now=100.0)
+
+    assert stats.adopted == 0
+    assert stats.deferred == 1
+    assert sandbox_id not in p._acquire_inflight
+    assert sandbox_id not in p._unowned_remote_ops_in_progress
+    assert p._reserved_slots == 0
+    assert p._ownership.owner(sandbox_id) == "owner-peer"
+    assert client.killed is False
+    assert client.closed is True
+
+
 def test_reconcile_kills_metadata_orphan_only_after_ttl(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)

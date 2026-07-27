@@ -1224,6 +1224,8 @@ class E2BSandboxProvider(SandboxProvider):
                 bootstrap_error, remote_destroyed = self._bootstrap_or_discard(canonical_client, canonical_id)
                 if bootstrap_error is not None:
                     self._complete_reserved_remote_op(canonical_id, remote_destroyed=remote_destroyed)
+                    with self._lock:
+                        self._acquire_inflight.discard(canonical_id)
                     stats.deferred += 1
                 else:
                     discard_after_shutdown = False
