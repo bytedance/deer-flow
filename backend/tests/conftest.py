@@ -7,6 +7,7 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,28 @@ _executor_mock.MAX_CONCURRENT_SUBAGENTS = 3
 _executor_mock.get_background_task_result = MagicMock()
 
 sys.modules["deerflow.subagents.executor"] = _executor_mock
+
+
+# ---------------------------------------------------------------------------
+# Live test collection gating
+# ---------------------------------------------------------------------------
+
+# Gate collection of test_client_live.py:
+# - CI is set: always skip
+# - config.yaml absent: skip (live tests need real API credentials)
+# When neither holds the module IS collected (via the live marker) and the
+# default `make test` excludes it with `-m "not live"`.
+_live_test_path = Path(__file__).parent / "test_client_live.py"
+_live_skip_needed = os.environ.get("CI") or not (Path(__file__).resolve().parents[2] / "config.yaml").exists()
+
+
+def pytest_collection_modifyitems(items):
+    """Remove live test items when CI is set or config.yaml is absent."""
+    if not _live_skip_needed:
+        return
+    live_items = [item for item in items if str(item.fspath) == str(_live_test_path)]
+    for item in live_items:
+        items.remove(item)
 
 
 @pytest.fixture()
