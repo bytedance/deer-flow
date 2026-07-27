@@ -796,7 +796,7 @@ tools:
   #   use: deerflow.community.browserless.tools:web_capture_tool
   #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
-  #   timeout_s: 30                         # Request timeout in seconds
+  #   timeout_s: 30                         # Request timeout in seconds (`timeout` also accepted)
   #   output_format: png                    # png, jpeg, or webp
   #   full_page: true                       # Capture entire page instead of viewport only
   #   viewport_width: 1280
