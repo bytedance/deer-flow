@@ -18,7 +18,8 @@ endif
 
 # Resolve pnpm command with Corepack fallback.
 # Prefer pnpm directly, then pnpm.cmd, then corepack pnpm.
-# This ensures consistency with scripts/check.py.
+# When no pnpm/corepack shim is on PATH, fall back to bare "pnpm" so the
+# failure surfaces at the call site as a clear "command not found".
 PNPM = $(shell bash -c ' \
     if command -v pnpm >/dev/null 2>&1; then \
         echo pnpm; \
@@ -29,7 +30,6 @@ PNPM = $(shell bash -c ' \
     elif command -v corepack.cmd >/dev/null 2>&1; then \
         echo "corepack.cmd pnpm"; \
     else \
-        # Fall back to bare "pnpm" — fails with a clear "command not found" at the call site. \
         echo pnpm; \
     fi')
 
