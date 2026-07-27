@@ -476,8 +476,8 @@ class E2BSandbox(Sandbox):
                 # ``--include`` flag above only pre-filtered by basename.
                 if file_path != root and not file_path.startswith(root_prefix):
                     continue
-                rel_path = file_path[len(root) :].lstrip("/")
-                if not rel_path or not path_matches(glob, rel_path):
+                rel_path = file_path.rsplit("/", 1)[-1] if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
                     continue
             matches.append(
                 GrepMatch(

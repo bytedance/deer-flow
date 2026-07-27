@@ -161,7 +161,7 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside text files under a directory."""
+        """Search for matches inside a text file or files under a directory."""
         pass
 
     @abstractmethod
