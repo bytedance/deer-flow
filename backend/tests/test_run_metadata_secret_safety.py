@@ -6,6 +6,7 @@ from deerflow.runtime.runs.manager import RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
+    redact_config_secrets,
     redact_metadata_secrets,
     validate_run_metadata_secrets,
 )
@@ -40,6 +41,35 @@ def test_redact_metadata_secrets_removes_exact_key_without_mutating_source():
     }
     assert source["auth_token"] == "legacy-secret"
     assert redacted is not source
+
+
+def test_redact_config_secrets_hides_legacy_config_metadata_without_mutating_source():
+    source = {
+        "metadata": {
+            "auth_token": "legacy-secret",
+            "token_usage": 7,
+            "nested": {"auth_token": "ordinary-nested-metadata"},
+        },
+        "context": {
+            "secrets": {"MCP_AUTH_TOKEN": "request-secret"},
+            "model_name": "default",
+        },
+    }
+
+    redacted = redact_config_secrets(source)
+
+    assert redacted == {
+        "metadata": {
+            "token_usage": 7,
+            "nested": {"auth_token": "ordinary-nested-metadata"},
+        },
+        "context": {"model_name": "default"},
+    }
+    assert source["metadata"]["auth_token"] == "legacy-secret"
+    assert source["context"]["secrets"] == {"MCP_AUTH_TOKEN": "request-secret"}
+    assert redacted is not source
+    assert redacted["metadata"] is not source["metadata"]
+    assert redacted["context"] is not source["context"]
 
 
 def test_run_response_hides_historical_auth_token_without_mutating_record():
