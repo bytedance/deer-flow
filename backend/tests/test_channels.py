@@ -8881,6 +8881,7 @@ class TestTelegramStreaming:
         bot = SimpleNamespace()
         bot.sent = []
         bot.edited = []
+        bot.rich = []
         bot.next_message_id = 100
 
         async def send_message(**kwargs):
@@ -8896,8 +8897,15 @@ class TestTelegramStreaming:
             result.message_id = kwargs["message_id"]
             return result
 
+        async def do_api_request(endpoint, api_kwargs):
+            bot.rich.append((endpoint, api_kwargs))
+            result = {"message_id": bot.next_message_id}
+            bot.next_message_id += 1
+            return result
+
         bot.send_message = send_message
         bot.edit_message_text = edit_message_text
+        bot.do_api_request = do_api_request
         mock_app.bot = bot
         ch._application = mock_app
         return ch, bot
@@ -9191,6 +9199,104 @@ class TestTelegramStreaming:
             assert len(bot.sent) == 1
             assert bot.sent[0]["text"] == "direct"
             assert len(bot.edited) == 0
+
+        _run(go())
+
+    def test_final_uses_telegram_rich_markdown_when_enabled(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            markdown = "# Result\n\n**Bold** and `code`"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=markdown, is_final=True))
+
+            assert bot.rich == [
+                (
+                    "sendRichMessage",
+                    {"chat_id": 12345, "rich_message": {"markdown": markdown}},
+                )
+            ]
+            assert bot.sent == []
+
+        _run(go())
+
+    def test_final_replaces_plain_stream_with_rich_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**partial", is_final=False, thread_ts="42"))
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**final**", is_final=True, thread_ts="42"))
+
+            assert bot.rich == [
+                (
+                    "editMessageText",
+                    {
+                        "chat_id": 12345,
+                        "message_id": 100,
+                        "rich_message": {"markdown": "**final**"},
+                    },
+                )
+            ]
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
+
+    def test_rich_message_bad_request_falls_back_to_plain_text_once(self):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def reject_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = reject_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True))
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_rich_message_retryable_failure_falls_back_to_plain_text_once(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise RuntimeError("network failed")
+
+            bot.do_api_request = fail_rich
+            await ch.send(
+                OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True),
+                _max_retries=1,
+            )
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_stream_rich_message_bad_request_falls_back_to_one_plain_text_edit(self, monkeypatch):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = fail_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True, thread_ts="42"))
+
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+            assert bot.edited == [{"chat_id": 12345, "message_id": 100, "text": "**answer**"}]
 
         _run(go())
 
