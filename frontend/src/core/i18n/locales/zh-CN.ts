@@ -24,6 +24,7 @@ export const zhCN: Translations = {
     dialogTitle: "分享反馈",
     detailsPlaceholder: "分享详细信息（可选）",
     submit: "提交",
+    submitFailed: "反馈保存失败，请重试。",
     tags: {
       incorrect: "不正确或不完整",
       notAsExpected: "与期望不符",

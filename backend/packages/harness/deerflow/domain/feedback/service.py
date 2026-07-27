@@ -34,17 +34,19 @@ class FeedbackService:
         """Set the user's current rating for a run (idempotent).
 
         Backs the PUT endpoint: "my current verdict on this run is X".
-        Verifies run ownership first, then creates the aggregate (which
-        validates the rating) and stores it with upsert-by-identity
+        Builds the aggregate first (which validates rating and tags), then
+        verifies run ownership, then stores it with upsert-by-identity
         semantics -- repeated calls replace the previous rating.
 
         Raises:
+            InvalidRatingError: rating is not +1 or -1. Raised by the
+                aggregate factory before any port call, so a malformed
+                rating is reported as such even for an unknown run.
+            InvalidTagError: a tag is not a known reason slug (same
+                pre-I/O guarantee).
             RunNotFoundError: the run does not exist or does not belong
                 to the given thread (cross-thread ids are rejected).
-            InvalidRatingError: rating is not +1 or -1 (raised by the
-                aggregate factory before any I/O happens).
         """
-        await self._require_run(thread_id, run_id)
         feedback = Feedback.create(
             run_id=run_id,
             thread_id=thread_id,
@@ -53,6 +55,7 @@ class FeedbackService:
             comment=comment,
             tags=tags,
         )
+        await self._require_run(thread_id, run_id)
         return await self._repository.save(feedback)
 
     async def retract_run_rating(self, thread_id: str, run_id: str, *, user_id: str | None) -> bool:

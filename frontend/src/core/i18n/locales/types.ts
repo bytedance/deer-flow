@@ -13,6 +13,7 @@ export interface Translations {
     dialogTitle: string;
     detailsPlaceholder: string;
     submit: string;
+    submitFailed: string;
     tags: {
       incorrect: string;
       notAsExpected: string;

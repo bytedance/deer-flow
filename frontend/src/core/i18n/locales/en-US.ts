@@ -24,6 +24,7 @@ export const enUS: Translations = {
     dialogTitle: "Share feedback",
     detailsPlaceholder: "Share more details (optional)",
     submit: "Submit",
+    submitFailed: "Could not save your feedback. Please try again.",
     tags: {
       incorrect: "Incorrect or incomplete",
       notAsExpected: "Not what I expected",

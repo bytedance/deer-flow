@@ -5,19 +5,9 @@ is exercised end-to-end against dict-backed doubles.
 """
 
 import pytest
-from test_feedback import InMemoryFeedbackRepository
+from feedback_fakes import FakeRunLookup, InMemoryFeedbackRepository
 
 from deerflow.domain.feedback import FeedbackService, InvalidRatingError, RunNotFoundError
-
-
-class FakeRunLookup:
-    """RunLookup double backed by a run_id -> thread_id mapping."""
-
-    def __init__(self, runs: dict[str, str]):
-        self._runs = runs
-
-    async def thread_of(self, run_id: str) -> str | None:
-        return self._runs.get(run_id)
 
 
 def _service(runs: dict[str, str] | None = None) -> FeedbackService:
@@ -65,10 +55,13 @@ class TestRateRun:
             await svc.rate_run("t1", "r1", rating=1, comment=None, user_id="u1")
 
     @pytest.mark.anyio
-    async def test_invalid_rating_propagates_before_persistence(self):
+    async def test_invalid_rating_rejected_before_run_lookup(self):
+        # "unknown-run" is absent from the lookup, so a rating validated after
+        # the RunLookup port call would surface RunNotFoundError instead.
+        # Expecting InvalidRatingError is what pins validation ahead of I/O.
         svc = _service()
         with pytest.raises(InvalidRatingError):
-            await svc.rate_run("t1", "r1", rating=0, comment=None, user_id="u1")
+            await svc.rate_run("t1", "unknown-run", rating=0, comment=None, user_id="u1")
 
 
 class TestRetractAndReads:
