@@ -672,7 +672,11 @@ class DingTalkChannel(Channel):
                     return ""
                 await asyncio.to_thread(sandbox.update_file, virtual_path, content)
         except Exception:
+            # Same failure mode as the sandbox-is-None branch: the bytes never
+            # reached the agent's sandbox, so the virtual path would read as
+            # nothing. Mirror Feishu and surface a failed-load marker.
             logger.exception("[DingTalk] failed to sync downloaded file into non-local sandbox: %s", virtual_path)
+            return ""
 
         return virtual_path
 

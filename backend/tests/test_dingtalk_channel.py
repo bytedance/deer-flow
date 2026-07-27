@@ -2282,6 +2282,36 @@ class TestReceiveFile:
 
         _run(go())
 
+    def test_update_file_failure_yields_marker(self, tmp_path, monkeypatch):
+        """A failed non-local sandbox sync must not yield a path either.
+
+        Same failure mode as the missing-sandbox case: the bytes never reached
+        the agent's sandbox, so the virtual path would read as nothing. Mirrors
+        Feishu, whose sync except-branch returns the failure marker.
+        """
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"BYTES")
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            broken_sandbox = MagicMock()
+            broken_sandbox.update_file.side_effect = RuntimeError("sandbox transport down")
+            _patch_uploads(monkeypatch, uploads, sandbox_id="aio:box1", sandbox=broken_sandbox)
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="hi",
+                thread_ts="m",
+                files=[{"type": "file", "download_code": "dc", "filename": "a.pdf"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert out.text == "[failed to load file: a.pdf]\n\nhi"
+
+        _run(go())
+
     def test_non_local_sandbox_is_synced(self, tmp_path, monkeypatch):
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})
