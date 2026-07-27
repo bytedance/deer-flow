@@ -9261,6 +9261,24 @@ class TestTelegramStreaming:
 
         _run(go())
 
+    def test_rich_message_retryable_failure_falls_back_to_plain_text_once(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise RuntimeError("network failed")
+
+            bot.do_api_request = fail_rich
+            await ch.send(
+                OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True),
+                _max_retries=1,
+            )
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
     def test_stream_rich_message_bad_request_falls_back_to_one_plain_text_edit(self, monkeypatch):
         from telegram.error import BadRequest
 

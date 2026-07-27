@@ -196,7 +196,11 @@ class TelegramChannel(Channel):
             return
 
         if self._can_send_rich(msg.text):
-            message_id = await self._send_new_rich_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+            try:
+                message_id = await self._send_new_rich_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+            except Exception as exc:
+                logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
+                message_id = None
             if message_id is not None:
                 return
 
