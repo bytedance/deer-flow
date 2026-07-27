@@ -5,7 +5,7 @@ description = "DeerFlow agent harness framework"
 requires-python = ">=3.12"
 dependencies = [
     "agent-client-protocol>=0.4.0",
-    "agent-sandbox>=0.0.19",
+    "agent-sandbox>=0.0.30",
     "croniter>=6.0.0",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",

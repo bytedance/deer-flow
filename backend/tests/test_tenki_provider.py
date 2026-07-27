@@ -543,6 +543,16 @@ def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
     assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
 
 
+def test_grep_single_file_path_with_matching_glob() -> None:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/a.txt", "needle here\n")
+
+    matches, truncated = box.grep("/mnt/user-data/workspace/a.txt", "needle", glob="*.txt")
+
+    assert [m.path for m in matches] == ["/mnt/user-data/workspace/a.txt"]
+    assert truncated is False
+
+
 def _grep_script(fake: _FakeSandbox) -> list[str]:
     scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
     assert scripts, "no grep command was issued"
