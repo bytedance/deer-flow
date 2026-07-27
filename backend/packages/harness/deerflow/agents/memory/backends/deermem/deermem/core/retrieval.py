@@ -626,7 +626,7 @@ class FTS5RetrievalAdapter:
             raise ValueError("retrieval category filter must be a string")
 
         results: list[dict[str, Any]] = []
-        per_scope_limit = max(top_k * 4, top_k)
+        per_scope_limit = top_k * 4
         for scope in scopes:
             scope_user, scope_agent = _scope_key(scope)
             for candidate in self._engine.search(
