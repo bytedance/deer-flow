@@ -45,6 +45,11 @@ _SANDBOX_NAME_PREFIX = "deer-flow-tenki-"
 # — so ask for a lifetime that comfortably outlives a research run. Override
 # with sandbox.max_duration (seconds); 0 falls back to the Tenki account default.
 DEFAULT_MAX_DURATION = 4 * 60 * 60
+# Bootstrap is best-effort and holds the per-scope acquire lock, so bound its
+# exec: a hang here (e.g. a stuck sudo) would otherwise stall acquire for that
+# scope indefinitely and queue later acquires behind it. A timeout drops it to
+# the existing warning path instead.
+_BOOTSTRAP_TIMEOUT = 30.0
 
 
 def _bootstrap_script(home_dir: str) -> str:
@@ -57,13 +62,18 @@ def _bootstrap_script(home_dir: str) -> str:
     to it so commands using the documented ``/mnt/...`` paths still work. If
     sudo is unavailable the symlink step is skipped; the file APIs keep working
     via :meth:`TenkiSandbox._resolve_path`'s home remap.
+
+    ``sudo -n`` (non-interactive) is deliberate: if the tenki user's sudoers
+    entry needs a password, a bare ``sudo`` on a tty-allocating exec would block
+    on the password prompt and — with this call's exec timeout — stall the whole
+    acquire. ``-n`` fails fast instead, and the existing ``|| true`` swallows it.
     """
     home = shlex.quote(home_dir)
     return (
         f"mkdir -p {home}/workspace {home}/uploads {home}/outputs; "
         f"if command -v sudo >/dev/null 2>&1; then "
         f"  if [ ! -e /mnt/user-data ] || [ -L /mnt/user-data ]; then "
-        f"    sudo ln -sfn {home} /mnt/user-data 2>/dev/null || true; "
+        f"    sudo -n ln -sfn {home} /mnt/user-data 2>/dev/null || true; "
         f"  fi; "
         f"fi; "
         f"echo BOOTSTRAP_OK"
@@ -305,7 +315,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         # Materialise DeerFlow's virtual path layout under the writable HOME.
         # Best-effort: on failure the file APIs still work via the home remap.
         try:
-            result = remote.exec("sh", "-lc", _bootstrap_script(self._config["home_dir"]))
+            result = remote.exec("sh", "-lc", _bootstrap_script(self._config["home_dir"]), timeout=_BOOTSTRAP_TIMEOUT)
             if result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
                 logger.warning(
                     "Tenki bootstrap for %s exited code=%s stderr=%s",

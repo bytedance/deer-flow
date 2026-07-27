@@ -697,6 +697,19 @@ def test_create_survives_bootstrap_failure(monkeypatch, caplog):
     provider.shutdown()
 
 
+def test_bootstrap_is_non_interactive_and_time_bounded(monkeypatch):
+    # The bootstrap runs under the per-scope acquire lock, so it must not hang:
+    # `sudo -n` fails fast instead of blocking on a password prompt, and the exec
+    # carries a timeout so any other stall drops to the warning path.
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    provider.acquire("thread-1", user_id="u1")
+    bootstrap = next(c for c in client.last_sandbox.exec_calls if "BOOTSTRAP_OK" in (c["argv"][2] if len(c["argv"]) > 2 else ""))
+    assert "sudo -n ln -sfn" in bootstrap["argv"][2]
+    assert bootstrap["timeout"] is not None
+    provider.shutdown()
+
+
 def test_release_parks_in_warm_pool(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
