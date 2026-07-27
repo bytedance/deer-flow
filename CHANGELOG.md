@@ -12,6 +12,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
+  limit. The default `wait` policy waits for `acquire_timeout`, then fails the
+  agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
+  `burst_limit` to permit bounded extra VMs. The `reject` policy can remove one
+  warm VM before it returns a capacity error. ([#4391])
 - **skills:** A directory containing `SKILL.md` is now a runtime package
   boundary. Nested `SKILL.md` files inside that package are supporting data and
   are no longer registered as independent skills; unusual custom layouts must
@@ -48,6 +53,15 @@ This section accumulates work toward the **2.1.0** milestone
   with a warning** and the factory **raises** if `storage_path` resolves to an
   existing file. Set `memory.backend_config.storage_path` to a directory for a
   custom root. ([#4122])
+- **memory:** `memory.mode: tool` with a backend that does not implement
+  `search()` now fails fast at Gateway startup with a `ValueError` from the
+  `MemoryManager` invariant, instead of starting successfully and silently
+  returning empty results on every `memory_search` call. Both shipping backends
+  implement `search()` (DeerMem retrieves; `noop` returns `[]`), so this only
+  affects a custom backend that onboards without overriding `search()`. It is
+  intentional -- silent empties are worse than a loud startup error. Fix: switch
+  to `mode: middleware` or override `search()` (and set `supports_search=True`).
+  ([#4324])
 
 ### Added
 
@@ -184,6 +198,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Thread metadata now switches to `running` only after the run passes
+  the startup barrier, so pending-cancelled runs no longer briefly project
+  `running`; clients may observe the prior thread status during worker startup.
+  ([#4450])
+- **runtime:** Re-check orphan candidates through an atomic, lease-aware takeover
+  claim so a successful heartbeat after the scan keeps the run active and only
+  one reconciler reports recovery. ([#4424])
 - **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
   lead-agent skills, preventing passive enabled skills and evaluation fixtures
   from removing MCP, web, file, and delegation tools from every run. ([#4095],
@@ -229,10 +250,12 @@ This section accumulates work toward the **2.1.0** milestone
   facts list is empty; stop the busy-spin in the debounced update queue; and
   flush the memory queue on graceful shutdown to prevent loss. ([#3719], [#4074],
   [#4076], [#4034], [#4217], [#3993], [#3992], [#4073], [#4181])
-- **runs:** Close multi-worker ownership gaps in run atomicity; degrade cancel
-  to lease takeover for multi-worker; keep `create_thread` idempotent when the
-  insert loses a race; read `stop_reason` from runtime context; and persist run
-  duration in checkpoints for history reads. ([#4003], [#4064], [#3800], [#4188],
+- **runs:** Close multi-worker ownership gaps in run atomicity; fail-stop local
+  execution when lease renewal cannot be confirmed before its deadline and
+  fence late completion writes after peer takeover; degrade cancel to lease
+  takeover for multi-worker; keep `create_thread` idempotent when the insert
+  loses a race; read `stop_reason` from runtime context; and persist run duration
+  in checkpoints for history reads. ([#4003], [#4064], [#4414], [#3800], [#4188],
   [#4118])
 - **runtime:** Serialize SQLite event-store writes to prevent per-thread
   sequence collisions; skip hidden human messages in the journal; and drop the
@@ -241,6 +264,13 @@ This section accumulates work toward the **2.1.0** milestone
   blocking filesystem IO in artifact serving, gateway uploads, and the Discord
   channel; limit the uploaded-file context manifest; and live-tail malformed
   Redis reconnect ids. ([#3651], [#3551], [#3935], [#3927], [#3917], [#4012])
+- **uploads:** Claim the converted-Markdown companion filename before writing
+  it, so two convertible uploads sharing a stem (or a convertible plus a
+  same-stem `.md` upload) no longer silently clobber each other within one
+  request. When `uploads.auto_convert_documents` is on, the companion `.md` now
+  gets a unique name (e.g. `a_1.md`); `POST /threads/{id}/uploads` and
+  `DeerFlowClient.upload_files` both report the actual name in `markdown_file`.
+  ([#4288])
 - **config:** Coerce null object config sections to their defaults; honor the
   unified database configuration in the store and sync checkpointer; and have
   legacy DB backfill create missing `Index` objects on existing tables. ([#3573],
@@ -282,9 +312,12 @@ This section accumulates work toward the **2.1.0** milestone
   codes and don't treat a bare "connect" as a bind command; stop Feishu from
   creating thread topics and throttle card updates; let the UI runtime channel
   config win over `config.yaml`; fix `require_mention` gating on
-  whitespace-only `bot_login` / `mention_login`; and guard null quote fields in
-  WeCom. ([#4100], [#4104], [#4131], [#4129], [#3753], [#4229], [#4222], [#4251],
-  [#3810], [#3674], [#4055], [#4069])
+  whitespace-only `bot_login` / `mention_login`; guard null quote fields in
+  WeCom; and key inbound dedupe on chat-scoped workspaces so Telegram, Feishu,
+  WeChat and DingTalk redeliveries stop re-running the agent on a default
+  (unbound) configuration, releasing the dedupe key on transient failures so a
+  redelivery can still recover. ([#4100], [#4104], [#4131], [#4129], [#3753],
+  [#4229], [#4222], [#4251], [#3810], [#3674], [#4055], [#4069], [#4287])
 - **frontend:** Preserve messages and durable context across summarization;
   preserve artifacts and stabilize artifact paths during streaming; resolve
   relative artifact image paths; retain presented artifacts in the header
@@ -1087,3 +1120,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4246]: https://github.com/bytedance/deer-flow/pull/4246
 [#4251]: https://github.com/bytedance/deer-flow/pull/4251
 [#4264]: https://github.com/bytedance/deer-flow/pull/4264
+[#4287]: https://github.com/bytedance/deer-flow/pull/4287
+[#4288]: https://github.com/bytedance/deer-flow/pull/4288
+[#4324]: https://github.com/bytedance/deer-flow/issues/4324
+[#4414]: https://github.com/bytedance/deer-flow/issues/4414
+[#4424]: https://github.com/bytedance/deer-flow/issues/4424

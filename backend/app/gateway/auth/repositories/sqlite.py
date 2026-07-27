@@ -24,6 +24,25 @@ from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
 
 
+def _normalize_email(email: str) -> str:
+    """Canonicalise an email address for storage and lookup.
+
+    An email identifies exactly one account regardless of the case the client
+    sends. The two write paths would otherwise disagree: local registration
+    normalises through ``EmailStr``, which lowercases only the *domain* and
+    keeps the local-part case (``Victim@X.COM`` -> ``Victim@x.com``), while OIDC
+    provisioning lowercases the whole address (``-> victim@x.com``). Combined
+    with the previous case-sensitive lookup, ``Victim@x.com`` and
+    ``victim@x.com`` resolved to two separate rows, defeating the invariant
+    that a local account blocks an SSO login on the same email.
+
+    Canonicalising to lowercase at every write site and matching
+    case-insensitively on read closes that gap for new accounts while letting
+    existing mixed-case rows keep resolving, without a destructive bulk rewrite.
+    """
+    return email.lower()
+
+
 class SQLiteUserRepository(UserRepository):
     """Async user repository backed by the shared SQLAlchemy engine."""
 
@@ -65,9 +84,20 @@ class SQLiteUserRepository(UserRepository):
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create_user(self, user: User) -> User:
-        """Insert a new user. Raises ``ValueError`` on duplicate email."""
+        """Insert a new user. Raises ``ValueError`` on duplicate email.
+
+        The email is canonicalised to lowercase before insert so the existing
+        unique constraint enforces case-insensitive uniqueness for new rows and
+        the returned ``User`` reflects the stored form.
+        """
+        user.email = _normalize_email(user.email)
         row = self._user_to_row(user)
         async with self._sf() as session:
+            # The unique constraint is case-sensitive, so it cannot catch a
+            # canonical address colliding with a mixed-case legacy row.
+            existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
+            if await session.scalar(existing) is not None:
+                raise ValueError(f"Email already registered: {user.email}")
             session.add(row)
             try:
                 await session.commit()
@@ -82,10 +112,17 @@ class SQLiteUserRepository(UserRepository):
             return self._row_to_user(row) if row is not None else None
 
     async def get_user_by_email(self, email: str) -> User | None:
-        stmt = select(UserRow).where(UserRow.email == email)
+        # Case-insensitive match: an account is keyed by its email regardless of
+        # the case the caller supplies (see ``_normalize_email``). ``.first()``
+        # with a deterministic ``created_at`` ordering resolves to the oldest
+        # account instead of raising if a pre-fix database already holds two
+        # rows differing only in case, so the fix never turns a legacy duplicate
+        # pair into a 500. ``id`` is a secondary tiebreaker so the choice stays
+        # deterministic even if two legacy rows share the same ``created_at``.
+        stmt = select(UserRow).where(func.lower(UserRow.email) == _normalize_email(email)).order_by(UserRow.created_at, UserRow.id).limit(1)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
+            row = result.scalars().first()
             return self._row_to_user(row) if row is not None else None
 
     async def update_user(self, user: User) -> User:
@@ -99,7 +136,24 @@ class SQLiteUserRepository(UserRepository):
                 # success would let the caller log "password reset" for
                 # a row that no longer exists.
                 raise UserNotFoundError(f"User {user.id} no longer exists")
-            row.email = user.email
+            # Canonicalise the email only when it actually changes, comparing
+            # case-insensitively against the stored value, then mirror the
+            # persisted value back onto the returned object. Re-lowercasing an
+            # *unchanged* legacy mixed-case email — e.g. a password-only update
+            # on a pre-fix ``Victim@x.com`` row while a canonical ``victim@x.com``
+            # row also exists — would rewrite it onto the other row's unique
+            # email and raise IntegrityError, surfacing as a 500 on the
+            # change-password / reset-admin paths that do not catch it. Guarding
+            # against the *raw* stored value (``canonical != row.email``) is not
+            # enough: the mixed-case row's canonical form still differs from its
+            # own stored casing, so it would rewrite and collide anyway. A genuine
+            # change still normalises, so the unique constraint keeps enforcing
+            # case-insensitive uniqueness for updated rows; get_user_by_email
+            # already resolves legacy mixed-case rows case-insensitively on read.
+            canonical_email = _normalize_email(user.email)
+            if canonical_email != _normalize_email(row.email):
+                row.email = canonical_email
+            user.email = row.email
             row.password_hash = user.password_hash
             row.system_role = user.system_role
             row.oauth_provider = user.oauth_provider

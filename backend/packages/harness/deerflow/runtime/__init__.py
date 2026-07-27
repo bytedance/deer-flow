@@ -5,17 +5,21 @@ Re-exports the public API of :mod:`~deerflow.runtime.runs` and
 directly from ``deerflow.runtime``.
 """
 
+from .checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from .checkpointer import checkpointer_context, get_checkpointer, make_checkpointer, reset_checkpointer
-from .runs import CancelOutcome, ConflictError, DisconnectMode, RunContext, RunManager, RunRecord, RunStatus, UnsupportedStrategyError, run_agent
+from .runs import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, CancelOutcome, ConflictError, DisconnectMode, RunContext, RunManager, RunRecord, RunStatus, ThreadOperationKind, UnsupportedStrategyError, run_agent
 from .serialization import serialize, serialize_channel_values, serialize_channel_values_for_api, serialize_lc_object, serialize_messages_tuple, strip_data_url_image_blocks
 from .store import get_store, make_store, reset_store, store_context
 
 # NOTE: ``RedisStreamBridge`` is intentionally not re-exported — ``redis`` is an
 # optional extra and importing it here would load ``redis.asyncio`` in every
 # process. Import it from ``deerflow.runtime.stream_bridge.redis`` when needed.
-from .stream_bridge import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamBridge, StreamEvent, make_stream_bridge
+from .stream_bridge import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamBridge, StreamEvent, StreamGap, StreamItem, make_stream_bridge
 
 __all__ = [
+    # checkpoint state
+    "CheckpointStateAccessor",
+    "build_state_mutation_graph",
     # checkpointer
     "checkpointer_context",
     "get_checkpointer",
@@ -25,10 +29,13 @@ __all__ = [
     "CancelOutcome",
     "ConflictError",
     "DisconnectMode",
+    "ORPHAN_RECOVERY_STOP_REASON",
     "RunContext",
     "RunManager",
     "RunRecord",
     "RunStatus",
+    "ThreadOperationKind",
+    "STARTUP_ORPHAN_RECOVERY_ERROR",
     "UnsupportedStrategyError",
     "run_agent",
     # serialization
@@ -49,5 +56,7 @@ __all__ = [
     "MemoryStreamBridge",
     "StreamBridge",
     "StreamEvent",
+    "StreamGap",
+    "StreamItem",
     "make_stream_bridge",
 ]

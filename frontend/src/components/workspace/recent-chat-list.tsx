@@ -6,6 +6,8 @@ import {
   FileText,
   MoreHorizontal,
   Pencil,
+  Pin,
+  PinOff,
   Share2,
   Trash2,
 } from "lucide-react";
@@ -53,12 +55,15 @@ import {
 import {
   useDeleteThread,
   useInfiniteThreads,
+  usePinThread,
   useRenameThread,
 } from "@/core/threads/hooks";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import {
   channelSourceOfThread,
+  isThreadPinned,
   pathOfThread,
+  sortPinnedThreads,
   titleOfThread,
 } from "@/core/threads/utils";
 import { env } from "@/env";
@@ -81,10 +86,17 @@ export function RecentChatList() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteThreads();
-  const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
-    [infiniteThreads],
-  );
+  const threads = useMemo(() => {
+    const seen = new Set<string>();
+    return (infiniteThreads?.pages.flat() ?? []).filter((thread) => {
+      if (seen.has(thread.thread_id)) {
+        return false;
+      }
+      seen.add(thread.thread_id);
+      return true;
+    });
+  }, [infiniteThreads]);
+  const displayedThreads = useMemo(() => sortPinnedThreads(threads), [threads]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -106,6 +118,7 @@ export function RecentChatList() {
 
   const { mutate: deleteThread } = useDeleteThread();
   const { mutate: renameThread } = useRenameThread();
+  const { mutate: updatePinnedThread } = usePinThread();
 
   // Rename dialog state
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -161,12 +174,44 @@ export function RecentChatList() {
 
   const handleRenameSubmit = useCallback(() => {
     if (renameThreadId && renameValue.trim()) {
-      renameThread({ threadId: renameThreadId, title: renameValue.trim() });
-      setRenameDialogOpen(false);
-      setRenameThreadId(null);
-      setRenameValue("");
+      renameThread(
+        { threadId: renameThreadId, title: renameValue.trim() },
+        {
+          onSuccess: () => {
+            setRenameDialogOpen(false);
+            setRenameThreadId(null);
+            setRenameValue("");
+          },
+          onError: (error) => {
+            toast.error(
+              error instanceof Error && error.message
+                ? error.message
+                : t.common.renameFailed,
+            );
+          },
+        },
+      );
     }
-  }, [renameThread, renameThreadId, renameValue]);
+  }, [renameThread, renameThreadId, renameValue, t.common.renameFailed]);
+
+  const handleTogglePin = useCallback(
+    (thread: AgentThread) => {
+      updatePinnedThread(
+        {
+          threadId: thread.thread_id,
+          pinned: !isThreadPinned(thread),
+        },
+        {
+          onError: (err) => {
+            toast.error(
+              err instanceof Error ? err.message : t.chats.pinChatFailed,
+            );
+          },
+        },
+      );
+    },
+    [t.chats.pinChatFailed, updatePinnedThread],
+  );
 
   const handleShare = useCallback(
     async (thread: AgentThread) => {
@@ -232,9 +277,10 @@ export function RecentChatList() {
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
             <div className="flex w-full flex-col gap-1">
-              {threads.map((thread) => {
+              {displayedThreads.map((thread) => {
                 const isActive = pathOfThread(thread) === pathname;
                 const channelSource = channelSourceOfThread(thread);
+                const pinned = isThreadPinned(thread);
                 return (
                   <SidebarMenuItem
                     key={thread.thread_id}
@@ -246,6 +292,12 @@ export function RecentChatList() {
                         href={pathOfThread(thread)}
                       >
                         <ThreadChannelIcon source={channelSource} />
+                        {pinned && (
+                          <Pin
+                            aria-hidden="true"
+                            className="text-muted-foreground size-3.5 shrink-0"
+                          />
+                        )}
                         <span className="min-w-0 truncate">
                           {titleOfThread(thread)}
                         </span>
@@ -277,6 +329,18 @@ export function RecentChatList() {
                           side={"right"}
                           align={"start"}
                         >
+                          <DropdownMenuItem
+                            onSelect={() => handleTogglePin(thread)}
+                          >
+                            {pinned ? (
+                              <PinOff className="text-muted-foreground" />
+                            ) : (
+                              <Pin className="text-muted-foreground" />
+                            )}
+                            <span>
+                              {pinned ? t.chats.unpinChat : t.chats.pinChat}
+                            </span>
+                          </DropdownMenuItem>
                           <DropdownMenuItem
                             onSelect={() =>
                               handleRenameClick(

@@ -312,10 +312,12 @@ class FeishuChannel(Channel):
 
             if msg.thread_ts:
                 request = self._ReplyMessageRequest.builder().message_id(msg.thread_ts).request_body(self._ReplyMessageRequestBody.builder().msg_type(msg_type).content(content).build()).build()
-                await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+                response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
             else:
                 request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(msg.chat_id).msg_type(msg_type).content(content).build()).build()
-                await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+                response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+            if not response.success():
+                raise RuntimeError(f"Feishu file send failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
             logger.info("[Feishu] file sent: %s (type=%s)", attachment.filename, msg_type)
             return True
@@ -491,7 +493,17 @@ class FeishuChannel(Channel):
             return
         try:
             request = self._CreateMessageReactionRequest.builder().message_id(message_id).request_body(self._CreateMessageReactionRequestBody.builder().reaction_type(self._Emoji.builder().emoji_type(emoji_type).build()).build()).build()
-            await asyncio.to_thread(self._api_client.im.v1.message_reaction.create, request)
+            response = await asyncio.to_thread(self._api_client.im.v1.message_reaction.create, request)
+            if not response.success():
+                logger.warning(
+                    "[Feishu] reaction '%s' add failed for message %s: code=%s, msg=%s, log_id=%s",
+                    emoji_type,
+                    message_id,
+                    response.code,
+                    response.msg,
+                    response.get_log_id(),
+                )
+                return
             logger.info("[Feishu] reaction '%s' added to message %s", emoji_type, message_id)
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
@@ -504,6 +516,8 @@ class FeishuChannel(Channel):
         content = self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu card reply failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
 
@@ -514,7 +528,9 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
     async def _update_card(self, message_id: str, text: str) -> None:
         """Patch an existing card message in place."""
@@ -523,7 +539,9 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        if not response.success():
+            raise RuntimeError(f"Feishu card update failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
     def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """Keep a strong reference to fire-and-forget tasks and surface errors."""

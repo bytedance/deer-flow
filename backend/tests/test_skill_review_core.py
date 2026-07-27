@@ -56,6 +56,22 @@ def test_review_core_reports_missing_description_blocker(tmp_path):
     assert any(f["rule_id"] == "structure.missing-description" for f in facts["findings"])
 
 
+def test_review_core_reports_non_string_frontmatter_key_as_unknown_field(tmp_path):
+    _write(
+        tmp_path / "SKILL.md",
+        "---\nname: demo-skill\ndescription: Demo skill. Invoke when testing review.\n42: stray-value\nunexpected-field: another-value\n---\n\n# Demo\n\nFollow the steps and stop.\n",
+    )
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert facts["summary"]["blockers"] == 0
+    finding = next(f for f in facts["findings"] if f["rule_id"] == "structure.unknown-frontmatter-field")
+    assert finding["severity"] == "warning"
+    assert finding["evidence"] == ["42", "unexpected-field"]
+    assert "42" in finding["message"]
+    assert "unexpected-field" in finding["message"]
+
+
 def test_resource_graph_reports_unreferenced_resource(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(tmp_path / "references" / "unused.md", "# Unused\n")
@@ -275,6 +291,20 @@ def test_cli_fail_on_error(tmp_path, capsys):
 
     assert exit_code == 1
     assert "structure.missing-description" in output
+
+
+def test_cli_reports_non_string_frontmatter_key_without_crashing(tmp_path, capsys):
+    _write(
+        tmp_path / "SKILL.md",
+        "---\nname: demo-skill\ndescription: Demo skill. Invoke when testing review.\n42: stray-value\nunexpected-field: another-value\n---\n\n# Demo\n\nFollow the steps and stop.\n",
+    )
+
+    exit_code = review_cli_main([str(tmp_path), "--format", "text", "--fail-on", "error", "--fail-on-incomplete"])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "structure.unknown-frontmatter-field" in output
+    assert "Unknown frontmatter field(s): 42, unexpected-field" in output
 
 
 def test_cli_fail_on_incomplete_package(tmp_path, capsys):

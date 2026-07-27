@@ -248,11 +248,36 @@ Notes:
 - `enabled: false` keeps background polling off by default.
 - `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
 - All scheduler fields are restart-required; edits need a Gateway restart.
-- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend. SQLite silently ignores row-level locks, so multiple workers can double-fire the same task.
+- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - The MVP supports only `once` and `cron`.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
+
+### Agent Storage
+
+Custom agent **definitions** (`config.yaml` + `SOUL.md`) are stored per-user on
+local disk by default. This is separate from the `database` backend (which holds
+run/thread/event data) and from agent memory.
+
+```yaml
+agent_storage:
+  backend: file   # file (default) | db
+```
+
+- `backend: file` — the historical layout under `{base_dir}/users/{user_id}/agents/`. Single-node by construction: an agent created on one node is not visible to other nodes without a shared mount.
+- `backend: db` — one row per agent in the shared SQL persistence layer (a new `agents` table), so every node in a multi-instance deployment sees the same agents. Requires `database.backend` to be `sqlite` or `postgres`; the Gateway **fails fast at startup** if it is `memory` (a per-process database cannot share definitions).
+- `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
+- In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
+
+Migrating an existing install from `file` to `db`:
+
+```bash
+python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
+python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+```
+
+The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
 
 ### Tools
 
@@ -479,6 +504,12 @@ sandbox:
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
+Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
+hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
+inside the client. This prevents an inherited proxy from returning a misleading
+502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
+continue to use the normal environment proxy configuration.
 
 ### Building a Custom AIO Sandbox Image
 

@@ -194,6 +194,59 @@ class DbRunEventStore(RunEventStore):
                         rows.append(row)
                 return [self._row_to_dict(r) for r in rows]
 
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        """Idempotently insert a run-scoped singleton event.
+
+        ``_max_seq_for_thread`` takes the same PostgreSQL advisory lock used by
+        every normal writer (and the in-process lock covers SQLite), so the
+        existence check cannot race another ``put_if_absent`` or journal write.
+        Terminal delivery receipts use this method on both the worker and
+        recovery paths; ordinary event types remain append-only.
+        """
+        content, metadata = self._truncate_trace(category, content, metadata)
+        db_content, metadata = self._content_to_db(content, metadata)
+        user_id = self._user_id_from_context()
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    stmt = (
+                        select(RunEventRow)
+                        .where(
+                            RunEventRow.thread_id == thread_id,
+                            RunEventRow.run_id == run_id,
+                            RunEventRow.event_type == event_type,
+                        )
+                        .order_by(RunEventRow.seq.asc())
+                        .limit(1)
+                    )
+                    existing = await session.scalar(stmt)
+                    if existing is not None:
+                        return self._row_to_dict(existing), False
+                    row = RunEventRow(
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        user_id=user_id,
+                        event_type=event_type,
+                        category=category,
+                        content=db_content,
+                        event_metadata=metadata,
+                        seq=(max_seq or 0) + 1,
+                        created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
+                    )
+                    session.add(row)
+                return self._row_to_dict(row), True
+
     async def list_messages(
         self,
         thread_id,

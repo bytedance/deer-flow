@@ -429,6 +429,47 @@ def test_make_lead_agent_passive_empty_skill_policy_preserves_mcp_and_other_tool
     assert captured_deferred_setups[0].deferred_names == frozenset({"lightrag_query"})
 
 
+def test_default_lead_agent_does_not_apply_installed_skill_allowlists(monkeypatch):
+    """Installed skills are discoverable but not active for ordinary default chat.
+
+    A public skill with ``allowed-tools`` must not globally hide configured
+    tools like ``browser_navigate`` before the user has selected a specific
+    skill-owned workflow.
+    """
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_load_enabled_available_skills",
+        lambda available_skills, *, app_config, user_id=None: [_make_skill("skill-reviewer", ["review_skill_package"])],
+    )
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **kwargs: [NamedTool("bash"), NamedTool("browser_navigate"), NamedTool("review_skill_package")],
+    )
+
+    mock_app_config = MagicMock()
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    mock_app_config.tool_search.enabled = True
+    mock_app_config.skills.container_path = "/mnt/skills"
+    mock_app_config.skills.deferred_discovery = True
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {}})
+
+    tool_names = [tool.name for tool in agent_kwargs["tools"]]
+    assert "browser_navigate" in tool_names
+    assert "bash" in tool_names
+    assert "describe_skill" in tool_names
+
+
 def test_make_lead_agent_fails_closed_when_skill_policy_load_fails(monkeypatch):
     from unittest.mock import MagicMock
 

@@ -90,6 +90,60 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     assert "content-disposition" not in response.headers
 
 
+def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypatch) -> None:
+    # Binary (non-text, non-active-content) artifacts must go through the
+    # "inline_file" plan so get_artifact serves them via FileResponse.
+    artifact_path = tmp_path / "clip.mp3"
+    artifact_path.write_bytes(b"\x00\x01ID3fakeaudiobytes")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/clip.mp3", _make_request()))
+
+    assert isinstance(response, FileResponse)
+    assert response.media_type == "audio/mpeg"
+    assert response.headers.get("content-disposition", "").startswith("inline;")
+
+
+def test_get_artifact_binary_preview_supports_range_requests(tmp_path, monkeypatch) -> None:
+    # Regression test for #3240: dragging an audio/video artifact's seek bar
+    # reset playback to the start because the binary-preview branch used to
+    # buffer the whole file into a plain Response, which ignores byte-Range
+    # requests entirely (always 200 + full body, never 206). Browsers fall
+    # back to restarting playback from byte 0 when a seek's Range request
+    # doesn't come back as 206. FileResponse (used for the "file" plan
+    # already) handles Range/If-Range natively, so switching the binary
+    # branch to FileResponse fixes seeking for free.
+    # Cycle through all 256 byte values (incl. \x00) so is_text_file_by_content
+    # correctly sniffs this as binary, same as a real audio file would be -- an
+    # all-printable-ASCII payload would (correctly) be sniffed as text and miss
+    # the branch this test targets.
+    payload = bytes(i % 256 for i in range(1_000_000))
+    artifact_path = tmp_path / "clip.mp3"
+    artifact_path.write_bytes(payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+
+    with TestClient(app) as client:
+        full = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/clip.mp3")
+        seek = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/clip.mp3",
+            headers={"Range": "bytes=500000-"},
+        )
+
+    assert full.status_code == 200
+    assert full.headers.get("accept-ranges") == "bytes"
+    assert full.content == payload
+
+    assert seek.status_code == 206
+    assert seek.headers.get("content-range") == f"bytes 500000-999999/{len(payload)}"
+    assert seek.content == payload[500000:]
+    assert seek.headers.get("content-disposition", "").startswith("inline;")
+
+
 def test_get_artifact_download_true_forces_attachment_for_skill_archive(tmp_path, monkeypatch) -> None:
     skill_path = tmp_path / "sample.skill"
     with zipfile.ZipFile(skill_path, "w") as zip_ref:
