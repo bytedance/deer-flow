@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "@rstest/core";
+import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
@@ -29,6 +29,9 @@ function renderCard() {
 }
 
 afterEach(cleanup);
+afterEach(() => {
+  rs.restoreAllMocks();
+});
 
 describe("HumanInputCard form validation (DOM)", () => {
   it("keeps the error node mounted while another field is still invalid", () => {
@@ -56,5 +59,45 @@ describe("HumanInputCard form validation (DOM)", () => {
     // Fixing the last invalid field clears the error entirely.
     fireEvent.change(category, { target: { value: "travel" } });
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps select fields controlled from placeholder through selection", () => {
+    const warnSpy = rs.spyOn(console, "warn").mockImplementation(() => ({}));
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined }}
+      >
+        <HumanInputCard
+          request={{
+            ...formRequest,
+            fields: [
+              {
+                name: "category",
+                label: "Category",
+                type: "select",
+                required: true,
+                options: [
+                  { id: "category-travel", label: "travel", value: "travel" },
+                  { id: "category-meals", label: "meals", value: "meals" },
+                ],
+              },
+            ],
+          }}
+          onSubmit={() => undefined}
+        />
+      </I18nContext.Provider>,
+    );
+
+    const trigger = screen.getByRole("combobox", {
+      name: "Category required",
+    });
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    fireEvent.click(screen.getByRole("option", { name: "travel" }));
+
+    expect(
+      warnSpy.mock.calls.some(([message]) =>
+        String(message).includes("uncontrolled to controlled"),
+      ),
+    ).toBe(false);
   });
 });

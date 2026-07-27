@@ -123,7 +123,7 @@ function FormFieldInput({
     return (
       <Select
         disabled={disabled}
-        value={stringValue === "" ? undefined : stringValue}
+        value={stringValue}
         onValueChange={(next) => onChange(next)}
       >
         <SelectTrigger
