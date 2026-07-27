@@ -2152,15 +2152,18 @@ run_ownership:
 #   provider:
 #     use: deerflow.authz.rbac:RbacAuthorizationProvider
 #     config:
-#       # A known role with no `tools` policy is unrestricted for tools.
-#       # Define `tools` for every role whose tool access should be constrained.
+#       # A known role with no policy for a resource is unrestricted for it.
+#       # Define both `tools` and `routes` wherever access should be constrained.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
+#           routes: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
+#           routes: {allow: "*"}
 #         guest:
 #           tools: {allow: ["web_search", "read_file"]}
+#           routes: {allow: ["threads:read", "runs:read"]}
 authorization:
   enabled: false
 
