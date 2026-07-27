@@ -419,9 +419,23 @@ def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: True)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False})
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
+    assert ready is True
+    assert detail is None
+
+
+def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    # Broker (Pattern B) wins even when the init image is also configured.
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": True})
+    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    assert mode == "broker"
     assert ready is True
     assert detail is None
 
@@ -432,7 +446,7 @@ def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: False)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": False, "lark_cli_broker_image": False})
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
@@ -445,7 +459,7 @@ def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: None)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: None)
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
@@ -462,7 +476,7 @@ def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) 
     def _fail(_config):  # pragma: no cover - must not be called
         raise AssertionError("provisioner should not be probed when probe=False")
 
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", _fail)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _fail)
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
     assert mode == "init-container"
     assert ready is False
