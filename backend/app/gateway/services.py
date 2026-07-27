@@ -46,6 +46,7 @@ from deerflow.runtime import (
     RunRecord,
     RunStatus,
     StreamBridge,
+    StreamGap,
     ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
@@ -1236,10 +1237,26 @@ async def sse_consumer(
         yield format_sse("end", None)
         return
 
+    gap_emitted = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
+
+            if isinstance(entry, StreamGap):
+                gap_emitted = True
+                yield format_sse(
+                    "gap",
+                    {
+                        "code": "stream_replay_gap",
+                        "run_id": record.run_id,
+                        "requested_event_id": entry.requested_event_id,
+                        "earliest_available_event_id": entry.earliest_available_event_id,
+                        "latest_available_event_id": entry.latest_available_event_id,
+                        "recovery": "reload_durable_state",
+                    },
+                )
+                return
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
@@ -1259,7 +1276,7 @@ async def sse_consumer(
         # worker holds no in-memory task/abort state for them, so run_mgr.cancel()
         # cannot stop the task (it would 409). Skip on_disconnect cancellation for
         # those and only act on runs this worker actually owns.
-        if not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -1297,21 +1314,32 @@ async def wait_for_run_completion(
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
+    resume_from_event_id: str | None = None
     try:
-        async for entry in bridge.subscribe(record.run_id):
-            # END_SENTINEL means the run reached a terminal state; honour it
-            # even if the client just disconnected so the caller still serializes
-            # the real final checkpoint.
-            if entry is END_SENTINEL:
-                completed = True
-                return True
-            if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
-                completed = True
-                return True
-            if await request.is_disconnected():
-                break
-            # Heartbeats and regular events: keep waiting for END_SENTINEL.
-        return completed
+        while True:
+            gap_seen = False
+            async for entry in bridge.subscribe(record.run_id, last_event_id=resume_from_event_id):
+                # END_SENTINEL means the run reached a terminal state; honour it
+                # even if the client just disconnected so the caller still serializes
+                # the real final checkpoint.
+                if entry is END_SENTINEL:
+                    completed = True
+                    return True
+                if isinstance(entry, StreamGap):
+                    # The wait API only needs terminal completion, not a complete
+                    # event replay. Resume at the retained tail rather than
+                    # treating a bridge gap as a client disconnect.
+                    resume_from_event_id = entry.latest_available_event_id
+                    gap_seen = True
+                    break
+                if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    completed = True
+                    return True
+                if await request.is_disconnected():
+                    return False
+                # Heartbeats and regular events: keep waiting for END_SENTINEL.
+            if not gap_seen:
+                return completed
     finally:
         if not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:

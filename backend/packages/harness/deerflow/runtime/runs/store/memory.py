@@ -144,14 +144,21 @@ class MemoryRunStore(RunStore):
             self._unindex_run(run_id, run["thread_id"])
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
-        if run_id in self._runs:
-            self._runs[run_id]["status"] = status
-            for key, value in kwargs.items():
-                if value is not None:
-                    self._runs[run_id][key] = value
-            self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
-            return True
-        return False
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        current_status = run.get("status")
+        allowed_sources = {"pending", "running", status}
+        if status == "error":
+            allowed_sources.add("interrupted")
+        if current_status not in allowed_sources:
+            return False
+        run["status"] = status
+        for key, value in kwargs.items():
+            if value is not None:
+                run[key] = value
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
 
     async def update_run_progress(self, run_id, **kwargs):
         if run_id in self._runs and self._runs[run_id].get("status") == "running":

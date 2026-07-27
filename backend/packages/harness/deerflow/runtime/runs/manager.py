@@ -190,6 +190,10 @@ class RunRecord:
     finalizing: bool = False
     owner_worker_id: str | None = None
     lease_expires_at: str | None = None
+    # Process-local fencing signal. Once set, this worker must not perform
+    # further durable run/thread finalization because its lease ownership is
+    # either known to be lost or could not be confirmed before expiry.
+    ownership_lost: bool = False
     stop_reason: str | None = None
 
 
@@ -365,6 +369,13 @@ class RunManager:
 
     async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
+        if record.ownership_lost:
+            logger.warning(
+                "Skipped status update to %s for run %s after lease ownership was lost",
+                status.value,
+                record.run_id,
+            )
+            return False
         if self._store is None:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
@@ -384,12 +395,25 @@ class RunManager:
                 existing = await self._store.get(record.run_id)
                 if existing is not None:
                     existing_status = existing.get("status")
+                    if existing_status == status.value:
+                        logger.info(
+                            "Run %s status update to %s was already persisted",
+                            record.run_id,
+                            status.value,
+                        )
+                        return True
                     if existing_status == "error":
                         logger.warning(
                             "Run %s status update to %s skipped: store row already at error (peer takeover)",
                             record.run_id,
                             status.value,
                         )
+                        if self.heartbeat_enabled and not record.store_only:
+                            await self._mark_ownership_lost(
+                                record,
+                                reason="A peer terminalized the run before this worker could persist its outcome.",
+                                require_active=False,
+                            )
                     else:
                         logger.info(
                             "Run %s status update to %s skipped: store row already at %s (local cancel/completion race)",
@@ -446,8 +470,12 @@ class RunManager:
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
         row_recovery_payload: dict[str, Any] | None = None
+        record: RunRecord | None = None
         async with self._lock:
             record = self._runs.get(run_id)
+            if record is not None and record.ownership_lost:
+                logger.warning("Skipped completion persistence for run %s after lease ownership was lost", run_id)
+                return
             if record is not None:
                 for key, value in kwargs.items():
                     if key == "status":
@@ -465,6 +493,22 @@ class RunManager:
                 lambda: self._store.update_run_completion(run_id, **kwargs),
             )
             if updated is False:
+                existing = await self._store.get(run_id)
+                requested_status = kwargs.get("status")
+                if existing is not None and existing.get("status") != requested_status:
+                    existing_status = existing.get("status")
+                    logger.warning(
+                        "Run completion update for %s skipped because store row is already at %s",
+                        run_id,
+                        existing_status,
+                    )
+                    if existing_status == "error" and record is not None and self.heartbeat_enabled:
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="A peer terminalized the run before completion data was persisted.",
+                            require_active=False,
+                        )
+                    return
                 if row_recovery_payload is None:
                     logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
                     return
@@ -486,7 +530,7 @@ class RunManager:
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
-                should_persist = record.status == RunStatus.running
+                should_persist = record.status == RunStatus.running and not record.ownership_lost
             if record is not None and should_persist:
                 for key, value in kwargs.items():
                     if hasattr(record, key) and value is not None:
@@ -775,6 +819,13 @@ class RunManager:
             if record is None:
                 logger.warning("set_status called for unknown run %s", run_id)
                 return
+            if record.ownership_lost:
+                logger.warning(
+                    "Skipped local status transition to %s for run %s after lease ownership was lost",
+                    status.value,
+                    run_id,
+                )
+                return
             record.status = status
             record.updated_at = _now_iso()
             if error is not None:
@@ -782,7 +833,15 @@ class RunManager:
             if stop_reason is not None:
                 record.stop_reason = stop_reason
         if persist:
-            await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+            if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
+                await self._mark_ownership_lost(
+                    record,
+                    reason="Successful completion could not be confirmed in the durable run store.",
+                    require_active=False,
+                )
+        if record.ownership_lost:
+            return
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def persist_current_status(self, run_id: str) -> bool:
@@ -795,7 +854,14 @@ class RunManager:
             status = record.status
             error = record.error
             stop_reason = record.stop_reason
-        return await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        persisted = await self._persist_status(record, status, error=error, stop_reason=stop_reason)
+        if not persisted and self.heartbeat_enabled and status == RunStatus.success and not record.ownership_lost:
+            await self._mark_ownership_lost(
+                record,
+                reason="Successful completion could not be confirmed in the durable run store.",
+                require_active=False,
+            )
+        return persisted
 
     async def _ensure_delivery_receipt(self, record: RunRecord) -> bool:
         """Idempotently persist a zero-delivery receipt during recovery."""
@@ -1519,6 +1585,61 @@ class RunManager:
         """
         return self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
+    @staticmethod
+    def _parse_lease_deadline(lease_expires_at: str | None) -> datetime | None:
+        """Parse the last durably confirmed lease expiry.
+
+        Missing or malformed deadlines are unsafe in heartbeat mode: the local
+        worker has no bounded interval during which it can prove ownership.
+        """
+        if lease_expires_at is None:
+            return None
+        try:
+            deadline = datetime.fromisoformat(lease_expires_at)
+        except (TypeError, ValueError):
+            return None
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)
+        return deadline
+
+    async def _mark_ownership_lost(
+        self,
+        record: RunRecord,
+        *,
+        reason: str,
+        require_active: bool = True,
+    ) -> bool:
+        """Fence one local run and cancel its execution task.
+
+        No store write is attempted here: once the last confirmed lease has
+        expired, this worker is no longer authorized to publish a terminal
+        outcome. A peer reconciler owns durable terminalization.
+        """
+        task_to_cancel: asyncio.Task | None = None
+        async with self._lock:
+            current = self._runs.get(record.run_id)
+            if current is not record:
+                return False
+            if require_active:
+                if record.status not in (RunStatus.pending, RunStatus.running):
+                    return False
+                if record.task is not None and record.task.done():
+                    return False
+            if record.ownership_lost:
+                return True
+            record.ownership_lost = True
+            record.abort_event.set()
+            record.status = RunStatus.error
+            record.error = reason
+            record.updated_at = _now_iso()
+            if record.task is not None and not record.task.done() and record.task is not asyncio.current_task():
+                task_to_cancel = record.task
+
+        if task_to_cancel is not None:
+            task_to_cancel.cancel()
+        logger.error("Run %s lost lease ownership; local execution was fenced: %s", record.run_id, reason)
+        return True
+
     async def start_heartbeat(self) -> None:
         """Start the background lease-renewal task.
 
@@ -1595,11 +1716,16 @@ class RunManager:
                 self._schedule_orphan_reconciliation()
 
     async def _renew_leases(self) -> None:
-        """Renew the lease on every locally-owned active run."""
+        """Renew locally-owned leases, failing closed at their deadlines.
+
+        ``RunRecord.lease_expires_at`` advances only after a successful durable
+        renewal, so it is the last confirmed ownership deadline. Transient
+        exceptions are tolerated before that deadline; a call that blocks or
+        keeps failing through it fences the local run.
+        """
         if self._store is None or self._run_ownership_config is None:
             return
         lease_seconds = self._run_ownership_config.lease_seconds
-        new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
 
         async with self._lock:
             # Renew any pending/running run owned by this worker unless its
@@ -1615,17 +1741,34 @@ class RunManager:
             active_runs = [(rid, record) for rid, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())]
 
         for run_id, record in active_runs:
-            try:
-                updated = await self._call_store_with_retry(
-                    "update_lease",
-                    run_id,
-                    lambda: self._store.update_lease(
-                        run_id,
-                        owner_worker_id=self._worker_id,
-                        lease_expires_at=new_expiry,
-                    ),
+            confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
+            if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
+                await self._mark_ownership_lost(
+                    record,
+                    reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
                 )
+                continue
+
+            remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
+            new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+            try:
+                async with asyncio.timeout(remaining):
+                    updated = await self._call_store_with_retry(
+                        "update_lease",
+                        run_id,
+                        lambda: self._store.update_lease(
+                            run_id,
+                            owner_worker_id=self._worker_id,
+                            lease_expires_at=new_expiry,
+                        ),
+                    )
                 if updated:
+                    if confirmed_deadline <= datetime.now(UTC):
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="Lease renewal completed after the last confirmed lease had already expired.",
+                        )
+                        continue
                     # Unsynced write is benign: ``lease_expires_at`` is the
                     # only field on an existing record this path mutates, so
                     # there is no concurrent writer to race against
@@ -1641,18 +1784,29 @@ class RunManager:
                     # finalisation.
                     async with self._lock:
                         still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
-                        if still_active:
-                            logger.warning(
-                                "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
-                                run_id,
-                                record.status.value,
-                                record.owner_worker_id,
-                            )
-                            record.abort_event.set()
-                            if record.task is not None:
-                                record.task.cancel()
+                    if still_active:
+                        logger.warning(
+                            "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
+                            run_id,
+                            record.status.value,
+                            record.owner_worker_id,
+                        )
+                        await self._mark_ownership_lost(
+                            record,
+                            reason="The durable store rejected lease renewal for this worker.",
+                        )
             except Exception:
-                logger.warning("Failed to renew lease for run %s", run_id, exc_info=True)
+                if confirmed_deadline <= datetime.now(UTC):
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+                    )
+                else:
+                    logger.warning(
+                        "Failed to renew lease for run %s before its confirmed deadline; will retry",
+                        run_id,
+                        exc_info=True,
+                    )
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.

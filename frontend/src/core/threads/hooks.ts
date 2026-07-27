@@ -23,7 +23,7 @@ import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
-import { useUpdateSubtask } from "../tasks/context";
+import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
@@ -1208,6 +1208,7 @@ export function useThreadStream({
   }, []);
 
   const queryClient = useQueryClient();
+  const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
   const thread = useStream<AgentThreadState>({
@@ -1342,6 +1343,25 @@ export function useThreadStream({
         typeof event === "object" && event !== null && "type" in event
           ? (event as { type: unknown }).type
           : undefined;
+
+      if (eventType === "stream_replay_gap") {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
+        setPendingSupersededRunIds(new Set());
+        setPendingSupersededMessageIds(new Set());
+        messagesRef.current = [];
+        transientHistoryBridgeRef.current = [];
+        transientHistoryOrderRef.current = [];
+        transientHistoryThreadIdRef.current = null;
+        summarizedRef.current = new Set<string>();
+        pendingUsageBaselineMessageIdsRef.current = new Set();
+        tasksRef.current = {};
+        setTasks({});
+        invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
+        toast.warning(t.conversation.streamReplayGap);
+        return;
+      }
 
       const taskUpdate = taskEventToSubtaskUpdate(event);
       if (taskUpdate) {
