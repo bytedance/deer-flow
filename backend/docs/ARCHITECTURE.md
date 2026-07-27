@@ -337,7 +337,7 @@ SKILL.md Format:
 │ ---                                                                      │
 │                                                                          │
 │ # Skill Instructions                                                     │
-│ Content injected into system prompt...                                   │
+│ Loaded on demand after discovery or explicit slash activation...         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 

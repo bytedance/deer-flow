@@ -15,6 +15,10 @@ from deerflow.runtime.journal import RunJournal
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
+def test_run_journal_is_marked_as_loop_bound():
+    assert RunJournal.deerflow_loop_bound is True
+
+
 @pytest.fixture
 def journal_setup():
     store = MemoryRunEventStore()
