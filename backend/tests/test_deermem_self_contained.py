@@ -55,6 +55,33 @@ def _deermem_with_fake_llm(backend_config=None, payload=None, callbacks=None) ->
     return dm
 
 
+def test_add_swallows_queue_full_so_backpressure_does_not_break_caller(deermem_data_dir, caplog) -> None:
+    """Regression: QueueFull raised under backpressure is caught in
+    DeerMem.add (the backend owns the queue, so it owns the degradation) so
+    memory backpressure degrades to "update skipped" instead of propagating into
+    MemoryMiddleware.after_agent and breaking the agent run -- peer middlewares
+    self-guard the same way."""
+    import logging
+
+    dm = _deermem_with_fake_llm(backend_config={"storage_path": str(deermem_data_dir), "queue_max_depth": 1})
+    # Stop the debounce timer so enqueued items stay pending (the cap persists
+    # across the second add instead of being drained by a timer fire).
+    dm._queue._schedule_timer = lambda *a, **k: None
+
+    conv = [HumanMessage("Please explain quantum computing in detail"), AIMessage("Quantum computing uses qubits and superposition.")]
+    # First add fills the queue to its depth cap (non-signal, new key).
+    dm.add("thread-A", conv, agent_name="lead_agent", user_id="u")
+    assert dm._queue.pending_count == 1
+
+    # Second add for a different key hits the cap -> QueueFull internally. It
+    # must be caught: no exception escapes DeerMem.add.
+    with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deer_mem"):
+        dm.add("thread-B", conv, agent_name="lead_agent", user_id="u")
+    assert "rejected under backpressure" in caplog.text
+    # thread-B was rejected (not enqueued); only thread-A remains.
+    assert dm._queue.pending_count == 1
+
+
 def test_di_construction_owns_dependencies():
     dm = DeerMem(backend_config={"max_facts": 50, "storage_path": "/tmp/x"})
     assert dm._config.max_facts == 50

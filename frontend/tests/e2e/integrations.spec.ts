@@ -49,10 +49,20 @@ test.describe("Integrations settings", () => {
     mockLangGraphAPI(page);
     let authStartRequest: unknown;
     const authCompleteRequests: unknown[] = [];
+    let authCompleteCount = 0;
     await page.route(
       "**/api/integrations/lark/auth/complete",
       async (route) => {
         authCompleteRequests.push(route.request().postDataJSON());
+        authCompleteCount += 1;
+        if (authCompleteCount > 1) {
+          await route.fulfill({
+            status: 504,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "Authorization still pending." }),
+          });
+          return;
+        }
         await route.fallback();
       },
     );

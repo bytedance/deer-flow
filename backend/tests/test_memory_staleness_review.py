@@ -1156,8 +1156,7 @@ class TestPrepareUpdatePromptStaleness:
         result = updater._prepare_update_prompt(
             messages=[msg],
             agent_name=None,
-            correction_detected=False,
-            reinforcement_detected=False,
+            signals=frozenset(),
         )
 
         assert result is not None
@@ -1180,8 +1179,7 @@ class TestPrepareUpdatePromptStaleness:
         result = updater._prepare_update_prompt(
             messages=[msg],
             agent_name=None,
-            correction_detected=False,
-            reinforcement_detected=False,
+            signals=frozenset(),
         )
 
         assert result is not None
@@ -1205,8 +1203,7 @@ class TestPrepareUpdatePromptStaleness:
         result = updater._prepare_update_prompt(
             messages=[msg],
             agent_name=None,
-            correction_detected=False,
-            reinforcement_detected=False,
+            signals=frozenset(),
         )
 
         assert result is not None
@@ -1229,8 +1226,7 @@ class TestPrepareUpdatePromptStaleness:
         result = updater._prepare_update_prompt(
             messages=[msg],
             agent_name=None,
-            correction_detected=False,
-            reinforcement_detected=False,
+            signals=frozenset(),
         )
 
         assert result is not None

@@ -40,7 +40,13 @@ from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
 )
-from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph, graph_state_schema
+from deerflow.runtime.checkpoint_state import (
+    CheckpointStateAccessor,
+    build_state_mutation_graph,
+    graph_reducer_channels,
+    graph_state_schema,
+    graph_writable_channels,
+)
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -101,6 +107,57 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
     async with lock:
         yield
+
+
+_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+
+
+async def _persist_delivery_receipt(
+    event_store: Any,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+) -> bool:
+    """Persist a terminal receipt with short bounded retries.
+
+    The owning worker still knows the real terminal outcome and renews its
+    lease while this coroutine runs. Retrying here handles transient event
+    store failures without handing a successful run to orphan recovery, which
+    cannot reconstruct either the terminal status or the detailed receipt.
+    """
+    attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
+    for attempt in range(attempts):
+        try:
+            await event_store.put_if_absent(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type="run.delivery",
+                category="outputs",
+                content=content,
+            )
+            return True
+        except Exception:
+            if attempt == attempts - 1:
+                logger.warning(
+                    "Failed to persist delivery receipt for run %s after %d attempts; preserving the real terminal status without a receipt",
+                    run_id,
+                    attempts,
+                    exc_info=True,
+                )
+                return False
+            delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                run_id,
+                attempt + 1,
+                attempts,
+                delay,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay)
+
+    return False  # pragma: no cover - loop always returns
 
 
 # Keep this streaming policy separate from middleware write-authorization sets.
@@ -393,6 +450,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
+    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -413,6 +471,12 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    # Journal construction moved ahead of preflight so every terminal run can
+    # emit a receipt. Completion persistence keeps its prior boundary: before
+    # #4272 the journal did not exist until preflight had succeeded, so early
+    # checkpoint failures / cancellation while waiting did not write an empty
+    # completion snapshot into RunStore.
+    persist_completion = False
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
@@ -423,6 +487,22 @@ async def run_agent(
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
         lg_modes = to_langgraph_stream_modes(normalized_stream_modes)
+        # Initialize the run-scoped journal before any fallible or cancellable
+        # preflight work. Every terminal run with an event store must reach the
+        # shared finally block with a journal available for its run.delivery
+        # receipt, including checkpoint validation failures and cancellation
+        # while waiting for an earlier run to finish finalizing.
+        if event_store is not None:
+            from deerflow.runtime.journal import RunJournal
+
+            journal = RunJournal(
+                run_id=run_id,
+                thread_id=thread_id,
+                event_store=event_store,
+                track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
+            )
+
         await run_manager.wait_for_prior_finalizing(
             thread_id,
             run_id,
@@ -434,12 +514,11 @@ async def run_agent(
             return
         started = True
 
-        if thread_store is not None:
+        if not record.ownership_lost and thread_store is not None:
             try:
                 await thread_store.update_status(thread_id, "running")
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -472,22 +551,7 @@ async def run_agent(
                     mode,
                 )
 
-        # Initialize RunJournal + write human_message event.
-        # These are inside the try block so any exception (e.g. a DB
-        # error writing the event) flows through the except/finally
-        # path that publishes an "end" event to the SSE bridge —
-        # otherwise a failure here would leave the stream hanging
-        # with no terminator.
-        if event_store is not None:
-            from deerflow.runtime.journal import RunJournal
-
-            journal = RunJournal(
-                run_id=run_id,
-                thread_id=thread_id,
-                event_store=event_store,
-                track_token_usage=getattr(run_events_config, "track_token_usage", True),
-                progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
-            )
+        persist_completion = True
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
@@ -589,14 +653,38 @@ async def run_agent(
         # failure disables rollback: restoring an empty or partial message
         # history would silently truncate the thread.
         if checkpointer is not None:
-            try:
-                rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
-            except Exception:
-                snapshot_capture_failed = True
-                logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
-            if rollback_point is not None:
-                pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
-                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
+            # A previous successful run may still be persisting duration
+            # metadata after its active admission slot is released. Share its
+            # checkpoint lock so the rollback snapshot and any resume rewrite
+            # are one uninterrupted read/write sequence against the head.
+            async with _checkpoint_thread_lock(thread_id):
+                try:
+                    rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
+                except Exception:
+                    snapshot_capture_failed = True
+                    logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                if rollback_point is not None:
+                    pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
+                    pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
+
+                # Resuming from an older checkpoint is a fork, and a delta fork
+                # materializes the abandoned sibling's writes back into state
+                # (#4458). Rewrite it as a linear head write *after* the rollback
+                # point is captured, so cancel-with-rollback still restores the
+                # real pre-run head rather than the rolled-back one.
+                resumed_messages = await _linearize_delta_checkpoint_resume(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    config=config,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
+            if resumed_messages is not None:
+                # The graph now starts from the selected state, so the
+                # current-run message boundary is that state, not the head we
+                # captured for rollback.
+                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
+                initial_runnable_config = RunnableConfig(**config)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
@@ -731,7 +819,12 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.error,
+                    error="Rolled back by user",
+                    **terminal_status_kwargs,
+                )
                 try:
                     await _rollback_to_pre_run_checkpoint(
                         accessor=accessor,
@@ -745,13 +838,22 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
             else:
-                await run_manager.set_status(run_id, RunStatus.interrupted)
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.interrupted,
+                    **terminal_status_kwargs,
+                )
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=error_msg,
+                **terminal_status_kwargs,
+            )
         else:
             runtime_context = runtime.context if isinstance(runtime.context, dict) else None
             # Guard middlewares that hard-stop a run by stripping tool_calls
@@ -761,6 +863,7 @@ async def run_agent(
             #   token_budget        -> "token_capped"
             #   safety_finish_reason -> "safety_capped"
             #   subagent_limit       -> "subagent_limit_capped"
+            #   model_length_finish_reason -> "model_length_capped"
             #
             # If more guards grow stop_reason semantics, consider a publish/
             # collect pattern (e.g. each guard middleware publishes its cap
@@ -768,13 +871,23 @@ async def run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
-            await run_manager.set_status(run_id, RunStatus.success, stop_reason=stop_reason)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.success,
+                stop_reason=stop_reason,
+                **terminal_status_kwargs,
+            )
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
         if action == "rollback":
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error="Rolled back by user",
+                **terminal_status_kwargs,
+            )
             try:
                 await _rollback_to_pre_run_checkpoint(
                     accessor=accessor,
@@ -788,13 +901,22 @@ async def run_agent(
             except Exception:
                 logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
         else:
-            await run_manager.set_status(run_id, RunStatus.interrupted)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.interrupted,
+                **terminal_status_kwargs,
+            )
             logger.info("Run %s was cancelled", run_id)
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
-        await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+        await run_manager.set_status(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            **terminal_status_kwargs,
+        )
         await bridge.publish(
             run_id,
             "error",
@@ -805,12 +927,18 @@ async def run_agent(
         )
 
     finally:
+        if record.ownership_lost:
+            logger.warning(
+                "Skipping durable finalization for run %s because this worker no longer owns its lease",
+                run_id,
+            )
+
         # Persist any subagent step events still buffered (#3779) — including on
         # abort/exception paths, where the stream loop broke before its own flush.
-        if subagent_events is not None:
+        if not record.ownership_lost and subagent_events is not None:
             await subagent_events.flush()
 
-        if event_store is not None and pre_run_workspace_snapshot is not None:
+        if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
             try:
                 await record_workspace_changes(
                     event_store,
@@ -822,13 +950,35 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
 
-        # Flush any buffered journal events and persist completion data
-        if journal is not None:
+        # Flush buffered journal events before the terminal receipt. The
+        # receipt uses a run-scoped idempotent write shared with recovery, then
+        # the staged terminal status is persisted. This ordering closes the
+        # crash window where a terminal run could otherwise outlive its receipt.
+        # A fenced worker leaves receipt recovery to the peer that claimed it.
+        if not record.ownership_lost and journal is not None:
             try:
                 await journal.flush()
             except Exception:
                 logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
+            await _persist_delivery_receipt(
+                event_store,
+                thread_id=thread_id,
+                run_id=run_id,
+                content=journal.get_delivery_content(),
+            )
+
+        if not record.ownership_lost and event_store is not None:
+            try:
+                # Even after bounded receipt retries are exhausted, persist the
+                # real worker outcome. Leaving a successful row inflight would
+                # let lease recovery rewrite it as an error with a synthetic
+                # zero receipt.
+                await run_manager.persist_current_status(run_id)
+            except Exception:
+                logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+
+        if not record.ownership_lost and journal is not None and persist_completion:
             try:
                 # Persist token usage + convenience fields to RunStore
                 completion = journal.get_completion_data()
@@ -836,7 +986,7 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if started and checkpointer is not None and record.status == RunStatus.interrupted:
+        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted:
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
@@ -845,7 +995,7 @@ async def run_agent(
                 logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
         # Sync title from checkpoint to threads_meta.display_name
-        if started and checkpointer is not None and thread_store is not None:
+        if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
             try:
                 ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
                 ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
@@ -859,7 +1009,7 @@ async def run_agent(
 
         # Persist run duration to checkpoint metadata so history reads
         # don't need to correlate runs and events.
-        if started and checkpointer is not None and record.status == RunStatus.success:
+        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
             try:
                 created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
                 updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
@@ -877,14 +1027,14 @@ async def run_agent(
                 logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
-        if started and thread_store is not None:
+        if started and not record.ownership_lost and thread_store is not None:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
                 await thread_store.update_status(thread_id, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-        if ctx.on_run_completed is not None:
+        if not record.ownership_lost and ctx.on_run_completed is not None:
             try:
                 await ctx.on_run_completed(record)
             except Exception:
@@ -1241,15 +1391,16 @@ async def _prepare_goal_continuation_input(
 
 @dataclass(frozen=True)
 class RollbackPoint:
-    """Materialized pre-run state used to fork the pre-run checkpoint lineage.
+    """Materialized pre-run state used to restore the thread after cancellation.
 
     Raw checkpoint blobs cannot reconstruct Delta-channel messages (their
-    checkpoints omit ``channel_values``), so rollback restores messages by
-    applying an ``Overwrite`` through a state-mutation graph anchored at the
-    pre-run checkpoint instead of cloning the raw blob.
+    checkpoints omit the materialized value), so rollback preserves those
+    messages plus delta mode's materialized non-message state in addition to
+    the raw pending writes.
     """
 
     config: dict[str, Any]
+    state_values: dict[str, Any]
     messages: tuple[Any, ...]
     metadata: dict[str, Any]
     pending_writes: tuple[tuple[str, str, Any], ...]
@@ -1271,8 +1422,9 @@ async def _capture_rollback_point(
     if not configurable.get("checkpoint_id"):
         return None
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", snapshot_config)
-    values = getattr(snapshot, "values", None) or {}
-    messages = values.get("messages") if isinstance(values, dict) else None
+    raw_values = getattr(snapshot, "values", None) or {}
+    messages = raw_values.get("messages") if isinstance(raw_values, dict) else None
+    state_values = copy.deepcopy({key: value for key, value in raw_values.items() if key != "messages"}) if accessor.mode == "delta" and isinstance(raw_values, dict) else {}
     return RollbackPoint(
         config={
             "configurable": {
@@ -1281,10 +1433,130 @@ async def _capture_rollback_point(
                 "checkpoint_id": configurable.get("checkpoint_id"),
             }
         },
+        state_values=state_values,
         messages=tuple(messages or ()),
         metadata=dict(getattr(snapshot, "metadata", None) or {}),
         pending_writes=tuple(getattr(checkpoint_tuple, "pending_writes", ()) or ()),
     )
+
+
+def _complete_state_replacement_values(
+    *,
+    mutation_graph: Any,
+    selected_values: dict[str, Any],
+    current_values: dict[str, Any],
+    run_id: str,
+    operation: str,
+) -> dict[str, Any]:
+    """Build a whole-state replacement through the graph's effective schema."""
+    writable_fields = graph_writable_channels(mutation_graph)
+    reducer_fields = graph_reducer_channels(mutation_graph)
+    if writable_fields is None or reducer_fields is None:
+        raise RuntimeError(f"Run {run_id} could not inspect the state schema for {operation}")
+
+    replacement_values: dict[str, Any] = {}
+    for field_name in writable_fields:
+        if field_name in selected_values:
+            replacement = copy.deepcopy(selected_values[field_name])
+        elif field_name in current_values:
+            # LangGraph has no public "unset channel" update. A fresh channel
+            # exposes its schema default when one exists (for example [] / {});
+            # optional and otherwise-unconstructible channels reset to None.
+            channel = mutation_graph.channels.get(field_name)
+            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
+        else:
+            continue
+        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
+    return replacement_values
+
+
+async def _linearize_delta_checkpoint_resume(
+    *,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+    config: dict[str, Any],
+    thread_id: str,
+    run_id: str,
+) -> list[Any] | None:
+    """Replace a delta-mode checkpoint fork with an equivalent linear write.
+
+    Resuming from an older checkpoint forks the lineage, and in ``delta`` mode
+    the fork's state cannot be materialized correctly: the delta history walk
+    collects **every** ``pending_writes`` entry stored on each on-path
+    ancestor, but a shared parent also carries the writes of the sibling child
+    that was abandoned. Those writes are replayed into the fork, so the run
+    starts from a message list that still contains the answer it was supposed
+    to replace — regenerating in a branched thread surfaced this as the old
+    assistant message reappearing beside the new one after a reload (#4458).
+    Reproduced on postgres, sqlite, and the in-memory saver; ``full`` mode is
+    unaffected because its checkpoints carry complete ``channel_values`` and
+    need no replay.
+
+    The upstream contract (`BaseCheckpointSaver.get_delta_channel_history` and
+    the savers overriding it) is where write-to-child ownership belongs, so
+    this does not reimplement it. Instead the fork is expressed as what it
+    means: materialize the requested checkpoint's state and write it with
+    replace semantics on the **current head**, which has no other children,
+    then run linearly. Every materialized channel is restored; channels that
+    exist only on the newer head are reset to their schema default (or
+    ``None`` when the channel has no constructible default). The abandoned
+    turn stays in checkpoint history as the rewritten head's ancestry.
+
+    Returns the materialized messages when the resume was linearized, or
+    ``None`` when there was nothing to do (full mode, no checkpoint selector,
+    a non-root namespace, or a selector that already names the head). Failures
+    propagate: silently falling back to the fork would persist the corrupted
+    history this exists to prevent. The worker call site holds
+    ``_checkpoint_thread_lock`` across rollback capture and this rewrite; do
+    not reacquire that non-reentrant lock inside this helper.
+    """
+    if checkpointer is None or accessor.mode != "delta":
+        return None
+    configurable = config.get("configurable")
+    if not isinstance(configurable, dict):
+        return None
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        return None
+    if configurable.get("checkpoint_ns"):
+        # Subgraph namespaces have their own lineage; the Gateway only selects
+        # root checkpoints, so leave anything else untouched.
+        return None
+
+    head_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    head = await accessor.aget(head_config)
+    if _checkpoint_id(head) == checkpoint_id:
+        # Selecting the head is already linear — no sibling can exist yet.
+        return None
+
+    source_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}}
+    snapshot = await accessor.aget(source_config)
+    values = getattr(snapshot, "values", None) or {}
+    messages = values.get("messages") if isinstance(values, dict) else None
+    if not isinstance(messages, list):
+        raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+
+    # Write through the thread's effective schema so every application and
+    # middleware channel can be restored. Reducer channels need Overwrite to
+    # replace their already-aggregated value instead of merging it again.
+    mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
+    selected_values = dict(values)
+    head_values = getattr(head, "values", None) or {}
+    head_values = dict(head_values) if isinstance(head_values, dict) else {}
+    replacement_values = _complete_state_replacement_values(
+        mutation_graph=mutation_graph,
+        selected_values=selected_values,
+        current_values=head_values,
+        run_id=run_id,
+        operation="checkpoint resume",
+    )
+
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
+    configurable.pop("checkpoint_id", None)
+    configurable.pop("checkpoint_map", None)
+    logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)
+    return list(messages)
 
 
 async def _rollback_to_pre_run_checkpoint(
@@ -1296,13 +1568,14 @@ async def _rollback_to_pre_run_checkpoint(
     rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
 ) -> None:
-    """Fork the pre-run checkpoint lineage with the pre-run messages restored.
+    """Restore the complete pre-run state after a cancelled run.
 
-    The fork is written through a state-only mutation graph (the synthetic
-    ``rollback_restore`` node must be registered for ``as_node`` and finishes
-    immediately so no agent nodes are scheduled). LangGraph owns the restored
-    checkpoint's source/step/channel versions/parent/timestamp; the parent
-    pointer back to the pre-run checkpoint is the audit trail.
+    Full mode forks the captured pre-run checkpoint and overwrites messages;
+    all other channels inherit from that parent. Delta mode cannot safely fork
+    once the cancelled path has attached writes to the same parent, so it
+    replaces every captured channel on the current head instead. Both writes
+    use a state-only mutation graph whose synthetic ``rollback_restore`` node
+    finishes immediately and schedules no agent work.
     """
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
@@ -1328,15 +1601,35 @@ async def _rollback_to_pre_run_checkpoint(
         logger.warning("Run %s rollback skipped: agent accessor unavailable", run_id)
         return
 
-    # The restored checkpoint inherits every channel from the pre-run fork;
-    # compile the mutation graph with the thread's effective schema so
-    # middleware-contributed channels survive (the base ThreadState fallback
-    # would silently drop them).
+    # Compile with the thread's effective schema so middleware-contributed
+    # channels survive (the base ThreadState fallback would silently drop
+    # them).
     mutation_graph = build_state_mutation_graph("rollback_restore", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
+    if accessor.mode == "delta":
+        # A delta rollback fork has the same write-ownership problem as a
+        # checkpoint resume: the captured parent now carries writes from the
+        # cancelled sibling. Restore linearly on the current head instead.
+        restore_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        current = await accessor.aget(restore_config)
+        raw_current_values = getattr(current, "values", None) or {}
+        current_values = dict(raw_current_values) if isinstance(raw_current_values, dict) else {}
+        selected_values = copy.deepcopy(rollback_point.state_values)
+        selected_values["messages"] = list(rollback_point.messages)
+        replacement_values = _complete_state_replacement_values(
+            mutation_graph=mutation_graph,
+            selected_values=selected_values,
+            current_values=current_values,
+            run_id=run_id,
+            operation="rollback",
+        )
+    else:
+        restore_config = rollback_point.config
+        replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
     restored_config = await mutation_accessor.aupdate(
-        rollback_point.config,
-        {"messages": Overwrite(list(rollback_point.messages))},
+        restore_config,
+        replacement_values,
         as_node="rollback_restore",
     )
     if not isinstance(restored_config, dict):

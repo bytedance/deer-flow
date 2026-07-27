@@ -506,6 +506,8 @@ export const enUS: Translations = {
     startConversation: "Start a conversation to see messages here",
     branchCreated: "Conversation branch created",
     branchFailed: "Failed to branch conversation.",
+    streamReplayGap:
+      "Some live updates expired. The conversation was restored from saved state.",
   },
 
   // Chats
@@ -514,6 +516,9 @@ export const enUS: Translations = {
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+    pinChat: "Pin chat",
+    unpinChat: "Unpin chat",
+    pinChatFailed: "Failed to update pinned chat",
   },
 
   // Sidecar
@@ -1092,6 +1097,10 @@ export const enUS: Translations = {
     haveAccountSignIn: "Already have an account? Sign in",
     backToHome: "← Back to home",
     networkError: "Network error. Please try again.",
+    serviceUnavailableTitle: "Service temporarily unavailable",
+    serviceUnavailableDescription:
+      "The Gateway is taking too long to respond. Check that it is running, then try again.",
+    retry: "Try again",
     authFailed: "Authentication failed.",
     errors: {
       sso_failed: "SSO login failed. Please try again or use email login.",

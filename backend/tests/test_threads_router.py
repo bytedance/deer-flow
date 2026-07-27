@@ -17,7 +17,7 @@ from langgraph.types import Overwrite
 from app.gateway import services as gateway_services
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
@@ -957,7 +957,12 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     assert response.json()["status"] == stored_status
 
 
-def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
+def test_patch_thread_pin_returns_iso_and_preserves_updated_at() -> None:
+    """A pin/unpin PATCH must not bump ``updated_at``.
+
+    Pinning or unpinning a chat does not represent conversation activity.
+    Timestamps are still surfaced as ISO via ``coerce_iso``.
+    """
     app, store, _checkpointer = _build_thread_app()
     thread_id = "patch-target"
 
@@ -982,16 +987,53 @@ def test_patch_thread_returns_iso_and_advances_updated_at() -> None:
     asyncio.run(_seed())
 
     with TestClient(app) as client:
-        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+        response = client.patch(
+            f"/api/threads/{thread_id}",
+            json={"metadata": {THREAD_PINNED_METADATA_KEY: True}},
+        )
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
-    # Patch issues a fresh ``updated_at`` via ``MemoryThreadMetaStore.update_metadata``,
-    # so it must be > the migrated legacy ``created_at`` (both ISO strings
-    # sort lexicographically by time when the format is consistent).
-    assert body["updated_at"] > body["created_at"]
+    # ``touch=False`` preserves the original ``updated_at``; both timestamps
+    # derive from the same legacy value, so they coerce to the same ISO string.
+    assert body["updated_at"] == body["created_at"]
+    assert body["metadata"] == {"k": "v0", THREAD_PINNED_METADATA_KEY: True}
+
+
+def test_patch_thread_non_pin_metadata_bumps_updated_at() -> None:
+    """The public metadata PATCH endpoint still bumps recency by default."""
+    app, store, _checkpointer = _build_thread_app()
+    thread_id = "patch-target"
+
+    legacy_created = "946684800.000000"
+    legacy_updated = "946684800.000000"
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": legacy_created,
+                "updated_at": legacy_updated,
+                "metadata": {"k": "v0"},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.patch(f"/api/threads/{thread_id}", json={"metadata": {"k": "v1"}})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
+    assert body["updated_at"] != body["created_at"]
     assert body["metadata"] == {"k": "v1"}
 
 
@@ -1042,6 +1084,44 @@ def test_search_threads_normalizes_legacy_unix_seconds_to_iso() -> None:
     for item in items:
         assert _ISO_TIMESTAMP_RE.match(item["created_at"]), item
         assert _ISO_TIMESTAMP_RE.match(item["updated_at"]), item
+
+
+def test_search_threads_returns_pinned_threads_before_newer_unpinned_threads() -> None:
+    app, store, _checkpointer = _build_thread_app()
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            "newer-unpinned",
+            {
+                "thread_id": "newer-unpinned",
+                "status": "idle",
+                "created_at": "2026-07-01T00:00:00+00:00",
+                "updated_at": "2026-07-20T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await store.aput(
+            THREADS_NS,
+            "older-pinned",
+            {
+                "thread_id": "older-pinned",
+                "status": "idle",
+                "created_at": "2026-06-01T00:00:00+00:00",
+                "updated_at": "2026-06-01T00:00:00+00:00",
+                "metadata": {THREAD_PINNED_METADATA_KEY: True},
+            },
+        )
+
+    import asyncio
+
+    asyncio.run(_seed())
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/search", json={"limit": 1})
+
+    assert response.status_code == 200, response.text
+    assert [item["thread_id"] for item in response.json()] == ["older-pinned"]
 
 
 def test_memory_thread_meta_store_writes_iso_on_create() -> None:
@@ -2052,6 +2132,124 @@ def test_branch_history_seed_failure_keeps_branch_usable(monkeypatch) -> None:
 
     assert branch_response.status_code == 200, branch_response.text
     assert branch_response.json()["history_seed_mode"] == "failed"
+
+
+async def _seed_union_channel_source(checkpointer, custom_factory, mode, source_thread_id):
+    """Seed a completed turn plus Union-typed reducer channels (sandbox/goal/todos)."""
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    await accessor.aupdate(
+        config,
+        {"messages": [HumanMessage(id="h1", content="question")], "goal": {"objective": "ship the fix"}},
+        as_node="model",
+    )
+    await accessor.aupdate(
+        config,
+        {
+            "messages": [AIMessage(id="a1", content="answer")],
+            "todos": [{"content": "write tests", "status": "pending"}],
+            "sandbox": {"sandbox_id": "local:parent-thread"},
+            "thread_data": {"workspace_path": "/parent/workspace"},
+        },
+        as_node="model",
+    )
+
+
+def _branch_union_channel_thread(monkeypatch, mode):
+    """Drive POST /branches on a source seeded with Union-typed channels; return branch values."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    source_thread_id = f"union-branch-source-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_union_channel_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        branch_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "a1", "message_ids": ["a1"]},
+        )
+        assert branch_response.status_code == 200, branch_response.text
+        branch_thread_id = branch_response.json()["thread_id"]
+
+    async def materialize():
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        snapshot = await accessor.aget({"configurable": {"thread_id": branch_thread_id, "checkpoint_ns": ""}})
+        return snapshot.values
+
+    return asyncio.run(materialize())
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_copies_union_typed_reducer_channels_as_plain_values(monkeypatch, mode) -> None:
+    """Branching must not persist Overwrite wrappers into the fresh thread (#4380).
+
+    Union-typed reducer channels (``goal``, ``todos``, ``promoted``,
+    ``sandbox``) have no constructible default, so they start MISSING on the
+    branch thread; an ``Overwrite`` first write that isn't unwrapped is stored
+    literally and the next consumer crashes with ``TypeError: 'Overwrite'
+    object is not subscriptable``.
+    """
+    branch_values = _branch_union_channel_thread(monkeypatch, mode)
+
+    # The exact crash shape from #4380: subscripting the copied channel value.
+    assert branch_values["goal"]["objective"] == "ship the fix"
+    assert branch_values["todos"] == [{"content": "write tests", "status": "pending"}]
+    assert not any(isinstance(value, Overwrite) for value in branch_values.values())
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_inherit_thread_scoped_channels(monkeypatch, mode) -> None:
+    """The branch must acquire its own sandbox and thread paths, not the parent's.
+
+    ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to
+    the parent thread, so inheriting it would make the branch read/write the
+    parent's workspace and release the parent's sandbox after its first run;
+    ``thread_data`` is recomputed from the branch's own thread_id by
+    ThreadDataMiddleware on every run.
+    """
+    branch_values = _branch_union_channel_thread(monkeypatch, mode)
+
+    assert branch_values.get("sandbox") is None
+    assert branch_values.get("thread_data") is None
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, mode) -> None:
+    """POST /state must store a plain value when the reducer channel was never written.
+
+    Same mechanism as the branch case (#4380): ``goal`` starts MISSING on a
+    thread that never wrote it, and the endpoint's replace-style ``Overwrite``
+    wrapping must not be persisted literally.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    source_thread_id = f"never-written-goal-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": source_thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+
+        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+
+        update_response = client.post(
+            f"/api/threads/{source_thread_id}/state",
+            json={"values": {"goal": {"objective": "finish"}}},
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["values"]["goal"] == {"objective": "finish"}
+
+        read_response = client.get(f"/api/threads/{source_thread_id}/state")
+        assert read_response.status_code == 200, read_response.text
+        assert read_response.json()["values"]["goal"] == {"objective": "finish"}
 
 
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:

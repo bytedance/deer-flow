@@ -11,6 +11,7 @@ from sqlalchemy.exc import DatabaseError as SQLAlchemyDatabaseError
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import DisconnectMode, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, PersistenceRetryPolicy, RunStartOutcome
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -507,6 +508,66 @@ async def test_reconcile_orphaned_inflight_runs_marks_stale_rows_error():
 
 
 @pytest.mark.anyio
+async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover():
+    """Lease recovery must durably backfill the terminal receipt exactly once."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    manager = RunManager(store=store, event_store=events)
+
+    first = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+    second = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in first] == ["running-run"]
+    assert second == []
+    delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert (await store.get("running-run"))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_reconcile_preserves_delivery_written_before_worker_crash():
+    """A crash after the receipt but before status persistence keeps its facts."""
+    store = MemoryRunStore()
+    events = MemoryRunEventStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    await events.put_if_absent(
+        thread_id="thread-1",
+        run_id="running-run",
+        event_type="run.delivery",
+        category="outputs",
+        content={"presented": 1, "paths": ["report.md"], "by_tool": {"present_files": ["report.md"]}},
+    )
+    manager = RunManager(store=store, event_store=events)
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
+    assert len(delivery) == 1
+    assert delivery[0]["content"]["presented"] == 1
+
+
+@pytest.mark.anyio
+async def test_reconcile_preserves_terminal_takeover_when_delivery_backfill_fails():
+    """A receipt-store outage must not undo an atomically claimed orphan."""
+
+    class FailingReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    store = MemoryRunStore()
+    await store.put("running-run", thread_id="thread-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    manager = RunManager(store=store, event_store=FailingReceiptStore())
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="worker crashed", before="2026-01-01T00:00:01+00:00")
+
+    assert [record.run_id for record in recovered] == ["running-run"]
+    assert (await store.get("running-run"))["status"] == "error"
+
+
+@pytest.mark.anyio
 async def test_reconcile_orphaned_inflight_runs_skips_live_local_run():
     """Startup recovery should not mark an active row orphaned when this worker owns it."""
     store = MemoryRunStore()
@@ -930,6 +991,245 @@ async def test_create_or_reject_does_not_interrupt_old_run_when_new_run_store_wr
     assert old.abort_event.is_set() is False
     assert stored_old is not None
     assert stored_old["status"] == "running"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_create_or_reject_cancellation_after_registration_interrupts_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+) -> None:
+    """Cancellation after admission must not leave the replacement active."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    persist_started = asyncio.Event()
+    release_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def blocking_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> bool:
+        persist_started.set()
+        await asyncio.wait_for(release_persist.wait(), timeout=1)
+        return await original_persist_status(record, status, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_status", blocking_persist_status)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy=strategy))
+    await asyncio.wait_for(persist_started.wait(), timeout=1)
+    create_task.cancel()
+    release_persist.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await create_task
+
+    records = await manager.list_by_thread("thread-1")
+    replacement = next(record for record in records if record.run_id != old.run_id)
+    stored_replacement = await store.get(replacement.run_id)
+    assert not await manager.has_inflight("thread-1")
+    assert replacement.status == RunStatus.interrupted
+    assert replacement.abort_event.is_set()
+    assert stored_replacement is not None
+    assert stored_replacement["status"] == RunStatus.interrupted.value
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_repeated_cancellation_drains_replacement_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation must not abandon the durable cleanup task."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old_persist_started = asyncio.Event()
+    release_old_persist = asyncio.Event()
+    replacement_persist_started = asyncio.Event()
+    release_replacement_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def staged_persist_status(record: Any, status: RunStatus, **kwargs: Any) -> bool:
+        if record.run_id == old.run_id:
+            old_persist_started.set()
+            await asyncio.wait_for(release_old_persist.wait(), timeout=1)
+        else:
+            replacement_persist_started.set()
+            await asyncio.wait_for(release_replacement_persist.wait(), timeout=1)
+        return await original_persist_status(record, status, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_status", staged_persist_status)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
+    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
+
+    create_task.cancel()
+    release_old_persist.set()
+    await asyncio.wait_for(replacement_persist_started.wait(), timeout=1)
+    create_task.cancel()
+    await asyncio.sleep(0)
+    assert not create_task.done()
+
+    release_replacement_persist.set()
+    with pytest.raises(asyncio.CancelledError):
+        _ = await asyncio.wait_for(create_task, timeout=1)
+
+    stored_replacement = await store.get(replacement.run_id)
+    assert replacement.status == RunStatus.interrupted
+    assert stored_replacement is not None
+    assert stored_replacement["status"] == RunStatus.interrupted.value
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_retries_replacement_when_cancel_status_cannot_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed best-effort update must get a strict durable retry."""
+
+    class FailFirstReplacementInterruptStore(MemoryRunStore):
+        failed = False
+
+        async def get(self, run_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+            raw = await super().get(run_id)
+            if raw is not None and raw.get("status") == RunStatus.pending.value and raw.get("user_id") is not None and user_id != raw.get("user_id"):
+                raise RuntimeError("replacement lookup was not owner-scoped")
+            return await super().get(run_id, user_id=user_id)
+
+        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+            row = await super().get(run_id)
+            if not self.failed and status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
+                self.failed = True
+                raise RuntimeError("replacement status write failed")
+            return await super().update_status(run_id, status, **kwargs)
+
+    store = FailFirstReplacementInterruptStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1", user_id="owner-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old_persist_started = asyncio.Event()
+    release_old_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
+        if record.run_id != old.run_id:
+            return await original_persist_status(record, status, **kwargs)
+        old_persist_started.set()
+        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
+        return await original_persist_status(record, status, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt", user_id="owner-1"))
+    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
+    create_task.cancel()
+    release_old_persist.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await asyncio.wait_for(create_task, timeout=1)
+
+    stored_replacement = await store.get(replacement.run_id, user_id="owner-1")
+    assert stored_replacement is not None
+    assert stored_replacement["status"] == RunStatus.interrupted.value
+    assert replacement.status == RunStatus.interrupted
+    assert not await manager.has_inflight("thread-1")
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_cleanup_failure_preserves_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup IO failure must not replace the caller's CancelledError."""
+
+    class FailingReplacementCleanupStore(MemoryRunStore):
+        replacement_update_failed = False
+
+        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+            row = await super().get(run_id)
+            if status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
+                self.replacement_update_failed = True
+                raise RuntimeError("replacement status unavailable")
+            return await super().update_status(run_id, status, **kwargs)
+
+        async def get(self, run_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+            row = await super().get(run_id, user_id=user_id)
+            if self.replacement_update_failed and row is not None and row.get("status") == RunStatus.pending.value:
+                raise RuntimeError("replacement verification unavailable")
+            return row
+
+    store = FailingReplacementCleanupStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old_persist_started = asyncio.Event()
+    release_old_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
+        if record.run_id != old.run_id:
+            return await original_persist_status(record, status, **kwargs)
+        old_persist_started.set()
+        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
+        return await original_persist_status(record, status, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
+    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
+    create_task.cancel()
+    release_old_persist.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await asyncio.wait_for(create_task, timeout=1)
+
+
+@pytest.mark.anyio
+async def test_create_or_reject_preserves_peer_terminal_status_during_cancel_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer terminal transition must win the strict cancellation retry."""
+
+    class PeerWinsReplacementInterruptStore(MemoryRunStore):
+        replacement_attempts = 0
+
+        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+            row = await self.get(run_id)
+            if status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
+                self.replacement_attempts += 1
+                if self.replacement_attempts == 1:
+                    raise RuntimeError("replacement status write failed")
+                await super().update_status(run_id, RunStatus.error.value, error="peer takeover")
+                return False
+            return await super().update_status(run_id, status, **kwargs)
+
+    store = PeerWinsReplacementInterruptStore()
+    manager = RunManager(store=store)
+    old = await manager.create("thread-1")
+    await manager.set_status(old.run_id, RunStatus.running)
+    old_persist_started = asyncio.Event()
+    release_old_persist = asyncio.Event()
+    original_persist_status = manager._persist_status
+
+    async def block_old_persist(record: Any, status: RunStatus, **kwargs: Any) -> bool:
+        if record.run_id != old.run_id:
+            return await original_persist_status(record, status, **kwargs)
+        old_persist_started.set()
+        await asyncio.wait_for(release_old_persist.wait(), timeout=1)
+        return await original_persist_status(record, status, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_status", block_old_persist)
+    create_task = asyncio.create_task(manager.create_or_reject("thread-1", multitask_strategy="interrupt"))
+    await asyncio.wait_for(old_persist_started.wait(), timeout=1)
+    replacement = next(record for record in manager._runs.values() if record.run_id != old.run_id)
+    create_task.cancel()
+    release_old_persist.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        _ = await asyncio.wait_for(create_task, timeout=1)
+
+    stored_replacement = await store.get(replacement.run_id)
+    assert stored_replacement is not None
+    assert stored_replacement["status"] == RunStatus.error.value
+    assert stored_replacement["error"] == "peer takeover"
+    assert replacement.status == RunStatus.error
+    assert replacement.error == "peer takeover"
+    assert not await manager.has_inflight("thread-1")
 
 
 @pytest.mark.anyio

@@ -79,6 +79,11 @@ class DeerMemConfig(BaseModel):
         le=300,
         description="Seconds to wait before processing queued updates (debounce).",
     )
+    queue_max_depth: int = Field(
+        default=1000,
+        ge=0,
+        description=("Backpressure cap on pending items. 0 = unlimited. When the cap is reached, new non-signal updates are rejected (QueueFull); signal updates are always admitted so important memories are never shed."),
+    )
     # ── Facts ────────────────────────────────────────────────────────────
     max_facts: int = Field(default=100, ge=10, le=500, description="Maximum number of facts to store.")
     fact_confidence_threshold: float = Field(
@@ -198,6 +203,29 @@ class DeerMemConfig(BaseModel):
         ge=2,
         le=20,
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
+    )
+    # ── Extraction quality callback (post-invoke observability) ─────────
+    extraction_callback: Any = Field(
+        default=None,
+        description=(
+            "Optional ``callback(metrics)`` invoked AFTER the extraction LLM "
+            "call (token usage, facts passing/rejected by the confidence "
+            "filter, rejection rate, prompt version). The host injects a "
+            "Langfuse-based callback to emit an extraction span; None = no "
+            "post-invoke observability. Set programmatically (not from YAML)."
+        ),
+    )
+    # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
+    watermark_max_keys: int = Field(
+        default=4096,
+        ge=0,
+        description=(
+            "Soft cap on the in-memory conversation-watermark cache (one entry "
+            "per distinct thread/user/agent). The cache is a bounded LRU: when "
+            "over capacity the least-recently-used entry is dropped, and a "
+            "dropped key re-extracts one batch on that thread's next turn (the "
+            "same as a restart). 0 = unbounded."
+        ),
     )
     # ── Message processing (externalized patterns / prompts) ──
     patterns_dir: str | None = Field(
