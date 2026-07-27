@@ -2050,6 +2050,128 @@ class TestReceiveFile:
 
         _run(go())
 
+    def test_second_picture_does_not_overwrite_first(self, tmp_path, monkeypatch):
+        """Two picture messages both generate "image.png" and must not collide.
+
+        The path handed to the agent must still hold the bytes it referred to.
+        """
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            channel._download_by_code = AsyncMock(return_value=b"FIRST")
+            first = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m1",
+                files=[{"type": "image", "download_code": "dc1", "filename": "image.png"}],
+            )
+            out_first = await channel.receive_file(first, "t1", user_id="default")
+
+            channel._download_by_code = AsyncMock(return_value=b"SECOND")
+            second = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m2",
+                files=[{"type": "image", "download_code": "dc2", "filename": "image.png"}],
+            )
+            out_second = await channel.receive_file(second, "t1", user_id="default")
+
+            assert out_first.text != out_second.text
+            first_name = out_first.text.rsplit("/", 1)[-1]
+            second_name = out_second.text.rsplit("/", 1)[-1]
+            # Each advertised path must still resolve to its own bytes.
+            assert (uploads / first_name).read_bytes() == b"FIRST"
+            assert (uploads / second_name).read_bytes() == b"SECOND"
+
+        _run(go())
+
+    def test_multiple_images_in_one_message_get_distinct_paths(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+            channel._download_by_code = AsyncMock(side_effect=[b"A", b"B"])
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[
+                    {"type": "image", "download_code": "dc1", "filename": "image_0.png"},
+                    {"type": "image", "download_code": "dc2", "filename": "image_0.png"},
+                ],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            paths = out.text.split("\n")
+            assert len(paths) == 2
+            assert paths[0] != paths[1]
+            assert len(list(uploads.iterdir())) == 2
+            assert {p.read_bytes() for p in uploads.iterdir()} == {b"A", b"B"}
+
+        _run(go())
+
+    def test_duplicate_document_names_do_not_collide(self, tmp_path, monkeypatch):
+        """The same real filename sent twice must not clobber the earlier upload."""
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+
+            channel._download_by_code = AsyncMock(return_value=b"V1")
+            m1 = channel._make_inbound(chat_id="c", user_id="u", text="", thread_ts="m1", files=[{"type": "file", "download_code": "d1", "filename": "quote.xlsx"}])
+            await channel.receive_file(m1, "t1", user_id="default")
+
+            channel._download_by_code = AsyncMock(return_value=b"V2")
+            m2 = channel._make_inbound(chat_id="c", user_id="u", text="", thread_ts="m2", files=[{"type": "file", "download_code": "d2", "filename": "quote.xlsx"}])
+            await channel.receive_file(m2, "t1", user_id="default")
+
+            assert (uploads / "quote.xlsx").read_bytes() == b"V1"
+            assert len(list(uploads.iterdir())) == 2
+
+        _run(go())
+
+    def test_write_does_not_follow_planted_symlink(self, tmp_path, monkeypatch):
+        """A symlink planted at the destination must not be written through.
+
+        Upload dirs can be mounted into local sandboxes, so a sandbox process can
+        leave a symlink at a future upload name; following it would let a
+        gateway-privileged write land outside the bucket.
+        """
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            outside = tmp_path / "outside.txt"
+            (uploads / "image.png").symlink_to(outside)
+            _patch_uploads(monkeypatch, uploads)
+            channel._download_by_code = AsyncMock(return_value=b"PWNED")
+
+            msg = channel._make_inbound(
+                chat_id="c",
+                user_id="u",
+                text="",
+                thread_ts="m",
+                files=[{"type": "image", "download_code": "dc", "filename": "image.png"}],
+            )
+            out = await channel.receive_file(msg, "t1", user_id="default")
+
+            assert not outside.exists()
+            assert "[failed to load image: image.png]" in out.text
+
+        _run(go())
+
     def test_non_local_sandbox_is_synced(self, tmp_path, monkeypatch):
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})

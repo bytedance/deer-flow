@@ -20,7 +20,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import normalize_filename
+from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
 
 logger = logging.getLogger(__name__)
 
@@ -607,16 +607,26 @@ class DingTalkChannel(Channel):
             safe_filename = normalize_filename(filename or fallback_name)
         except ValueError:
             safe_filename = fallback_name
-        resolved_target = uploads_dir / safe_filename
 
-        def _persist() -> None:
+        def _persist() -> Path:
+            # Claim the name and write it under one lock. Generated names repeat
+            # across messages ("image.png" for every picture message), so without
+            # a uniqueness claim a later attachment silently overwrites an earlier
+            # one whose path was already handed to the agent. Claiming and writing
+            # must not interleave, or two attachments resolve to the same free name.
             with self._file_write_lock:
-                resolved_target.write_bytes(content)
+                seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                unique_name = claim_unique_filename(safe_filename, seen)
+                # write_upload_file_no_symlink refuses a symlinked destination:
+                # uploads dirs can be mounted into local sandboxes, so a sandbox
+                # process could otherwise redirect this privileged write outside
+                # the bucket.
+                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
 
         try:
-            await asyncio.to_thread(_persist)
-        except OSError:
-            logger.exception("[DingTalk] failed to persist downloaded file: %s", resolved_target)
+            resolved_target = await asyncio.to_thread(_persist)
+        except (OSError, UnsafeUploadPathError):
+            logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
             return ""
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
