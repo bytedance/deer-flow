@@ -1264,7 +1264,7 @@ class TestChannelManager:
                 outbound_received.append(msg)
                 if msg.is_final:
                     key = manager._inbound_dedupe_key(_inbound())
-                    key_present_during_final_publish.append(key in manager._recent_inbound_events)
+                    key_present_during_final_publish.append(key in manager._inbound_dedupe_store._store)
 
             bus.subscribe_outbound(capture_outbound)
 
@@ -1428,7 +1428,8 @@ class TestChannelManager:
             else:
                 CHANNEL_RUN_POLICY[channel_name] = original
 
-    def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
         """A redelivered GitHub webhook must dispatch the agent only once.
 
         PR #3584 added inbound dedupe for the IM channels; the GitHub channel
@@ -1467,18 +1468,18 @@ class TestChannelManager:
         assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:alice:reviewer")
 
         # First delivery fires; an identical redelivery of the same GUID is dropped.
-        assert manager._is_duplicate_inbound(_gh("d1")) is False
-        assert manager._is_duplicate_inbound(_gh("d1")) is True
+        assert await manager._is_duplicate_inbound(_gh("d1")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1")) is True
         # A genuinely new delivery still fires.
-        assert manager._is_duplicate_inbound(_gh("d2")) is False
+        assert await manager._is_duplicate_inbound(_gh("d2")) is False
         # A second agent fanned out from the SAME delivery is not cross-deduped.
-        assert manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
         # A second user's SAME-named agent on the SAME delivery is not
         # cross-deduped either. A helper still stamping the old 2-part
         # (delivery, agent) id could not even express this case — it would
         # collide with the very first assertion's "d1"+"reviewer" key and
         # silently drop this user's run (willem-bd, PR #4104 review).
-        assert manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
 
     def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
         """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""

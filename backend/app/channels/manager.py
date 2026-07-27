@@ -20,6 +20,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -75,15 +76,14 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
-# Inbound-redelivery dedup window. ``_recent_inbound_events`` (below) is a
-# process-local, in-memory-only OrderedDict — it is never persisted to
-# ``ChannelStore`` — so a recorded key survives only for this TTL (or until
-# evicted by the entry cap below) and is gone entirely across a Gateway
-# restart. 10 minutes is a deliberately bounded window: long enough to
-# absorb a near-term redelivery of the same event — whether a provider's
-# own automatic retry (where the provider implements one) or an operator
-# explicitly triggering a resend — without keeping a growing in-memory
-# ledger.
+# Inbound-redelivery dedup window. The dedupe state lives in
+# ``self._inbound_dedupe_store``: the default in-process Memory store is
+# local to this Gateway process (a recorded key survives only for the store's
+# TTL / entry cap and is gone across a restart), while a Postgres-backed store
+# is shared across pods. 10 minutes is a deliberately bounded window: long
+# enough to absorb a near-term redelivery of the same event — whether a
+# provider's own automatic retry or an operator resend — without keeping a
+# growing ledger.
 #
 # For GitHub specifically: GitHub does NOT automatically retry or redeliver
 # a failed delivery (non-2xx response, timeout, or connection error) — it
@@ -114,8 +114,6 @@ BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is tempora
 FOLLOWUP_BUFFER_MAX_PER_THREAD = 20
 FOLLOWUP_DRAIN_BATCH_SIZE = 10
 FOLLOWUP_BLOCK_TAG = "followups-while-busy"
-INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
-INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
@@ -917,6 +915,7 @@ class ChannelManager:
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
         self.bus = bus
@@ -956,14 +955,14 @@ class ChannelManager:
         # stop() has run, for the follow-up drain guard below.
         self._stopped = False
         self._task: asyncio.Task | None = None
-        # Insertion order == chronological (keys are never re-inserted), so an
-        # OrderedDict lets us evict expired/overflow entries from the front in
-        # O(k) instead of scanning all entries on every inbound message.
-        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
+        # Inbound webhook dedupe store. Defaults to the in-process Memory store
+        # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
+        # duplicate deliveries landing on different pods are collapsed.
+        self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
         # Per-thread follow-up buffers for busy fire_and_forget channels that
         # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
         # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
-        # oldest-first, mirroring _recent_inbound_events's shape but scoped
+        # oldest-first, mirroring the dedupe store's shape but scoped
         # per-thread with a hard cap instead of a global TTL (see
         # _buffer_followup / _enforce_followup_cap).
         self._followup_buffers: dict[str, OrderedDict[str, _FollowupEntry]] = {}
@@ -1549,7 +1548,7 @@ class ChannelManager:
             # answer. Provider adapters may emit ack side-effects (a "Working on
             # it…" reply, an "eyes" reaction) before publish_inbound, so those are
             # intentionally not deduped here.
-            if self._is_duplicate_inbound(msg):
+            if await self._is_duplicate_inbound(msg):
                 continue
             logger.info(
                 "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
@@ -1598,36 +1597,25 @@ class ChannelManager:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
-    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+    async def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
         key = self._inbound_dedupe_key(msg)
         if key is None:
             return False
 
-        now = time.monotonic()
-        # Entries are in chronological insertion order, so expired ones cluster at
-        # the front: pop from the front until we hit a still-live entry.
-        while self._recent_inbound_events:
-            _, oldest_at = next(iter(self._recent_inbound_events.items()))
-            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
-                self._recent_inbound_events.popitem(last=False)
-            else:
-                break
-        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
-            self._recent_inbound_events.popitem(last=False)
-
-        if key in self._recent_inbound_events:
+        # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
+        # and capacity bounds; try_record returns True when the key was already
+        # present (i.e. this is a duplicate delivery to drop).
+        is_duplicate = await self._inbound_dedupe_store.try_record(key)
+        if is_duplicate:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-            return True
+        return is_duplicate
 
-        self._recent_inbound_events[key] = now
-        return False
-
-    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+    async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
         """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
@@ -1637,7 +1625,7 @@ class ChannelManager:
         """
         key = self._inbound_dedupe_key(msg)
         if key is not None:
-            self._recent_inbound_events.pop(key, None)
+            await self._inbound_dedupe_store.release(key)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1692,7 +1680,7 @@ class ChannelManager:
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
-            self._release_inbound_dedupe_key(msg)
+            await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -2064,7 +2052,7 @@ class ChannelManager:
                         # Swallowed like the generic handler would not be: release the
                         # key so the provider's redelivery can retry once the thread
                         # frees, instead of being dropped for the dedupe TTL.
-                        self._release_inbound_dedupe_key(msg)
+                        await self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 raise
@@ -2084,7 +2072,7 @@ class ChannelManager:
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                 # Same reason as the fire-and-forget branch above: this error is
                 # handled here rather than re-raised, so release explicitly.
-                self._release_inbound_dedupe_key(msg)
+                await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -2261,7 +2249,7 @@ class ChannelManager:
                 # handler never runs and never releases the key. Release only
                 # after publishing the final outbound so a provider redelivery
                 # cannot overtake this attempt's terminal reply.
-                self._release_inbound_dedupe_key(msg)
+                await self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 

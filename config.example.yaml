@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 29
+config_version: 30
 
 # ============================================================================
 # Logging
@@ -1825,6 +1825,30 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
+
+# ============================================================================
+# Inbound webhook dedupe storage (cross-pod redelivery dedup — issue #4120)
+# ============================================================================
+# Where the ChannelManager records inbound webhook dedupe state.
+#
+# backend: auto     -- (default) Postgres whenever database.backend=postgres,
+#                       including multi-replica K8s where each pod runs a single
+#                       worker but shares one DB. Otherwise an in-process memory
+#                       store (single-DB, single-pod).
+#                       NOTE: multi-replica deployments must use a Postgres DB;
+#                       if database.backend is sqlite/memory, 'auto' falls back to
+#                       the per-pod memory store and cross-pod dedupe is disabled.
+# backend: memory   -- In-process store only. Per-pod: a webhook redelivered to
+#                       a DIFFERENT replica is NOT deduped. Not recommended for
+#                       multi-worker deployments (logs a startup WARNING).
+# backend: postgres -- Share dedupe state across pods via the application DB.
+#                       REQUIRED for any multi-replica deployment. If
+#                       database.backend is not 'postgres', a WARNING is logged and
+#                       the store falls back to the in-process memory store.
+#
+# dedupe_storage:
+#   backend: auto
+
   # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
   pool_recycle: 300
   # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
