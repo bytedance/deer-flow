@@ -149,8 +149,8 @@ def redact_secret_context_keys(context: Any) -> Any:
 def redact_config_secrets(config: Any) -> Any:
     """Return a copy of a run config safe to persist or echo back to clients.
 
-    The request config (``body.config``) is stored verbatim on the run record
-    (``runs.kwargs_json``) and echoed by the run API. Strip secret-bearing keys
+    The request config (``body.config``) would otherwise be stored verbatim on
+    the run record (``runs.kwargs_json``) and echoed by the run API. Strip secret-bearing keys
     from its ``context`` and legacy credentials from its ``metadata`` so neither
     protected config surface is persisted or returned, while the live config
     that drives the run (built separately) keeps them. Ordinary metadata is
