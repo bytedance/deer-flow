@@ -1221,6 +1221,7 @@ export function useThreadStream({
     // Coalesce same-tick stream events into one React notification. Only the
     // boolean tier is safe: the SDK's numeric tier is a trailing debounce that
     // starves UI updates while chunks keep arriving faster than the window.
+    // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
