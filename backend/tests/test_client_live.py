@@ -26,6 +26,12 @@ elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
 if _skip_reason:
     pytest.skip(_skip_reason, allow_module_level=True)
 
+# Collected only with an explicit opt-in (`pytest -m live` or `make
+# test-live`); deselected by default via the `addopts` setting in
+# pyproject.toml. The CI / missing-config guards above still skip
+# this module regardless of the marker.
+pytestmark = pytest.mark.live
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
