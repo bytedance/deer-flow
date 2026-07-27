@@ -1647,6 +1647,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
 
 
 def test_launch_scheduled_thread_run_rejects_legacy_auth_token():
+    """The internal launcher shares run admission; task API/model state has no metadata field."""
     import asyncio
     from types import SimpleNamespace
 

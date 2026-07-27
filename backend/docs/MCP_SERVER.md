@@ -188,8 +188,8 @@ Supply the credential on each run request through `config.context.secrets`:
 }
 ```
 
-`metadata.auth_token` is rejected with HTTP 422 at run admission and is never a
-supported interceptor path. Do not put credentials in `metadata`; use
+Both `metadata.auth_token` and `config.metadata.auth_token` are rejected with HTTP 422 at run admission and are never supported
+interceptor paths. Do not put credentials in either metadata surface; use
 `config.context.secrets`, whose values remain available to the live interceptor
 but are removed from persisted and API-visible run configuration copies.
 
@@ -199,7 +199,7 @@ but are removed from persisted and API-visible run configuration copies.
 
 ### Migrating legacy MCP credentials
 
-Deployments that previously sent `metadata.auth_token` must:
+Deployments that previously sent `metadata.auth_token` or `config.metadata.auth_token` must:
 
 1. Update the caller and interceptor to use `config.context.secrets` as shown
    above.
@@ -208,10 +208,10 @@ Deployments that previously sent `metadata.auth_token` must:
    retention policy, including database rows, run events, application or proxy
    logs, snapshots, exports, and backups.
 
-Current history APIs hide legacy `metadata.auth_token` values, but hiding a
-response does not erase material already retained by those systems. Restarting
-or upgrading DeerFlow does not rotate credentials or perform historical cleanup;
-operators must complete both actions explicitly.
+Current history APIs hide legacy `metadata.auth_token` and `config.metadata.auth_token` values, but hiding a response does not erase
+material already retained by those systems. Restarting or upgrading DeerFlow does
+not rotate credentials or perform historical cleanup; operators must complete
+both actions explicitly.
 
 ## How It Works
 

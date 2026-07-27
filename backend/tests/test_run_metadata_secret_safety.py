@@ -89,6 +89,41 @@ def test_run_response_hides_historical_auth_token_without_mutating_record():
     assert record.metadata["auth_token"] == "legacy-secret"
 
 
+def test_run_response_hides_historical_config_metadata_without_mutating_record():
+    legacy_config = {
+        "metadata": {
+            "auth_token": "legacy-secret",
+            "token_usage": 7,
+            "nested": {"auth_token": "ordinary-nested-metadata"},
+        },
+        "context": {
+            "secrets": {"MCP_AUTH_TOKEN": "request-secret"},
+            "model_name": "default",
+        },
+    }
+    record = RunRecord(
+        run_id="legacy-config-run",
+        thread_id="legacy-thread",
+        assistant_id="lead_agent",
+        status=RunStatus.success,
+        on_disconnect=DisconnectMode.cancel,
+        metadata={"token_usage": 7},
+        kwargs={"input": {}, "config": legacy_config},
+    )
+
+    response = _record_to_response(record)
+
+    assert response.kwargs["config"] == {
+        "metadata": {
+            "token_usage": 7,
+            "nested": {"auth_token": "ordinary-nested-metadata"},
+        },
+        "context": {"model_name": "default"},
+    }
+    assert record.kwargs["config"]["metadata"]["auth_token"] == "legacy-secret"
+    assert record.kwargs["config"]["context"]["secrets"] == {"MCP_AUTH_TOKEN": "request-secret"}
+
+
 @pytest.mark.parametrize(
     ("response_class", "required_fields"),
     [
