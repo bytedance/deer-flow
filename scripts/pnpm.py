@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
 def find_pnpm_command() -> list[str] | None:
@@ -43,6 +44,9 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 127
+
+    if Path(command[0]).stem.lower() == "corepack":
+        print(COREPACK_NOTICE, file=sys.stderr)
 
     try:
         result = subprocess.run(

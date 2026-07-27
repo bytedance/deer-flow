@@ -91,6 +91,46 @@ def test_check_script_preserves_runner_failure_diagnostics(monkeypatch):
 
     assert check_script.run_pnpm_version() == (
         None,
+        False,
         "Error: pnpm command failed with exit status 42.\npartial pnpm output",
     )
     assert call_kwargs["cwd"] == REPO_ROOT / "frontend"
+
+
+def test_check_script_preserves_corepack_resolution_hint(monkeypatch):
+    check_script = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_corepack")
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=["python", "pnpm.py", "-v"],
+            returncode=0,
+            stdout="10.26.2\n",
+            stderr="Using pnpm via Corepack.\n",
+        )
+
+    monkeypatch.setattr(check_script.subprocess, "run", fake_run)
+
+    assert check_script.run_pnpm_version() == ("10.26.2", True, None)
+
+
+def test_check_status_labels_corepack_fallback(monkeypatch, capsys):
+    check_script = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_status")
+
+    monkeypatch.setattr(check_script.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(
+        check_script,
+        "run_command",
+        lambda command: {
+            "node": "v22.0.0",
+            "uv": "uv 0.11.31",
+            "nginx": "nginx/1.31.3",
+        }[command[0]],
+    )
+    monkeypatch.setattr(
+        check_script,
+        "run_pnpm_version",
+        lambda: ("10.26.2", True, None),
+    )
+
+    assert check_script.main() == 0
+    assert "OK pnpm 10.26.2 (via Corepack)" in capsys.readouterr().out

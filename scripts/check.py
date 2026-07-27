@@ -10,6 +10,7 @@ from pathlib import Path
 
 PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
 FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
+COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
 def configure_stdio() -> None:
@@ -26,14 +27,16 @@ def configure_stdio() -> None:
 def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=True, shell=False
+        )
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or result.stderr.strip()
 
 
-def run_pnpm_version() -> tuple[str | None, str | None]:
-    """Return the pnpm version or the runner's actionable failure message."""
+def run_pnpm_version() -> tuple[str | None, bool, str | None]:
+    """Return the pnpm version, resolution source, and failure message."""
     try:
         result = subprocess.run(
             [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
@@ -44,18 +47,21 @@ def run_pnpm_version() -> tuple[str | None, str | None]:
             cwd=FRONTEND_DIR,
         )
     except OSError as exc:
-        return None, f"Unable to launch the pnpm runner: {exc}"
+        return None, False, f"Unable to launch the pnpm runner: {exc}"
 
     stdout = result.stdout.strip()
-    stderr = result.stderr.strip()
+    stderr_lines = result.stderr.splitlines()
+    via_corepack = COREPACK_NOTICE in stderr_lines
+    stderr = "\n".join(line for line in stderr_lines if line != COREPACK_NOTICE).strip()
     if result.returncode == 0 and (stdout or stderr):
-        return stdout or stderr, None
+        return stdout or stderr, via_corepack, None
 
     diagnostics = "\n".join(part for part in (stderr, stdout) if part)
     if diagnostics:
-        return None, diagnostics
+        return None, via_corepack, diagnostics
     return (
         None,
+        via_corepack,
         f"The pnpm runner exited with status {result.returncode} without output.",
     )
 
@@ -104,9 +110,10 @@ def main() -> int:
 
     print()
     print("Checking pnpm...")
-    pnpm_version, pnpm_error = run_pnpm_version()
+    pnpm_version, pnpm_via_corepack, pnpm_error = run_pnpm_version()
     if pnpm_version:
-        print(f"  OK pnpm {pnpm_version}")
+        resolution_hint = " (via Corepack)" if pnpm_via_corepack else ""
+        print(f"  OK pnpm {pnpm_version}{resolution_hint}")
     else:
         print("  FAIL pnpm is unavailable or failed to run")
         if pnpm_error:
@@ -120,7 +127,9 @@ def main() -> int:
         uv_version_text = run_command(["uv", "--version"])
         if uv_version_text:
             uv_version_parts = uv_version_text.split()
-            uv_version = uv_version_parts[1] if len(uv_version_parts) > 1 else uv_version_text
+            uv_version = (
+                uv_version_parts[1] if len(uv_version_parts) > 1 else uv_version_text
+            )
             print(f"  OK uv {uv_version}")
         else:
             print("  INFO Unable to determine uv version")

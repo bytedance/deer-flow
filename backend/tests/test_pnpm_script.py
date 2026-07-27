@@ -56,6 +56,7 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
 
     assert result.returncode == 0
     assert result.stdout.strip() == f"direct|{FRONTEND_DIR}|run dev --host 127.0.0.1"
+    assert "via Corepack" not in result.stderr
 
 
 def test_runner_uses_corepack_pnpm_from_frontend_directory(tmp_path: Path):
@@ -67,6 +68,7 @@ def test_runner_uses_corepack_pnpm_from_frontend_directory(tmp_path: Path):
 
     assert result.returncode == 0
     assert result.stdout.strip() == f"corepack|{FRONTEND_DIR}|pnpm --version"
+    assert result.stderr.strip() == "Using pnpm via Corepack."
 
     package_json = json.loads((FRONTEND_DIR / "package.json").read_text(encoding="utf-8"))
     assert package_json["packageManager"] == "pnpm@10.26.2"
