@@ -77,7 +77,10 @@ class TestLiveTestCollectionPolicy:
         """
         if not CONFIG_YAML.exists():
             pytest.skip("config.yaml not present — live tests are removed at collection time when config is absent")
-        lines = _collect_live_tests(extra_args=["-m", "live"])
+        # Pass a clean env (without CI) so the subprocess is not affected by
+        # an inherited CI=true from the outer test runner.
+        clean_env = {k: v for k, v in subprocess.os.environ.items() if k != "CI"}
+        lines = _collect_live_tests(env=clean_env, extra_args=["-m", "live"])
         # With -m live and config.yaml present, tests should be collected
         module_collected = any("test_client_live.py" in ln for ln in lines)
         assert module_collected, f"Live marker should collect the module when config.yaml exists: {lines}"
