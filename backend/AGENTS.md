@@ -470,10 +470,18 @@ compatibility failures and cancellation while waiting for prior finalization
 still emit a zero-delivery receipt. The worker flushes ordinary journal events,
 idempotently persists the run-scoped receipt, and only then persists the staged
 terminal run status. A receipt failure is retried on a short bounded schedule
-while the owning worker still knows the real outcome and holds the lease. If
-all attempts fail, the worker persists that real terminal status instead of
-leaving a successful run inflight for orphan recovery to rewrite as an error;
-the receipt remains best-effort in that outage case. Orphan recovery first
+while the owning worker still knows the real outcome and holds the lease. The
+worker derives delivery requirements from the run's workspace snapshots rather
+than a client request option: every regular file created or modified under
+`/mnt/user-data/outputs` is a candidate produced artifact. At least one candidate
+must be covered by a path attributed by the journal to `present_files`;
+presenting only an unrelated pre-existing path does not satisfy delivery.
+Receipts for such runs add `produced_paths`, `presented_paths`, `matched_paths`,
+`verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
+matching presentation becomes a run error; a successful presentation is also
+downgraded to error if its receipt cannot be durably verified. Runs without
+changed outputs preserve ordinary chat behavior and the original receipt shape.
+Orphan recovery first
 atomically claims an expired lease, then uses the same singleton write to
 backfill a zero-delivery receipt. This ordering prevents a stale recovery scan
 from overwriting a live run's later detailed receipt; an event-store outage

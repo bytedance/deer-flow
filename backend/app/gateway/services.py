@@ -987,7 +987,6 @@ async def start_run(
 
     body_context = getattr(body, "context", None) or {}
     model_name = body_context.get("model_name")
-
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
         model_name = str(model_name)
