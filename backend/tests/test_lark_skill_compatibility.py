@@ -13,7 +13,10 @@ upstream lark-cli 升级（git submodule bump）时，CI 会发现任何打破�
 frontmatter 变更。
 """
 
+import re
 from pathlib import Path
+
+import yaml
 
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SkillCategory
@@ -31,6 +34,20 @@ def _skill_dir(name: str) -> Path:
 
 def _skill_md(name: str) -> Path:
     return _skill_dir(name) / "SKILL.md"
+
+
+# 与 parse_skill_file 同款 frontmatter 切割，但跳过 deer-flow 的字段提取，
+# 直接 yaml.safe_load 原始 dict，用于断言 upstream 字段确实存在/缺席。
+_FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def _raw_frontmatter(name: str) -> dict:
+    content = _skill_md(name).read_text(encoding="utf-8")
+    match = _FRONT_MATTER_RE.match(content)
+    assert match is not None, f"{name}: 缺 frontmatter"
+    data = yaml.safe_load(match.group(1))
+    assert isinstance(data, dict), f"{name}: frontmatter 不是 dict"
+    return data
 
 
 def test_lark_skills_dir_exists():
@@ -77,6 +94,14 @@ def test_lark_metadata_fields_ignored():
         # deer-flow 不应该把这个误解析成 allowed_tools 或 required_secrets
         assert skill.allowed_tools is None, f"{name}: lark-cli 的 metadata 字段不该被 deer-flow 误识别成 allowed-tools"
         assert skill.required_secrets == (), f"{name}: lark-cli 的 metadata 字段不该被 deer-flow 误识别成 required-secrets"
+
+    # 锁住"被忽略的字段确实存在"这一前提：upstream 若移除 metadata 字段，
+    # 上面的 allowed_tools/required_secrets 断言会空过（vacuously pass），
+    # 这里强制 lark-im 的 frontmatter 确实含 metadata 键、lark-shared 确实不含。
+    lark_im_fm = _raw_frontmatter("lark-im")
+    assert "metadata" in lark_im_fm, "lark-im frontmatter 不再含 metadata 字段（upstream 变更？）"
+    lark_shared_fm = _raw_frontmatter("lark-shared")
+    assert "metadata" not in lark_shared_fm, "lark-shared frontmatter 不该含 metadata 字段"
 
 
 def test_lark_version_field_ignored():

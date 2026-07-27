@@ -21,12 +21,14 @@ DeerFlow 通过飞书官方 `lark-cli`（npm `@larksuite/cli`）调用飞书能�
 ## 安装与配置
 
 ```bash
-# 全局安装 lark-cli（查阅 https://github.com/larksuite/cli README 确认）
-npm install -g @larksuite/cli
+# 安装 lark-cli（与官方 README 一致，查阅 https://github.com/larksuite/cli）
+npx @larksuite/cli@latest install
 lark-cli config init --new
 lark-cli auth login --recommend
 lark-cli auth status
 ```
+
+复制 `extensions_config.example.json` 为 `extensions_config.json` 后，如需启用 lark skill，将 `lark-shared`/`lark-im`/`lark-base` 的 `enabled` 改为 `true`（或依赖 public category 默认 enabled 行为，显式声明便于审计）。
 
 ## 排障
 
