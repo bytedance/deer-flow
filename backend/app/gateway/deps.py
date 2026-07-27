@@ -30,7 +30,7 @@ from langgraph.types import Checkpointer
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
-from deerflow.runtime import RunContext, RunManager, StreamBridge
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -58,14 +58,16 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-worker configurations before persistence starts.
 
-    Three checks (all must pass for multi-worker):
+    Four checks (all must pass for multi-worker):
 
     1. Process-local browser sessions must be disabled. Browser tools keep
        Chromium and Playwright objects in one worker's memory, while ordinary
        uvicorn dispatch provides no thread-id affinity.
     2. The DB backend must be Postgres — SQLite write-locks cannot support
        concurrent multi-process access.
-    3. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+    3. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
+       process-local, so workers cannot enforce a shared singleton receipt.
+    4. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
@@ -88,6 +90,14 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     backend = getattr(config.database, "backend", None)
     if backend != "postgres":
         raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+
+    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
+    if run_events_backend != "db":
+        raise SystemExit(
+            f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
+            "Memory and JSONL event stores are process-local, so delivery receipt singleton guarantees cannot hold across workers. "
+            "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
+        )
 
     run_ownership = getattr(config, "run_ownership", None)
     if run_ownership is None or not run_ownership.heartbeat_enabled:
@@ -163,8 +173,10 @@ async def _publish_recovered_run_stream_end(
     recovered_runs: list[RunRecord],
     *,
     cleanup_delay: float = 60.0,
-) -> None:
-    """Terminate retained streams for runs recovered as orphaned at startup."""
+    on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
+) -> list[tuple[str, asyncio.Task[None]]]:
+    """Terminate retained streams for runs recovered as orphaned."""
+    cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
         if stream_exists is not None:
@@ -185,6 +197,10 @@ async def _publish_recovered_run_stream_end(
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
+        cleanup_tasks.append((record.run_id, task))
+        if on_cleanup_scheduled is not None:
+            on_cleanup_scheduled(record.run_id, task)
+    return cleanup_tasks
 
 
 def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) -> None:
@@ -194,6 +210,45 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
         task.result()
     except Exception:
         logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
+
+async def _flush_recovered_stream_cleanups(
+    bridge: StreamBridge,
+    cleanup_tasks: dict[asyncio.Task[None], str],
+    *,
+    timeout: float = 1.0,
+) -> None:
+    """Cancel delayed cleanups and delete their streams before bridge shutdown."""
+    pending = [(task, run_id) for task, run_id in cleanup_tasks.items() if not task.done()]
+    if not pending:
+        return
+    for task, _run_id in pending:
+        task.cancel()
+    await asyncio.gather(*(task for task, _run_id in pending), return_exceptions=True)
+
+    run_ids = list(dict.fromkeys(run_id for _task, run_id in pending))
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                *(bridge.cleanup(run_id, delay=0) for run_id in run_ids),
+                return_exceptions=True,
+            ),
+            timeout=max(0.0, timeout),
+        )
+    except TimeoutError:
+        logger.warning(
+            "Immediate recovered stream cleanup exceeded %.1fs for run_ids=%s; bridge TTL remains the final safety net",
+            timeout,
+            run_ids,
+        )
+    else:
+        for run_id, result in zip(run_ids, results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Failed to immediately clean up recovered run stream for %s: %r",
+                    run_id,
+                    result,
+                )
 
 
 if TYPE_CHECKING:
@@ -206,12 +261,19 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
-async def _mark_latest_recovered_threads_error(
+async def _mark_latest_startup_recovered_threads_error(
     run_manager: RunManager,
     thread_store: ThreadMetaStore,
     recovered_runs: list[RunRecord],
 ) -> None:
-    """Mark thread status as error only when its newest run was recovered."""
+    """Project startup recovery before request-serving concurrency begins.
+
+    This helper must remain on the pre-``yield`` startup path. ``ThreadMetaStore``
+    has no ``latest_run_id`` column, so it cannot express an atomic conditional
+    update keyed by the recovered run. Periodic recovery deliberately skips this
+    projection; moving this helper after request serving starts would reintroduce
+    a read/update race with newer runs.
+    """
     recovered_by_thread: dict[str, set[str]] = {}
     for record in recovered_runs:
         recovered_by_thread.setdefault(record.thread_id, set()).add(record.run_id)
@@ -228,6 +290,22 @@ async def _mark_latest_recovered_threads_error(
             await thread_store.update_status(thread_id, "error", user_id=None)
         except Exception:
             logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
+
+
+async def _terminalize_recovered_runs(
+    bridge: StreamBridge,
+    recovered_runs: list[RunRecord],
+    *,
+    cleanup_delay: float,
+    on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
+) -> list[tuple[str, asyncio.Task[None]]]:
+    """Publish terminal markers and schedule retained-stream cleanup."""
+    return await _publish_recovered_run_stream_end(
+        bridge,
+        recovered_runs,
+        cleanup_delay=cleanup_delay,
+        on_cleanup_scheduled=on_cleanup_scheduled,
+    )
 
 
 def get_config() -> AppConfig:
@@ -358,9 +436,30 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
+        sb_config = getattr(config, "stream_bridge", None)
+        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
+        recovered_stream_cleanup_tasks: dict[asyncio.Task[None], str] = {}
+
+        def track_recovered_stream_cleanup(
+            run_id: str,
+            task: asyncio.Task[None],
+        ) -> None:
+            recovered_stream_cleanup_tasks[task] = run_id
+            task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
+
+        async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _terminalize_recovered_runs(
+                app.state.stream_bridge,
+                recovered_runs,
+                cleanup_delay=cleanup_delay,
+                on_cleanup_scheduled=track_recovered_stream_cleanup,
+            )
+
         app.state.run_manager = RunManager(
             store=app.state.run_store,
             run_ownership_config=run_ownership_config,
+            event_store=app.state.run_event_store,
+            on_orphans_recovered=terminalize_recovered_runs,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
@@ -370,13 +469,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.utils.time import now_iso
 
         recovered_runs = await app.state.run_manager.reconcile_orphaned_inflight_runs(
-            error="Gateway restarted before this run reached a durable final state.",
+            error=STARTUP_ORPHAN_RECOVERY_ERROR,
             before=now_iso(),
+            stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        sb_config = getattr(config, "stream_bridge", None)
-        cleanup_delay = getattr(sb_config, "recovered_stream_cleanup_delay_seconds", 60.0) if sb_config else 60.0
-        await _publish_recovered_run_stream_end(app.state.stream_bridge, recovered_runs, cleanup_delay=cleanup_delay)
-        await _mark_latest_recovered_threads_error(app.state.run_manager, app.state.thread_store, recovered_runs)
+        await _terminalize_recovered_runs(
+            app.state.stream_bridge,
+            recovered_runs,
+            cleanup_delay=cleanup_delay,
+            on_cleanup_scheduled=track_recovered_stream_cleanup,
+        )
+        await _mark_latest_startup_recovered_threads_error(
+            app.state.run_manager,
+            app.state.thread_store,
+            recovered_runs,
+        )
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
@@ -391,7 +498,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # raises PoolClosed (issue #3373).
             run_manager = getattr(app.state, "run_manager", None)
             if run_manager is not None:
-                await _drain_inflight_runs(run_manager)
+                shutdown_deadline = asyncio.get_running_loop().time() + _RUN_DRAIN_TIMEOUT_SECONDS
+                try:
+                    await _drain_inflight_runs(run_manager)
+                finally:
+                    await _flush_recovered_stream_cleanups(
+                        app.state.stream_bridge,
+                        recovered_stream_cleanup_tasks,
+                        timeout=min(
+                            1.0,
+                            max(
+                                0.0,
+                                shutdown_deadline - asyncio.get_running_loop().time(),
+                            ),
+                        ),
+                    )
             await close_engine()
 
 

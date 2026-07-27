@@ -7,10 +7,12 @@ import tempfile
 import zipfile
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
+from langchain_core.tools import StructuredTool
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -21,9 +23,11 @@ from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
 from deerflow.skills.types import SkillCategory
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -48,6 +52,8 @@ def mock_app_config():
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
     config.database.checkpoint_channel_mode = "full"
+    config.database.checkpoint_delta_snapshot_frequency = 1000
+    config.authorization = AuthorizationConfig(enabled=False)
     return config
 
 
@@ -139,6 +145,23 @@ class TestClientInit:
             ),
         ):
             DeerFlowClient()
+
+    def test_delta_snapshot_frequency_is_frozen_from_app_config(self, mock_app_config):
+        from typing import get_type_hints
+
+        from langgraph.channels import DeltaChannel
+
+        from deerflow.agents import thread_state
+
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        mock_app_config.database.checkpoint_delta_snapshot_frequency = 7
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            DeerFlowClient()
+
+        schema = thread_state.get_thread_state_schema("delta")
+        hint = get_type_hints(schema, include_extras=True)["messages"]
+        channel = next(item for item in hint.__metadata__ if isinstance(item, DeltaChannel))
+        assert channel.snapshot_frequency == 7
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +709,47 @@ class TestStream:
         assert tool_events[0].data["content"] == "file.txt"
         assert tool_events[0].data["name"] == "bash"
         assert tool_events[0].data["tool_call_id"] == "tc-1"
+        assert "artifact" not in tool_events[0].data
+
+    def test_messages_mode_tool_message_preserves_human_input_artifact(self, client):
+        """Structured clarification data survives both embedded stream paths."""
+        artifact = {
+            "human_input": {
+                "request_id": "request-1",
+                "tool_call_id": "tc-1",
+                "question": "Which environment should be used?",
+                "options": [{"label": "Production", "value": "production"}],
+            }
+        }
+        tool_message = ToolMessage(
+            content="Which environment should be used?",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="ask_clarification",
+            artifact=artifact,
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (tool_message, {})),
+                ("values", {"messages": [HumanMessage(content="deploy", id="h-1"), tool_message]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("deploy", thread_id="t-tool-artifact"))
+
+        tool_event = next(event for event in events if event.type == "messages-tuple" and event.data.get("type") == "tool")
+        values_event = next(event for event in events if event.type == "values")
+        serialized_tool_message = next(message for message in values_event.data["messages"] if message["type"] == "tool")
+
+        assert tool_event.data["artifact"] == artifact
+        assert serialized_tool_message["artifact"] == artifact
+        assert tool_event.data["artifact"] is artifact
+        assert serialized_tool_message["artifact"] is artifact
 
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
@@ -1023,6 +1087,135 @@ class TestExtractText:
 
 
 class TestEnsureAgent:
+    def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
+        class Provider:
+            name = "test"
+
+            def filter_resources(self, principal, resource_type, candidates):
+                return [name for name in candidates if name == "safe_tool"]
+
+            def authorize(self, request):
+                raise AssertionError("not called while assembling")
+
+            async def aauthorize(self, request):
+                raise AssertionError("not called while assembling")
+
+        provider = Provider()
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(use="unused:Provider"),
+        )
+        mock_app_config.skills.deferred_discovery = True
+        client._app_config = mock_app_config
+
+        safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
+        denied_tool = StructuredTool.from_function(lambda: "denied", name="denied_tool", description="denied")
+        describe_tool = StructuredTool.from_function(lambda: "describe", name="describe_skill", description="describe")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[MagicMock()]),
+            patch("deerflow.client.build_skill_search_setup", return_value=SimpleNamespace(describe_skill_tool=describe_tool, skill_names=frozenset({"example"}))),
+            patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
+            patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
+
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
+
+    def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            client._ensure_agent(config, context={"user_id": "u1", "user_role": "user", "authz_attributes": {"department": "eng"}})
+            client._ensure_agent(config, context={"user_id": "u2", "user_role": "user", "authz_attributes": {"department": "eng"}})
+
+        assert mock_create_agent.call_count == 2
+
+    def test_authorization_cache_key_snapshots_nested_attributes(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+        attributes = {"groups": ["reader"]}
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            config = client._get_runnable_config("t1")
+            context = {
+                "user_role": "user",
+                "authz_attributes": attributes,
+            }
+            client._ensure_agent(config, context=context)
+            attributes["groups"].append("admin")
+            client._ensure_agent(config, context=context)
+
+        assert mock_create_agent.call_count == 2
+
+    def test_disabled_authorization_preserves_framework_tool_order(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(enabled=False)
+        mock_app_config.tool_search.enabled = True
+        mock_app_config.skills.deferred_discovery = True
+        client._app_config = mock_app_config
+        mcp_tool = tag_mcp_tool(StructuredTool.from_function(lambda: "mcp", name="mcp_tool", description="mcp"))
+        describe_tool = StructuredTool.from_function(lambda: "describe", name="describe_skill", description="describe")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[MagicMock()]),
+            patch(
+                "deerflow.client.build_skill_search_setup",
+                return_value=SimpleNamespace(
+                    describe_skill_tool=describe_tool,
+                    skill_names=frozenset({"example"}),
+                ),
+            ),
+            patch.object(client, "_get_tools", return_value=[mcp_tool]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(client._get_runnable_config("t1"))
+
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == [
+            "mcp_tool",
+            "tool_search",
+            "describe_skill",
+        ]
+
     def test_creates_agent(self, client):
         """_ensure_agent creates an agent on first call."""
         mock_agent = MagicMock()
@@ -1141,7 +1334,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full")
+        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -2538,7 +2731,7 @@ class TestScenarioAgentRecreation:
 
         agents_created = []
 
-        def fake_ensure(config):
+        def fake_ensure(config, **kwargs):
             key = tuple(config.get("configurable", {}).get(k) for k in ["model_name", "thinking_enabled", "is_plan_mode", "subagent_enabled"])
             agents_created.append(key)
             client._agent = agent
@@ -2550,6 +2743,52 @@ class TestScenarioAgentRecreation:
         # Two different config keys should have been created
         assert len(agents_created) == 2
         assert agents_created[0] != agents_created[1]
+
+    def test_stream_propagates_trusted_authorization_context(self, client):
+        ai = AIMessage(content="ok", id="ai-1")
+        agent = _make_agent_mock([{"messages": [ai]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(
+                client.stream(
+                    "hi",
+                    thread_id="t1",
+                    user_id="u1",
+                    user_role="guest",
+                    is_internal=True,
+                    authz_attributes={"department": "eng"},
+                )
+            )
+
+        assert captured["user_id"] == "u1"
+        assert captured["user_role"] == "guest"
+        assert captured["is_internal"] is True
+        assert captured["authz_attributes"] == {"department": "eng"}
+        assert agent.stream.call_args.kwargs["context"]["user_role"] == "guest"
+
+    def test_stream_uses_effective_user_for_authorization_context(self, client, mock_app_config):
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(use="unused:Provider"),
+        )
+        client._app_config = mock_app_config
+        agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
+        captured: dict = {}
+
+        def fake_ensure(config, *, context):
+            captured.update(context)
+            client._agent = agent
+
+        with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
+            list(client.stream("hi", thread_id="t1"))
+
+        assert captured["user_id"] == "test-user-autouse"
+        assert agent.stream.call_args.kwargs["context"]["user_id"] == "test-user-autouse"
 
 
 class TestScenarioThreadIsolation:
@@ -3478,6 +3717,35 @@ class TestSerializeMessage:
         result = DeerFlowClient._serialize_message(msg)
         assert result["type"] == "tool"
         assert isinstance(result["content"], str)
+        assert "artifact" not in result
+
+    def test_tool_message_event_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._tool_message_event(msg)
+
+        assert result.data["artifact"] is msg.artifact
+
+    def test_tool_message_values_serialization_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._serialize_message(msg)
+
+        assert result["artifact"] is msg.artifact
 
 
 # ===========================================================================

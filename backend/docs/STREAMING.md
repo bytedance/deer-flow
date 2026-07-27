@@ -7,7 +7,7 @@
 ## TL;DR
 
 - DeerFlow 有**两条并行**的流式路径：**Gateway 路径**（async / HTTP SSE / JSON 序列化）服务浏览器和 IM 渠道；**DeerFlowClient 路径**（sync / in-process / 原生 LangChain 对象）服务 Jupyter、脚本、测试。它们**无法合并**——消费者模型不同。
-- 两条路径都从 `create_agent()` 工厂出发，核心都是订阅 LangGraph 的 `stream_mode=["values", "messages", "custom"]`。`values` 是节点级 state 快照，`messages` 是 LLM token 级 delta，`custom` 是显式 `StreamWriter` 事件。**这三种模式不是详细程度的梯度，是三个独立的事件源**，要 token 流就必须显式订阅 `messages`。
+- 两条路径都从 `create_agent()` 工厂出发，核心都是订阅 LangGraph 的 `stream_mode=["values", "messages", "custom"]`。`values` 是节点级 state 快照，`messages` 是 LLM token 级 delta，`custom` 是显式 `StreamWriter` 事件。DeerFlow 内置 custom 事件同时通过 callback dispatch 暴露为 `astream_events(version="v2")` 的 `on_custom_event`，供 AG-UI 等 callback 型消费者使用。**这些接口不是详细程度的梯度，而是独立事件源**，消费者必须订阅自己需要的接口。
 - 嵌入式 client 为每个 `stream()` 调用维护三个 `set[str]`：`seen_ids` / `streamed_ids` / `counted_usage_ids`。三者看起来相似但管理**三个独立的不变式**，不能合并。
 
 ---
@@ -65,11 +65,14 @@ flowchart LR
 
     LG -->|"每个节点完成后"| V["values: 完整 state 快照"]
     Node1 -->|"LLM 每产生一个 token"| M["messages: (AIMessageChunk, meta)"]
-    Node1 -->|"StreamWriter.write()"| C["custom: 任意 dict"]
+    Node1 -->|"emit_custom_event()"| E["DeerFlow custom event helper"]
+    E -->|"StreamWriter.write()"| C["custom: 任意 dict"]
+    E -->|"dispatch_custom_event()"| A["astream_events(v2): on_custom_event"]
 
     class V values
     class M messages
     class C custom
+    class A custom
 ```
 
 | Mode | 发射时机 | Payload | 粒度 |
@@ -77,6 +80,9 @@ flowchart LR
 | `values` | 每个 graph 节点完成后 | 完整 state dict（title、messages、artifacts）| 节点级 |
 | `messages` | LLM 每次 yield 一个 chunk；tool 节点完成时 | `(AIMessageChunk \| ToolMessage, metadata_dict)` | token 级 |
 | `custom` | 用户代码显式调用 `StreamWriter.write()` | 任意 dict | 应用定义 |
+| `on_custom_event` | 用户代码调用 `dispatch_custom_event()`；通过 `astream_events(version="v2")` 消费 | `name` + 任意 `data` | 应用定义 |
+
+DeerFlow 自身产生的事件必须通过 `deerflow.utils.custom_events` 的同步或异步 helper 发送，并且每个内置 payload 必须携带非空字符串 `type`；缺少合法 `type` 的 payload 只进入 `custom` stream，不会出现在 `astream_events`。helper 先写入 `custom` stream，再 best-effort dispatch callback；callback 名称取 payload 的 `type`，`data` 保留完整 payload。这样原生 Gateway / Web UI / `DeerFlowClient` 的 custom 事件不变，`astream_events` 消费者也能观察同一事件。callback dispatch 的普通异常只记 debug 日志，不允许打断原有 writer 链路；writer 的异常语义保持不变。
 
 ### 两套命名的由来
 
@@ -137,11 +143,27 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复将 orphan run 标记为 error 后也会发布 `END_SENTINEL`，避免重连的 SSE 客户端只收到心跳。注意：TTL 是 Redis 内存安全网（防止 key 泄漏），不是 subscriber 终止机制——如果 worker 和 gateway 同时挂掉，已连接的 SSE 客户端在 TTL 过期后仍无法收到 END 信号，需要依赖客户端侧超时。完整的跨 pod subscriber 终止需要 worker 存活检测（liveness），当前版本不包含此功能。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。Memory 和 Redis 都只保留 `queue_maxsize` 条数据事件；游标早于保留水位线时返回 `StreamGap`，不会从当前最早事件静默部分重放。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。store-only SSE 与 `/wait` consumer 不能把普通 durable terminal status 当成流已完成，否则可能跳过延迟发布的 error 等尾部事件；只有 `orphan_recovered` 信号能在 heartbeat 时触发 END fallback，因为此时 producer 已被确认失联。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 
 **`StreamBridge` 的存在价值**：当生产者（`run_agent` 任务）和消费者（HTTP 连接）在不同的 asyncio task 里运行时，需要一个可以跨 task 传递事件的中介。Queue 同时还承担断连重连的 buffer 和多订阅者的 fan-out。
+
+### 有界历史与 `gap` 恢复
+
+`Last-Event-ID` 只保证在保留窗口内完整重放，不代表无限历史。有效游标仍在窗口内时，bridge 从该 ID 的下一条事件正常恢复；有效游标已经被 `queue_maxsize` 裁剪，或在线消费者慢到落后水位线时，Gateway 会在任何部分重放之前发送：
+
+```text
+event: gap
+data: {"code":"stream_replay_gap","run_id":"...","requested_event_id":"...","earliest_available_event_id":"...","latest_available_event_id":"...","recovery":"reload_durable_state"}
+
+```
+
+`gap` 帧没有 SSE `id:`，后面也没有正常 `end`；当前订阅随即关闭。它是恢复边界而不是客户端断开，因此不会触发 `on_disconnect=cancel`。客户端必须丢弃不再可信的瞬时状态，重新读取 thread checkpoint 和持久化 run-event/message history，再以 `latest_available_event_id` 为游标跟随新事件。DeerFlow Web UI 自动执行此流程并最多连续恢复五次。
+
+Redis 对无游标、空 stream 上已经建立的阻塞等待也遵循相同契约：第一次 `XREAD` 唤醒的数据在交付前仍是 provisional baseline，bridge 会用下一次事务快照确认其尾 ID 仍在保留窗口。若生产者已经裁剪了该基线，订阅直接返回 `requested_event_id: null` 的 `gap`，不会先交付 retained tail。这个检查有明确的性能代价：每轮订阅需要一个包含 `XRANGE`、`XREVRANGE`、非阻塞 `XREAD` 的事务快照；空闲时还需要单独的阻塞 `XREAD` 来唤醒。
+
+“有效但已淘汰”和 malformed cursor 是不同策略：本契约只要求前者产生 `gap`。Redis 的 malformed ID 仍从 live tail 等待；Memory 对 malformed ID 及序号不低于水位线的未知 ID 仍采用既有的最早保留事件策略。对于序号已经低于水位线的数字格式 foreign ID，Memory 无法再校验已淘汰的 timestamp，因此保守返回 `gap`，优先保证客户端不会把不完整重放误认为完整。
 
 ---
 
@@ -167,7 +189,7 @@ sequenceDiagram
 
 - 没有 `RunManager` —— 一次 `stream()` 调用对应一次生命周期，只生成轻量 `run_id` 供 runtime context、tracing 和 per-run middleware 使用。
 - 没有 `StreamBridge` —— 直接 `yield`，生产和消费在同一个 Python 调用栈，不需要跨 task 中介。
-- 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 对象（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict）。Jupyter 用户拿到的是真正的类型，不是匿名 dict。
+- 没有 JSON 序列化 —— `StreamEvent.data` 直接装原生 LangChain 值（`AIMessage.content`、`usage_metadata` 的 `UsageMetadata` TypedDict，以及非 `None` 的 `ToolMessage.artifact`）。`messages-tuple` 工具结果和 `values` 快照里的工具消息都会保留 artifact；没有 artifact 的工具消息维持原有字段形状。Jupyter 用户拿到的是真正的类型，不是经过网络序列化后的匿名值。
 - 没有 asyncio —— 调用者可以直接 `for event in ...`，不必写 `async for`。
 
 ---
@@ -293,6 +315,8 @@ sequenceDiagram
 
 本文档的直接起因是 bytedance/deer-flow#1969：`DeerFlowClient.stream()` 原本只订阅 `["values", "custom"]`，**漏了 `"messages"`**。结果 `client.stream("hello")` 等价于一次性返回，视觉上和 `chat()` 没区别。
 
+Custom 事件还有一条独立回归边界：`get_stream_writer()` 产生的 chunk 不会自动成为 `astream_events(version="v2")` 的 `on_custom_event`，而 callback dispatch 也不会自动进入 `stream_mode="custom"`。测试必须使用真实最小 LangGraph 同时锁定两种 API，断言每个消费者各收到一次且 payload 相同；仅 mock 任一函数无法证明协议互操作。
+
 这类 bug 有三个结构性原因：
 
 1. **多协议层命名**：`messages` / `messages-tuple` / HTTP SSE `messages` 是同一概念的三个名字。在其中一层出错不会在另外两层报错。
@@ -340,6 +364,7 @@ assert "messages" in agent.stream.call_args.kwargs["stream_mode"]
 | 关心什么 | 看这里 |
 |---|---|
 | DeerFlowClient 嵌入式流 | `packages/harness/deerflow/client.py::DeerFlowClient.stream` |
+| Embedded ToolMessage artifact 序列化 | `packages/harness/deerflow/client.py::_tool_message_event` / `_serialize_message` |
 | `chat()` 的 delta 累加器 | `packages/harness/deerflow/client.py::DeerFlowClient.chat` |
 | Gateway async 流 | `packages/harness/deerflow/runtime/runs/worker.py::run_agent` |
 | HTTP SSE 帧输出 | `app/gateway/services.py::sse_consumer` / `format_sse` |

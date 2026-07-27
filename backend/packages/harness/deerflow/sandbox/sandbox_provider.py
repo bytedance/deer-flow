@@ -51,7 +51,10 @@ class SandboxProvider(ABC):
         pass
 
     def reset(self) -> None:
-        """Clear cached state that survives provider instance replacement."""
+        """Clear cached state that survives provider instance replacement.
+
+        Provider overrides can release resources and make the instance unusable.
+        """
         pass
 
 
@@ -115,7 +118,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
 def reset_sandbox_provider() -> None:
     """Reset the sandbox provider singleton.
 
-    This clears the cached instance without calling shutdown.
+    This clears the cached instance without calling shutdown directly.
     The next call to `get_sandbox_provider()` will create a new instance.
     Useful for testing or when switching configurations.
 
@@ -124,7 +127,9 @@ def reset_sandbox_provider() -> None:
     `LocalSandbox` singleton). Without it, config/mount changes would not take
     effect on the next acquire().
 
-    Note: If the provider has active sandboxes, they will be orphaned.
+    A provider override can release active sandboxes during reset.
+    Otherwise, active sandboxes become orphaned.
+    Do not reuse the detached provider after reset.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
     global _default_sandbox_provider
