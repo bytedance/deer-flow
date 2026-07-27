@@ -77,6 +77,8 @@ monocle = ["monocle_apptrace>=0.8.8"]
 # so the core harness install stays lean; import is lazy inside the private
 # Playwright loop. After install, run `playwright install chromium` once.
 browser = ["playwright>=1.40"]
+# Optional Chinese tokenization for the FTS5 memory retrieval adapter.
+memory-zh = ["jieba>=0.42.1"]
 
 [build-system]
 requires = ["hatchling"]

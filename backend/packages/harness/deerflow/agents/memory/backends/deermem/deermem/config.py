@@ -69,8 +69,8 @@ class DeerMemConfig(BaseModel):
         description="Maximum wait for the per-scope cross-process advisory file lock.",
     )
     retrieval_adapter: str = Field(
-        default="",
-        description="Optional dotted retrieval-adapter factory. It receives DeerMemConfig and must implement RetrievalPort.",
+        default="fts5",
+        description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
     )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
