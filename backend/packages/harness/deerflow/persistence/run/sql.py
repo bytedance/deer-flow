@@ -11,11 +11,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -77,7 +77,7 @@ class RunRepository(RunStore):
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
         # ``coerce_iso`` normalizes naive datetimes as UTC.
-        for key in ("created_at", "updated_at", "lease_expires_at"):
+        for key in ("created_at", "updated_at", "lease_expires_at", "cancel_requested_at"):
             val = d.get(key)
             if isinstance(val, datetime):
                 d[key] = coerce_iso(val)
@@ -509,6 +509,62 @@ class RunRepository(RunStore):
         }
         async with self._sf() as session:
             result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status.in_(("pending", "running"))).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        """Renew the owner lease and read cancellation intent atomically."""
+        lease_dt = datetime.fromisoformat(lease_expires_at)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .values(
+                    lease_expires_at=lease_dt,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(RunRow.run_id, RunRow.cancel_action)
+            )
+            row = result.first()
+            await session.commit()
+        if row is None:
+            return LeaseRenewal(renewed=False)
+        return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
+
+    async def request_cancel(self, run_id: str, *, action: str) -> bool:
+        """Atomically persist the first cancellation action on an active run."""
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .values(
+                    cancel_action=case(
+                        (RunRow.cancel_action.is_(None), action),
+                        else_=RunRow.cancel_action,
+                    ),
+                    cancel_requested_at=case(
+                        (RunRow.cancel_requested_at.is_(None), now),
+                        else_=RunRow.cancel_requested_at,
+                    ),
+                    updated_at=now,
+                )
+            )
             await session.commit()
             return result.rowcount != 0
 

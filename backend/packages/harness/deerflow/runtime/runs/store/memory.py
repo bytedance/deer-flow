@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import LeaseRenewal, RunStore
 
 
 class MemoryRunStore(RunStore):
@@ -52,6 +52,7 @@ class MemoryRunStore(RunStore):
         lease_expires_at=None,
     ):
         now = datetime.now(UTC).isoformat()
+        existing = self._runs.get(run_id)
         self._runs[run_id] = {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -69,6 +70,10 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            # ``put`` is an idempotent snapshot write. Preserve a cancellation
+            # request that may have raced a retry of an earlier snapshot.
+            "cancel_action": existing.get("cancel_action") if existing else None,
+            "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
         }
         self._index_run(run_id, thread_id)
 
@@ -254,6 +259,40 @@ class MemoryRunStore(RunStore):
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        # Delegate through ``update_lease`` so lightweight subclasses and tests
+        # that override the legacy primitive keep the same behavior.
+        renewed = await self.update_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+        if not renewed:
+            return LeaseRenewal(renewed=False)
+        run = self._runs.get(run_id)
+        return LeaseRenewal(
+            renewed=True,
+            cancel_action=run.get("cancel_action") if run is not None else None,
+        )
+
+    async def request_cancel(self, run_id: str, *, action: str) -> bool:
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        run = self._runs.get(run_id)
+        if run is None or run["status"] not in ("pending", "running"):
+            return False
+        if run.get("cancel_action") is None:
+            run["cancel_action"] = action
+            run["cancel_requested_at"] = datetime.now(UTC).isoformat()
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -409,6 +448,8 @@ class MemoryRunStore(RunStore):
             "error": None,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "cancel_action": None,
+            "cancel_requested_at": None,
             "created_at": created_at or now,
             "updated_at": now,
         }

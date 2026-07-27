@@ -21,6 +21,18 @@ class EditReplayVisibility:
     hidden_attempt_run_ids: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class LeaseRenewal:
+    """Result of renewing a run lease.
+
+    ``cancel_action`` carries a durable cancellation request to the owning
+    worker without transferring lease ownership.
+    """
+
+    renewed: bool
+    cancel_action: str | None = None
+
+
 class RunStore(abc.ABC):
     @abc.abstractmethod
     async def put(
@@ -216,6 +228,38 @@ class RunStore(abc.ABC):
     ) -> bool:
         """Renew the lease on an active run. Returns ``False`` when no row matched."""
         pass
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        """Renew ownership and return any durable cancellation request.
+
+        The default wraps the legacy ``update_lease`` method and returns no
+        cancellation action, so third-party stores remain source-compatible
+        without adding a background read. Stores that support multi-process
+        cancellation must override this method to renew and observe the
+        request atomically.
+        """
+        renewed = await self.update_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+        return LeaseRenewal(renewed=renewed)
+
+    async def request_cancel(self, run_id: str, *, action: str) -> bool:
+        """Persist the first cancellation action for an active run.
+
+        Implementations must update only ``pending`` or ``running`` rows and
+        return ``False`` when no active row matched. This concrete default
+        avoids breaking older custom stores; callers retain the legacy
+        lease-conflict behavior when the primitive is unsupported.
+        """
+        raise NotImplementedError
 
     @abc.abstractmethod
     async def claim_for_takeover(

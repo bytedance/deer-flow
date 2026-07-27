@@ -1037,6 +1037,55 @@ class RunManager:
         await self._persist_model_name(run_id, model_name)
         logger.info("Run %s model_name=%s", run_id, model_name)
 
+    async def _request_remote_cancel(self, run_id: str, *, action: str) -> CancelOutcome:
+        """Record cancellation for a run whose task belongs to another worker."""
+        if self._store is None:
+            return CancelOutcome.unknown
+        try:
+            requested = await self._call_store_with_retry(
+                "request_cancel",
+                run_id,
+                lambda: self._store.request_cancel(run_id, action=action),
+            )
+        except NotImplementedError:
+            # Keep third-party stores that predate durable cancellation on the
+            # old safe behavior instead of pretending the owner was notified.
+            logger.info(
+                "Run store does not support cross-worker cancellation for run %s",
+                run_id,
+            )
+            return CancelOutcome.lease_valid_elsewhere
+        except Exception:
+            logger.warning(
+                "Failed to persist cancellation request for run %s",
+                run_id,
+                exc_info=True,
+            )
+            return CancelOutcome.unknown
+
+        if requested:
+            logger.info(
+                "Run %s cancellation requested from owning worker (action=%s)",
+                run_id,
+                action,
+            )
+            return CancelOutcome.requested
+
+        # Completion may have won the race between the caller's read and the
+        # guarded cancellation UPDATE. Re-read so the API reports that precise
+        # terminal result rather than claiming the request was accepted.
+        try:
+            fresh = await self._store.get(run_id)
+        except Exception:
+            fresh = None
+        if fresh is None:
+            return CancelOutcome.unknown
+        if fresh.get("status") not in ("pending", "running"):
+            return CancelOutcome.not_cancellable
+        # A legacy/partial store implementation may decline the request while
+        # the owner is still live. Preserve the former lease-conflict signal.
+        return CancelOutcome.lease_valid_elsewhere
+
     async def cancel(self, run_id: str, *, action: str = "interrupt") -> CancelOutcome:
         """Request cancellation of a run.
 
@@ -1051,9 +1100,9 @@ class RunManager:
           ``error``.  The owning worker is assumed dead (its heartbeat
           stopped renewing).
 
-        - **Lease still valid** — returns ``lease_valid_elsewhere`` so
-          the caller can return HTTP 409 + ``Retry-After`` to tell the
-          client when to retry.
+        - **Lease still valid** — durably records the cancellation action.
+          The owner observes it on its next heartbeat and performs the same
+          local abort/finalization path as a directly-routed request.
 
         In single-worker mode (``heartbeat_enabled=False``) store-only
         hydrated runs that aren't in-memory return ``not_active_locally``,
@@ -1138,7 +1187,7 @@ class RunManager:
         lease_expires_at: str | None = row.get("lease_expires_at")
 
         if not is_lease_expired(lease_expires_at, grace_seconds=grace_seconds):
-            return CancelOutcome.lease_valid_elsewhere
+            return await self._request_remote_cancel(run_id, action=action)
 
         take_over_msg = f"Run reclaimed by worker {self._worker_id}: the owning worker ({row.get('owner_worker_id') or 'unknown'}) stopped renewing its lease and is presumed dead."
         try:
@@ -1160,7 +1209,7 @@ class RunManager:
             return CancelOutcome.taken_over
 
         # The conditional UPDATE matched 0 rows. Two causes:
-        #   (a) the owner renewed the lease → lease_valid_elsewhere.
+        #   (a) the owner renewed the lease → persist a cancellation request.
         #   (b) the row went terminal between our read and the claim
         #       (run finished, or another worker already took it over)
         #       → not_cancellable or taken_over.
@@ -1177,8 +1226,9 @@ class RunManager:
                 logger.info("Run %s takeover lost to another worker already at error", run_id)
                 return CancelOutcome.taken_over
             return CancelOutcome.not_cancellable
-        # Row is still active — lease must have been renewed by the owner.
-        return CancelOutcome.lease_valid_elsewhere
+        # Row is still active — lease was renewed by the owner while the
+        # takeover raced. Notify that owner instead of exposing routing as 409.
+        return await self._request_remote_cancel(run_id, action=action)
 
     def _compute_lease_expires_at(self) -> str | None:
         """Return the lease expiry ISO timestamp for a freshly created run.
@@ -1815,16 +1865,16 @@ class RunManager:
             new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
             try:
                 async with asyncio.timeout(remaining):
-                    updated = await self._call_store_with_retry(
-                        "update_lease",
+                    renewal = await self._call_store_with_retry(
+                        "renew_lease",
                         run_id,
-                        lambda: self._store.update_lease(
+                        lambda: self._store.renew_lease(
                             run_id,
                             owner_worker_id=self._worker_id,
                             lease_expires_at=new_expiry,
                         ),
                     )
-                if updated:
+                if renewal.renewed:
                     if confirmed_deadline <= datetime.now(UTC):
                         await self._mark_ownership_lost(
                             record,
@@ -1838,8 +1888,18 @@ class RunManager:
                     # fields). Re-acquiring ``self._lock`` here would
                     # serialise against unrelated run mutations for no gain.
                     record.lease_expires_at = new_expiry
+                    if renewal.cancel_action is not None:
+                        action = renewal.cancel_action
+                        if action not in ("interrupt", "rollback"):
+                            logger.warning(
+                                "Run %s has invalid durable cancel action %r; using interrupt",
+                                run_id,
+                                action,
+                            )
+                            action = "interrupt"
+                        await self.cancel(run_id, action=action)
                 else:
-                    # ``update_lease`` returned False — the row was claimed
+                    # ``renew_lease`` returned False — the row was claimed
                     # by another worker (status is no longer pending/running,
                     # or ``owner_worker_id`` changed). Stop the local task so
                     # we don't waste CPU or overwrite the takeover status on
@@ -2040,6 +2100,7 @@ class CancelOutcome(StrEnum):
     """Result of a :meth:`RunManager.cancel` call."""
 
     cancelled = "cancelled"
+    requested = "requested"
     taken_over = "taken_over"
     lease_valid_elsewhere = "lease_valid_elsewhere"
     not_cancellable = "not_cancellable"
