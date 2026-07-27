@@ -5,8 +5,6 @@ on demand via the ``list_uploaded_files`` tool.
 """
 
 import logging
-
-from deerflow.tools.builtins.list_uploaded_files_tool import _format_extension_counts
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -19,6 +17,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tools.builtins.list_uploaded_files_tool import _format_extension_counts
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text

@@ -594,11 +594,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         thread_store=get_thread_store(request),
         app_config=get_config(),
-        on_run_completed=(
-            (_svc := getattr(request.app.state, "scheduled_task_service", None)) is not None
-            and _svc.handle_run_completion
-            or None
-        ),
+        on_run_completed=((_svc := getattr(request.app.state, "scheduled_task_service", None)) is not None and _svc.handle_run_completion or None),
     )
 
 
