@@ -250,10 +250,12 @@ This section accumulates work toward the **2.1.0** milestone
   facts list is empty; stop the busy-spin in the debounced update queue; and
   flush the memory queue on graceful shutdown to prevent loss. ([#3719], [#4074],
   [#4076], [#4034], [#4217], [#3993], [#3992], [#4073], [#4181])
-- **runs:** Close multi-worker ownership gaps in run atomicity; degrade cancel
-  to lease takeover for multi-worker; keep `create_thread` idempotent when the
-  insert loses a race; read `stop_reason` from runtime context; and persist run
-  duration in checkpoints for history reads. ([#4003], [#4064], [#3800], [#4188],
+- **runs:** Close multi-worker ownership gaps in run atomicity; fail-stop local
+  execution when lease renewal cannot be confirmed before its deadline and
+  fence late completion writes after peer takeover; degrade cancel to lease
+  takeover for multi-worker; keep `create_thread` idempotent when the insert
+  loses a race; read `stop_reason` from runtime context; and persist run duration
+  in checkpoints for history reads. ([#4003], [#4064], [#4414], [#3800], [#4188],
   [#4118])
 - **runtime:** Serialize SQLite event-store writes to prevent per-thread
   sequence collisions; skip hidden human messages in the journal; and drop the
@@ -1121,4 +1123,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4287]: https://github.com/bytedance/deer-flow/pull/4287
 [#4288]: https://github.com/bytedance/deer-flow/pull/4288
 [#4324]: https://github.com/bytedance/deer-flow/issues/4324
+[#4414]: https://github.com/bytedance/deer-flow/issues/4414
 [#4424]: https://github.com/bytedance/deer-flow/issues/4424

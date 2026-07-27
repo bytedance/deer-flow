@@ -58,14 +58,16 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-worker configurations before persistence starts.
 
-    Three checks (all must pass for multi-worker):
+    Four checks (all must pass for multi-worker):
 
     1. Process-local browser sessions must be disabled. Browser tools keep
        Chromium and Playwright objects in one worker's memory, while ordinary
        uvicorn dispatch provides no thread-id affinity.
     2. The DB backend must be Postgres — SQLite write-locks cannot support
        concurrent multi-process access.
-    3. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+    3. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
+       process-local, so workers cannot enforce a shared singleton receipt.
+    4. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
@@ -88,6 +90,14 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     backend = getattr(config.database, "backend", None)
     if backend != "postgres":
         raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+
+    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
+    if run_events_backend != "db":
+        raise SystemExit(
+            f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
+            "Memory and JSONL event stores are process-local, so delivery receipt singleton guarantees cannot hold across workers. "
+            "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
+        )
 
     run_ownership = getattr(config, "run_ownership", None)
     if run_ownership is None or not run_ownership.heartbeat_enabled:
@@ -448,6 +458,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_manager = RunManager(
             store=app.state.run_store,
             run_ownership_config=run_ownership_config,
+            event_store=app.state.run_event_store,
             on_orphans_recovered=terminalize_recovered_runs,
         )
         # Startup recovery: mark inflight runs whose lease has expired as error.

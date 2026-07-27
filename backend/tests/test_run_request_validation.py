@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -32,7 +33,7 @@ def client() -> TestClient:
     ("field", "value"),
     [
         ("webhook", "https://example.com/callback"),
-        ("stream_resumable", False),
+        ("stream_resumable", True),
         ("on_completion", "complete"),
         ("on_completion", "continue"),
         ("on_completion", "keep"),
@@ -113,6 +114,47 @@ def test_run_request_keeps_supported_modes_and_compatibility_defaults() -> None:
     assert set(body.stream_mode or []) == SUPPORTED_STREAM_MODES
     assert body.on_completion is None
     assert body.if_not_exists == "create"
+
+
+def _sdk_default_payload(method: str) -> dict[str, Any]:
+    """Capture the body a stock ``langgraph_sdk`` client sends for a default run."""
+    from langgraph_sdk.client import get_client
+
+    client = get_client(url="http://gateway.invalid")
+    captured: dict[str, Any] = {}
+
+    def capture(*_args: Any, json: dict[str, Any] | None = None, **_kwargs: Any) -> None:
+        captured.update(json or {})
+
+    async def capture_post(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        capture(*args, **kwargs)
+        return {}
+
+    if method == "stream":
+        client.runs.http.stream = capture  # type: ignore[method-assign]
+        # ``stream()`` is a sync factory: the payload is built and handed to the
+        # transport before the returned async iterator is consumed.
+        client.runs.stream("thread-id", "deerflow", input={"messages": []})
+    else:
+        client.runs.http.post = capture_post  # type: ignore[method-assign]
+        asyncio.run(client.runs.create("thread-id", "deerflow", input={"messages": []}))
+    return captured
+
+
+@pytest.mark.parametrize("method", ["stream", "create"])
+def test_gateway_accepts_langgraph_sdk_default_payload(client: TestClient, method: str) -> None:
+    """The SDK's own defaults must never be rejected as unsupported options (#4466).
+
+    ``stream_resumable`` defaults to ``False`` rather than ``None``, so the SDK's
+    drop-``None`` payload filter always forwards it; every IM channel run goes
+    through this path.
+    """
+    payload = _sdk_default_payload(method)
+
+    assert payload["stream_resumable"] is False, "SDK contract changed; update this test"
+    response = client.post("/api/runs/stream", json=payload)
+
+    assert response.status_code != 422, response.text
 
 
 @pytest.mark.parametrize(
@@ -203,8 +245,9 @@ def test_openapi_run_option_schema_exposes_only_supported_values() -> None:
     properties = schema["properties"]
 
     assert schema["additionalProperties"] is False
-    for field in ("webhook", "stream_resumable", "after_seconds", "feedback_keys"):
+    for field in ("webhook", "after_seconds", "feedback_keys"):
         assert properties[field]["type"] == "null"
+    assert properties["stream_resumable"]["anyOf"] == [{"const": False, "type": "boolean"}, {"type": "null"}]
     assert properties["on_completion"]["type"] == "null"
     assert properties["if_not_exists"]["const"] == "create"
     assert properties["multitask_strategy"]["enum"] == ["reject", "rollback", "interrupt"]

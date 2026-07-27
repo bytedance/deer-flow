@@ -487,6 +487,7 @@ export const zhCN: Translations = {
     startConversation: "开始新的对话以查看消息",
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
+    streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
   },
 
   // Chats
@@ -495,6 +496,9 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+    pinChat: "置顶对话",
+    unpinChat: "取消置顶",
+    pinChatFailed: "更新对话置顶状态失败",
   },
 
   // Sidecar

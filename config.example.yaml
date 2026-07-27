@@ -1649,6 +1649,10 @@ memory:
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: ""       # optional dotted factory(config) supplied by the retrieval module
     debounce_seconds: 30 # Wait time before processing queued updates
+    # Backpressure cap on pending items. 0 = unlimited. At the cap, new
+    # non-signal updates are rejected (QueueFull); signal updates are always
+    # admitted so important memories are never shed.
+    queue_max_depth: 1000
     model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
       # provider: openai
       # model: gpt-4o-mini
@@ -1696,6 +1700,9 @@ memory:
     consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
     consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
     consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
+    # extraction_callback is a host-injected post-extraction observability hook
+    # (token usage, facts accepted/rejected, rejection rate). The factory
+    # injects a logging default; set programmatically to emit a Langfuse span.
     # Message processing (externalized patterns / prompt templates):
     #   patterns_dir        - dir with correction.yaml / reinforcement.yaml overriding
     #                         the bundled signal-detection patterns. None (default) =
@@ -1887,6 +1894,11 @@ scheduler:
 # grace_seconds if your environment cannot keep clocks within a few seconds;
 # the trade-off is longer recovery latency for genuinely dead workers
 # (lease_seconds + grace_seconds from last heartbeat to reclaim).
+#
+# The owning worker itself does NOT use grace_seconds as extra execution time.
+# If renewal cannot be confirmed before lease_seconds expires, it cancels the
+# local run and suppresses durable finalization; grace_seconds only delays when
+# a peer may reclaim the expired row.
 
 run_ownership:
   lease_seconds: 30           # Seconds before a run lease expires if not renewed.
@@ -1908,12 +1920,14 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256
+#   queue_maxsize: 256           # data events retained per run. A reconnect
+#                                # older than this window receives SSE `gap`.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # events retained per run (redis stream MAXLEN)
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
