@@ -94,6 +94,123 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("keeps rendered messages ordered when the latest history page advances", async ({
+    page,
+  }) => {
+    const originalPrompt = "/ppt-master Build the quarterly presentation";
+    const followUpPrompt = "Continue with the approved default layout";
+    const initialRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 51;
+      if (index === 0) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "human",
+            id: "history-prompt",
+            content: [{ type: "text", text: originalPrompt }],
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:00Z",
+        };
+      }
+      if (index === 1) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "ai",
+            id: "history-answer",
+            content: "Initial design is ready",
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:01Z",
+        };
+      }
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+          ...(index === 49
+            ? { additional_kwargs: { turn_duration: 704 } }
+            : {}),
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:02Z",
+      };
+    });
+    const shiftedRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 101;
+      return {
+        run_id: "run-shifted",
+        seq,
+        content: {
+          type: "ai",
+          id: `shifted-step-${seq}`,
+          content: `New presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:01:00Z",
+      };
+    });
+    let historyRequestCount = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Long presentation task",
+          updated_at: "2025-06-03T12:00:00Z",
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${MOCK_THREAD_ID}/messages/page`,
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          return route.fallback();
+        }
+        historyRequestCount += 1;
+        const rows = historyRequestCount === 1 ? initialRows : shiftedRows;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: rows,
+            has_more: true,
+            next_before_seq: rows[0]?.seq ?? null,
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText(originalPrompt)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+
+    const textarea = page.locator("textarea[name='message']");
+    await textarea.fill(followUpPrompt);
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => historyRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(1);
+    await expect(page.getByText(originalPrompt)).toBeVisible();
+    await expect(page.getByText(followUpPrompt)).toBeVisible();
+    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+
+    const originalBox = await page.getByText(originalPrompt).boundingBox();
+    const followUpBox = await page.getByText(followUpPrompt).boundingBox();
+    expect(originalBox).not.toBeNull();
+    expect(followUpBox).not.toBeNull();
+    expect(originalBox!.y).toBeLessThan(followUpBox!.y);
+  });
+
   test("shows a completed run duration once after multi-step history", async ({
     page,
   }) => {
