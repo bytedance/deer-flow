@@ -161,6 +161,47 @@ test("reasoning + content (no tool calls) yields a single assistant bubble, not 
   expect(turnUsage.at(-1)?.map((message) => message.id)).toEqual(["ai-1"]);
 });
 
+test("keeps unresolved streaming text in the processing group when tool calls arrive later", () => {
+  const textOnlyMessages = [
+    { id: "human-1", type: "human", content: "Create a presentation" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will inspect the source material first.",
+    },
+  ] as Message[];
+
+  const textOnlyGroups = getMessageGroups(textOnlyMessages, {
+    isCurrentTurnLoading: true,
+  });
+  expect(textOnlyGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+
+  const withToolCall = [
+    textOnlyMessages[0],
+    {
+      ...textOnlyMessages[1],
+      tool_calls: [
+        { id: "call-1", name: "read_file", args: { path: "slides.md" } },
+      ],
+    },
+  ] as Message[];
+  const toolCallGroups = getMessageGroups(withToolCall, {
+    isCurrentTurnLoading: true,
+  });
+  expect(toolCallGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(toolCallGroups[1]?.id).toBe(textOnlyGroups[1]?.id);
+
+  expect(getMessageGroups(textOnlyMessages).map((group) => group.type)).toEqual(
+    ["human", "assistant"],
+  );
+});
+
 test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
   // Companion to #3868: only the message that also becomes an assistant bubble
   // (content, no tool calls) is pulled out of the processing group. Reasoning

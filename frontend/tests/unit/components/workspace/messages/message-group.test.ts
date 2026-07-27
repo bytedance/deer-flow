@@ -32,6 +32,23 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("renders unresolved streaming assistant text before a tool call arrives", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "I will inspect the source material first.",
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expect(html).toContain(">inspect</span>");
+    expect(html).toContain(">source</span>");
+    expect(html).toContain(">first.</span>");
+  });
+
   it("renders assistant text attached to a tool-calling processing message", () => {
     const html = renderGroup([
       {
