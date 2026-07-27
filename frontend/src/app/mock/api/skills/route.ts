@@ -1,4 +1,9 @@
+import { rejectDisabledMockApi } from "@/core/mock-api/server-security";
+
 export function GET() {
+  const rejected = rejectDisabledMockApi();
+  if (rejected) return rejected;
+
   return Response.json({
     skills: [
       {

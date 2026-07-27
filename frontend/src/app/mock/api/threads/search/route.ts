@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 
+import { rejectDisabledMockApi } from "@/core/mock-api/server-security";
+
 type ThreadSearchRequest = {
   limit?: number;
   offset?: number;
@@ -14,6 +16,9 @@ type MockThreadSearchResult = Record<string, unknown> & {
 };
 
 export async function POST(request: Request) {
+  const rejected = rejectDisabledMockApi();
+  if (rejected) return rejected;
+
   const body = ((await request.json().catch(() => ({}))) ??
     {}) as ThreadSearchRequest;
 
