@@ -445,6 +445,25 @@ class TestFormPayload:
             {"id": "option-2", "label": "prod", "value": "prod"},
         ]
 
+    def test_required_accepts_integer_serialization(self, middleware):
+        """Some providers emit 1/0 for booleans; `required: 1` must not
+        silently flip a model-intended required field to optional."""
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Details please",
+                "clarification_type": "missing_info",
+                "fields": [
+                    {"name": "amount", "type": "number", "required": 1},
+                    {"name": "note", "type": "text", "required": 0},
+                ],
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["fields"][0]["required"] is True
+        assert payload["fields"][1]["required"] is False
+
     def test_field_placeholder_is_preserved(self, middleware):
         payload = middleware._build_human_input_payload(
             {

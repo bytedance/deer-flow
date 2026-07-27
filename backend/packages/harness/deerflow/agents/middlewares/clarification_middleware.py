@@ -110,9 +110,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
     @staticmethod
     def _normalize_bool(raw: Any) -> bool:
-        """Coerce a model-provided boolean; some models serialize booleans as strings."""
+        """Coerce a model-provided boolean; some models serialize booleans as strings or 1/0."""
         if isinstance(raw, bool):
             return raw
+        if isinstance(raw, int | float):
+            return bool(raw)
         if isinstance(raw, str):
             return raw.strip().lower() == "true"
         return False
@@ -189,7 +191,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return normalized
 
-    def _build_human_input_payload(self, args: dict[str, Any], *, tool_call_id: str, request_id: str) -> dict[str, Any]:
+    def _build_human_input_payload(self, args: dict[str, Any], *, tool_call_id: str, request_id: str, fields: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Build the structured UI payload while keeping ToolMessage.content as fallback.
 
         Protocol versioning: legacy modes (``free_text`` / ``choice_with_other``)
@@ -198,8 +200,12 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         degrade to the plain-text ToolMessage content. Replies stay on the v1
         response protocol (``text`` / ``option``) — the form card submits a
         readable ``value`` summary, so no new response kind is introduced.
+
+        ``fields`` accepts an already-normalized list so callers rendering both
+        the payload and the text fallback normalize only once.
         """
-        fields = self._normalize_fields(args.get("fields"))
+        if fields is None:
+            fields = self._normalize_fields(args.get("fields"))
         options = self._normalize_options(args.get("options", []))
         clarification_type = str(args.get("clarification_type", "missing_info"))
 
@@ -252,11 +258,13 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         """
         return any("\u4e00" <= char <= "\u9fff" for char in text)
 
-    def _format_clarification_message(self, args: dict) -> str:
+    def _format_clarification_message(self, args: dict, fields: list[dict[str, Any]] | None = None) -> str:
         """Format the clarification arguments into a user-friendly message.
 
         Args:
             args: The tool call arguments containing clarification details
+            fields: Already-normalized form fields, so callers rendering both
+                the payload and this fallback normalize only once
 
         Returns:
             Formatted message string
@@ -264,7 +272,8 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
-        fields = self._normalize_fields(args.get("fields"))
+        if fields is None:
+            fields = self._normalize_fields(args.get("fields"))
         options = self._normalize_options(args.get("options", []))
 
         # Type-specific icons
@@ -366,14 +375,18 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         logger.info("Intercepted clarification request")
         logger.debug("Clarification question: %s", question)
 
+        # Normalize form fields once; both the text fallback and the payload
+        # consume the same result.
+        fields = self._normalize_fields(args.get("fields"))
+
         # Format the clarification message
-        formatted_message = self._format_clarification_message(args)
+        formatted_message = self._format_clarification_message(args, fields=fields)
 
         # Get the tool call ID
         tool_call_id = request.tool_call.get("id", "")
 
         request_id = self._stable_message_id(tool_call_id, formatted_message)
-        human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id)
+        human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id, fields=fields)
 
         # Create a ToolMessage with the formatted question
         # This will be added to the message history
