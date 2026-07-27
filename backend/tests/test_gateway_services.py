@@ -1165,6 +1165,49 @@ def test_start_run_rejects_legacy_auth_token_before_persistence():
     asyncio.run(_scenario())
 
 
+def test_start_run_rejects_legacy_auth_token_in_config_metadata_before_persistence(
+    _stub_app_config,
+):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        request, run_store, thread_store = _make_start_run_persistence_context()
+        body = RunCreateRequest(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            metadata={"token_usage": 7},
+            config={
+                "metadata": {
+                    "auth_token": "legacy-secret",
+                    "nested": {"auth_token": "ordinary-nested-metadata"},
+                }
+            },
+        )
+        create_or_reject = AsyncMock(side_effect=AssertionError("run persistence was reached"))
+
+        with patch.object(
+            request.app.state.run_manager,
+            "create_or_reject",
+            new=create_or_reject,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await start_run(body, "thread-config-secret-admission", request)
+
+        assert exc_info.value.status_code == 422
+        assert "config.context.secrets" in str(exc_info.value.detail)
+        create_or_reject.assert_not_awaited()
+        assert await run_store.list_by_thread("thread-config-secret-admission") == []
+        assert await thread_store.get("thread-config-secret-admission") is None
+
+    asyncio.run(_scenario())
+
+
 def test_start_run_preserves_ordinary_metadata(_stub_app_config):
     import asyncio
     from typing import Any

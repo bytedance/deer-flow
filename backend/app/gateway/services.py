@@ -912,8 +912,11 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    body_config = getattr(body, "config", None)
+    config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
     try:
         validate_run_metadata_secrets(getattr(body, "metadata", None))
+        validate_run_metadata_secrets(config_metadata)
     except LegacyRunMetadataSecretError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
