@@ -9,6 +9,8 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
+from telegram.error import BadRequest
+
 from app.channels.base import Channel
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -270,11 +272,18 @@ class TelegramChannel(Channel):
             await self._send_new_message(chat_id, chat_key, chunk)
 
     async def _edit_final_chunk(self, bot, chat_id: int, message_id: int, text: str) -> bool:
-        """Edit with one rate-limit retry. Returns False if the edit could not be applied."""
+        """Edit with one rate-limit retry and HTML→plain fallback. Returns False if the edit could not be applied."""
+        parse_mode = "HTML"
         for attempt in range(2):
             try:
-                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=parse_mode)
                 return True
+            except BadRequest:
+                if attempt == 0:
+                    logger.debug("[Telegram] HTML parse rejected for edit, falling back to plain in chat=%s", chat_id)
+                    parse_mode = None
+                    continue
+                return False
             except Exception as exc:
                 if self._is_not_modified(exc):
                     return True
@@ -286,7 +295,7 @@ class TelegramChannel(Channel):
         return False
 
     async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
-        """Send a fresh message with retry/backoff. Returns the sent message_id."""
+        """Send a fresh message with retry/backoff and HTML→plain fallback. Returns the sent message_id."""
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
 
         # Reply to the last bot message in this chat for threading
@@ -301,11 +310,24 @@ class TelegramChannel(Channel):
             self._last_bot_message[chat_key] = sent.message_id
             return sent.message_id
 
-        return await self._send_with_retry(
-            send_message,
-            max_retries=_max_retries,
-            log_prefix="[Telegram]",
-        )
+        # Try HTML parse_mode first for rich formatting; fall back to plain
+        # text without retries if the bot rejects the HTML payload.
+        for attempt in range(2):
+            parse_mode = None if attempt > 0 else "HTML"
+            kwargs["parse_mode"] = parse_mode
+
+            try:
+                return await self._send_with_retry(
+                    send_message,
+                    max_retries=_max_retries,
+                    log_prefix="[Telegram]",
+                )
+            except BadRequest:
+                if attempt == 0:
+                    logger.debug("[Telegram] HTML parse rejected, falling back to plain text in chat=%s", chat_id)
+                    continue
+                raise
+        return None
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:
