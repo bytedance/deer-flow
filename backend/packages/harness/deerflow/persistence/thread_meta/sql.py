@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, select, update
+from sqlalchemy import case, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -204,16 +204,52 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         """Merge ``metadata`` into ``metadata_json``.
 
-        Read-modify-write inside a single session/transaction so concurrent
-        callers see consistent state. No-op if the row does not exist or
-        the user_id check fails.
+        The merge is a read-modify-write, so concurrent callers must serialise
+        on the row -- otherwise the second commit silently overwrites the
+        first (issue #4488: 96/100 lost patches under concurrency on the SQL
+        backend, while the in-memory store masked the race by not yielding
+        between its get/put).
+
+        Serialisation is dialect-aware:
+
+        - PostgreSQL: ``SELECT ... FOR UPDATE`` takes a row-level lock inside
+          the current transaction. The second worker blocks until the first
+          commits, then re-reads the merged JSON and applies its own patch on
+          top. This is the same pattern used by ``RunEventRepository`` for
+          monotonic seq assignment.
+        - SQLite: ``BEGIN IMMEDIATE`` acquires a RESERVED lock *before* the
+          read. SQLite (even under WAL) is single-writer per file, and the
+          default DEFERRED transaction only takes the write lock on the first
+          DML -- which lets two sessions read the same pre-merge JSON and
+          clobber each other. Forcing IMMEDIATE up front makes the second
+          connection's begin block (within the 30s ``busy_timeout`` set in
+          ``persistence/engine.py``) until the first commits, so its read
+          observes the merged row. ``with_for_update`` is a no-op on SQLite,
+          hence the branch.
 
         ``touch`` refreshes ``updated_at`` (default); pass ``touch=False`` to
         preserve recency ordering for metadata-only changes such as pin/unpin.
+        No-op if the row does not exist or the user_id check fails.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
+            bind = session.get_bind()
+            dialect_name = bind.dialect.name if bind is not None else ""
+
+            if dialect_name == "sqlite":
+                # Acquire the RESERVED write lock before the read so a second
+                # connection/process cannot read the pre-merge JSON and then
+                # overwrite us (or vice versa). SQLite serialises BEGIN
+                # IMMEDIATE across connections via the file lock; the 30s
+                # busy_timeout turns contention into orderly queueing.
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                # PostgreSQL (and any other dialect that understands row
+                # locking): hold the row until commit so concurrent workers
+                # serialise on it.
+                row = await session.get(ThreadMetaRow, thread_id, with_for_update=True)
+
             if row is None:
                 return
             if resolved_user_id is not None and row.user_id != resolved_user_id:
