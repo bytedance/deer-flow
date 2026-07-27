@@ -41,6 +41,9 @@ export interface Translations {
     exportAsJSON: string;
     exportSuccess: string;
     regenerate: string;
+    editAndRerun: string;
+    updateAndRerun: string;
+    editRerunWarning: string;
     branch: string;
     showArtifacts: string;
     browser: string;

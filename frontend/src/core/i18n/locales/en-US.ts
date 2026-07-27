@@ -52,6 +52,10 @@ export const enUS: Translations = {
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
     regenerate: "Regenerate",
+    editAndRerun: "Edit and rerun",
+    updateAndRerun: "Update and rerun",
+    editRerunWarning:
+      "Rerunning restores conversation state only. Files, memory, and external actions are not undone.",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
