@@ -439,7 +439,7 @@ Localhost persistence deliberately reads the direct request `Host` and ignores `
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types |
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
 | **Input Polish** (`/api/input-polish`) | `POST /` - rewrite a composer draft before it is sent. This is a short authenticated `runs:create` LLM request using `input_polish` config; it does not create a LangGraph run, persist a message, or modify thread state. Shares the non-graph one-shot LLM path (`deerflow.utils.oneshot_llm.run_oneshot_llm`) with the suggestions route so model build + Langfuse metadata + invoke stay in one place; validates the same stripped view of the draft it sends to the model, and preserves literal `<think>` substrings in the rewrite (`strip_think_blocks(truncate_unclosed=False)`) |
-| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated per-run messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /{rid}/workspace-changes` - workspace/output file change summary and optional diffs; `GET /../messages` - legacy thread message array; `GET /../messages/page` - backward thread-global `seq` history page with middleware/subagent-AI/successful-regenerate filtering and page-run-scoped feedback enrichment; subagent AI callbacks remain available through run events while parent `task` ToolMessages stay visible for card restoration; `GET /../token-usage` - aggregate tokens |
+| **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block; `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest assistant answer, carrying the latest non-empty thread title in graph input so resuming an older checkpoint cannot roll back a later manual rename (#4457); `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/messages` - paginated per-run messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /{rid}/workspace-changes` - workspace/output file change summary and optional diffs; `GET /../messages` - legacy thread message array; `GET /../messages/page` - backward thread-global `seq` history page with middleware/subagent-AI/successful-regenerate filtering and page-run-scoped feedback enrichment; subagent AI callbacks remain available through run events while parent `task` ToolMessages stay visible for card restoration; `GET /../token-usage` - aggregate tokens |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream` - stateless run + SSE; `POST /wait` - stateless run + block; `GET /{rid}/messages` - paginated messages by run_id `{data, has_more}` (cursor: `after_seq`/`before_seq`); `GET /{rid}/feedback` - list feedback by run_id |
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
@@ -902,7 +902,7 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
 
-**Mode is process-frozen and restart-required.** `make_lead_agent` freezes the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). A second, different mode in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
+**Mode is process-frozen and restart-required.** `make_lead_agent` and the embedded `DeerFlowClient` freeze the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) and the delta snapshot frequency (`agents/thread_state.py::freeze_delta_snapshot_frequency`, from the `checkpoint_delta_snapshot_frequency` config knob, default 1000 — restart-required like the mode) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). Adapted middleware schemas are cached by schema, mode, and resolved snapshot frequency so a pre-freeze ephemeral graph cannot leave a stale default-frequency schema behind. A second, different mode or frequency in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
 
 **Compatibility is asymmetric and fail-closed.** Every checkpoint written in delta mode carries metadata marker `deerflow_checkpoint_channel_mode: "delta"` (injected via `inject_checkpoint_mode`; absence of marker = full, so pre-feature checkpoints need no migration). Before any state read/write, `ensure_checkpoint_mode_compatible` rejects a full-mode process opening a delta thread with `CheckpointModeMismatchError` (surfaced as HTTP 409 with the cause and thread id by the threads router; `CheckpointModeReconfigurationError` maps to 503) — a full-mode raw read of a delta blob would silently return empty/partial `messages`. The reverse direction is allowed: delta-mode processes read full checkpoints transparently (old full checkpoints seed the delta channel), so full → delta is the smooth migration path; delta → full requires materializing/converting the data first. Detection also honors upstream's `counters_since_delta_snapshot.messages` metadata, and an explicit config marker takes precedence over any ambient context value.
 
@@ -920,11 +920,11 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 - `runtime/checkpoint_mode.py` — mode freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
 - `checkpoint_patches.py` (package root) — checkpoint-machinery patches: delta-history folding for `InMemorySaver` (delegating to the base walk), stable message IDs across materialization, upstream first-write drop fix, and `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty (MISSING) channel — Union-typed reducer channels (`sandbox`/`goal`/`todos`/`promoted`) have no constructible default, so a replace-style write into a fresh branch thread or a never-written channel stored the wrapper literally and crashed the next consumer (#4380; probe-guarded, stands down if upstream fixes it)
-- `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `DELTA_MESSAGES_FIELD` (`DeltaChannel` with `snapshot_frequency=1000`), schema adaptation helpers
+- `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `DELTA_MESSAGES_FIELD` (`DeltaChannel` whose `snapshot_frequency` resolves from the `checkpoint_delta_snapshot_frequency` config knob via `freeze_delta_snapshot_frequency`/`resolved_delta_snapshot_frequency`; 1000 is only the default), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer)
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`
 
-**Checkpoint channel benchmark**: `scripts/benchmark/bench_checkpoint_channels.py`
+**Checkpoint channel benchmark**: `scripts/benchmark/checkpoint/bench_channels.py`
 runs paired `full`/`delta` message-only StateGraphs in a fresh child process per
 case, using sync `InMemorySaver` or `SqliteSaver` so reducer, serialization, and
 saver costs stay separate from Gateway/async scheduling. It reports deterministic
@@ -937,7 +937,7 @@ estimated cumulative full-payload cap skips both modes of an oversized pair when
 full-payload cap, so size those runs explicitly. Use `--allow-large-cases` only
 on a provisioned machine. Duplicate CSV matrix values are ignored with a warning;
 use `--repetitions` for repeated samples. Summarize paired successful repetitions
-with `scripts/benchmark/summarize_checkpoint_channels.py` (all ratios are
+with `scripts/benchmark/checkpoint/summarize_channels.py` (all ratios are
 `delta/full`). `--profile-dir /tmp/checkpoint-profiles` writes one cProfile
 artifact per case for attribution. Profiled rows carry `profiled: true`, and the
 summarizer automatically excludes them from baseline summaries with a warning.
@@ -948,19 +948,61 @@ Example:
 
 ```bash
 cd backend
-PYTHONPATH=. uv run python scripts/benchmark/bench_checkpoint_channels.py \
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
   --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
   --repetitions 7 --output /tmp/checkpoint-bench.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/summarize_checkpoint_channels.py \
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
   /tmp/checkpoint-bench.jsonl
 ```
 
-The sync storage benchmark is not an end-to-end Gateway benchmark. Complete
-`ThreadState`/`DeltaThreadState`, async saver scheduling, history, mutation,
-rollback, migration, and branch-heavy cases belong to the production-shaped
-follow-up layer. Harness tests live in `tests/test_bench_checkpoint_channels.py`
-and `tests/test_summarize_checkpoint_channels.py`; timing thresholds are not CI
-gates.
+The production-shaped layer lives in
+`scripts/benchmark/checkpoint/bench_production.py`: per-case child processes
+run graph-level `ainvoke` turns through the real lead-agent graph (scripted
+deterministic model, real `AsyncSqliteSaver`), then measure
+`GET /threads/{id}/state` and `POST /threads/{id}/history` through the real
+Gateway route stack in the same event loop (httpx ASGITransport), split into
+cold/warm accessor-graph-cache samples. It sweeps `snapshot_frequency`
+(config: `checkpoint_delta_snapshot_frequency`, process-frozen like the
+mode), pairs every delta frequency against the same full row, and fails both
+rows of a pair when materialized or wire digests diverge. Each case must have
+more than the two discarded warm-up turns, and SQLite DB/WAL/SHM sizes are
+captured while the saver is still open so they represent the online storage
+footprint. Summarize with
+`scripts/benchmark/checkpoint/summarize_production.py` (ratios are
+`delta/full`; it also emits `snapshot_write_spike` and `cache_effect_ms`,
+the decision inputs for the production snapshot-frequency and accessor-cache
+defaults). Harness tests live in `tests/test_bench_checkpoint_production.py`
+and `tests/test_summarize_checkpoint_production.py`; timing thresholds are
+not CI gates. The matrix test pins that every `(repetition, turns)` group
+contains both modes and that their execution order flips between consecutive
+groups, including across repetition boundaries.
+
+Operational limits learned from the first runs (the default matrix is too
+large to run blindly):
+
+- The default `--timeout-seconds 900` is insufficient for delta mode at
+  `snapshot_frequency=1000` once turns reach 500 (measured: delta-500 takes
+  ~1100-1200s; delta-2000 takes ~45min). Pass an explicit
+  `--timeout-seconds` for any large matrix, and treat the turns=2000 corner
+  as practical only at small snapshot frequencies.
+- Full-mode 2000-turn runs produce a ~33GB sqlite DB. Point `TMPDIR` at real
+  disk, not tmpfs (the benchmark uses `tempfile.TemporaryDirectory`, which
+  honors `TMPDIR`), or the run dies mid-case.
+- The history route clamps `limit` to 100 (`le=100` on
+  `ThreadHistoryRequest.limit`), so `--history-limits` values above 100 are
+  measured and reported by their effective (clamped) limit.
+
+Example:
+
+```bash
+cd backend
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
+  --turns 10,100,500,1000,2000 --payload-bytes 128 \
+  --snapshot-frequencies 10,50,100,500,1000 \
+  --repetitions 7 --output /tmp/production-bench.jsonl
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
+  /tmp/production-bench.jsonl
+```
 
 ### Terminal Workbench / TUI (`packages/harness/deerflow/tui/`)
 

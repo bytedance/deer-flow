@@ -490,8 +490,17 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         "regenerate_from_run_id": target_run_id,
         "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
     }
+    regenerate_input: dict[str, Any] = {"messages": [_clean_human_message_for_regenerate(previous_human)]}
+    latest_values = latest_checkpoint.values if isinstance(latest_checkpoint.values, dict) else {}
+    latest_title = latest_values.get("title")
+    if isinstance(latest_title, str) and latest_title:
+        # Regenerate resumes from the checkpoint before the target human turn.
+        # That checkpoint can predate a manual rename, so replay the current
+        # title as graph input instead of letting checkpoint rollback restore
+        # the older automatically generated title (#4457).
+        regenerate_input["title"] = latest_title
     return RegeneratePrepareResponse(
-        input={"messages": [_clean_human_message_for_regenerate(previous_human)]},
+        input=regenerate_input,
         checkpoint=checkpoint,
         metadata=metadata,
         target_run_id=target_run_id,
