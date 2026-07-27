@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -86,6 +87,18 @@ def test_lazy_warm_rebuilds_each_requested_scope(tmp_path: Path) -> None:
     scopes = [{"userId": "alice", "agentName": "a"}, {"userId": "bob", "agentName": "b"}]
     manager._ensure_retrieval_scopes(scopes)
     assert calls == [[scopes[0]], [scopes[1]]]
+
+
+def test_lazy_warm_does_not_retry_partial_fact_failures(tmp_path: Path) -> None:
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    rebuild = MagicMock(return_value={"supported": True, "indexed": 2, "failed": 1})
+    manager._storage.rebuild_index = rebuild  # type: ignore[method-assign]
+    scopes = [{"userId": "alice", "agentName": "a"}]
+
+    manager._ensure_retrieval_scopes(scopes)
+    manager._ensure_retrieval_scopes(scopes)
+
+    rebuild.assert_called_once_with(scopes)
 
 
 def test_deermem_close_releases_retrieval_connection(tmp_path: Path) -> None:

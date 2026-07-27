@@ -394,7 +394,7 @@ class DeerMem(MemoryManager):
                 except Exception:
                     logger.exception("Failed to lazily rebuild memory retrieval index for scope %r", key)
                     continue
-                if result.get("supported") and not result.get("failed"):
+                if result.get("supported") and not result.get("fatal"):
                     self._retrieval_warmed_scopes.add(key)
 
     # ── Manage ───────────────────────────────────────────────────────────
