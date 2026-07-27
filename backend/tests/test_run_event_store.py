@@ -58,6 +58,28 @@ class TestPutAndSeq:
         record = await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace", metadata=meta)
         assert record["metadata"] == meta
 
+    @pytest.mark.anyio
+    async def test_put_if_absent_preserves_first_run_scoped_event(self, store):
+        first, created = await store.put_if_absent(
+            thread_id="t1",
+            run_id="r1",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 1},
+        )
+        duplicate, duplicate_created = await store.put_if_absent(
+            thread_id="t1",
+            run_id="r1",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 0},
+        )
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate == first
+        assert [event["content"] for event in await store.list_events("t1", "r1") if event["event_type"] == "run.delivery"] == [{"presented": 1}]
+
 
 # -- list_messages --
 
@@ -341,6 +363,24 @@ class TestDbRunEventStore:
         count = await s.count_messages("t1")
         assert count == 2
 
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_put_if_absent_is_idempotent(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        first, created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 2})
+        duplicate, duplicate_created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 0})
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate["seq"] == first["seq"]
+        assert duplicate["content"] == {"presented": 2}
         await close_engine()
 
     @pytest.mark.anyio
@@ -694,6 +734,19 @@ class TestJsonlRunEventStore:
         assert r["seq"] == 1
         messages = await s.list_messages("t1")
         assert len(messages) == 1
+
+    @pytest.mark.anyio
+    async def test_put_if_absent_is_idempotent(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        first, created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 2})
+        duplicate, duplicate_created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 0})
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate == first
+        assert len(await s.list_events("t1", "r1", event_types=["run.delivery"])) == 1
 
     @pytest.mark.anyio
     async def test_file_at_correct_path(self, tmp_path):

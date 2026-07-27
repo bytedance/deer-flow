@@ -10,10 +10,12 @@ import logging
 import math
 import re
 import uuid
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import DeerMemConfig
+from .message_processing import detect_signals, extract_message_text
 from .prompt import (
     format_conversation_for_update,
     load_prompt,
@@ -610,6 +612,52 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
     return memory
 
 
+def _memory_with_manual_markers(memory: Any) -> Any:
+    """Return a deep copy of ``memory`` with ``[MANUAL]`` prefixed onto the
+    content of manually-authored facts (``source.type == "manual"``).
+
+    The marker is a prompt-only signal that tells the extraction LLM a fact is a
+    high-trust user edit; the persisted memory is untouched (this copy is only
+    fed to the prompt). Idempotent: a fact already carrying the prefix is not
+    double-marked.
+    """
+    display = copy.deepcopy(memory)
+    if not isinstance(display, dict):
+        return display
+    for fact in display.get("facts", []):
+        if not isinstance(fact, dict):
+            continue
+        src = fact.get("source")
+        src_type = src.get("type") if isinstance(src, dict) else None
+        if src_type == "manual":
+            content = fact.get("content")
+            if isinstance(content, str) and not content.startswith("[MANUAL]"):
+                fact["content"] = "[MANUAL] " + content
+    return display
+
+
+def _message_identity(msg: Any) -> tuple[str, ...] | None:
+    """Return a hashable identity for ``msg`` for watermark tracking.
+
+    The watermark is content/identity based rather than index based so it stays
+    valid when summarization removes the conversation front (an index watermark
+    would point at the wrong message after a front removal, silently skipping
+    un-extracted turns). Prefers the langgraph message ``id`` (unique, robust to
+    duplicate content); falls back to ``(type, content)`` when no id is set
+    (e.g. plain ``HumanMessage(content=...)`` in tests). Returns ``None`` for a
+    message with neither id nor extractable text -- the caller then feeds the
+    full list, which is safe over-extraction and never loss.
+    """
+    mid = getattr(msg, "id", None)
+    if isinstance(mid, str) and mid:
+        return ("id", mid)
+    text = extract_message_text(msg)
+    if not text:
+        return None
+    msg_type = getattr(msg, "type", "") or ""
+    return ("content", msg_type, text)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -632,6 +680,12 @@ class MemoryUpdater:
         self._llm = llm
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
+        # Watermark: last-extracted message identity per (thread_id, user_id,
+        # agent_name), held in memory so a restart re-extracts one batch. The
+        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
+        # gateway handling many threads cannot grow it without limit; a dropped
+        # key re-extracts one batch on that thread's next turn.
+        self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -917,37 +971,45 @@ class MemoryUpdater:
             raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
         return updated_memory
 
-    def _build_correction_hint(
-        self,
-        correction_detected: bool,
-        reinforcement_detected: bool,
-    ) -> str:
-        """Build optional prompt hints for correction and reinforcement signals."""
-        correction_hint = ""
-        if correction_detected:
-            correction_hint = (
+    def _build_signal_hints(self, signals: frozenset[str]) -> str:
+        """Build optional prompt hints for the detected signal classes.
+
+        Each present signal contributes one instruction nudging the extraction
+        LLM toward the right category and confidence. The variable is still
+        rendered into the template's ``{correction_hint}`` slot (the name is
+        historical -- it now carries the full signal-hint set, plus the manual
+        fact note appended by :meth:`_prepare_update_prompt`).
+        """
+        hints: list[str] = []
+        if "correction" in signals:
+            hints.append(
                 "IMPORTANT: Explicit correction signals were detected in this conversation. "
                 "Pay special attention to what the agent got wrong, what the user corrected, "
                 "and record the correct approach as a fact with category "
                 '"correction" and confidence >= 0.95 when appropriate.'
             )
-        if reinforcement_detected:
-            reinforcement_hint = (
+        if "reinforcement" in signals:
+            hints.append(
                 "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
                 "The user explicitly confirmed the agent's approach was correct or helpful. "
                 "Record the confirmed approach, style, or preference as a fact with category "
                 '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
             )
-            correction_hint = (correction_hint + "\n" + reinforcement_hint).strip() if correction_hint else reinforcement_hint
-
-        return correction_hint
+        if "preference" in signals:
+            hints.append('IMPORTANT: A preference signal was detected. Record the user\'s stated preference or dislike as a fact with category "preference" and high confidence.')
+        if "identity" in signals:
+            hints.append('IMPORTANT: An identity signal was detected. Record the user\'s stated role, profession, or background as a fact with category "identity" and high confidence.')
+        if "goal" in signals:
+            hints.append('IMPORTANT: A goal signal was detected. Record the user\'s stated objective or intent as a fact with category "goal" and high confidence.')
+        if "decision" in signals:
+            hints.append('IMPORTANT: A decision signal was detected. Record the user\'s decision or chosen option as a fact with category "decision" and high confidence.')
+        return "\n".join(hints)
 
     def _prepare_update_prompt(
         self,
         messages: list[Any],
         agent_name: str | None,
-        correction_detected: bool,
-        reinforcement_detected: bool,
+        signals: frozenset[str],
         user_id: str | None = None,
     ) -> tuple[dict[str, Any], list[Any]] | None:
         """Load memory and build the update prompt for a conversation."""
@@ -960,10 +1022,16 @@ class MemoryUpdater:
         if not conversation_text.strip():
             return None
 
-        correction_hint = self._build_correction_hint(
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        correction_hint = self._build_signal_hints(signals)
+
+        # Manual-fact signal: tag high-trust user-authored facts with a [MANUAL]
+        # prefix in the prompt's current_memory and instruct the model to preserve
+        # them unless the new conversation is an explicit, unambiguous correction.
+        display_memory = current_memory
+        if self._has_manual_facts(current_memory):
+            display_memory = _memory_with_manual_markers(current_memory)
+            manual_hint = "NOTE: Facts marked [MANUAL] are high-trust user-authored edits. Update them only when the new conversation is an explicit, unambiguous correction; otherwise preserve them as-is."
+            correction_hint = (correction_hint + "\n" + manual_hint).strip() if correction_hint else manual_hint
 
         # ── Build staleness review section ──
         staleness_section = ""
@@ -986,7 +1054,7 @@ class MemoryUpdater:
                 )
 
         variables = {
-            "current_memory": json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
+            "current_memory": json.dumps(_escape_memory_for_prompt(display_memory), indent=2, ensure_ascii=False),
             "conversation": conversation_text,
             "correction_hint": correction_hint,
             "staleness_review_section": staleness_section,
@@ -995,6 +1063,45 @@ class MemoryUpdater:
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
         return current_memory, prompt
 
+    def _has_manual_facts(self, memory: dict[str, Any]) -> bool:
+        """Return whether ``memory`` contains any user-authored (manual) fact."""
+        return any(isinstance(f, dict) and isinstance(f.get("source"), dict) and f.get("source", {}).get("type") == "manual" for f in memory.get("facts", []))
+
+    def _emit_extraction_metrics(
+        self,
+        metrics: dict[str, Any],
+        *,
+        thread_id: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        model_name: str | None,
+        response: Any,
+        success: bool,
+    ) -> None:
+        """Invoke the post-extraction observability callback (Langfuse span etc.).
+
+        No-op when ``extraction_callback`` is unset (default). Exceptions from
+        the callback are logged and swallowed so observability never breaks the
+        update path.
+        """
+        callback = self._config.extraction_callback
+        if callback is None:
+            return
+        usage = getattr(response, "usage_metadata", None)
+        payload: dict[str, Any] = {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "trace_id": trace_id,
+            "model_name": model_name,
+            "success": success,
+            "token_usage": usage if isinstance(usage, dict) else None,
+        }
+        payload.update(metrics)
+        try:
+            callback(payload)
+        except Exception:
+            logger.warning("extraction_callback raised; ignoring", exc_info=True)
+
     def _finalize_update(
         self,
         current_memory: dict[str, Any],
@@ -1002,9 +1109,18 @@ class MemoryUpdater:
         thread_id: str | None,
         agent_name: str | None,
         user_id: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
+        if metrics is not None:
+            extracted = update_data.get("newFacts", [])
+            extracted_list = extracted if isinstance(extracted, list) else []
+            metrics["facts_extracted"] = len(extracted_list)
+            # facts_passed_confidence / rejected_low_confidence are populated
+            # inside _apply_updates at the real confidence-filter site, so the
+            # metric tracks the actual filter rather than a re-derived copy here.
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 # Deep-copy before in-place mutation so a failed commit cannot
@@ -1012,7 +1128,7 @@ class MemoryUpdater:
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
                 # must never be replayed as disjoint point writes.
-                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
                 updated_memory = _strip_upload_mentions_from_memory(updated_memory)
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
@@ -1044,7 +1160,7 @@ class MemoryUpdater:
             raise AssertionError("bounded extracted-update retry did not return or raise")
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
-        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         return self._storage.save(
             updated_memory,
@@ -1058,10 +1174,11 @@ class MemoryUpdater:
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1076,10 +1193,10 @@ class MemoryUpdater:
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
 
     def _do_update_memory_sync(
@@ -1087,10 +1204,11 @@ class MemoryUpdater:
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1110,45 +1228,128 @@ class MemoryUpdater:
                     messages=messages,
                     thread_id=thread_id,
                     agent_name=agent_name,
-                    correction_detected=correction_detected,
-                    reinforcement_detected=reinforcement_detected,
+                    signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    bypass_watermark=bypass_watermark,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
+
+    def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Return the watermark for ``key``, marking it most-recently-used.
+
+        Uses key presence (not value truthiness) so a stored ``None`` identity
+        still counts as a live entry for LRU ordering.
+        """
+        if key not in self._watermarks:
+            return None
+        self._watermarks.move_to_end(key)
+        return self._watermarks[key]
+
+    def _watermark_set(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Store ``value`` for ``key``, evicting the least-recently-used entry
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+
+        A dropped key is safe: the next turn for that thread finds no watermark
+        and re-extracts one batch (the documented restart behavior). ``0`` =
+        unbounded (no eviction).
+        """
+        self._watermarks[key] = value
+        self._watermarks.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(self._watermarks) > cap:
+            self._watermarks.popitem(last=False)
+
+    def _feed_after_watermark(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+    ) -> list[Any]:
+        """Return the slice of ``messages`` not yet extracted.
+
+        The watermark stores the identity of the last-extracted message (see
+        :func:`_message_identity`). If that message is still present, everything
+        *after* it is fed; if it is absent (front removed by summarization, or
+        the first-ever extraction for this key) the full list is fed. Re-feeding
+        is safe over-extraction -- it never skips a turn, which is the only
+        failure direction that would lose facts.
+        """
+        last_id = self._watermark_get(watermark_key)
+        if last_id is None:
+            return messages
+        for i, msg in enumerate(messages):
+            if _message_identity(msg) == last_id:
+                return messages[i + 1 :]
+        return messages
 
     def _do_update_memory_sync_impl(
         self,
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
         Uses the *sync* LLM call path so no event loop is created.  This
         guarantees that the langchain provider's globally cached async
         httpx ``AsyncClient`` / connection pool (the one shared with the
-        lead agent) is never touched — no cross-loop connection reuse is
+        lead agent) is never touched - no cross-loop connection reuse is
         possible.
+
+        Watermark: the middleware passes the full conversation each turn, so
+        without skipping already-extracted turns every update re-feeds old
+        messages. The watermark stores the identity of the last-extracted
+        message (content/id based, in-memory only) so it stays correct when
+        summarization removes the conversation front; a restart loses it and
+        re-extracts one batch. ``bypass_watermark`` is set by the emergency
+        (summarization) flush path: the subset it carries is a one-shot
+        "extract before removal" snapshot, so it is fed in full and does not
+        read or advance the conversation watermark (advancing it from the
+        subset's own length would regress the watermark and skip un-extracted
+        tail turns on the next normal feed).
         """
+        metrics: dict[str, Any] = {}
+        response: Any = None
+        model_name: str | None = None
+        success = False
+        attempted = False
         try:
+            watermark_key = (thread_id, user_id, agent_name)
+            if bypass_watermark:
+                # Emergency flush: extract the carried subset in full.
+                feed_messages = messages
+            else:
+                feed_messages = self._feed_after_watermark(watermark_key, messages)
+            if not feed_messages:
+                logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
+                return True
+            # Re-detect signals on the post-watermark feed so extraction hints
+            # reference only turns the LLM will actually see. The admission-time
+            # ``signals`` (detected on the full conversation in DeerMem) already
+            # served their purpose (backpressure admission at enqueue); the hint
+            # is a soft nudge and must not point at turns the watermark excluded.
+            feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
             prepared = self._prepare_update_prompt(
-                messages=messages,
+                messages=feed_messages,
                 agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
+                signals=feed_signals,
                 user_id=user_id,
             )
             if prepared is None:
@@ -1173,30 +1374,56 @@ class MemoryUpdater:
                     model_name=model_name,
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
+            attempted = True
             response = model.invoke(prompt, config=invoke_config)
-            return self._finalize_update(
+            success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
                 agent_name=agent_name,
                 user_id=user_id,
+                metrics=metrics,
             )
+            if success and not bypass_watermark:
+                # Advance the watermark to the last message fed (the feed is a
+                # suffix, so this is messages[-1]). Skipped on the emergency
+                # path -- the subset's last message is older than the
+                # conversation's latest, so advancing from it would regress.
+                self._watermark_set(watermark_key, _message_identity(messages[-1]))
+            return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
             return False
+        finally:
+            # Emit metrics even when _finalize_update (or invoke) raises, so the
+            # observability callback sees exception failures (parse errors,
+            # storage errors after retry) rather than only the happy path. The
+            # pre-attempt early returns (no new messages, empty conversation, no
+            # model) do not emit, matching the prior behavior.
+            if attempted:
+                self._emit_extraction_metrics(
+                    metrics,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    model_name=model_name,
+                    response=response,
+                    success=success,
+                )
 
     def update_memory(
         self,
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1213,12 +1440,15 @@ class MemoryUpdater:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
             agent_name: If provided, updates per-agent memory. If None, updates global memory.
-            correction_detected: Whether recent turns include an explicit correction signal.
-            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            signals: Signal classes detected in the conversation (correction /
+                reinforcement / preference / ...), used as extraction hints.
             user_id: If provided, scopes memory to a specific user.
 
         Returns:
-            True if update was successful, False otherwise.
+            True if the update persisted. False on any failure (no content,
+            unparseable response, LLM error); failures are swallowed (best-effort)
+            -- a failed update is re-fed on the next conversation turn because the
+            watermark does not advance on failure.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -1232,10 +1462,10 @@ class MemoryUpdater:
                     messages=messages,
                     thread_id=thread_id,
                     agent_name=agent_name,
-                    correction_detected=correction_detected,
-                    reinforcement_detected=reinforcement_detected,
+                    signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    bypass_watermark=bypass_watermark,
                 )
                 return future.result()
             except Exception:
@@ -1246,10 +1476,10 @@ class MemoryUpdater:
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
 
     def _apply_updates(
@@ -1257,6 +1487,8 @@ class MemoryUpdater:
         current_memory: dict[str, Any],
         update_data: dict[str, Any],
         thread_id: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -1264,6 +1496,11 @@ class MemoryUpdater:
             current_memory: Current memory data.
             update_data: Updates from LLM.
             thread_id: Optional thread ID for tracking.
+            metrics: Optional observability dict. When provided, populated with
+                ``facts_passed_confidence`` / ``rejected_low_confidence`` counted
+                at the real confidence-filter site below (the only acceptance
+                gate for new facts), so the metric cannot drift from the actual
+                filter the way a re-derived count in the caller could.
 
         Returns:
             Updated memory data.
@@ -1398,9 +1635,18 @@ class MemoryUpdater:
         # Creation-time lifetime cap shared with the consolidation path below, so
         # both fact-creation sites apply the identical bound in one place.
         creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
+        # Counted at the confidence-gate site (the only real accept filter for new
+        # facts) so the ``facts_passed_confidence`` metric mirrors the actual
+        # filter and cannot drift from it. Facts below the threshold are the
+        # reject count; duplicate / empty / over-cap facts that pass the
+        # threshold are still counted here -- the metric is a confidence-gate
+        # signal (the host's rejection-rate warning monitors confidence
+        # filtering, not dedup / over-cap), not a persisted-fact count.
+        passed_threshold = 0
         for fact in new_facts:
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
+                passed_threshold += 1
                 raw_content = fact.get("content", "")
                 if not isinstance(raw_content, str):
                     continue
@@ -1438,6 +1684,10 @@ class MemoryUpdater:
                 current_memory["facts"].append(fact_entry)
                 if fact_key is not None:
                     existing_fact_keys.add(fact_key)
+
+        if metrics is not None:
+            metrics["facts_passed_confidence"] = passed_threshold
+            metrics["rejected_low_confidence"] = len(new_facts) - passed_threshold
 
         # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
         current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)

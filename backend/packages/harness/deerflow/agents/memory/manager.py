@@ -656,6 +656,51 @@ def _host_default_llm() -> Any:
         return None
 
 
+def _host_default_extraction_callback(payload: Any) -> None:
+    """deer-flow default for DeerMem's ``extraction_callback`` slot.
+
+    Logs post-extraction metrics (token usage, facts passing/rejected by the
+    confidence filter, gate rejection rate) for ops observability, and flags a
+    high rejection rate
+    (>60%) so a prompt/threshold regression is visible without inspecting every
+    trace. A Langfuse-aware callback can replace this to emit a dedicated
+    extraction span; the metrics keys are stable for that handoff. Exceptions
+    are never raised (the DeerMem side already wraps the call).
+    """
+    if not isinstance(payload, dict):
+        return
+    extracted = payload.get("facts_extracted")
+    passed_confidence = payload.get("facts_passed_confidence")
+    rejected = payload.get("rejected_low_confidence", 0)
+    thread_id = payload.get("thread_id")
+    model_name = payload.get("model_name")
+    if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
+        rejection_rate = (extracted - passed_confidence) / extracted
+        logger.info(
+            "Memory extraction metrics: thread=%s model=%s extracted=%d passed_confidence=%d rejected=%d rejection_rate=%.2f",
+            thread_id,
+            model_name,
+            extracted,
+            passed_confidence,
+            rejected,
+            rejection_rate,
+        )
+        if rejection_rate > 0.6:
+            logger.warning(
+                "Memory extraction rejection rate %.0f%% exceeds 60%% - review extraction prompt / confidence threshold (thread=%s)",
+                rejection_rate * 100,
+                thread_id,
+            )
+    else:
+        logger.info(
+            "Memory extraction metrics: thread=%s model=%s success=%s token_usage=%s",
+            thread_id,
+            model_name,
+            payload.get("success"),
+            payload.get("token_usage"),
+        )
+
+
 def _collect_host_hooks() -> dict[str, Any]:
     """Provide host hook callables for backends to consume in ``from_config``.
 
@@ -674,6 +719,7 @@ def _collect_host_hooks() -> dict[str, Any]:
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
         "trace_context_manager": request_trace_context,
         "host_llm_factory": _host_default_llm,
+        "extraction_callback": _host_default_extraction_callback,
     }
 
 

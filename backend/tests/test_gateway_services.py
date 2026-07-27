@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from contextlib import suppress
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +20,39 @@ def _stub_app_config():
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
+
+
+def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    store = InMemoryStore()
+    return SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(auth_source=auth_source),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=SimpleNamespace(),
+                run_manager=run_manager,
+                checkpointer=InMemorySaver(),
+                store=store,
+                run_event_store=SimpleNamespace(),
+                run_events_config=None,
+                thread_store=thread_store or MemoryThreadMetaStore(store),
+            )
+        ),
+    )
+
+
+def _run_create_request(content="hello", **kwargs):
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    return RunCreateRequest(
+        input={"messages": [{"role": "user", "content": content}]},
+        **kwargs,
+    )
 
 
 def test_format_sse_basic():
@@ -47,6 +84,71 @@ def test_format_sse_no_event_id():
 
     frame = format_sse("values", {"x": 1})
     assert "id:" not in frame
+
+
+@pytest.mark.anyio
+async def test_sse_consumer_emits_gap_without_cancelling_run():
+    """A replay gap is a recovery boundary, not a client disconnect."""
+    from app.gateway.services import sse_consumer
+    from deerflow.runtime import DisconnectMode, MemoryStreamBridge, RunManager, RunStatus
+
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-gap", on_disconnect=DisconnectMode.cancel)
+    await run_manager.set_status(record.run_id, RunStatus.running)
+
+    await bridge.publish(record.run_id, "event-1", {"step": 1})
+    evicted_id = bridge._streams[record.run_id].events[0].id
+    await bridge.publish(record.run_id, "event-2", {"step": 2})
+    await bridge.publish(record.run_id, "event-3", {"step": 3})
+    retained = bridge._streams[record.run_id].events
+
+    worker_started = asyncio.Event()
+
+    async def _pending_worker() -> None:
+        worker_started.set()
+        await asyncio.Event().wait()
+
+    record.task = asyncio.create_task(_pending_worker())
+    await worker_started.wait()
+
+    class _ConnectedRequest:
+        headers = {"Last-Event-ID": evicted_id}
+
+        async def is_disconnected(self) -> bool:
+            return False
+
+    try:
+        frames = [
+            frame
+            async for frame in sse_consumer(
+                bridge,
+                record,
+                _ConnectedRequest(),
+                run_manager,
+            )
+        ]
+
+        assert len(frames) == 1
+        assert frames[0].startswith("event: gap\n")
+        assert "\nid:" not in frames[0]
+        assert "\nevent: end\n" not in frames[0]
+        payload = json.loads(frames[0].split("data: ", 1)[1].splitlines()[0])
+        assert payload == {
+            "code": "stream_replay_gap",
+            "run_id": record.run_id,
+            "requested_event_id": evicted_id,
+            "earliest_available_event_id": retained[0].id,
+            "latest_available_event_id": retained[-1].id,
+            "recovery": "reload_durable_state",
+        }
+        assert record.status == RunStatus.running
+        assert not record.abort_event.is_set()
+        assert not record.task.done()
+    finally:
+        record.task.cancel()
+        with suppress(asyncio.CancelledError):
+            await record.task
 
 
 def test_sanitize_log_param_strips_control_characters():
@@ -795,6 +897,130 @@ def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
 
     assert exc.value.status_code == 404
     assert "missing" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_start_run_checkpoint_validation_failure_does_not_admit_run(_stub_app_config):
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_id = "thread-invalid-checkpoint"
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    request = _make_start_run_request(run_manager)
+    invalid_body = _run_create_request(
+        checkpoint_id="missing-checkpoint",
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        pytest.raises(HTTPException, match="Checkpoint missing-checkpoint not found"),
+    ):
+        await start_run(invalid_body, thread_id, request)
+
+    assert await run_manager.list_by_thread(thread_id, user_id=None) == []
+    assert await run_store.list_by_thread(thread_id, user_id=None) == []
+
+
+@pytest.mark.asyncio
+async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    metadata_started = asyncio.Event()
+
+    async def get_thread(_thread_id):
+        metadata_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("thread metadata store failed after cancellation") from exc
+
+    async def fake_run_agent(*_args, **_kwargs):
+        return None
+
+    run_manager = RunManager(store=MemoryRunStore())
+    body = _run_create_request()
+    request = _make_start_run_request(
+        run_manager,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-cancel-log-meta", request)
+        await asyncio.wait_for(metadata_started.wait(), timeout=1)
+        assert record.task is not None
+        await run_manager.cancel(record.run_id)
+        await asyncio.wait_for(record.task, timeout=1)
+        await asyncio.sleep(0)
+
+    assert "thread metadata store failed after cancellation" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_config, caplog, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    import app.gateway.services as services
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.manager import RunStartOutcome
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    metadata_started = asyncio.Event()
+    run_agent_called = asyncio.Event()
+
+    async def get_thread(_thread_id):
+        metadata_started.set()
+        await asyncio.Event().wait()
+
+    async def fake_run_agent(_bridge, run_manager, record, **_kwargs):
+        run_agent_called.set()
+        start_outcome = await run_manager.try_start(record.run_id)
+        assert start_outcome is RunStartOutcome.started
+
+    monkeypatch.setattr(services, "_THREAD_METADATA_SETUP_TIMEOUT_SECONDS", 0.01)
+    run_manager = RunManager(store=MemoryRunStore())
+    body = _run_create_request()
+    request = _make_start_run_request(
+        run_manager,
+        thread_store=SimpleNamespace(
+            get=AsyncMock(side_effect=get_thread),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="app.gateway.services")
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-timeout-meta", request)
+        await asyncio.wait_for(metadata_started.wait(), timeout=1)
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    assert run_agent_called.is_set()
+    assert record.status == RunStatus.running
+    assert (await run_manager.get(record.run_id)).status == RunStatus.running
+    assert "Timed out ensuring thread_meta for thread-timeout-meta" in caplog.text
 
 
 def test_context_merges_into_configurable():
@@ -1844,7 +2070,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         CHECKPOINT_MODE_METADATA_KEY,
         INTERNAL_CHECKPOINT_MODE_KEY,
     )
-    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
     from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -1859,6 +2085,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         cleanup=AsyncMock(),
     )
     run_manager = SimpleNamespace(
+        try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=AsyncMock(),
     )
@@ -1909,7 +2136,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
     from unittest.mock import AsyncMock, MagicMock, call
 
     from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY
-    from deerflow.runtime.runs.manager import RunRecord
+    from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
     from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
     from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -1930,6 +2157,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         cleanup=AsyncMock(),
     )
     run_manager = SimpleNamespace(
+        try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
         set_status=AsyncMock(),
     )

@@ -23,7 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from packaging.version import Version
 
 from deerflow.runtime.runs import worker
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import (
     _compose_sse_event,
@@ -315,6 +315,10 @@ class _RecordingStreamBridge(MemoryStreamBridge):
 class _IntegrationRunManager:
     def __init__(self, record: RunRecord) -> None:
         self._record = record
+
+    async def try_start(self, _run_id):
+        self._record.status = RunStatus.running
+        return RunStartOutcome.started
 
     async def wait_for_prior_finalizing(self, *_args, **_kwargs):
         return None
