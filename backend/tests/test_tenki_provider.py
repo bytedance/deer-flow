@@ -19,7 +19,7 @@ import types
 
 import pytest
 
-from deerflow.community.tenki.provider import TenkiSandboxProvider, _import_client
+from deerflow.community.tenki.provider import _BOOTSTRAP_TIMEOUT, TenkiSandboxProvider, _import_client
 from deerflow.community.tenki.sandbox import TenkiSandbox
 
 # ── Fake Tenki SDK ────────────────────────────────────────────────────
@@ -706,7 +706,9 @@ def test_bootstrap_is_non_interactive_and_time_bounded(monkeypatch):
     provider.acquire("thread-1", user_id="u1")
     bootstrap = next(c for c in client.last_sandbox.exec_calls if "BOOTSTRAP_OK" in (c["argv"][2] if len(c["argv"]) > 2 else ""))
     assert "sudo -n ln -sfn" in bootstrap["argv"][2]
-    assert bootstrap["timeout"] is not None
+    # Pin the actual bounded value, not merely "some timeout": a regression to
+    # timeout=0 (no timeout in some SDKs) would slip past an `is not None` check.
+    assert bootstrap["timeout"] == _BOOTSTRAP_TIMEOUT
     provider.shutdown()
 
 
