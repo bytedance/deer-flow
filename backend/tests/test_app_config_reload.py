@@ -133,6 +133,29 @@ def test_checkpoint_delta_rejects_non_positive_snapshot_frequency(value: int) ->
         DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
 
 
+def test_legacy_snapshot_frequency_maps_to_nested_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(checkpoint_delta_snapshot_frequency=1000)
+    assert config.checkpoint_delta.snapshot_frequency == 1000
+    assert "checkpoint_delta_snapshot_frequency is deprecated" in caplog.text
+
+
+def test_nested_snapshot_frequency_wins_over_legacy_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(
+            checkpoint_delta_snapshot_frequency=1000,
+            checkpoint_delta={"snapshot_frequency": 250},
+        )
+    assert config.checkpoint_delta.snapshot_frequency == 250
+    assert "the nested key wins" in caplog.text
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_legacy_snapshot_frequency_rejects_non_positive_value(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
+
+
 def test_checkpoint_graph_cache_defaults() -> None:
     assert DatabaseConfig().checkpoint_graph_cache.accessor_graph_max == 64
 

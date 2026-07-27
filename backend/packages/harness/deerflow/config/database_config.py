@@ -31,10 +31,13 @@ need to do any environment variable processing.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_checkpoint_graph_cache_max(database_config: Any, field_name: str, default: int) -> int:
@@ -148,6 +151,46 @@ class DatabaseConfig(BaseModel):
         gt=0,
         description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
     )
+
+    # -- Legacy key migration (not user-configured) --
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_snapshot_frequency(cls, data: Any) -> Any:
+        """Carry the pre-rename top-level ``checkpoint_delta_snapshot_frequency``
+        key onto ``checkpoint_delta.snapshot_frequency``.
+
+        ``DatabaseConfig`` ignores unknown keys (pydantic ``extra="ignore"``),
+        so without this shim a config.yaml written against the old flat key
+        would silently fall back to the new default cadence instead of the
+        operator's chosen value. An explicitly set nested key always wins.
+        """
+        if not isinstance(data, dict) or "checkpoint_delta_snapshot_frequency" not in data:
+            return data
+        data = dict(data)
+        legacy_value = data.pop("checkpoint_delta_snapshot_frequency")
+        nested = data.get("checkpoint_delta")
+        if isinstance(nested, dict):
+            if "snapshot_frequency" in nested:
+                logger.warning(
+                    "Both database.checkpoint_delta_snapshot_frequency (deprecated) and database.checkpoint_delta.snapshot_frequency are set; the nested key wins.",
+                )
+                return data
+            data["checkpoint_delta"] = {**nested, "snapshot_frequency": legacy_value}
+        elif nested is None:
+            data["checkpoint_delta"] = {"snapshot_frequency": legacy_value}
+        else:
+            # Programmatically constructed CheckpointDeltaConfig instance: the
+            # explicit object wins over the legacy scalar.
+            logger.warning(
+                "Ignoring deprecated database.checkpoint_delta_snapshot_frequency because database.checkpoint_delta is already set.",
+            )
+            return data
+        logger.warning(
+            "database.checkpoint_delta_snapshot_frequency is deprecated; use database.checkpoint_delta.snapshot_frequency instead. Carried the legacy value (%r) forward.",
+            legacy_value,
+        )
+        return data
 
     # -- Derived helpers (not user-configured) --
 
