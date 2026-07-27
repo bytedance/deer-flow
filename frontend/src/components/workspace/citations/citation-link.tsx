@@ -1,5 +1,5 @@
 import { ExternalLinkIcon } from "lucide-react";
-import type { ComponentProps } from "react";
+import { isValidElement, type ComponentProps, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -8,6 +8,25 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
+
+/** Extract visible text from renderer-provided ReactNode children. */
+export function extractReactNodeText(node: ReactNode): string | null {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    const text = node
+      .map(extractReactNodeText)
+      .filter((value): value is string => value !== null)
+      .join("");
+    return text || null;
+  }
+  if (isValidElement(node)) {
+    const children = (node.props as { children?: ReactNode }).children;
+    return children === undefined ? null : extractReactNodeText(children);
+  }
+  return null;
+}
 
 export function CitationLink({
   href,
