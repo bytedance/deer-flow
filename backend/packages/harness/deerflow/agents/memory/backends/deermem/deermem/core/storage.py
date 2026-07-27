@@ -412,6 +412,9 @@ class MemoryStorage(abc.ABC):
         """Clear global summaries and every agent fact bucket for one user."""
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release optional storage resources."""
+
 
 class FileMemoryStorage(MemoryStorage):
     def __init__(self, config: DeerMemConfig, retrieval: RetrievalPort | None = None):
@@ -421,6 +424,11 @@ class FileMemoryStorage(MemoryStorage):
         self._cache_lock = threading.Lock()
         self._scope_locks: weakref.WeakValueDictionary[tuple[str | None, str | None], threading.RLock] = weakref.WeakValueDictionary()
         self._retrieval_dirty_scopes: set[tuple[str | None, str | None]] = set()
+
+    def close(self) -> None:
+        """Release the retrieval adapter owned by this storage instance."""
+        if self._retrieval is not None:
+            self._retrieval.close()
 
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:

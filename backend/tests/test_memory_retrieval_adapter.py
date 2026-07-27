@@ -103,7 +103,21 @@ def test_lazy_warm_does_not_retry_partial_fact_failures(tmp_path: Path) -> None:
 
 def test_deermem_close_releases_retrieval_connection(tmp_path: Path) -> None:
     manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    close_storage = MagicMock()
+    manager._storage.close = close_storage  # type: ignore[attr-defined]
+
     manager.close()
+
+    close_storage.assert_called_once_with()
+
+
+def test_file_storage_close_releases_retrieval_connection(tmp_path: Path) -> None:
+    retrieval = MagicMock()
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)), retrieval=retrieval)
+
+    storage.close()
+
+    retrieval.close.assert_called_once_with()
 
 
 def test_factory_recreates_corrupt_persistent_index(tmp_path: Path) -> None:

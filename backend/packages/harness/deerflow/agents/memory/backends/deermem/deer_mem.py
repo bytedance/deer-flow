@@ -454,10 +454,7 @@ class DeerMem(MemoryManager):
 
     def close(self) -> None:
         """Close derived retrieval resources after pending updates drain."""
-        retrieval = getattr(self._storage, "_retrieval", None)
-        close = getattr(retrieval, "close", None)
-        if callable(close):
-            close()
+        self._storage.close()
 
     # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ──
     def warm(self) -> bool:
