@@ -131,8 +131,11 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+        # Initialize before try so the except block can reference these reliably.
+        _launch_run_succeeded = False
+        _launch_run_result: dict = {}
         try:
-            result = await self._launch_run(
+            _launch_run_result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
                 prompt=task["prompt"],
@@ -165,7 +168,7 @@ class ScheduledTaskService:
             await self._task_run_repo.update_status(
                 task_run_id,
                 status="running",
-                run_id=result["run_id"],
+                run_id=_launch_run_result["run_id"],
                 started_at=now,
                 # A fast-failing run can reach handle_run_completion before this
                 # write resumes; never clobber its terminal status.
@@ -176,8 +179,8 @@ class ScheduledTaskService:
                 status=task_status,
                 next_run_at=next_at,
                 last_run_at=now,
-                last_run_id=result["run_id"],
-                last_thread_id=result["thread_id"],
+                last_run_id=_launch_run_result["run_id"],
+                last_thread_id=_launch_run_result["thread_id"],
                 last_error=None,
                 increment_run_count=True,
                 # Same race as the run-row write above: a fast-failing run's
@@ -187,8 +190,8 @@ class ScheduledTaskService:
             return {
                 "outcome": "launched",
                 "task_run_id": task_run_id,
-                "run_id": result["run_id"],
-                "thread_id": result["thread_id"],
+                "run_id": _launch_run_result["run_id"],
+                "thread_id": _launch_run_result["thread_id"],
                 "error": None,
             }
         except Exception as exc:
@@ -204,12 +207,11 @@ class ScheduledTaskService:
             # If _launch_run succeeded but subsequent bookkeeping failed, keep the
             # slot occupied so a second run cannot be launched while this one is
             # still live. The run_id is already known to the external scheduler.
-            # We use a sentinel to detect whether _launch_run succeeded.
-            if "_launch_run_succeeded" in locals() and _launch_run_succeeded:
+            if _launch_run_succeeded:
                 await self._task_run_repo.update_status(
                     task_run_id,
                     status="running",
-                    run_id=result["run_id"],
+                    run_id=_launch_run_result["run_id"],
                     started_at=now,
                     # A fast-failing run can reach handle_run_completion before this
                     # write resumes; never clobber its terminal status.
@@ -217,11 +219,11 @@ class ScheduledTaskService:
                 )
                 await self._task_repo.update_after_launch(
                     task["id"],
-                    status=task.get("status") or "enabled",
+                    status=task.get("status") or "running",
                     next_run_at=next_at,
                     last_run_at=now,
-                    last_run_id=result["run_id"],
-                    last_thread_id=result["thread_id"],
+                    last_run_id=_launch_run_result["run_id"],
+                    last_thread_id=_launch_run_result["thread_id"],
                     last_error=str(exc),
                     increment_run_count=True,
                     protect_terminal=True,
@@ -229,8 +231,8 @@ class ScheduledTaskService:
                 return {
                     "outcome": "failed",
                     "task_run_id": task_run_id,
-                    "run_id": result["run_id"],
-                    "thread_id": result["thread_id"],
+                    "run_id": _launch_run_result["run_id"],
+                    "thread_id": _launch_run_result["thread_id"],
                     "error": str(exc),
                 }
 
