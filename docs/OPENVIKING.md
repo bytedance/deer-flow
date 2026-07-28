@@ -14,8 +14,9 @@ runtime.
 - Explicit search through the backend-neutral `MemoryManager.search` API.
 - Hard isolation by hashing each DeerFlow `(user_id, agent_name)` scope into a
   separate OpenViking trusted user identity.
-- Local message watermarks under DeerFlow's runtime home to avoid resubmitting
-  the same conversation history in a single-Gateway deployment.
+- Local bounded message watermarks under DeerFlow's runtime home. An ordered
+  prefix digest handles append-only histories of any length, while a recent-ID
+  window handles history compaction without resubmitting known messages.
 
 The current backend does not implement DeerMem fact CRUD, import/export, or the
 Settings memory document. Keep `mode: middleware`; tool mode is rejected
@@ -57,6 +58,9 @@ memory:
     auth_mode: trusted
     account: deerflow
     api_key_env: OPENVIKING_API_KEY
+    max_connections: 100
+    max_keepalive_connections: 20
+    max_seen_message_ids: 512
     startup_policy: fail_fast
     failure_policy:
       read: fail_open
@@ -71,6 +75,11 @@ For a locally installed DeerFlow process, use
 `http://127.0.0.1:1933`. For a DeerFlow container connecting to OpenViking on
 the host, use `http://host.docker.internal:1933` and set
 `allow_insecure_http: true`.
+
+`max_connections` and `max_keepalive_connections` bound the shared HTTP
+connection pool. `max_seen_message_ids` bounds only the recent-ID fallback used
+when a conversation is compacted or rewritten; append-only histories are
+tracked by a constant-size prefix digest and do not depend on that window.
 
 ## Docker first-time startup
 
@@ -200,6 +209,8 @@ The DeerFlow entrypoint is <http://localhost:2026>.
   watermark before committing the Session. If commit then fails, later updates
   do not resubmit those messages or retry the ambiguous commit; a future batch
   can commit the still-open Session together with new messages.
+- Retried health, session lookup, and search requests use exponential backoff
+  with jitter so concurrent Gateway workers do not retry in lockstep.
 - OpenViking commit is eventually consistent: accepting a commit archives the
   messages immediately, while summary and memory extraction finish in a
   background task.

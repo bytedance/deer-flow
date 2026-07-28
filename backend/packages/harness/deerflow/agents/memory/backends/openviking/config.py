@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -20,11 +20,13 @@ class OpenVikingConfig:
     storage_path: str
     auth_mode: Literal["trusted", "dev"]
     account: str
-    api_key: str | None
+    api_key: str | None = field(repr=False)
     connect_timeout_seconds: float
     read_timeout_seconds: float
     write_timeout_seconds: float
     pool_timeout_seconds: float
+    max_connections: int
+    max_keepalive_connections: int
     max_retries: int
     search_top_k: int
     score_threshold: float | None
@@ -56,6 +58,8 @@ class OpenVikingConfig:
             read_timeout_seconds=float(cfg.pop("read_timeout_seconds", 10.0)),
             write_timeout_seconds=float(cfg.pop("write_timeout_seconds", 10.0)),
             pool_timeout_seconds=float(cfg.pop("pool_timeout_seconds", 2.0)),
+            max_connections=int(cfg.pop("max_connections", 100)),
+            max_keepalive_connections=int(cfg.pop("max_keepalive_connections", 20)),
             max_retries=int(cfg.pop("max_retries", 1)),
             search_top_k=int(retrieval.pop("top_k", 8)),
             score_threshold=_optional_float(retrieval.pop("score_threshold", None)),
@@ -95,6 +99,10 @@ class OpenVikingConfig:
         for field_name in ("connect_timeout_seconds", "read_timeout_seconds", "write_timeout_seconds", "pool_timeout_seconds"):
             if getattr(self, field_name) <= 0:
                 raise ValueError(f"OpenViking {field_name} must be > 0")
+        if not 1 <= self.max_connections <= 1000:
+            raise ValueError("OpenViking max_connections must be between 1 and 1000")
+        if not 0 <= self.max_keepalive_connections <= self.max_connections:
+            raise ValueError("OpenViking max_keepalive_connections must be between 0 and max_connections")
         if not 0 <= self.max_retries <= 5:
             raise ValueError("OpenViking max_retries must be between 0 and 5")
         if not 1 <= self.search_top_k <= 100:

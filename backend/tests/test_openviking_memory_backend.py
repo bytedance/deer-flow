@@ -58,6 +58,38 @@ def test_config_rejects_dev_auth_without_explicit_opt_in(tmp_path: Path) -> None
         OpenVikingConfig.from_backend_config(_backend_config(tmp_path, auth_mode="dev"))
 
 
+def test_config_repr_does_not_expose_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "super-secret-api-key")
+
+    config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
+
+    assert "super-secret-api-key" not in repr(config)
+
+
+def test_config_parses_and_validates_connection_limits(tmp_path: Path) -> None:
+    config = OpenVikingConfig.from_backend_config(
+        _backend_config(
+            tmp_path,
+            max_connections=48,
+            max_keepalive_connections=12,
+        )
+    )
+
+    assert config.max_connections == 48
+    assert config.max_keepalive_connections == 12
+
+    with pytest.raises(ValueError, match="max_connections"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_connections=0))
+    with pytest.raises(ValueError, match="max_keepalive_connections"):
+        OpenVikingConfig.from_backend_config(
+            _backend_config(
+                tmp_path,
+                max_connections=10,
+                max_keepalive_connections=11,
+            )
+        )
+
+
 def test_backend_is_discovered_by_registered_name() -> None:
     reset_memory_manager()
     assert _scan_backends()["openviking"] is OpenVikingMemoryManager
@@ -122,6 +154,55 @@ def test_http_client_maps_authentication_error(tmp_path: Path) -> None:
     assert exc_info.value.code == "UNAUTHENTICATED"
 
 
+def test_http_client_configures_connection_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _RecordingClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(httpx, "Client", _RecordingClient)
+    config = OpenVikingConfig.from_backend_config(
+        _backend_config(
+            tmp_path,
+            max_connections=32,
+            max_keepalive_connections=8,
+        )
+    )
+
+    OpenVikingHttpClient(config)
+
+    limits = captured["limits"]
+    assert limits.max_connections == 32
+    assert limits.max_keepalive_connections == 8
+
+
+def test_http_client_adds_jitter_to_retry_delay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+    jitter_ranges: list[tuple[float, float]] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"status": "ok"})
+
+    def fake_uniform(lower: float, upper: float) -> float:
+        jitter_ranges.append((lower, upper))
+        return 0.02
+
+    monkeypatch.setattr("random.uniform", fake_uniform)
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_retries=1))
+    client = OpenVikingHttpClient(config, transport=httpx.MockTransport(handler))
+
+    assert client.health() is True
+    assert jitter_ranges == [(0.0, 0.05)]
+    assert sleeps == [pytest.approx(0.07)]
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.ensured: list[tuple[OpenVikingIdentity, str]] = []
@@ -180,8 +261,8 @@ class _FakeClient:
         self.closed = True
 
 
-def _manager(tmp_path: Path) -> tuple[OpenVikingMemoryManager, _FakeClient]:
-    manager = OpenVikingMemoryManager.from_config(_backend_config(tmp_path))
+def _manager(tmp_path: Path, **overrides: Any) -> tuple[OpenVikingMemoryManager, _FakeClient]:
+    manager = OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
     fake = _FakeClient()
     manager._client = fake  # type: ignore[assignment]
     return manager, fake
@@ -248,6 +329,64 @@ def test_manager_does_not_resubmit_messages_after_failed_commit(tmp_path: Path) 
     recovered_state = json.loads(watermark.read_text(encoding="utf-8"))
     assert recovered_state["submitted_message_ids"] == recovered_state["committed_message_ids"]
     assert recovered_state["last_commit_task_id"] == "task-1"
+
+
+def test_manager_does_not_resubmit_history_beyond_recent_id_window(tmp_path: Path) -> None:
+    manager, client = _manager(tmp_path, max_seen_message_ids=16)
+    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
+
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 1
+
+    messages.append(HumanMessage("message 20", id="h20"))
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 2
+    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
+    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
+    state = json.loads(watermark.read_text(encoding="utf-8"))
+    assert state["schema_version"] == 3
+    assert state["submitted_prefix_count"] == 21
+    assert len(state["submitted_message_ids"]) == 16
+
+
+def test_manager_rebases_watermark_after_history_compaction(tmp_path: Path) -> None:
+    manager, client = _manager(tmp_path, max_seen_message_ids=16)
+    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    compacted = [*messages[-8:], HumanMessage("message 20", id="h20")]
+    manager.add("thread-1", compacted, user_id="alice", agent_name="research")
+    manager.add("thread-1", compacted, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 2
+    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
+    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
+    state = json.loads(watermark.read_text(encoding="utf-8"))
+    assert state["submitted_prefix_count"] == 9
+
+
+def test_manager_migrates_legacy_recent_id_watermark(tmp_path: Path) -> None:
+    manager, client = _manager(tmp_path, max_seen_message_ids=16)
+    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
+    legacy_state = json.loads(watermark.read_text(encoding="utf-8"))
+    legacy_state["schema_version"] = 2
+    legacy_state.pop("submitted_prefix_count", None)
+    legacy_state.pop("submitted_prefix_digest", None)
+    legacy_state.pop("committed_prefix_count", None)
+    legacy_state.pop("committed_prefix_digest", None)
+    watermark.write_text(json.dumps(legacy_state), encoding="utf-8")
+
+    messages.append(HumanMessage("message 20", id="h20"))
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 2
+    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
 
 
 def test_manager_identity_is_stable_and_agent_isolated(tmp_path: Path) -> None:
