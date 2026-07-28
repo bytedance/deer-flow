@@ -1662,9 +1662,10 @@ memory:
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
-  # memory_search/add/update/delete go through the active backend; backends
-  # without fact-CRUD return a JSON error instead of crashing.)
+  # Normally only one mode runs at a time. A backend that needs conversation-
+  # level extraction may retain passive writes in tool mode while still
+  # exposing query-aware search (mem0 does this). Tool calls go through the
+  # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).

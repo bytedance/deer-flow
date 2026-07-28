@@ -738,6 +738,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    config = None
     try:
         from deerflow.agents.memory import get_memory_manager
         from deerflow.runtime.user_context import get_effective_user_id
@@ -764,8 +765,13 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 {memory_content}
 </memory>
 """
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to load memory context")
+        from deerflow.agents.memory import MemoryManagerError
+
+        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+            raise
         return ""
 
 
