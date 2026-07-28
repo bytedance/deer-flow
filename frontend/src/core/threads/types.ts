@@ -55,7 +55,7 @@ export interface AgentThread extends Thread<AgentThreadState> {
 
 export interface RunMessage {
   run_id: string;
-  seq?: number;
+  seq: number;
   /** Current user's feedback for the run, attached by the backend to the
    *  run's last AI message row (echo path for the thumb buttons). */
   feedback?: FeedbackData | null;

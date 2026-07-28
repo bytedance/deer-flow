@@ -44,6 +44,41 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
+def _coerce_timeout(value: object, default: float) -> float:
+    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+
+    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
+    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
+    does not become ``0.0`` and time out every request against a healthy server, and a
+    typo'd value does not raise out of tool construction.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+    return default
+
+
+def _resolve_timeout(cfg: dict, default: float) -> float:
+    """Read the timeout, accepting this provider's key and the sibling providers' key.
+
+    ``browserless`` documents ``timeout_s`` while ``crawl4ai`` and ``jina_ai`` read
+    ``timeout``. An unrecognised key is dropped silently by the extra-fields tool config,
+    so someone adapting another provider's snippet got the default with no diagnostic.
+    Accept both, preferring the documented ``timeout_s`` when both are present.
+    """
+    if "timeout_s" in cfg:
+        return _coerce_timeout(cfg["timeout_s"], default)
+    if "timeout" in cfg:
+        return _coerce_timeout(cfg["timeout"], default)
+    return default
+
+
 def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
     cfg = _get_tool_config(tool_name)
     base_url = "http://localhost:3032"
@@ -52,8 +87,7 @@ def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
         token = cfg.get("token", token)
-        raw = cfg.get("timeout_s", timeout_s)
-        timeout_s = float(raw) if not isinstance(raw, float) else raw
+        timeout_s = _resolve_timeout(cfg, timeout_s)
     return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
