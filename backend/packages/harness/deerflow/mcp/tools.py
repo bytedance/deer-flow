@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Iterable, Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -13,17 +14,29 @@ from urllib.parse import unquote, urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+# MCP tool names arrive verbatim from external (potentially hostile/compromised)
+# servers. A tool name is only ever a function identifier: the provider's
+# function-calling API validates it against this same charset at bind time. But
+# deferred (tool_search) MCP tools are withheld from binding, so that provider
+# check never runs on their names — they only ever live in the system-prompt
+# string, where a crafted name (newlines, markdown, angle brackets) could forge
+# framework prompt structure. Canonicalizing at the load boundary constrains
+# both bound and deferred names to the same safe identifier charset, mirroring
+# the load-time validation skill names get (skills/storage/skill_storage.py).
+_VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Subdirectory under the thread's workspace used as the temp dir for stdio MCP
 # subprocesses. Pinning the process temp dir here (alongside its cwd) makes
@@ -57,7 +70,10 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     """
     if not uri:
         return None
-    parsed = urlparse(uri)
+    try:
+        parsed = urlparse(uri)
+    except ValueError:
+        return None
     if parsed.scheme == "file":
         raw = unquote(parsed.path)
     elif parsed.scheme == "":
@@ -414,6 +430,7 @@ def _make_session_pool_tool(
     server_name: str,
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
+    tool_call_timeout: float | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -478,19 +495,29 @@ def _make_session_pool_tool(
             session_connection["env"] = session_env
         session = await pool.get_session(server_name, scope_key, session_connection)
 
+        # Build common call_tool kwargs once — only add keys when needed so
+        # existing call-sites that assert on exact arguments are not affected.
+        call_kwargs: dict[str, Any] = {}
+        if tool_call_timeout:
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=tool_call_timeout)
+
         if tool_interceptors:
             from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 
             async def base_handler(request: MCPToolCallRequest) -> Any:
                 # Preserve interceptor-injected headers for stdio MCP calls by
                 # forwarding them through MCP call meta.
-                call_kwargs: dict[str, Any] = {}
+                kwargs = dict(call_kwargs)
                 if request.headers:
                     if isinstance(request.headers, Mapping):
-                        call_kwargs["meta"] = {"headers": dict(request.headers)}
+                        kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await session.call_tool(request.name, request.args, **call_kwargs)
+                return await session.call_tool(
+                    request.name,
+                    request.args,
+                    **kwargs,
+                )
 
             handler = base_handler
             for interceptor in reversed(tool_interceptors):
@@ -509,7 +536,11 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await session.call_tool(original_name, arguments)
+            call_tool_result = await session.call_tool(
+                original_name,
+                arguments,
+                **call_kwargs,
+            )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
         # free text, so skip the second recursive walk when there is no text
@@ -636,21 +667,42 @@ async def get_mcp_tools() -> list[BaseTool]:
         # internally which cannot be closed from a different async task, so
         # pooling them causes RuntimeError on cleanup (see #3203).
         wrapped_tools: list[BaseTool] = []
-        for tool in tools:
-            tool_server: str | None = None
-            for name in servers_config:
-                if tool.name.startswith(f"{name}_"):
-                    tool_server = name
-                    break
-
-            if tool_server is not None:
-                transport = servers_config[tool_server].get("transport", "stdio")
-                if transport == "stdio":
-                    wrapped_tools.append(_make_session_pool_tool(tool, tool_server, servers_config[tool_server], tool_interceptors))
+        # Route each tool by the server that actually produced it: tools_by_server[i]
+        # corresponds to the i-th server in servers_config. Inferring the source server by
+        # scanning servers_config for a name prefix is ambiguous when one server name is a
+        # prefix of another (e.g. "web" vs "web_scraper" → "web_scraper_search".startswith(
+        # "web_") matches "web" first), which pools the tool under the wrong server. Using the
+        # source grouping makes routing exact; the prefix guard preserves the previous
+        # behavior of leaving unprefixed tools unwrapped.
+        for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+            transport = servers_config[source_name].get("transport", "stdio")
+            server_cfg = extensions_config.mcp_servers.get(source_name)
+            for tool in server_tools:
+                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
+                    logger.warning(
+                        "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
+                        source_name,
+                        tool.name,
+                        _VALID_MCP_TOOL_NAME.pattern,
+                    )
+                    continue
+                tag_mcp_tool(tool)
+                prefix = f"{source_name}_"
+                original_name = tool.name[len(prefix) :] if tool.name.startswith(prefix) else tool.name
+                routing = resolve_effective_mcp_routing(server_cfg, original_name)
+                if routing.get("mode") != "off":
+                    tag_mcp_routing(tool, routing)
+                if tool.name.startswith(f"{source_name}_") and transport == "stdio":
+                    _timeout = server_cfg.tool_call_timeout if server_cfg else None
+                    wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors, tool_call_timeout=_timeout))
                 else:
+                    if transport != "stdio" and server_cfg and server_cfg.tool_call_timeout is not None:
+                        logger.warning(
+                            "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
+                            source_name,
+                            transport,
+                        )
                     wrapped_tools.append(tool)
-            else:
-                wrapped_tools.append(tool)
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:

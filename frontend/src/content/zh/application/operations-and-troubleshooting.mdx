@@ -94,6 +94,27 @@ ls -la backend/.deer-flow/threads/
 
 ---
 
+### SQLite 报 `database is locked`
+
+**症状**：Docker 或团队部署中，多个用户同时使用时出现 `sqlite3.OperationalError: database is locked`。
+
+**原因**：SQLite 支持并发读取，但同一时间只有一个写入者。DeerFlow 的检查点写入和应用写入会共享同一个 SQLite 数据库文件，多用户并发时可能竞争文件锁。
+
+**解决**：生产环境或多用户部署切换到 Postgres：
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+SQLite 应只用于本地开发、单用户部署或短期评估环境。
+
+---
+
 ### 前端构建失败
 
 **症状**：`make install` 或前端构建步骤失败，提示 `BETTER_AUTH_SECRET` 错误。
@@ -142,14 +163,16 @@ grep -i "mcp\|timeout" logs/gateway.log | tail -20
 
 ## 数据备份
 
-DeerFlow 将持久化数据存储在：
+根据你启用的存储后端备份：
 
-- **线程数据**：`backend/.deer-flow/threads/` — 每个线程的上传文件、输出和工作区文件
-- **检查点**：取决于检查点器配置（SQLite：`backend/.deer-flow/checkpoints.db`，Redis：外部存储）
-- **记忆**：`backend/.deer-flow/memory.json`（以及 `agents/*/memory.json`）
-- **自定义 Agent 配置**：`backend/agents/*/config.yaml`
+- `backend/.deer-flow/threads/`：线程工作目录、上传文件和产出物。
+- `backend/.deer-flow/memory.json` 和 `backend/.deer-flow/agents/`：全局和 Agent 记忆。
+- `${database.sqlite_dir}/deerflow.db`：当使用 `database.backend: sqlite` 时备份，默认路径为 `.deer-flow/data/deerflow.db`。
+- Postgres 数据库备份：当使用 `database.backend: postgres` 时定期导出。
+- 旧的 `checkpointer.connection_string` 文件：如果你的部署仍配置独立 `checkpointer`。
+- `backend/agents/*/config.yaml`：自定义 Agent 配置。
 
-对于生产部署，定期备份这些目录。Docker 部署中，确保这些目录绑定挂载到持久卷，而不是容器内部。
+Docker 部署中，备份绑定挂载的宿主机路径，而不是容器内部文件系统。
 
 ## 停止和重启服务
 

@@ -114,9 +114,36 @@ For production, use a named volume or a Persistent Volume Claim (PVC) instead of
 | -------------------------------------- | ------------------------------------------ |
 | `LocalSandboxProvider`                 | Single-user, trusted local workflows       |
 | `AioSandboxProvider` (Docker)          | Multi-user, moderate isolation requirement |
+| `E2BSandboxProvider` (e2b cloud)       | Hosted/serverless, no Docker/K8s ops, instant Jupyter |
 | `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user   |
 
 For any deployment with more than one concurrent user, use a container-based sandbox to prevent users from interfering with each other's execution environments.
+
+### Database backend
+
+SQLite is convenient for local development and single-user deployments, but it is not a production backend for concurrent users.
+
+In SQLite mode, DeerFlow stores LangGraph checkpoint data and application data in one `deerflow.db` file. WAL mode allows concurrent reads, but SQLite still permits only one writer at a time. When several users run agents at once, checkpoint writes and application writes can contend for the same file and raise `sqlite3.OperationalError: database is locked`.
+
+For production or any multi-user deployment, use Postgres:
+
+```bash
+# .env
+DATABASE_URL=postgresql://user:password@postgres:5432/deerflow
+UV_EXTRAS=postgres
+```
+
+```yaml
+# config.yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+Keep SQLite deployments to local, single-node, or short-lived evaluation environments.
 
 ### K8s Provisioner setup
 
@@ -153,7 +180,7 @@ USERDATA_PVC_NAME=deer-flow-userdata-pvc
 SKILLS_PVC_NAME=deer-flow-skills-pvc
 ```
 
-When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`threads/{thread_id}/user-data`) so each thread gets its own directory in the PVC.
+When `USERDATA_PVC_NAME` is set, the provisioner automatically uses subPath (`deer-flow/users/{user_id}/threads/{thread_id}/user-data`) so each user's threads get their own directories in the PVC.
 
 </Steps>
 

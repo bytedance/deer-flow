@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import threading
@@ -108,7 +109,7 @@ class DiscordChannel(Channel):
 
         self._thread = threading.Thread(target=self._run_client, daemon=True)
         self._thread.start()
-        self._load_active_threads()
+        await asyncio.to_thread(self._load_active_threads)
         logger.info("Discord channel started")
 
     def _load_active_threads(self) -> None:
@@ -129,23 +130,45 @@ class DiscordChannel(Channel):
             except Exception:
                 logger.exception("[Discord] failed to load thread mappings")
 
-    def _save_thread(self, channel_id: str, thread_id: str) -> None:
-        """Persist a Discord thread mapping to the dedicated JSON file."""
+    def _record_thread_mapping(self, channel_id: str, thread_id: str) -> None:
+        """Synchronously update the in-memory channel->thread mapping and its reverse-lookup set.
+
+        Runs on the event loop (no IO, no await) so a follow-up message in the
+        newly created thread is recognized immediately, before the offloaded
+        persistence write completes. Deferring this update into the worker
+        thread opened a window where ``_active_thread_ids`` had not yet been
+        updated and an inbound message was misclassified as orphaned (see the
+        #3927 review). Persistence is handled separately by
+        ``_persist_thread_mappings``.
+        """
+        old_id = self._active_threads.get(channel_id)
+        self._active_threads[channel_id] = thread_id
+        if old_id:
+            self._active_thread_ids.discard(old_id)
+        self._active_thread_ids.add(thread_id)
+
+    def _persist_thread_mappings(self) -> None:
+        """Flush the current in-memory thread mappings to disk.
+
+        Intended for ``asyncio.to_thread``: this is pure filesystem IO. The
+        in-memory state is updated synchronously by ``_record_thread_mapping``,
+        so persistence latency never delays visibility of a new mapping to
+        inbound-message handling. The mapping is snapshotted under the store
+        lock so a concurrent record cannot mutate the dict mid-serialization.
+        """
         with self._thread_store_lock:
             try:
-                data: dict[str, str] = {}
-                if self._thread_store_path.exists():
-                    data = json.loads(self._thread_store_path.read_text())
-                old_id = data.get(channel_id)
-                data[channel_id] = thread_id
-                # Update reverse-lookup set
-                if old_id:
-                    self._active_thread_ids.discard(old_id)
-                self._active_thread_ids.add(thread_id)
+                snapshot = dict(self._active_threads)
                 self._thread_store_path.parent.mkdir(parents=True, exist_ok=True)
-                self._thread_store_path.write_text(json.dumps(data, indent=2))
+                self._thread_store_path.write_text(json.dumps(snapshot, indent=2))
             except Exception:
-                logger.exception("[Discord] failed to save thread mapping for channel %s", channel_id)
+                logger.exception("[Discord] failed to persist thread mappings")
+
+    @staticmethod
+    def _read_attachment_bytes(path: str) -> bytes:
+        """Read an attachment file synchronously (intended for ``asyncio.to_thread``)."""
+        with open(path, "rb") as fp:
+            return fp.read()
 
     async def stop(self) -> None:
         self._running = False
@@ -204,14 +227,15 @@ class DiscordChannel(Channel):
             return False
 
         try:
-            # Keep the file handle open only for the duration of the upload: discord.py
-            # reads ``fp`` while ``target.send`` runs on ``_discord_loop``; once that
-            # future resolves the bytes are consumed, so closing here is safe and avoids
-            # leaking the handle on both the success and failure paths.
-            with open(str(attachment.actual_path), "rb") as fp:
-                file = self._discord_module.File(fp, filename=attachment.filename)
-                send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
-                await asyncio.wrap_future(send_future)
+            # Read the attachment off the event loop (open + read are blocking IO),
+            # then hand discord.py an in-memory buffer. The bytes are consumed while
+            # ``target.send`` runs on ``_discord_loop``; once that future resolves the
+            # buffer can be reclaimed, so this avoids leaking a file handle on both the
+            # success and failure paths.
+            data = await asyncio.to_thread(self._read_attachment_bytes, str(attachment.actual_path))
+            file = self._discord_module.File(io.BytesIO(data), filename=attachment.filename)
+            send_future = asyncio.run_coroutine_threadsafe(target.send(file=file), self._discord_loop)
+            await asyncio.wrap_future(send_future)
             logger.info("[Discord] file uploaded: %s", attachment.filename)
             return True
         except Exception:
@@ -357,8 +381,8 @@ class DiscordChannel(Channel):
                 thread_obj = await self._create_thread(message)
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
-                    self._active_threads[channel_id] = target_thread_id
-                    self._save_thread(channel_id, target_thread_id)
+                    self._record_thread_mapping(channel_id, target_thread_id)
+                    await asyncio.to_thread(self._persist_thread_mappings)
                     thread_id = target_thread_id
                     chat_id = channel_id
                     typing_target = thread_obj
@@ -384,8 +408,8 @@ class DiscordChannel(Channel):
             thread_obj = await self._create_thread(message)
             if thread_obj is not None:
                 target_thread_id = str(thread_obj.id)
-                self._active_threads[channel_id] = target_thread_id
-                self._save_thread(channel_id, target_thread_id)
+                self._record_thread_mapping(channel_id, target_thread_id)
+                await asyncio.to_thread(self._persist_thread_mappings)
                 thread_id = target_thread_id
                 chat_id = channel_id
                 typing_target = thread_obj  # Type into the new thread
@@ -407,8 +431,8 @@ class DiscordChannel(Channel):
                 typing_target = message.channel  # Type into the channel
             else:
                 target_thread_id = str(thread_obj.id)
-                self._active_threads[channel_id] = target_thread_id
-                self._save_thread(channel_id, target_thread_id)
+                self._record_thread_mapping(channel_id, target_thread_id)
+                await asyncio.to_thread(self._persist_thread_mappings)
                 thread_id = target_thread_id
                 chat_id = channel_id
                 typing_target = thread_obj  # Type into the new thread

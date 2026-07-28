@@ -105,6 +105,25 @@ If file tools (`read_file`, `ls`, `bash`) fail with permission or path errors:
 
 ---
 
+### SQLite reports `database is locked`
+
+This usually means SQLite is handling concurrent writes from multiple users or long-running agent runs. SQLite supports concurrent reads, but only one writer can hold the database lock at a time. In DeerFlow, checkpoint writes and application writes share the same SQLite database file.
+
+For production or multi-user deployments, switch to Postgres:
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+SQLite should be kept for local development, single-user deployments, or short-lived evaluation environments.
+
+---
+
 ### K8s Provisioner not connecting
 
 ```
@@ -136,23 +155,15 @@ If MCP tools appear in `extensions_config.json` but are not available in the age
 
 ## Data backup
 
-Thread data and memory are stored under `backend/.deer-flow/`:
+Back up the storage backends you use:
 
-```
-backend/.deer-flow/
-  memory.json           # global agent memory
-  agents/               # per-agent memory
-  threads/              # thread working directories
-    {thread_id}/
-      user-data/
-        uploads/
-        outputs/
-  checkpoints.db        # SQLite checkpoints (if configured)
-```
+- `backend/.deer-flow/threads/` for thread working directories, uploads, and artifacts.
+- `backend/.deer-flow/memory.json` and `backend/.deer-flow/agents/` for learned memory.
+- `${database.sqlite_dir}/deerflow.db` when using `database.backend: sqlite` (default: `.deer-flow/data/deerflow.db`).
+- Regular database dumps when using `database.backend: postgres`.
+- The legacy `checkpointer.connection_string` file if your deployment still configures a standalone `checkpointer`.
 
-Back up this entire directory to preserve conversation history, artifacts, and learned memory.
-
-In Docker deployments, the bind-mounted host path (`$DEER_FLOW_ROOT/backend/.deer-flow/`) is the source of truth — back up the host path.
+In Docker deployments, back up the bind-mounted host paths rather than the container filesystem.
 
 ## Restarting services
 

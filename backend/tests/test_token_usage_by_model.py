@@ -429,3 +429,139 @@ async def test_include_active_picks_up_running_progress_snapshot(tmp_path):
         assert active["total_tokens"] == 70
     finally:
         await _close_sql_engine()
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache-hit accounting (powers cache-aware cost estimation in
+# /api/console): cache_read_tokens is a *sparse* bucket key — present only
+# when a provider reported cache hits — so pre-existing bucket shapes and
+# exact-equality assertions above stay valid.
+# ---------------------------------------------------------------------------
+
+
+class TestJournalCacheRead:
+    def test_cache_read_accumulates_as_sparse_key(self) -> None:
+        j = _journal()
+        j.on_llm_end(
+            _make_llm_response(
+                usage={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "input_token_details": {"cache_read": 80}},
+                model_name="m",
+            ),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        # Second call without cache hits still accumulates into the same bucket.
+        j.on_llm_end(
+            _make_llm_response(usage={"input_tokens": 50, "output_tokens": 5, "total_tokens": 55}, model_name="m"),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        data = j.get_completion_data()
+        assert data["token_usage_by_model"]["m"] == {
+            "input_tokens": 150,
+            "output_tokens": 15,
+            "total_tokens": 165,
+            "cache_read_tokens": 80,
+        }
+
+    def test_bucket_without_cache_hits_keeps_legacy_shape(self) -> None:
+        j = _journal()
+        j.on_llm_end(
+            _make_llm_response(usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}, model_name="m"),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        assert j.get_completion_data()["token_usage_by_model"]["m"] == {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+        }
+
+    def test_external_records_carry_cache_read(self) -> None:
+        j = _journal()
+        j.record_external_llm_usage_records(
+            [
+                {
+                    "source_run_id": "sub-1",
+                    "caller": "subagent:general-purpose",
+                    "model_name": "sub-m",
+                    "input_tokens": 40,
+                    "output_tokens": 10,
+                    "total_tokens": 50,
+                    "cache_read_tokens": 25,
+                },
+            ],
+        )
+        assert j.get_completion_data()["token_usage_by_model"]["sub-m"]["cache_read_tokens"] == 25
+
+    def test_deepseek_raw_usage_normalizes_to_cache_read(self) -> None:
+        """Pin the DeepSeek chat-completions shape end-to-end: the raw
+        ``prompt_tokens_details.cached_tokens`` field is what langchain-openai's
+        ``_create_usage_metadata`` normalizes into
+        ``input_token_details.cache_read`` (DeepSeek's top-level
+        ``prompt_cache_hit/miss_tokens`` are redundant aliases LangChain does
+        not read), and the journal captures it. The derived cache-miss count
+        (input − cache_read) must equal DeepSeek's own
+        ``prompt_cache_miss_tokens``, which is what cache-aware pricing bills
+        at the full input price."""
+        from langchain_openai.chat_models.base import _create_usage_metadata
+
+        raw = {
+            "prompt_tokens": 106,
+            "completion_tokens": 112,
+            "total_tokens": 218,
+            "prompt_tokens_details": {"cached_tokens": 64},
+            "prompt_cache_hit_tokens": 64,
+            "prompt_cache_miss_tokens": 42,
+        }
+        usage = _create_usage_metadata(raw)
+        j = _journal()
+        j.on_llm_end(
+            _make_llm_response(usage=dict(usage), model_name="deepseek-chat"),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        bucket = j.get_completion_data()["token_usage_by_model"]["deepseek-chat"]
+        assert bucket == {
+            "input_tokens": 106,
+            "output_tokens": 112,
+            "total_tokens": 218,
+            "cache_read_tokens": 64,
+        }
+        assert bucket["input_tokens"] - bucket["cache_read_tokens"] == raw["prompt_cache_miss_tokens"]
+
+    def test_collector_extracts_cache_read_from_usage_metadata(self) -> None:
+        from deerflow.subagents.token_collector import SubagentTokenCollector
+
+        collector = SubagentTokenCollector("subagent:general-purpose")
+        collector.on_llm_end(
+            _make_llm_response(
+                usage={"input_tokens": 30, "output_tokens": 6, "total_tokens": 36, "input_token_details": {"cache_read": 20}},
+                model_name="sub-m",
+            ),
+            run_id=uuid4(),
+        )
+        records = collector.snapshot_records()
+        assert len(records) == 1
+        assert records[0]["cache_read_tokens"] == 20
+
+    def test_collector_omits_cache_read_key_when_no_cache_hits(self) -> None:
+        from deerflow.subagents.token_collector import SubagentTokenCollector
+
+        collector = SubagentTokenCollector("subagent:general-purpose")
+        collector.on_llm_end(
+            _make_llm_response(
+                usage={"input_tokens": 30, "output_tokens": 6, "total_tokens": 36},
+                model_name="sub-m",
+            ),
+            run_id=uuid4(),
+        )
+        records = collector.snapshot_records()
+        assert len(records) == 1
+        # Sparse record shape: no explicit 0 when the provider reported no
+        # cache hits (record_external_llm_usage_records treats absent as 0).
+        assert "cache_read_tokens" not in records[0]

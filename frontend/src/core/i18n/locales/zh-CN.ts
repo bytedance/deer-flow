@@ -1,4 +1,4 @@
-﻿import {
+import {
   CompassIcon,
   GraduationCapIcon,
   ImageIcon,
@@ -24,6 +24,7 @@ export const zhCN: Translations = {
     delete: "删除",
     edit: "编辑",
     rename: "重命名",
+    renameFailed: "重命名会话失败。",
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",
@@ -50,7 +51,28 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    exportFailed: "导出对话失败。",
     regenerate: "重新生成",
+    editAndRerun: "编辑并重新运行",
+    updateAndRerun: "更新并重新运行",
+    editRerunWarning:
+      "重新运行只恢复对话状态，不会撤销文件、Memory 或外部操作。",
+    branch: "分叉",
+    showArtifacts: "查看此对话的文件",
+    browser: "浏览器",
+    showBrowser: "打开浏览器面板",
+  },
+
+  runDuration: {
+    reasoning: "思考过程",
+    working: "执行中…",
+    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    description: "任务总耗时，包括模型推理、工具调用和等待时间。",
+    lessThanSecond: "不足 1 秒",
+    hours: (value) => `${value} 小时`,
+    minutes: (value) => `${value} 分`,
+    seconds: (value) => `${value} 秒`,
+    separator: " ",
   },
 
   // Home
@@ -78,12 +100,63 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  // Citations
+  citations: {
+    sourcesSummary: (count) => `使用了 ${count} 个来源`,
+    citeCount: (count) => `${count} 次引用`,
+    copyReference: (title) => `复制 ${title} 引用`,
+    copiedReference: (title) => `已复制 ${title} 引用`,
+  },
+
+  // Workspace Changes
+  workspaceChanges: {
+    title: "工作区变更",
+    editedTitle: (count) => `已编辑 ${count} 个文件`,
+    badge: (count, additions, deletions) =>
+      `${count} 个文件已更改 +${additions} -${deletions}`,
+    viewChanges: "查看更改",
+    created: "新增",
+    modified: "修改",
+    deleted: "删除",
+    openFile: "打开文件",
+    loading: "正在加载工作区变更...",
+    noChanges: "没有记录到工作区变更。",
+    diffUnavailable: "无法展示 diff",
+    binaryUnavailable: "二进制文件，无法展示 diff。",
+    largeUnavailable: "文件过大，已省略 diff。",
+    sensitiveUnavailable: "敏感路径，已隐藏内容。",
+    truncatedUnavailable: "变更集过大，已省略 diff。",
+    symlinkUnavailable: "符号链接变更，无法展示 diff。",
+    truncatedSummary: "部分变更已被截断。",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",
+    disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
+    inputPolish: "优化输入",
+    inputPolishing: "正在优化输入...",
+    inputPolishNoChanges: "当前输入已经足够清晰。",
+    inputPolishFailed: "优化输入失败。",
+    inputPolishUndo: "撤销优化",
+    inputPolishCancel: "取消优化",
+    voiceInputStartLabel: "语音输入",
+    voiceInputStopLabel: "停止语音输入",
+    voiceInputStart:
+      "语音输入。DeerFlow 只接收转写文本，音频由浏览器或系统语音服务处理。",
+    voiceInputStop: "停止语音输入",
+    voiceInputListening: "正在聆听... 点击停止语音输入。",
+    voiceInputUnsupported:
+      "当前浏览器不支持语音输入。建议使用 Chrome 或 Edge。",
+    voiceInputPermissionDenied: "麦克风权限被拒绝。请允许麦克风访问后重试。",
+    voiceInputMicrophoneUnavailable: "未检测到麦克风。请检查设备输入后重试。",
+    voiceInputUnsupportedLanguage: "当前浏览器不支持该语言的语音输入。",
+    voiceInputNetworkError: "无法连接浏览器语音识别服务。",
+    voiceInputNoSpeech: "没有检测到语音，请重试。",
+    voiceInputFailed: "语音输入失败，请重试。",
     mode: "模式",
     flashMode: "闪速",
     flashModeDescription: "快速且高效的完成任务，但可能不够精准",
@@ -112,6 +185,23 @@ export const zhCN: Translations = {
     followupConfirmAppend: "追加并发送",
     followupConfirmReplace: "替换并发送",
     suggestionPlaceholderRequired: "发送前请先填写建议模板中的占位内容。",
+    goalCommandDescription: "设置、查看或清除当前目标",
+    compactCommandDescription: "压缩早期上下文，保留完整聊天记录",
+    goalLabel: "目标",
+    goalContinuing: "续跑中 {count}/{max}",
+    goalContinuationTooltip:
+      "为达成目标已自动续跑 {count}/{max} 次，达上限后自动停止",
+    goalSet: "目标已设置。",
+    goalCleared: "目标已清除。",
+    goalNone: "当前没有目标。",
+    goalActive: "当前目标：{goal}",
+    goalFailed: "目标命令执行失败。",
+    goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
+    goalLengthCounter: "目标长度：{length}/{max} 字符",
+    compactSuccess:
+      "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
+    compactSkipped: "当前上下文还不需要压缩。",
+    compactFailed: "上下文压缩失败。",
     suggestions: [
       {
         suggestion: "写作",
@@ -160,6 +250,7 @@ export const zhCN: Translations = {
         icon: SparklesIcon,
       },
     ],
+    pleaseWaitStreaming: "请等待当前响应完成。",
   },
 
   // Sidebar
@@ -170,6 +261,141 @@ export const zhCN: Translations = {
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
+    scheduledTasks: "定时任务",
+    agentsDisabledTooltip: "功能未启用",
+  },
+
+  // 定时任务
+  scheduledTasks: {
+    scheduleType: {
+      cron: "重复",
+      once: "单次",
+    },
+    preset: {
+      label: "重复方式",
+      hourly: "每小时",
+      daily: "每天",
+      weekly: "每周",
+      monthly: "每月",
+      custom: "自定义 cron",
+    },
+    fields: {
+      minute: "分钟",
+      time: "时间",
+      weekday: "在",
+      dayOfMonth: "几号",
+      cron: "cron 表达式",
+      cronPlaceholder: "0 9 * * *",
+      runAt: "运行时间",
+      timezone: "时区",
+    },
+    weekdays: {
+      mon: "周一",
+      tue: "周二",
+      wed: "周三",
+      thu: "周四",
+      fri: "周五",
+      sat: "周六",
+      sun: "周日",
+    },
+    preview: "预览",
+    cronHelp: "打开 crontab.guru",
+    create: {
+      title: "创建定时任务",
+      taskTitle: "任务标题",
+      prompt: "提示词",
+      submit: "创建",
+      fillRequired: "请填写所有必填项",
+    },
+    context: {
+      fresh: "新线程",
+      reuse: "复用线程",
+      threadIdPlaceholder: "线程 ID",
+    },
+    filters: {
+      allStatuses: "全部状态",
+      enabled: "已启用",
+      paused: "已暂停",
+      completed: "已完成",
+      failed: "已失败",
+      allTypes: "全部类型",
+      cron: "定时",
+      once: "单次",
+    },
+    detail: {
+      contextMode: "上下文模式",
+      thread: "线程",
+      lastThread: "上个线程",
+      schedule: "调度",
+      nextRun: "下次运行",
+      lastRun: "上次运行",
+      lastRunId: "上次运行 ID",
+      lastError: "上次错误",
+      runsCount: "{count} 次运行",
+      runsCountOne: "{count} 次运行",
+      noRuns: "暂无运行",
+      noSelection: "未选择定时任务",
+      filteredByThread: "按线程筛选：{id}",
+      loadFailed: "加载定时任务失败",
+    },
+    actions: {
+      edit: "编辑",
+      cancelEdit: "取消编辑",
+      pause: "暂停",
+      resume: "恢复",
+      trigger: "立即触发",
+      delete: "删除",
+    },
+    deleteConfirm: "确定要删除该定时任务吗？此操作不可撤销。",
+    errors: {
+      create: "创建定时任务失败",
+      update: "更新定时任务失败",
+      pause: "暂停定时任务失败",
+      resume: "恢复定时任务失败",
+      trigger: "触发定时任务失败",
+      delete: "删除定时任务失败",
+    },
+    edit: {
+      titlePlaceholder: "编辑标题",
+      promptPlaceholder: "编辑提示词",
+      submit: "保存编辑",
+    },
+    status: {
+      enabled: "已启用",
+      paused: "已暂停",
+      running: "运行中",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+    runTrigger: { scheduled: "定时", manual: "手动" },
+    runStatus: {
+      queued: "排队中",
+      running: "运行中",
+      success: "成功",
+      failed: "失败",
+      skipped: "跳过",
+      interrupted: "已中断",
+    },
+    recipes: {
+      label: "快速创建",
+      trending: {
+        title: "GitHub Trending 日榜",
+        desc: "总结今日 Trending 前十仓库",
+      },
+      news: {
+        title: "每日科技新闻摘要",
+        desc: "收集并总结当日科技要闻",
+      },
+      issues: {
+        title: "GitHub Issue 分诊",
+        desc: "分诊某仓库的 open issues（填入 {{repo}}）",
+      },
+      weekly: {
+        title: "每周周报",
+        desc: "每周一汇总一周工作",
+      },
+    },
   },
 
   // Agents
@@ -179,6 +405,8 @@ export const zhCN: Translations = {
     newAgent: "新建智能体",
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
+    featureDisabledTitle: "智能体功能未启用",
+    featureDisabledDescription: "该功能未在此服务器上启用，请联系管理员。",
     chat: "对话",
     delete: "删除",
     deleteConfirm: "确定要删除该智能体吗？此操作不可撤销。",
@@ -214,6 +442,24 @@ export const zhCN: Translations = {
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
     backToGallery: "返回 Gallery",
+    settings: "模型设置",
+    settingsTitle: "模型设置",
+    settingsDescription:
+      "为该智能体选择默认模型和生成参数，修改在下一条消息生效。",
+    settingsModel: "默认模型",
+    settingsModelDefault: "使用全局默认",
+    settingsTemperature: "温度",
+    settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
+    settingsMaxTokens: "最大输出 token",
+    settingsMaxTokensPlaceholder: "继承模型配置",
+    settingsThinking: "思考模式",
+    settingsThinkingOn: "开启",
+    settingsThinkingOff: "关闭",
+    settingsReasoningEffort: "推理强度",
+    settingsInherit: "继承",
+    settingsSaved: "模型设置已保存",
+    settingsInvalidTemperature: "温度必须在 0 到 2 之间",
+    settingsInvalidMaxTokens: "最大输出 token 必须为不超过 200,000 的正整数",
   },
 
   // Breadcrumb
@@ -225,9 +471,9 @@ export const zhCN: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "访问 DeerFlow 官方网站",
-    githubTooltip: "访问 DeerFlow 的 Github 仓库",
+    githubTooltip: "访问 DeerFlow 的 GitHub 仓库",
     settingsAndMore: "设置和更多",
-    visitGithub: "在 Github 上查看 DeerFlow",
+    visitGithub: "在 GitHub 上查看 DeerFlow",
     reportIssue: "报告问题",
     contactUs: "联系我们",
     about: "关于 DeerFlow",
@@ -240,6 +486,9 @@ export const zhCN: Translations = {
   conversation: {
     noMessages: "还没有消息",
     startConversation: "开始新的对话以查看消息",
+    branchCreated: "已创建分叉对话",
+    branchFailed: "创建分叉对话失败。",
+    streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
   },
 
   // Chats
@@ -248,6 +497,36 @@ export const zhCN: Translations = {
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+    pinChat: "置顶对话",
+    unpinChat: "取消置顶",
+    pinChatFailed: "更新对话置顶状态失败",
+  },
+
+  // Sidecar
+  sidecar: {
+    title: "侧边对话",
+    open: "打开侧边对话",
+    close: "关闭侧边对话",
+    delete: "删除侧边对话",
+    deleteConfirm:
+      "确定要删除该侧边对话吗？此操作不可撤销。如果只是想隐藏，请使用顶部的侧边对话开关。",
+    deleteSuccess: "侧边对话已删除",
+    deleteFailed: "删除侧边对话失败。",
+    addToConversation: "添加到对话",
+    askInSideChat: "在侧边聊天中提问",
+    reference: "引用",
+    selectedTextFragment: "{count} 个已选文本片段",
+    selectedTextFragments: "{count} 个已选文本片段",
+    clearReferences: "清除已选引用",
+    emptyTitle: "继续深入追问",
+    emptyDescription: "基于引用内容单独追问。",
+    placeholder: "继续深入追问...",
+    send: "发送",
+    sendFailed: "侧边对话发送失败。",
+    noContext: "未选择上下文",
+    continuing: "继续当前侧边对话",
+    selectionCrossesMessages:
+      "选区跨越了多条消息，请在同一条回复内选择要引用的文本。",
   },
 
   // Channels
@@ -311,11 +590,42 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     skillInstallTooltip: "安装技能并使其可在 DeerFlow 中使用",
+    browserNavigate: (url: string) => `在浏览器中打开 ${url}`,
+    browserNavigateGeneric: "在浏览器中打开页面",
+    browserClick: "在浏览器中点击元素",
+    browserType: "在浏览器中输入内容",
+    browserSnapshot: "在浏览器中读取页面",
+    browserGetText: "在浏览器中读取页面文本",
+    browserBack: "在浏览器中返回上一页",
+    browserScreenshot: "浏览器截图",
+    browserClose: "关闭浏览器",
+  },
+
+  humanInput: {
+    answered: "已回答",
+    pending: "发送中...",
+    readOnly: "只读",
+    otherLabel: "其他回答",
+    otherPlaceholder: "输入其他回答...",
+    submit: "提交",
+    emptyError: "请输入回答后再提交。",
+    requiredError: "请填写所有必填字段后再提交。",
+    requiredA11yLabel: "必填",
+    selectPlaceholder: "请选择...",
+    answeredValue: (value: string) => `已回答：${value}`,
   },
 
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
+    limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
+      `添加附件（最多 ${maxFiles} 个，单文件不超过 ${maxFileSize}，总计不超过 ${maxTotalSize}）。支持常规文件类型；macOS .app 应先压缩。`,
+    filesTooLarge: (files: string, maxFileSize: string) =>
+      `${files} 超过单文件 ${maxFileSize} 的限制，未被添加。`,
+    tooManyFiles: (count: number, maxFiles: number) =>
+      `有 ${count} 个文件未被添加；一次最多添加 ${maxFiles} 个文件。`,
+    totalSizeTooLarge: (count: number, maxTotalSize: string) =>
+      `有 ${count} 个文件未被添加；附件总大小不能超过 ${maxTotalSize}。`,
   },
 
   subtasks: {
@@ -338,6 +648,7 @@ export const zhCN: Translations = {
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
     unavailableShort: "未返回用量",
+    collecting: "统计中",
     note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，可能与平台账单页不完全一致。",
     presets: {
       off: "关闭",
@@ -380,6 +691,7 @@ export const zhCN: Translations = {
       account: "账号",
       appearance: "外观",
       channels: "渠道",
+      integrations: "集成",
       memory: "记忆",
       tools: "工具",
       skills: "技能",
@@ -487,6 +799,189 @@ export const zhCN: Translations = {
       disabled:
         "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
+    integrations: {
+      title: "集成",
+      description: "连接第三方工具和办公生态，让 Agent 能直接使用对应能力。",
+      refresh: "刷新",
+      install: "安装",
+      reinstall: "重新安装",
+      installing: "安装中...",
+      ready: "就绪",
+      pending: "待处理",
+      available: "可用",
+      unavailable: "不可用",
+      connected: "已连接",
+      loadFailed: "加载集成状态失败",
+      adminRequired: "需要管理员权限才能安装集成。",
+      lark: {
+        title: "Lark / 飞书 CLI",
+        description:
+          "安装官方 Lark/Feishu Agent Skills，并在授权后让 Agent 直接使用飞书能力。",
+        skillPack: "技能包",
+        gatewayCli: "Gateway CLI",
+        auth: "授权",
+        sandboxRuntime: "沙箱运行时",
+        sandboxRuntimeInitContainer: "由 init container 提供",
+        sandboxRuntimeBroker: "由 broker sidecar 提供",
+        sandboxRuntimeGatewayDownload: "由 Gateway 提供",
+        sandboxRuntimeNotReady: "未就绪 —— 对话时 lark-cli 可能不可用",
+        notInstalled: "尚未安装",
+        skillsInstalled: (installed, expected) =>
+          `已安装 ${installed}/${expected} 个技能`,
+        installedVersion: (version) => `已安装版本：${version}`,
+        updateAvailable: (version) =>
+          `有新版本：${version} —— 管理员重新安装会更新 managed Gateway CLI 和技能包`,
+        runtimeVersionMismatch:
+          "技能包版本与 Gateway 运行时 lark-cli 不一致；管理员重新安装会尝试更新 managed Gateway CLI 并重新对齐技能包",
+        authNotConfigured: "尚未连接",
+        authConfigured: "凭证已配置（未实时验证）",
+        authConfiguredFor: (user) => `${user} · 凭证已配置（未实时验证）`,
+        connect: "连接飞书",
+        authStarting: "正在打开连接链接...",
+        checkingConnection: "正在检查连接状态...",
+        connectedAction: "重新连接飞书",
+        requestPermissions: "申请新权限",
+        alreadyConnected:
+          "飞书已连接，无需重复授权。如果授权已过期，刷新状态后可重新连接。",
+        connectionStarted: "连接链接已打开",
+        connectionReady: "连接准备已完成，正在打开授权链接",
+        authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",
+        authorizationStillPending:
+          "还没有检测到授权完成。请在浏览器完成授权；DeerFlow 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
+        permissionTitle: "授权范围",
+        permissionDescription:
+          "默认只完成基础登录，不会申请任何业务权限。按需在这里勾选要授权的业务域；已连接用户可以重新授权继续追加（scope 会累积）。",
+        authDomains: {
+          calendar: {
+            label: "日历",
+            description: "日程、忙闲、日程回复与会议室预定。",
+          },
+          im: {
+            label: "消息",
+            description: "收发/回复消息、管理群聊、搜索记录、下载媒体。",
+          },
+          docs: {
+            label: "文档",
+            description: "创建、读取、编辑和搜索云文档。",
+          },
+          drive: {
+            label: "云空间",
+            description: "上传/下载文件、搜索文档与知识库、管理评论。",
+          },
+          sheets: {
+            label: "电子表格",
+            description: "读取、写入、追加、查找和导出电子表格。",
+          },
+          base: {
+            label: "多维表格",
+            description: "多维表格的表、字段、记录、视图、仪表盘与工作流。",
+          },
+          wiki: {
+            label: "知识库",
+            description: "知识空间、节点与知识库文档。",
+          },
+          task: {
+            label: "任务",
+            description: "任务、清单、子任务、评论与提醒。",
+          },
+          mail: {
+            label: "邮件",
+            description: "浏览、搜索、阅读、发送、回复、转发与管理草稿。",
+          },
+          vc: {
+            label: "视频会议",
+            description: "会议记录、纪要产物与录制。",
+          },
+          minutes: {
+            label: "妙记",
+            description: "会议纪要内容与逐字稿。",
+          },
+          note: {
+            label: "笔记",
+            description: "会议笔记及相关内容。",
+          },
+          slides: {
+            label: "幻灯片",
+            description: "演示文稿与幻灯片内容。",
+          },
+          markdown: {
+            label: "Markdown",
+            description: "创建、获取、局部修改和覆盖云盘原生 .md 文件。",
+          },
+          mindnotes: {
+            label: "思维笔记",
+            description: "思维笔记内容。",
+          },
+          contact: {
+            label: "通讯录",
+            description: "按姓名/邮箱/电话查用户并读取资料。",
+          },
+          approval: {
+            label: "审批",
+            description: "查询和处理审批任务、撤销与抄送实例。",
+          },
+          attendance: {
+            label: "考勤",
+            description: "查询个人考勤打卡记录。",
+          },
+          okr: {
+            label: "OKR",
+            description: "目标、关键结果、对齐、指标与进展。",
+          },
+          event: {
+            label: "实时事件",
+            description: "订阅并消费平台实时事件。",
+          },
+          apps: {
+            label: "妙搭应用",
+            description: "创建 Spark/妙搭应用、发布站点并管理可见范围。",
+          },
+          all: {
+            label: "全部",
+            description:
+              "申请 lark-cli 支持的全部业务域权限。仅在不确定缺哪个权限时使用。",
+          },
+        },
+        customScopeLabel: "具体 OAuth scope",
+        customScopePlaceholder: "例如 calendar:calendar.event:read",
+        customScopeDescription:
+          "高级用法：如果错误里给出了缺失 scope，可直接填在这里。例如 calendar:calendar.event:read、calendar:calendar.free_busy:read。",
+        openConnectionLinkTitle: "继续完成飞书连接",
+        openConnectionLinkDescription:
+          "首次连接需要在浏览器里完成一次飞书确认。打开下面的链接按提示完成；完成后回到这里继续授权。",
+        openAuthLinkTitle: "在浏览器中完成飞书授权",
+        openAuthLinkDescription:
+          "打开下面的链接完成授权。DeerFlow 会持续自动检测，并在授权通过后保存连接状态。",
+        waitingAuthTitle: "等待飞书授权完成",
+        waitingAuthDescription:
+          "请在刚打开的浏览器页面完成授权。DeerFlow 会自动更新这里的状态；下方按钮只是兜底操作。",
+        openAuthLink: "打开链接",
+        copyAuthLink: "复制链接",
+        completeAuth: "我已完成授权",
+        continueAuth: "我已完成浏览器确认，继续授权",
+        preparingAuthorization: "正在准备授权...",
+        completingAuth: "确认中...",
+        authExpiresIn: (seconds) => `链接将在约 ${seconds} 秒后过期。`,
+        installingTitle: "正在安装官方技能包",
+        installingDescription:
+          "通常 30 秒内完成，网络较慢时可能需要约 1 分钟。安装完成后会自动刷新状态。",
+        installNextTitle: "先安装官方技能包",
+        installNextDescription:
+          "安装后，/lark-doc、/lark-im、/lark-sheets 等技能会出现在技能索引中。",
+        cliNextTitle: "需要安装 Gateway CLI",
+        cliNextDescription:
+          "技能包已安装，但 Gateway 找不到 lark-cli。管理员重新安装集成会尝试下载 managed Gateway CLI；离线部署可使用内置 @larksuite/cli 的镜像。",
+        configuredTitle: "飞书凭证已在本地配置",
+        configuredDescription:
+          "当前只确认本地存在凭证，尚未向飞书实时验证有效性。重新连接可刷新并实时验证授权。",
+        connectedTitle: "飞书授权已实时验证",
+        connectedDescription:
+          "本次连接流程已向飞书验证当前用户授权。需要刷新授权或追加权限时，可重新连接。",
+        authNextTitle: "下一步完成浏览器授权",
+        authNextDescription:
+          "点击“连接飞书”后，DeerFlow 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
+      },
+    },
     skills: {
       title: "技能",
       description: "管理 Agent Skill 配置和启用状态。",
@@ -495,6 +990,8 @@ export const zhCN: Translations = {
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
+      adminRequired: "需要管理员权限才能管理 Agent Skill。",
+      installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
     },
     notification: {
       title: "通知",
@@ -542,9 +1039,16 @@ export const zhCN: Translations = {
     emailPlaceholder: "you@example.com",
     password: "密码",
     passwordPlaceholder: "•••••••",
+    rememberMe: "保持登录",
+    rememberMeDescription:
+      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",
+    createAdminAccount: "创建管理员账号",
+    adminSetupRequiredTitle: "需要先完成管理员初始化",
+    adminSetupRequiredDescription:
+      "DeerFlow 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,
@@ -552,6 +1056,10 @@ export const zhCN: Translations = {
     haveAccountSignIn: "已有账号？立即登录",
     backToHome: "← 返回首页",
     networkError: "网络错误，请重试。",
+    serviceUnavailableTitle: "服务暂时不可用",
+    serviceUnavailableDescription:
+      "网关响应时间过长。请确认服务正在运行，然后重试。",
+    retry: "重试",
     authFailed: "身份验证失败。",
     errors: {
       sso_failed: "SSO 登录失败，请重试或使用邮箱登录。",

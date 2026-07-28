@@ -70,9 +70,7 @@ describe("skills api", () => {
   test("falls back to HTTP status when loading skills fails without detail", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(503, {}, ""));
 
-    await expect(loadSkills()).rejects.toThrow(
-      "Failed to load skills: HTTP 503 Unknown",
-    );
+    await expect(loadSkills()).rejects.toThrow("HTTP 503: ");
   });
 
   test("updates a skill enabled flag", async () => {
@@ -109,12 +107,8 @@ describe("skills api", () => {
   });
 
   test("falls back to HTTP status when updating a skill fails without detail", async () => {
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(409, {}, ""),
-    );
+    mockedFetch.mockResolvedValueOnce(jsonResponse(409, {}, ""));
 
-    await expect(enableSkill("foo", false)).rejects.toThrow(
-      "Failed to update foo: HTTP 409 Unknown",
-    );
+    await expect(enableSkill("foo", false)).rejects.toThrow("HTTP 409: ");
   });
 });

@@ -8,12 +8,14 @@ import {
   LightbulbIcon,
   ListTodoIcon,
   MessageCircleQuestionMarkIcon,
+  MessageSquareTextIcon,
+  MonitorIcon,
   NotebookPenIcon,
   SearchIcon,
   SquareTerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ChainOfThought,
@@ -24,37 +26,48 @@ import {
 } from "@/components/ai-elements/chain-of-thought";
 import { CodeBlock } from "@/components/ai-elements/code-block";
 import { Button } from "@/components/ui/button";
+import {
+  buildWriteFileArtifactURL,
+  resolveArtifactURL,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
+  extractContentFromMessage,
   extractReasoningContentFromMessage,
-  findToolCallResult,
+  extractTextFromMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
+import { useMaybeBrowserView } from "../browser-view";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 
-export function MessageGroup({
-  className,
-  messages,
-  isLoading = false,
-  tokenDebugSteps = [],
-  showTokenDebugSummaries = false,
-}: {
+interface MessageGroupProps {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  deferBrowserPreviews?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
-}) {
+  threadId?: string;
+}
+
+function MessageGroupComponent({
+  className,
+  messages,
+  isLoading = false,
+  deferBrowserPreviews = false,
+  tokenDebugSteps = [],
+  showTokenDebugSummaries = false,
+  threadId,
+}: MessageGroupProps) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
@@ -96,6 +109,20 @@ export function MessageGroup({
     }
     return [];
   }, [lastToolCallStep, steps]);
+  const afterLastToolCallAssistantTextSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return [];
+    }
+    const index = steps.indexOf(lastToolCallStep);
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastToolCallStep, steps]);
+  const collapsibleAboveLastToolCallSteps = useMemo(
+    () =>
+      aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
+    [aboveLastToolCallSteps],
+  );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
       const index = steps.indexOf(lastToolCallStep);
@@ -105,7 +132,6 @@ export function MessageGroup({
       return filteredSteps[filteredSteps.length - 1];
     }
   }, [lastToolCallStep, steps]);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
   const firstEligibleDebugSummaryStepIndexByMessageId = useMemo(() => {
     const firstIndices = new Map<string, number>();
 
@@ -211,13 +237,52 @@ export function MessageGroup({
       <ToolCall
         key={step.id}
         {...step}
+        threadId={threadId}
         isLast={options?.isLast}
         isLoading={isLoading}
+        deferBrowserPreview={deferBrowserPreviews}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
       />
     );
+  };
+
+  const renderAssistantText = (step: CoTAssistantTextStep) => (
+    <ChainOfThoughtStep
+      key={step.id}
+      icon={MessageSquareTextIcon}
+      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
+    ></ChainOfThoughtStep>
+  );
+
+  const renderStep = (step: CoTStep) => {
+    const stepIndex = steps.indexOf(step);
+    if (step.type === "assistantText") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        renderAssistantText(step),
+      ];
+    }
+    if (step.type === "reasoning") {
+      return [
+        renderDebugSummary(step.messageId, stepIndex),
+        <ChainOfThoughtStep
+          key={step.id}
+          label={
+            <MarkdownContent
+              content={step.reasoning ?? ""}
+              isLoading={isLoading}
+            />
+          }
+        ></ChainOfThoughtStep>,
+      ];
+    }
+
+    return [
+      renderDebugSummary(step.messageId, stepIndex),
+      renderToolCall(step),
+    ];
   };
 
   const lastReasoningDebugStep =
@@ -230,7 +295,7 @@ export function MessageGroup({
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
     >
-      {aboveLastToolCallSteps.length > 0 && (
+      {collapsibleAboveLastToolCallSteps.length > 0 && (
         <Button
           key="above"
           className="w-full items-start justify-start text-left"
@@ -242,7 +307,9 @@ export function MessageGroup({
               <span className="opacity-60">
                 {showAbove
                   ? t.toolCalls.lessSteps
-                  : t.toolCalls.moreSteps(aboveLastToolCallSteps.length)}
+                  : t.toolCalls.moreSteps(
+                      collapsibleAboveLastToolCallSteps.length,
+                    )}
               </span>
             }
             icon={
@@ -256,40 +323,28 @@ export function MessageGroup({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {(lastToolCallStep ??
+        steps.some((step) => step.type === "assistantText")) && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {showAbove &&
-            aboveLastToolCallSteps.flatMap((step) => {
-              const stepIndex = steps.indexOf(step);
-              if (step.type === "reasoning") {
-                return [
-                  renderDebugSummary(step.messageId, stepIndex),
-                  <ChainOfThoughtStep
-                    key={step.id}
-                    label={
-                      <MarkdownContent
-                        content={step.reasoning ?? ""}
-                        isLoading={isLoading}
-                        rehypePlugins={rehypePlugins}
-                      />
-                    }
-                  ></ChainOfThoughtStep>,
-                ];
-              }
-
-              return [
-                renderDebugSummary(step.messageId, stepIndex),
-                renderToolCall(step),
-              ];
-            })}
-          {renderDebugSummary(
-            lastToolCallStep.messageId,
-            steps.indexOf(lastToolCallStep),
-          )}
+          {(lastToolCallStep
+            ? showAbove
+              ? aboveLastToolCallSteps
+              : aboveLastToolCallSteps.filter(
+                  (step) => step.type === "assistantText",
+                )
+            : steps.filter((step) => step.type === "assistantText")
+          ).flatMap(renderStep)}
           {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderToolCall(lastToolCallStep, { isLast: true })}
-            </FlipDisplay>
+            <>
+              {renderDebugSummary(
+                lastToolCallStep.messageId,
+                steps.indexOf(lastToolCallStep),
+              )}
+              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                {renderToolCall(lastToolCallStep, { isLast: true })}
+              </FlipDisplay>
+              {afterLastToolCallAssistantTextSteps.flatMap(renderStep)}
+            </>
           )}
         </ChainOfThoughtContent>
       )}
@@ -344,7 +399,6 @@ export function MessageGroup({
                   <MarkdownContent
                     content={lastReasoningStep.reasoning ?? ""}
                     isLoading={isLoading}
-                    rehypePlugins={rehypePlugins}
                   />
                 }
               ></ChainOfThoughtStep>
@@ -353,6 +407,47 @@ export function MessageGroup({
         </>
       )}
     </ChainOfThought>
+  );
+}
+
+export const MessageGroup = memo(
+  MessageGroupComponent,
+  areMessageGroupPropsEqual,
+);
+MessageGroup.displayName = "MessageGroup";
+
+function areMessageGroupPropsEqual(
+  previous: MessageGroupProps,
+  next: MessageGroupProps,
+): boolean {
+  if (next.isLoading) {
+    return false;
+  }
+  return (
+    previous.className === next.className &&
+    Boolean(previous.isLoading) === Boolean(next.isLoading) &&
+    Boolean(previous.deferBrowserPreviews) ===
+      Boolean(next.deferBrowserPreviews) &&
+    Boolean(previous.showTokenDebugSummaries) ===
+      Boolean(next.showTokenDebugSummaries) &&
+    previous.threadId === next.threadId &&
+    sameReferences(previous.messages, next.messages) &&
+    sameReferences(previous.tokenDebugSteps, next.tokenDebugSteps)
+  );
+}
+
+function sameReferences<T>(
+  previous: readonly T[] | undefined,
+  next: readonly T[] | undefined,
+): boolean {
+  if (previous === next) {
+    return true;
+  }
+  const previousItems = previous ?? [];
+  const nextItems = next ?? [];
+  return (
+    previousItems.length === nextItems.length &&
+    previousItems.every((item, index) => item === nextItems[index])
   );
 }
 
@@ -410,6 +505,35 @@ function DebugStepLabel({
   );
 }
 
+function browserToolLabel(
+  name: string,
+  args: Record<string, unknown>,
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  switch (name) {
+    case "browser_navigate":
+      return typeof args.url === "string"
+        ? t.toolCalls.browserNavigate(args.url)
+        : t.toolCalls.browserNavigateGeneric;
+    case "browser_click":
+      return t.toolCalls.browserClick;
+    case "browser_type":
+      return t.toolCalls.browserType;
+    case "browser_snapshot":
+      return t.toolCalls.browserSnapshot;
+    case "browser_get_text":
+      return t.toolCalls.browserGetText;
+    case "browser_back":
+      return t.toolCalls.browserBack;
+    case "browser_screenshot":
+      return t.toolCalls.browserScreenshot;
+    case "browser_close":
+      return t.toolCalls.browserClose;
+    default:
+      return t.toolCalls.useTool(name);
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -418,7 +542,10 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  deferBrowserPreview = false,
   tokenDebugStep,
+  browserView,
+  threadId,
 }: {
   id?: string;
   messageId?: string;
@@ -427,11 +554,15 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  browserView?: BrowserViewMeta;
+  threadId?: string;
 }) {
   const { t } = useI18n();
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
+  const browserViewPanel = useMaybeBrowserView();
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
@@ -441,8 +572,89 @@ function ToolCall({
     ) : (
       fallback
     );
+  const writeFilePath =
+    (name === "write_file" || name === "str_replace") &&
+    typeof args.path === "string"
+      ? args.path
+      : undefined;
+  const writeFileArtifactUrl = writeFilePath
+    ? buildWriteFileArtifactURL({
+        filepath: writeFilePath,
+        messageId,
+        toolCallId: id,
+      })
+    : null;
+  const autoOpenArtifactUrl =
+    isLoading &&
+    isLast &&
+    autoOpen &&
+    autoSelect &&
+    writeFileArtifactUrl &&
+    !result
+      ? writeFileArtifactUrl
+      : null;
 
-  if (name === "web_search") {
+  useEffect(() => {
+    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      select(autoOpenArtifactUrl, true);
+      setOpen(true);
+    }, 100);
+
+    return () => window.clearTimeout(timeout);
+  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
+
+  if (name.startsWith("browser_")) {
+    const shot = browserView?.screenshot;
+    const previewUrl =
+      shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(browserToolLabel(name, args, t))}
+        icon={MonitorIcon}
+      >
+        {previewUrl && !deferBrowserPreview && (
+          <button
+            type="button"
+            className="border-border mt-1 block w-full max-w-md cursor-pointer overflow-hidden rounded-lg border"
+            onClick={() => {
+              if (!shot) {
+                return;
+              }
+              if (browserViewPanel) {
+                browserViewPanel.pushFrame({
+                  screenshot: shot,
+                  url: browserView?.url,
+                  title: browserView?.title,
+                });
+                browserViewPanel.openPanel();
+              } else {
+                select(shot);
+                setOpen(true);
+              }
+            }}
+          >
+            <img
+              className="w-full object-contain"
+              src={previewUrl}
+              alt={browserView?.title ?? "browser view"}
+              loading="lazy"
+              decoding="async"
+            />
+            {browserView?.url && (
+              <div className="text-muted-foreground bg-muted/40 truncate px-2 py-1 text-left text-[11px]">
+                {browserView.url}
+              </div>
+            )}
+          </button>
+        )}
+      </ChainOfThoughtStep>
+    );
+  } else if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -589,38 +801,24 @@ function ToolCall({
     if (!description) {
       description = t.toolCalls.writeFile;
     }
-    const path: string | undefined = (args as { path: string })?.path;
-    if (isLoading && isLast && autoOpen && autoSelect && path && !result) {
-      setTimeout(() => {
-        const url = new URL(
-          `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-        ).toString();
-        if (selectedArtifact === url) {
-          return;
-        }
-        select(url, true);
-        setOpen(true);
-      }, 100);
-    }
 
     return (
       <ChainOfThoughtStep
         key={id}
-        className="cursor-pointer"
+        className={writeFileArtifactUrl ? "cursor-pointer" : undefined}
         label={resolveLabel(description)}
         icon={NotebookPenIcon}
         onClick={() => {
-          select(
-            new URL(
-              `write-file:${path}?message_id=${messageId}&tool_call_id=${id}`,
-            ).toString(),
-          );
+          if (!writeFileArtifactUrl) {
+            return;
+          }
+          select(writeFileArtifactUrl);
           setOpen(true);
         }}
       >
-        {path && (
+        {writeFilePath && (
           <ChainOfThoughtSearchResult className="cursor-pointer">
-            {path}
+            {writeFilePath}
           </ChainOfThoughtSearchResult>
         )}
       </ChainOfThoughtStep>
@@ -697,14 +895,67 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  browserView?: BrowserViewMeta;
 }
 
-type CoTStep = CoTReasoningStep | CoTToolCallStep;
+interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  content: string;
+}
+
+type CoTStep = CoTAssistantTextStep | CoTReasoningStep | CoTToolCallStep;
+
+interface BrowserViewMeta {
+  screenshot: string;
+  url?: string;
+  title?: string;
+}
+
+function indexToolCallData(messages: Message[]) {
+  const toolCallResults = new Map<string, string>();
+  const browserViews = new Map<string, BrowserViewMeta>();
+
+  for (const message of messages) {
+    if (message.type !== "tool" || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolCallId = message.tool_call_id;
+    if (!toolCallResults.has(toolCallId)) {
+      const result = extractTextFromMessage(message);
+      if (result) {
+        toolCallResults.set(toolCallId, result);
+      }
+    }
+
+    if (!browserViews.has(toolCallId)) {
+      const browserView = (
+        message.additional_kwargs as
+          | { browser_view?: BrowserViewMeta }
+          | undefined
+      )?.browser_view;
+      if (browserView && typeof browserView.screenshot === "string") {
+        browserViews.set(toolCallId, browserView);
+      }
+    }
+  }
+
+  return { browserViews, toolCallResults };
+}
 
 function convertToSteps(messages: Message[]): CoTStep[] {
   const steps: CoTStep[] = [];
-  for (const message of messages) {
+  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
+      const content = extractContentFromMessage(message);
+      if (content) {
+        steps.push({
+          id: `${message.id ?? `ai-${messageIndex}`}-content`,
+          messageId: message.id,
+          type: "assistantText",
+          content,
+        });
+      }
       const reasoning = extractReasoningContentFromMessage(message);
       if (reasoning) {
         const step: CoTReasoningStep = {
@@ -728,7 +979,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = findToolCallResult(toolCallId, messages);
+          const toolCallResult = toolCallResults.get(toolCallId);
           if (toolCallResult) {
             try {
               const json = JSON.parse(toolCallResult);
@@ -737,6 +988,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
               step.result = toolCallResult;
             }
           }
+          step.browserView = browserViews.get(toolCallId);
         }
         steps.push(step);
       }

@@ -1,7 +1,7 @@
 """Middleware that enforces a per-result budget on tool outputs.
 
 Oversized tool results are persisted to disk and replaced with a compact
-preview containing a file reference.  When disk persistence is
+typed synopsis containing a file reference.  When disk persistence is
 unavailable the middleware falls back to head+tail truncation so the
 model context is never blown by a single large tool return.
 """
@@ -24,6 +24,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -77,11 +78,31 @@ def _snap_to_line_boundary(text: str, pos: int) -> int:
     Used so that previews and truncations end on a complete line when
     possible.  If no newline exists in the second half of ``text[:pos]``
     the original *pos* is returned unchanged.
+
+    Only valid for an *end* offset: moving backwards shortens the slice that
+    ends here.  Use :func:`_snap_start_to_line_boundary` for a start offset.
     """
     if pos <= 0 or pos >= len(text):
         return pos
     half = pos // 2
     nl = text.rfind("\n", half, pos)
+    if nl >= 0:
+        return nl + 1
+    return pos
+
+
+def _snap_start_to_line_boundary(text: str, pos: int) -> int:
+    """Return *pos* or the nearest following newline+1, whichever is closer.
+
+    The start-offset mirror of :func:`_snap_to_line_boundary`. Snapping a start
+    backwards would *lengthen* the slice beginning there, so the tail of a
+    budgeted preview must snap forward instead. If no newline exists in the
+    first half of ``text[pos:]`` the original *pos* is returned unchanged.
+    """
+    if pos <= 0 or pos >= len(text):
+        return pos
+    half = pos + (len(text) - pos) // 2
+    nl = text.find("\n", pos, half)
     if nl >= 0:
         return nl + 1
     return pos
@@ -211,24 +232,14 @@ def _build_preview(
     head_chars: int,
     tail_chars: int,
 ) -> str:
-    """Build a preview with a file reference for externalized output."""
-    total = len(content)
-    head_end = _snap_to_line_boundary(content, min(head_chars, total))
-    tail_start = max(head_end, total - tail_chars)
-    tail_start_snapped = _snap_to_line_boundary(content, tail_start)
-    if tail_start_snapped > head_end:
-        tail_start = tail_start_snapped
-
-    head = content[:head_end]
-    tail = content[tail_start:] if tail_start < total else ""
-
-    omitted = total - len(head) - len(tail)
-    ref = f"\n\n[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens). Use read_file with start_line and end_line to access specific sections. {omitted} chars omitted from this preview.]\n\n"
-
-    parts = [head, ref]
-    if tail:
-        parts.append(tail)
-    return "".join(parts)
+    """Build a typed synopsis preview with a file reference for externalized output."""
+    return render_tool_output_preview(
+        content,
+        tool_name=tool_name,
+        virtual_path=virtual_path,
+        head_chars=head_chars,
+        tail_chars=tail_chars,
+    )
 
 
 def _build_fallback(
@@ -258,10 +269,7 @@ def _build_fallback(
     effective_tail = min(tail_chars, max(0, budget - effective_head))
 
     head_end = _snap_to_line_boundary(content, min(effective_head, total))
-    tail_start = max(head_end, total - effective_tail)
-    tail_start_snapped = _snap_to_line_boundary(content, tail_start)
-    if tail_start_snapped > head_end:
-        tail_start = tail_start_snapped
+    tail_start = _snap_start_to_line_boundary(content, max(head_end, total - effective_tail))
 
     head = content[:head_end]
     tail = content[tail_start:] if tail_start < total else ""

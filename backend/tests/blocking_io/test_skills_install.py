@@ -53,7 +53,7 @@ async def test_install_skill_archive_does_not_block_event_loop(tmp_path: Path, m
     archive = tmp_path / "loop-skill.skill"
     await asyncio.to_thread(_build_archive, archive)
 
-    async def _allow_scan(content: str, *, executable: bool = False, location: str = "SKILL.md", app_config=None):
+    async def _allow_scan(content: str, *, executable: bool = False, location: str = "SKILL.md", app_config=None, static_findings=None):
         return SimpleNamespace(decision="allow", reason="anchor stub")
 
     # External dependency boundary only: the security scanner is an LLM call.

@@ -72,29 +72,32 @@ curl -X POST http://localhost:8001/api/agents \
 
 每次你发送消息，LangGraph 从最新检查点恢复线程状态，运行 Lead Agent，并更新状态。流式事件在 Agent 工作时发送到浏览器。
 
-### 检查点和持久化
+### 线程持久化配置
 
-DeerFlow 在每次 Agent 轮次后自动保存线程状态（如果配置了检查点器）。这允许：
+DeerFlow 在每次 Agent 轮次后自动保存线程状态。使用持久化后端时，这允许：
 
 - 在服务器重启后恢复线程。
 - 在长时间间隔后继续对话。
 - 在出现问题时重放或从特定时间点恢复。
 
-配置检查点器：
+`database` 配置控制线程状态和应用数据的默认持久化后端：
 
 ```yaml
-checkpointer:
-  type: sqlite
-  connection_string: .deer-flow/checkpoints.db
+# SQLite（本地开发和单用户部署）
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+
+# Postgres（生产环境和多用户部署）
+# database:
+#   backend: postgres
+#   postgres_url: $DATABASE_URL
+#
+# run_events:
+#   backend: db
 ```
 
-对于生产高负载环境使用 Redis：
-
-```yaml
-checkpointer:
-  type: redis
-  connection_string: redis://localhost:6379/0
-```
+旧的 `checkpointer` 配置仍然兼容，用于 LangGraph 状态持久化；如果配置了它，会优先于 `database` 的检查点设置。新的部署应优先使用 `database`。
 
 ### 线程数据目录
 

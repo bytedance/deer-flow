@@ -2,52 +2,112 @@
 
 import asyncio
 import logging
-import os
+from pathlib import Path
 
 from langchain_core.tools import BaseTool
+
+from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
+from deerflow.config.file_signature import get_config_signature as _get_config_signature
 
 logger = logging.getLogger(__name__)
 
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
-_config_mtime: float | None = None  # Track config file modification time
+
+# Cache-invalidation key for the resolved extensions config file. We track the
+# resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
+# shared ``deerflow.config.file_signature`` helper also used by
+# ``deerflow.config.app_config`` for the sibling runtime-editable config file —
+# rather than only the mtime. A strict mtime ``>`` comparison misses same-second
+# edits and mtime that stays put or moves backward (object-store / network
+# mounts, ``git checkout``, ``cp -p`` / backup restore, ``tar`` / ``rsync`` that
+# preserve timestamps), and tracking no path at all makes a switch to a
+# different config file with an equal-or-older mtime structurally invisible.
+_config_path: Path | None = None  # Resolved extensions config path at init time
+_config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
 
 
-def _get_config_mtime() -> float | None:
-    """Get the modification time of the extensions config file.
+def _resolve_config_path() -> Path | None:
+    """Resolve the extensions config file path, or ``None`` when unconfigured.
 
-    Returns:
-        The modification time as a float, or None if the file doesn't exist.
+    ``ExtensionsConfig.resolve_config_path()`` raises ``FileNotFoundError``
+    when an explicit `config_path` or `DEER_FLOW_EXTENSIONS_CONFIG_PATH`
+    points at a file that does not exist. That is deliberate for callers that
+    load the config for actual use (e.g. ``ExtensionsConfig.from_file()`` via
+    ``get_mcp_tools()``): an operator-asserted explicit path going missing is
+    a real misconfiguration and must be surfaced loudly.
+
+    This helper is not one of those callers — it only backs the cache's own
+    staleness check (``_is_cache_stale``, via ``_current_config_state``),
+    which runs on every ``get_cached_mcp_tools()`` call and just wants to know
+    whether the previously loaded config is still current. If the file behind
+    a previously-valid explicit/env-var path becomes unreadable later
+    (deleted mid-run, a Docker mount hiccup, ...), raising here would crash
+    every subsequent call to that hot per-request path instead of leaving the
+    cache serving its last-known-good MCP tools. So this wrapper catches that
+    specific failure and treats it the same as "unconfigured", matching
+    ``_is_cache_stale()``'s existing fail-soft handling of a ``None`` config
+    state (see its docstring). Scoping the catch here — rather than making
+    ``resolve_config_path()`` itself return ``None`` for every caller — keeps
+    the loud failure intact for callers that actually need the file.
     """
     from deerflow.config.extensions_config import ExtensionsConfig
 
-    config_path = ExtensionsConfig.resolve_config_path()
-    if config_path and config_path.exists():
-        return os.path.getmtime(config_path)
-    return None
+    try:
+        return ExtensionsConfig.resolve_config_path()
+    except FileNotFoundError:
+        logger.debug(
+            "Extensions config path could not be resolved while checking MCP cache staleness; treating as unconfigured for this check.",
+            exc_info=True,
+        )
+        return None
+
+
+def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
+    """Return the currently resolved extensions config path and its signature."""
+    config_path = _resolve_config_path()
+    if config_path is None:
+        return None, None
+    return config_path, _get_config_signature(config_path)
 
 
 def _is_cache_stale() -> bool:
     """Check if the cache is stale due to config file changes.
 
+    The cache is stale when the resolved extensions config path changed, or when
+    the ``(mtime, size, sha256)`` content signature differs from the one recorded
+    at initialization. Using content equality (``!=``) instead of a strict mtime
+    ``>`` comparison detects same-second edits and backward mtime moves, and
+    tracking the resolved path detects a switch to a different config file.
+
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
-    global _config_mtime
-
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
 
-    current_mtime = _get_config_mtime()
+    current_path, current_signature = _current_config_state()
 
-    # If we couldn't get mtime before or now, assume not stale
-    if _config_mtime is None or current_mtime is None:
+    # Preserve the original "config missing / not yet recorded" behavior: if
+    # there was no readable config when the cache was populated, or there is
+    # none now, do not invalidate. This also covers the config being deleted
+    # entirely after a successful init (current_signature flips to None): the
+    # cache intentionally keeps serving its last-known-good MCP tools rather
+    # than invalidating into an unconfigured state, matching the pre-fix
+    # mtime-only contract (which also returned False once the file could no
+    # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
+    # oversight — a future change that wants "config deleted" to tear down
+    # MCP tools needs its own explicit signal here, not an inferred one.
+    if _config_signature is None or current_signature is None:
         return False
 
-    # If the config file has been modified since we cached, it's stale
-    if current_mtime > _config_mtime:
-        logger.info(f"MCP config file has been modified (mtime: {_config_mtime} -> {current_mtime}), cache is stale")
+    if current_path != _config_path:
+        logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
+        return True
+
+    if current_signature != _config_signature:
+        logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
         return True
 
     return False
@@ -61,7 +121,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     Returns:
         List of LangChain tools from all enabled MCP servers.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
 
     async with _initialization_lock:
         if _cache_initialized:
@@ -73,8 +133,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         logger.info("Initializing MCP tools...")
         _mcp_tools_cache = await get_mcp_tools()
         _cache_initialized = True
-        _config_mtime = _get_config_mtime()  # Record config file mtime
-        logger.info(f"MCP tools initialized: {len(_mcp_tools_cache)} tool(s) loaded (config mtime: {_config_mtime})")
+        _config_path, _config_signature = _current_config_state()  # Record config path + content signature
+        logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
 
         return _mcp_tools_cache
 
@@ -136,10 +196,11 @@ def reset_mcp_tools_cache() -> None:
     Also closes all persistent MCP sessions so they are recreated on
     the next tool load.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_mtime
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
     _mcp_tools_cache = None
     _cache_initialized = False
-    _config_mtime = None
+    _config_path = None
+    _config_signature = None
 
     # Close persistent sessions – they will be recreated by the next
     # get_mcp_tools() call with the (possibly updated) connection config.

@@ -5,6 +5,7 @@ Both Gateway and Client delegate to these functions.
 """
 
 import errno
+import logging
 import os
 import re
 import stat
@@ -23,8 +24,12 @@ class UnsafeUploadPathError(ValueError):
     """Raised when an upload destination is not a safe regular file path."""
 
 
+logger = logging.getLogger(__name__)
+
 # thread_id must be alphanumeric, hyphens, underscores, or dots only.
 _SAFE_THREAD_ID = re.compile(r"^[a-zA-Z0-9._-]+$")
+UPLOAD_STAGING_PREFIX = ".upload-"
+UPLOAD_STAGING_SUFFIX = ".part"
 
 
 def validate_thread_id(thread_id: str) -> None:
@@ -103,6 +108,11 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     return candidate
 
 
+def is_upload_staging_file(filename: str) -> bool:
+    """Return whether *filename* is a transient Gateway upload staging file."""
+    return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
+
+
 def validate_path_traversal(path: Path, base: Path) -> None:
     """Verify that *path* is inside *base*.
 
@@ -113,6 +123,56 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         path.resolve().relative_to(base.resolve())
     except ValueError:
         raise PathTraversalError("Path traversal detected") from None
+
+
+def validate_upload_destination(base_dir: Path, filename: str) -> Path:
+    """Validate an upload destination without mutating an existing file."""
+    safe_name = normalize_filename(filename)
+    dest = base_dir / safe_name
+
+    try:
+        st = os.lstat(dest)
+    except FileNotFoundError:
+        st = None
+
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
+    if st is not None and st.st_nlink > 1:
+        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
+
+    validate_path_traversal(dest, base_dir)
+    return dest
+
+
+def _iter_upload_dirs(base_dir: Path):
+    yield from base_dir.glob("threads/*/user-data/uploads")
+    yield from base_dir.glob("users/*/threads/*/user-data/uploads")
+
+
+def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
+    """Remove orphaned Gateway upload staging files left by a hard crash."""
+    root = Path(base_dir) if base_dir is not None else get_paths().base_dir
+    removed = 0
+    for uploads_dir in _iter_upload_dirs(root):
+        if not uploads_dir.is_dir():
+            continue
+        try:
+            with os.scandir(uploads_dir) as entries:
+                for entry in entries:
+                    if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
+                        continue
+                    try:
+                        os.unlink(entry.path)
+                        removed += 1
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        logger.warning("Failed to remove stale upload staging file: %s", entry.path, exc_info=True)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.warning("Failed to scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
+    return removed
 
 
 def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
@@ -128,17 +188,11 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     validation prevents escapes from *base_dir* in both cases.
     """
     safe_name = normalize_filename(filename)
-    dest = base_dir / safe_name
-
+    dest = validate_upload_destination(base_dir, safe_name)
     try:
         st = os.lstat(dest)
     except FileNotFoundError:
         st = None
-
-    if st is not None and not stat.S_ISREG(st.st_mode):
-        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-
-    validate_path_traversal(dest, base_dir)
 
     has_nofollow = hasattr(os, "O_NOFOLLOW")
 
@@ -234,6 +288,8 @@ def list_files_in_dir(directory: Path) -> dict:
     files = []
     with os.scandir(directory) as entries:
         for entry in sorted(entries, key=lambda e: e.name):
+            if is_upload_staging_file(entry.name):
+                continue
             if not entry.is_file(follow_symlinks=False):
                 continue
             st = entry.stat(follow_symlinks=False)

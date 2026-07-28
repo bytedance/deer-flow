@@ -50,8 +50,9 @@ deer-flow/
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
-├── contracts/                      # Cross-component JSON contracts (e.g. subagent status)
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, serve, docker, deploy, setup_wizard)
+│                                    # Managed integration skill packs are installed per user under .deer-flow/users/{user_id}/skills/integrations/
+├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
@@ -62,6 +63,18 @@ servers + skills). Both real files are gitignored and may be edited at runtime v
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
+Skill quality review note:
+- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
+  It uses the harness-layer `review_skill_package` tool and contracts in
+  `contracts/skill_review/`. Model-visible review data is compact and
+  tag-neutralized; full raw payloads stay in tool artifacts. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
+  `skill-creator` ownership boundaries.
+
+Scheduled-task note:
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
+- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+
 ## Commands: Root vs. Module
 
 **Root `make` targets drive the whole stack** (run from the repo root):
@@ -69,6 +82,7 @@ Gateway API. Config schema and resolution order are documented in
 ```bash
 make setup       # Interactive setup wizard (recommended for new users)
 make doctor      # Check configuration and system requirements
+make support-bundle  # Generate redacted troubleshooting summary, AI issue draft, and optional zip
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
@@ -108,6 +122,7 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
   `README_ja.md`, `README_fr.md`, `README_ru.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
+- Cutting a release → **[RELEASING.md](RELEASING.md)**
 
 ## Cross-Cutting Conventions
 

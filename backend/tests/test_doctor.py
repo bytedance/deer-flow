@@ -340,6 +340,43 @@ class TestCheckWebFetch:
 
 
 # ---------------------------------------------------------------------------
+# check_web_capture
+# ---------------------------------------------------------------------------
+
+
+class TestCheckWebCapture:
+    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "self-hosted" in result.detail
+
+    def test_browserless_token_env_ref_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "BROWSERLESS_TOKEN set from config" in result.detail
+
+    def test_browserless_cloud_without_token_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "BROWSERLESS_TOKEN" in (result.fix or "")
+
+
+# ---------------------------------------------------------------------------
 # check_image_search
 # ---------------------------------------------------------------------------
 
@@ -384,6 +421,31 @@ class TestCheckImageSearch:
         result = doctor.check_image_search(cfg)
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_brave_image_search_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "ok"
+        assert "brave" in result.detail
+
+    def test_brave_image_search_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
+
+    def test_brave_image_search_inline_api_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: image_search\n    use: deerflow.community.brave.tools:image_search_tool\n    api_key: inline-key\n")
+        result = doctor.check_image_search(cfg)
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "BRAVE_SEARCH_API_KEY" in (result.fix or "")
 
     def test_infoquest_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFOQUEST_API_KEY", "test-key")

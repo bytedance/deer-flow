@@ -140,6 +140,15 @@ class ViewState:
     # Id of the message currently being generated this turn. Only this row renders
     # as plain text while streaming; everything else (history) stays Markdown.
     streaming_id: str | None = None
+    # Row index of the *anonymous* (empty-id) assistant row receiving deltas this
+    # turn, if any. A genuine id is a reliable cross-chunk key (see
+    # `_apply_assistant_delta`'s whole-transcript id scan), but an empty id ("" —
+    # see `runtime._as_str`) is shared by every id-less chunk from every turn, so
+    # it cannot be matched the same way: scanning for `row.id == ""` would fold a
+    # brand new turn's text into whatever earlier turn's row happened to be
+    # id-less too. This index instead pins "this turn's" anonymous row by
+    # position, reset alongside `streaming_id` at the start/end of every turn.
+    streaming_anonymous_row_index: int | None = None
 
 
 def initial_state(rows: tuple[Row, ...] = ()) -> ViewState:
@@ -164,13 +173,14 @@ def reduce(state: ViewState, action: Action) -> ViewState:
     if isinstance(action, RunStarted):
         # New turn: no message is actively streaming yet (the client re-emits
         # prior messages first; those must not be treated as the active one).
-        return replace(state, streaming=True, streaming_id=None)
+        return replace(state, streaming=True, streaming_id=None, streaming_anonymous_row_index=None)
 
     if isinstance(action, RunEnded):
         return replace(
             state,
             streaming=False,
             streaming_id=None,
+            streaming_anonymous_row_index=None,
             usage=action.usage if action.usage is not None else state.usage,
         )
 
@@ -193,20 +203,28 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return replace(state, title=action.title)
 
     if isinstance(action, ClearRows):
-        return replace(state, rows=(), title=None, streaming_id=None)
+        return replace(state, rows=(), streaming_id=None, streaming_anonymous_row_index=None)
 
     return state
 
 
 def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewState:
-    """Update the assistant row with this id (anywhere in the transcript), or
-    start a new one.
+    """Update the assistant row for this delta, or start a new one.
 
-    On a thread with history, the client re-emits every prior message on each
-    new turn (its dedup is per-turn), and a re-emitted *older* message can arrive
-    after a newer one has started — so we must match by id across the whole
-    transcript, not just the most recent assistant row, or prior answers get
-    duplicated.
+    A genuine (non-empty) id is matched anywhere in the transcript, not just
+    the most recent assistant row: on a thread with history, the client
+    re-emits every prior message on each new turn (its dedup is per-turn), and
+    a re-emitted *older* message can arrive after a newer one has started — so
+    matching only the tail row would duplicate prior answers.
+
+    An empty id ("" — some providers/paths never stamp per-chunk ids, see
+    ``runtime._as_str``) is NOT a reliable key for that same scan: unlike a
+    genuine id, it is shared by every id-less chunk from *every* turn, so
+    matching `row.id == ""` across the whole transcript would fold a brand
+    new turn's text into whatever earlier turn's row happened to be id-less
+    too — silently vanishing the new turn's answer into a stale row. Empty-id
+    deltas are therefore routed to `_apply_assistant_delta_anonymous`, which
+    tracks "this turn's" row by position instead of by id.
 
     Updates also merge by content rather than blindly concatenating, to absorb
     full re-sends / cumulative snapshots vs. genuine incremental deltas:
@@ -215,6 +233,8 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
     * accumulated starts with new text            -> stale/shorter re-send: keep
     * otherwise                                   -> a real delta: append
     """
+    if not action.id:
+        return _apply_assistant_delta_anonymous(state, action)
 
     rows = list(state.rows)
     for i, row in enumerate(rows):
@@ -222,14 +242,56 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
         # match here anyway — the guard is belt-and-suspenders to keep an error
         # row from being merged into if a future change ever gives it an id.
         if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
-            merged = _merge_stream_text(row.text, action.text)
-            if merged == row.text:
-                # No-op re-send (e.g. a values snapshot re-emitting history) —
-                # don't mark this as the actively-streaming message.
+            # Exact re-send of the same full text (e.g. a values snapshot
+            # re-emitting history after reconnection): no-op.  Only multi-char
+            # matches are treated as re-sends so single-char deltas that happen
+            # to equal the buffer (CJK reduplication) are NOT mistaken for no-ops.
+            if row.text == action.text and len(action.text) > 1:
                 return state
+            merged = _merge_stream_text(row.text, action.text)
             rows[i] = replace(row, text=merged)
             return _mark_streaming(replace(state, rows=tuple(rows)), action.id)
     return _mark_streaming(_append(state, AssistantRow(text=action.text, id=action.id)), action.id)
+
+
+def _apply_assistant_delta_anonymous(state: ViewState, action: AssistantDelta) -> ViewState:
+    """Handle an ``AssistantDelta`` whose id is empty (see `_apply_assistant_delta`).
+
+    Multiple id-less chunks legitimately arrive for a single turn — a provider
+    that never stamps per-chunk ids still streams token by token, e.g.
+    ``"Hel"`` then ``"lo"`` — so the first empty-id delta of a turn starts a
+    new row, and later empty-id deltas keep appending to that row (tracked by
+    ``state.streaming_anonymous_row_index``, reset on every
+    ``RunStarted``/``RunEnded``/``ClearRows``, not by id, so a later turn
+    always starts its own new row instead of matching the previous turn's
+    leftover id-less row — the bug this split exists to avoid).
+
+    The tracked row is only reused while it is still the LAST row in the
+    transcript. A genuine id naturally changes across a tool round-trip
+    (LangGraph gives the post-tool continuation a new AIMessage id), which is
+    why an interleaved ``ToolStarted``/``ToolResult`` already starts a new row
+    in the id-keyed path (see `test_assistant_delta_with_new_id_after_tool_
+    creates_separate_row`). An empty id has no such natural signal — it is
+    always ``""`` before and after the tool call — so this function uses row
+    *position* as the substitute: once anything else has been appended (a
+    tool card, in practice), the anonymous row is no longer the tail, and the
+    next empty-id delta starts a fresh row rather than reaching backward past
+    the tool card into stale text.
+    """
+    index = state.streaming_anonymous_row_index
+    if index is not None and index == len(state.rows) - 1:
+        row = state.rows[index]
+        if isinstance(row, AssistantRow) and not row.error:
+            # Same no-op / merge semantics as the id-keyed path above.
+            if row.text == action.text and len(action.text) > 1:
+                return state
+            rows = list(state.rows)
+            merged = _merge_stream_text(row.text, action.text)
+            rows[index] = replace(row, text=merged)
+            return _mark_streaming_anonymous(replace(state, rows=tuple(rows)), index)
+
+    new_state = _append(state, AssistantRow(text=action.text, id=action.id))
+    return _mark_streaming_anonymous(new_state, len(new_state.rows) - 1)
 
 
 def _mark_streaming(state: ViewState, message_id: str) -> ViewState:
@@ -239,13 +301,35 @@ def _mark_streaming(state: ViewState, message_id: str) -> ViewState:
     return state
 
 
+def _mark_streaming_anonymous(state: ViewState, index: int) -> ViewState:
+    """Record the active turn's anonymous-row index (only while a run is active).
+
+    Deliberately leaves ``streaming_id`` at ``None`` rather than ``""``: unlike
+    a genuine id, ``""`` would be shared by every anonymous row across every
+    turn, so using it as the render layer's "is this the row actively
+    streaming" key (``render.render_transcript``) would flag every past
+    anonymous row as actively streaming too, the moment a new one starts. The
+    cost is purely cosmetic — an anonymous row never gets the
+    raw-text-while-streaming treatment other rows get, only the id-less
+    fallback path is affected — in exchange for not reintroducing a cross-turn
+    ambiguity into the render layer that this fix removes from ``rows``.
+    """
+    if state.streaming:
+        return replace(state, streaming_id=None, streaming_anonymous_row_index=index)
+    return state
+
+
 def _merge_stream_text(existing: str, incoming: str) -> str:
     if not existing:
         return incoming
-    if incoming.startswith(existing):
-        return incoming  # cumulative snapshot or exact full re-send
-    if existing.startswith(incoming):
-        return existing  # shorter/stale re-send
+    # Cumulative re-delivery: incoming strictly extends existing.
+    if len(incoming) > len(existing) and incoming.startswith(existing):
+        return incoming
+    # Stale/shorter re-send: existing already contains incoming as a prefix
+    # (e.g. a values snapshot re-emitting history that has already been
+    # accumulated from deltas). Only treat as stale when strictly shorter.
+    if len(existing) > len(incoming) and existing.startswith(incoming):
+        return existing
     return existing + incoming  # genuine incremental delta
 
 

@@ -23,7 +23,9 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
+import { SkillRequestError } from "@/core/skills/api";
 import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
@@ -33,6 +35,8 @@ import { SettingsSection } from "./settings-section";
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
+  const adminRequired =
+    error instanceof SkillRequestError && error.isAdminRequired;
   return (
     <SettingsSection
       title={t.settings.skills.title}
@@ -40,6 +44,10 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
     >
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
+      ) : adminRequired ? (
+        <div className="text-muted-foreground text-sm">
+          {t.settings.skills.adminRequired}
+        </div>
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
@@ -58,6 +66,8 @@ function SkillSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = user?.system_role === "admin";
   const [filter, setFilter] = useState<string>("public");
   const { mutateAsync: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(
@@ -110,7 +120,9 @@ function SkillSettingsList({
             <ItemActions>
               <Switch
                 checked={skill.enabled}
-                disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                disabled={
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" || !isAdmin
+                }
                 onCheckedChange={(checked) =>
                   handleToggleSkill(skill.name, checked)
                 }

@@ -17,6 +17,14 @@ Run `make config-upgrade` to merge new fields into your config.
 
 ## Configuration Sections
 
+### Extensions
+
+MCP servers and skill enabled states live in `extensions_config.json`, separate
+from `config.yaml`. Use `mcpServers.<server>.routing` to add soft MCP tool
+preference hints for requests that should prefer a specific MCP server or tool.
+See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
+example, and soft-vs-hard routing boundary.
+
 ### Models
 
 Configure the LLM models available to the agent:
@@ -80,6 +88,8 @@ models:
 ```
 
 For OpenAI-compatible gateways (for example Novita or OpenRouter), keep using `langchain_openai:ChatOpenAI` and set `base_url`:
+
+> **Note:** for `langchain_openai:ChatOpenAI` the endpoint override key is `base_url` (not `api_base`). If you write `api_base` it is automatically normalized to `base_url`, and unrecognized keys are logged with a warning at model-build time. Some other model classes (e.g. `PatchedChatDeepSeek`) do use `api_base` — match the key to the class you configured.
 
 ```yaml
 models:
@@ -220,6 +230,55 @@ tool_groups:
   - name: bash         # Shell command execution
 ```
 
+### Scheduler
+
+The scheduled-task MVP adds a scheduler section to `config.yaml`:
+
+```yaml
+scheduler:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
+```
+
+Notes:
+
+- `enabled: false` keeps background polling off by default.
+- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
+- All scheduler fields are restart-required; edits need a Gateway restart.
+- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
+- The MVP supports thread reuse and fresh-thread-per-run execution modes.
+- The MVP supports only `once` and `cron`.
+- Manual trigger uses the same scheduled-task resource and run lifecycle.
+- Scheduled task definitions and task-run history are persisted in the application database.
+
+### Agent Storage
+
+Custom agent **definitions** (`config.yaml` + `SOUL.md`) are stored per-user on
+local disk by default. This is separate from the `database` backend (which holds
+run/thread/event data) and from agent memory.
+
+```yaml
+agent_storage:
+  backend: file   # file (default) | db
+```
+
+- `backend: file` — the historical layout under `{base_dir}/users/{user_id}/agents/`. Single-node by construction: an agent created on one node is not visible to other nodes without a shared mount.
+- `backend: db` — one row per agent in the shared SQL persistence layer (a new `agents` table), so every node in a multi-instance deployment sees the same agents. Requires `database.backend` to be `sqlite` or `postgres`; the Gateway **fails fast at startup** if it is `memory` (a per-process database cannot share definitions).
+- `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
+- In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
+
+Migrating an existing install from `file` to `db`:
+
+```bash
+python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
+python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+```
+
+The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+
 ### Tools
 
 Configure specific tools available to the agent:
@@ -235,13 +294,69 @@ tools:
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
-- `web_fetch` - Fetch web pages (Jina AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
-- `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
+- `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
+- `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
 - `read_file` - Read file contents
 - `write_file` - Write file contents
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
+
+Browserless can be configured as an opt-in visual capture tool:
+
+```yaml
+tools:
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false  # SSRF guard; keep false in production
+```
+
+`web_capture` writes screenshots to the current thread's `/mnt/user-data/outputs`
+directory and presents the image path through the standard artifact mechanism. By
+default it refuses URLs that resolve to private, loopback, link-local, or
+cloud-metadata addresses; set `allow_private_addresses: true` only when you
+intentionally point the tool at an internal target.
+
+Both `web_fetch` (Browserless provider) and `web_capture` need a running
+Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
+(set `BROWSERLESS_TOKEN`) or run one locally with Docker:
+
+```bash
+# Browserless listens on port 3000 inside the container; map it to 3032 to
+# match the default base_url (http://localhost:3032). Recent Browserless
+# images always require a token — if you don't pass one, a random token is
+# generated and requests without it are rejected — so set it explicitly.
+docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
+```
+
+Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
+in the config above):
+
+```bash
+export BROWSERLESS_TOKEN=local-dev-token
+```
+
+Verify the instance is reachable before enabling the tool:
+
+```bash
+curl -sS "http://localhost:3032/screenshot?token=local-dev-token" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "options": {"type": "png"}}' \
+  -o /tmp/browserless-check.png  # writes a PNG on success
+```
+
+For Docker Compose deployments, run Browserless as a service and point `base_url`
+at the service name (e.g. `http://browserless:3000`) instead of `localhost`. See
+the [Browserless project](https://github.com/browserless/browserless) for full
+deployment and configuration options.
 
 ### Sandbox
 
@@ -260,6 +375,32 @@ sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
 
+**BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
+```yaml
+sandbox:
+   use: deerflow.community.boxlite:BoxliteProvider
+   image: python:3.12-slim
+   memory_mib: 1024                 # optional per-box memory cap
+   cpus: 2                          # optional per-box vCPUs
+   replicas: 3                      # max active + warm VMs per gateway process
+   idle_timeout: 600                # warm VM idle seconds before stop; 0 disables idle reaping
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional runtime before selecting this provider:
+
+```bash
+pip install "deerflow-harness[boxlite]"
+```
+
+BoxLite boxes are named from the effective `(user_id, thread_id)` scope and are
+released into an in-process warm pool after each turn. The same user/thread can
+reclaim its warm VM on the next acquire; different threads cannot share a VM.
+`replicas` caps active plus warm VMs. When the cap is reached only warm VMs are
+evicted; active VMs continue and the provider may temporarily exceed the cap if
+all boxes are active.
+
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
 
 This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.
@@ -272,7 +413,83 @@ sandbox:
 
 When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
+Remote/provisioner backends default to explicit file synchronization because
+DeerFlow cannot infer whether their `/mnt/user-data` mount points reference the
+same storage as the Gateway. When the deployment guarantees that both sides use
+the same thread user-data directories, opt out of that extra transfer:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+  thread_data_mounts: true
+```
+
+Leave `thread_data_mounts` unset to retain backend auto-detection. Set it to
+`false` to force explicit synchronization even for a local container backend.
+Only set it to `true` after verifying the Gateway's
+`users/{user_id}/threads/{thread_id}/user-data` directory and the sandbox's
+`/mnt/user-data` are the same storage; a false positive skips synchronization
+and makes newly uploaded files unavailable inside the sandbox.
+
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
+
+**E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
+
+```yaml
+sandbox:
+   use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+   api_key: $E2B_API_KEY            # required; or set the E2B_API_KEY env var
+   template: code-interpreter-v1     # e2b sandbox template id
+   # domain: e2b.dev                # optional; for self-hosted e2b deployments
+   home_dir: /home/user             # /mnt/user-data is remapped under this directory
+   idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
+   replicas: 3                      # max concurrent sandboxes per gateway process
+   ownership:                       # use Redis when more than one gateway shares E2B
+     type: redis
+     redis_url: $REDIS_URL
+   reconciliation_interval_seconds: 60
+   reconciliation_grace_seconds: 120
+   reconciliation_orphan_ttl_seconds: 3600
+   reconciliation_max_pages: 10
+   reconciliation_max_items: 200
+   reconciliation_max_seconds: 15
+   mounts:                          # one-shot upload of host files at sandbox start
+     - host_path: /path/on/host
+       container_path: /home/user/shared
+       read_only: false
+   environment:                     # forwarded to the sandbox at create time
+     OPENAI_API_KEY: $OPENAI_API_KEY
+```
+
+`e2b-code-interpreter` is bundled as a core dependency of `deerflow-harness`,
+so no extra install step is needed; just supply your API key and switch the
+provider in `config.yaml`.
+
+Notes specific to `E2BSandboxProvider`:
+
+- Each DeerFlow thread is bound to its E2B sandbox via metadata
+  (`deer_flow_user`, `deer_flow_thread`). Startup and periodic reconciliation
+  probe every bounded candidate, adopt one healthy canonical sandbox, and reap
+  duplicates after a grace period. Provider-tagged entries without a complete
+  user/thread identity are reaped only after the orphan TTL.
+- Ownership leases prevent one gateway from adopting or destroying a sandbox
+  another live gateway is responsible for. The default in-memory store is safe
+  only for one gateway process. Multi-worker/load-balanced deployments must use
+  `sandbox.ownership.type: redis`; an existing Redis stream bridge configuration
+  is inferred automatically.
+- Reconciliation is bounded by page, item, and wall-clock limits. Its summary log
+  exposes discovered, adopted, duplicate, deferred, killed, dead, and budget-exhausted
+  counts for operational monitoring.
+- Idle expiry is enforced server-side by e2b's `set_timeout()`. The provider
+  refreshes the timeout on every release so warm sandboxes stay alive long
+  enough for the next acquire.
+- `mounts` are uploaded once when the sandbox starts; e2b cannot host bind-mount
+  the gateway filesystem, so changes inside the sandbox are not reflected back
+  on disk automatically. Use the `download_file` tool or write outputs under
+  `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
+  sandbox and surfaced through the standard artifact pipeline) to ship files
+  back to the gateway.
 
 Choose between local execution or Docker-based isolation:
 
@@ -284,6 +501,27 @@ sandbox:
 ```
 
 `allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+
+When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
+
+```yaml
+# docker/docker-compose.yaml or an override file
+services:
+  gateway:
+    volumes:
+      - ${DEER_FLOW_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
+```
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  mounts:
+    - host_path: /app/.deer-flow/knowledge
+      container_path: /mnt/knowledge
+      read_only: true
+```
+
+If the configured `host_path` is not visible to the gateway process, DeerFlow logs an error and ignores that mount.
 
 **Option 2: Docker Sandbox** (isolated, more secure):
 ```yaml
@@ -303,6 +541,12 @@ sandbox:
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
 For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
+Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
+hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
+inside the client. This prevents an inherited proxy from returning a misleading
+502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
+continue to use the normal environment proxy configuration.
 
 ### Building a Custom AIO Sandbox Image
 
@@ -339,6 +583,7 @@ If you rebuild the runtime from scratch instead of extending the published image
 
 - `sandbox.get_context()`, including `home_dir`
 - `shell.exec_command(...)`
+- `bash.exec(...)` — only exercised for per-command environment injection (skills that declare `required-secrets`). The `/v1/bash/*` routes exist since upstream all-in-one-sandbox `1.9.3`; on older images (including a `latest` tag still frozen on the `1.0.0.x` line) DeerFlow fails fast with an actionable error instead of surfacing the raw 404. Pin `sandbox.image` to `1.9.3` or newer (e.g. `1.11.0`) and recreate the sandbox container to use `required-secrets` with the AIO sandbox.
 - `file.read_file(...)`
 - `file.write_file(...)`, including base64 writes for binary content
 - streamed `file.download_file(...)`
@@ -372,11 +617,24 @@ skills:
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
 
+Skill installs and agent-managed skill writes also run through native deterministic SkillScan before the LLM scanner:
+
+```yaml
+skill_scan:
+  enabled: true
+```
+
+Set `skill_scan.enabled: false` to disable only the deterministic analyzers. Safe archive extraction and the LLM-based skill scanner still run.
+
 **Per-Agent Skill Filtering**:
-Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
-- **Omitted or `null`**: Loads all globally enabled skills (default fallback).
+Custom agents can restrict which skills they discover and activate by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
+- **Omitted or `null`**: Makes all globally enabled skills available (default fallback).
 - **`[]` (empty list)**: Disables all skills for this specific agent.
-- **`["skill-name"]`**: Loads only the explicitly specified skills.
+- **`["skill-name"]`**: Makes only the explicitly specified skills available.
+
+This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
+
+The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A passive subagent skill never removes baseline tools; its `allowed-tools` declaration becomes active only after slash activation or a completed `SKILL.md` read.
 
 ### Title Generation
 
@@ -387,7 +645,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null  # Use first model in list
+  model_name: null  # null = fast local fallback; set a model name to use LLM title generation
 ```
 
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
@@ -414,9 +672,10 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
-- `BRAVE_SEARCH_API_KEY` - Brave Search API key
+- `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
+- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path

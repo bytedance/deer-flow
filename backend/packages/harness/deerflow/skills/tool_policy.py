@@ -10,6 +10,21 @@ class NamedTool(Protocol):
     name: str
 
 
+# Framework built-ins that remain available even when an active skill declares
+# allowed-tools. They support controlled file/review/discovery workflows rather
+# than extending the reviewed/activated skill's own business-tool authority.
+# In particular, promotion through tool_search does not restore a tool removed
+# by SkillToolPolicyMiddleware, and describe_skill only returns catalog metadata.
+ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "describe_skill",
+        "read_file",
+        "review_skill_package",
+        "tool_search",
+    }
+)
+
+
 def allowed_tool_names_for_skills(skills: list[Skill]) -> set[str] | None:
     """Return the union of explicit skill allowed-tools declarations.
 
@@ -36,9 +51,15 @@ def allowed_tool_names_for_skills(skills: list[Skill]) -> set[str] | None:
     return allowed
 
 
-def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](tools: list[ToolT], skills: list[Skill]) -> list[ToolT]:
+def filter_tools_by_skill_allowed_tools[ToolT: NamedTool](
+    tools: list[ToolT],
+    skills: list[Skill],
+    *,
+    always_allowed_tool_names: set[str] | frozenset[str] = frozenset(),
+) -> list[ToolT]:
     allowed = allowed_tool_names_for_skills(skills)
     if allowed is None:
         return tools
 
-    return [tool for tool in tools if tool.name in allowed]
+    allowed_with_framework_tools = allowed | set(always_allowed_tool_names)
+    return [tool for tool in tools if tool.name in allowed_with_framework_tools]

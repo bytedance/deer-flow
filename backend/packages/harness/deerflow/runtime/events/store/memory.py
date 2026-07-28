@@ -10,6 +10,7 @@ import bisect
 from datetime import UTC, datetime
 
 from deerflow.runtime.events.store.base import RunEventStore
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
 
 class MemoryRunEventStore(RunEventStore):
@@ -92,7 +93,36 @@ class MemoryRunEventStore(RunEventStore):
             results.append(record)
         return results
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        # No await occurs between the lookup and append, so this is atomic for
+        # the backend's documented single-event-loop concurrency model.
+        for event in self._events_by_run.get(thread_id, {}).get(run_id, []):
+            if event["event_type"] == event_type:
+                return event, False
+        return (
+            self._put_one(
+                thread_id=thread_id,
+                run_id=run_id,
+                event_type=event_type,
+                category=category,
+                content=content,
+                metadata=metadata,
+                created_at=created_at,
+            ),
+            True,
+        )
+
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.
         messages = self._messages.get(thread_id, [])
@@ -109,12 +139,16 @@ class MemoryRunEventStore(RunEventStore):
             # Return the latest `limit` records, ascending.
             return messages[-limit:]
 
-    async def list_events(self, thread_id, run_id, *, event_types=None, limit=500):
+    async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
         # ``_events_by_run`` is already scoped to this run and seq-ordered, so we
         # touch only this run's events instead of scanning the whole thread.
         run_events = self._events_by_run.get(thread_id, {}).get(run_id, [])
         if event_types is not None:
             run_events = [e for e in run_events if e["event_type"] in event_types]
+        if task_id is not None:
+            run_events = [e for e in run_events if (e.get("metadata") or {}).get("task_id") == task_id]
+        if after_seq is not None:
+            run_events = [e for e in run_events if e.get("seq", 0) > after_seq]
         return run_events[:limit]
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
@@ -131,6 +165,17 @@ class MemoryRunEventStore(RunEventStore):
         if after_seq is not None:
             return window[:limit]
         return window[-limit:]
+
+    async def get_last_visible_ai_seq_by_run(self, thread_id, run_ids, *, user_id: str | None | _AutoSentinel = AUTO):
+        result: dict[str, int] = {}
+        messages_by_run = self._messages_by_run.get(thread_id, {})
+        for run_id in run_ids:
+            for event in reversed(messages_by_run.get(run_id, [])):
+                caller = str((event.get("metadata") or {}).get("caller", ""))
+                if event.get("category") == "message" and event.get("event_type") in {"llm.ai.response", "ai_message"} and not caller.startswith("middleware:"):
+                    result[run_id] = event["seq"]
+                    break
+        return result
 
     async def count_messages(self, thread_id):
         return len(self._messages.get(thread_id, []))

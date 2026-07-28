@@ -8,6 +8,10 @@ import {
 
 const mermaidContent = `Here is a relationship diagram.
 
+\`\`\`typescript
+const answer: number = 42;
+\`\`\`
+
 \`\`\`mermaid
 flowchart TD
     A[Lin<br/>protagonist]
@@ -45,41 +49,40 @@ test("historical run messages preview labelled dotted Mermaid arrows", async ({
     }),
   );
 
-  await page.route(
-    `**/api/threads/${MOCK_THREAD_ID}/runs/${MOCK_RUN_ID}/messages`,
-    (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          data: [
-            {
-              thread_id: MOCK_THREAD_ID,
-              run_id: MOCK_RUN_ID,
-              event_type: "llm.ai.response",
-              category: "message",
-              content: {
-                content: mermaidContent,
-                additional_kwargs: {},
-                response_metadata: {},
-                type: "ai",
-                name: null,
-                id: "lc_run--issue-3193",
-                tool_calls: [],
-                invalid_tool_calls: [],
-              },
-              seq: 720,
-              created_at: "2026-05-24T04:47:01.123949+00:00",
-              metadata: {
-                caller: "lead_agent",
-                content_is_json: true,
-                content_is_dict: true,
-              },
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/messages/page`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: [
+          {
+            thread_id: MOCK_THREAD_ID,
+            run_id: MOCK_RUN_ID,
+            event_type: "llm.ai.response",
+            category: "message",
+            content: {
+              content: mermaidContent,
+              additional_kwargs: {},
+              response_metadata: {},
+              type: "ai",
+              name: null,
+              id: "lc_run--issue-3193",
+              tool_calls: [],
+              invalid_tool_calls: [],
             },
-          ],
-          has_more: false,
-        }),
+            seq: 720,
+            created_at: "2026-05-24T04:47:01.123949+00:00",
+            metadata: {
+              caller: "lead_agent",
+              content_is_json: true,
+              content_is_dict: true,
+            },
+          },
+        ],
+        has_more: false,
+        next_before_seq: null,
       }),
+    }),
   );
 
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
@@ -88,4 +91,22 @@ test("historical run messages preview labelled dotted Mermaid arrows", async ({
     timeout: 15_000,
   });
   await expect(page.getByText("Mermaid Error:")).toHaveCount(0);
+  const highlightedTokens = page.locator(
+    '[data-streamdown="code-block-body"] code > span > span',
+  );
+  await expect
+    .poll(() => highlightedTokens.count(), { timeout: 15_000 })
+    .toBeGreaterThan(1);
+  const tokenStyles = await highlightedTokens.evaluateAll((tokens) =>
+    tokens.map((token) => ({
+      color: getComputedStyle(token).color,
+      style: token.getAttribute("style"),
+    })),
+  );
+  expect(new Set(tokenStyles.map(({ style }) => style)).size).toBeGreaterThan(
+    1,
+  );
+  expect(new Set(tokenStyles.map(({ color }) => color)).size).toBeGreaterThan(
+    1,
+  );
 });

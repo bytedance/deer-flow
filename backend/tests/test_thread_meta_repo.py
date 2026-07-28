@@ -1,10 +1,11 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
+import asyncio
 import logging
 
 import pytest
 
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
 
 @pytest.fixture
@@ -136,6 +137,52 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_update_metadata_nonexistent_is_noop(self, repo):
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touches_updated_at_by_default(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        await repo.update_metadata("t1", {"b": 2})
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, "b": 2}
+        assert record["updated_at"] >= original
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touch_false_preserves_updated_at(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        # Pin/unpin style patch must not bump recency ordering.
+        await repo.update_metadata("t1", {THREAD_PINNED_METADATA_KEY: True}, touch=False)
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, THREAD_PINNED_METADATA_KEY: True}
+        assert record["updated_at"] == original
+
+    @pytest.mark.anyio
+    async def test_concurrent_metadata_updates_preserve_disjoint_keys(self, repo):
+        for index in range(10):
+            thread_id = f"concurrent-{index}"
+            await repo.create(thread_id, metadata={"base": index}, user_id=None)
+
+            await asyncio.gather(
+                repo.update_metadata(thread_id, {"left": index}, user_id=None),
+                repo.update_metadata(thread_id, {"right": index}, user_id=None),
+            )
+
+            record = await repo.get(thread_id, user_id=None)
+            assert record["metadata"] == {"base": index, "left": index, "right": index}
+
+    @pytest.mark.anyio
+    async def test_search_orders_pinned_threads_before_newer_unpinned_threads(self, repo):
+        await repo.create("older-pinned", metadata={THREAD_PINNED_METADATA_KEY: True})
+        await repo.create("newer-unpinned")
+
+        results = await repo.search(limit=1)
+
+        assert [record["thread_id"] for record in results] == ["older-pinned"]
 
     @pytest.mark.anyio
     async def test_update_owner_with_bypass_moves_row(self, repo):

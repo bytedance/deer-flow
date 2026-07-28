@@ -11,9 +11,15 @@ import asyncio
 
 import pytest
 
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    mark_trace_id_from_request_header,
+    request_trace_context,
+    reset_trace_id_from_request_header,
+)
 
 
 class _FakeAgent:
@@ -36,7 +42,23 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def try_start(self, _run_id: str) -> RunStartOutcome:
+        return RunStartOutcome.started
+
+    async def wait_for_prior_finalizing(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def has_later_run(self, *_args, **_kwargs) -> bool:
+        return False
+
+    async def has_later_started_run(self, *_args, **_kwargs) -> bool:
+        return False
+
     async def set_status(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def set_status_if_not_cancelled(self, *_args, **_kwargs) -> None:
+        await self.set_status(*_args, **_kwargs)
         return None
 
     async def update_model_name(self, *_args, **_kwargs) -> None:
@@ -96,15 +118,16 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     record.abort_event = asyncio.Event()
     ctx = RunContext(checkpointer=None)
 
-    await run_agent(
-        _FakeBridge(),
-        _FakeRunManager(),
-        record,
-        ctx=ctx,
-        agent_factory=agent_factory,
-        graph_input={"messages": []},
-        config={"configurable": {"thread_id": "thread-xyz"}},
-    )
+    with request_trace_context("gateway-trace-1"):
+        await run_agent(
+            _FakeBridge(),
+            _FakeRunManager(),
+            record,
+            ctx=ctx,
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={"configurable": {"thread_id": "thread-xyz"}},
+        )
 
     assert fake_agent.captured_config is not None, "astream was not invoked"
     metadata = fake_agent.captured_config.get("metadata") or {}
@@ -114,28 +137,86 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
     user_id = metadata.get("langfuse_user_id")
     assert user_id == "test-user-autouse", f"expected test-user-autouse, got {user_id}"
     assert metadata.get("langfuse_trace_name") == "lead-agent"
+    assert metadata.get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "gateway-trace-1"
     tags = metadata.get("langfuse_tags") or []
     assert "model:gpt-4o" in tags
 
 
 @pytest.mark.asyncio
-async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
-    """When no user is in the contextvar, langfuse_user_id falls back to 'default'.
+async def test_run_agent_uses_context_user_id_over_contextvar(monkeypatch):
+    """A run carrying ``context.user_id`` traces to that user, not the contextvar.
 
-    Uses ``monkeypatch.setattr`` to redirect ``get_effective_user_id`` to return
-    ``"default"`` rather than directly mutating the contextvar — direct contextvar
-    operations across pytest test boundaries have produced spooky cross-file
-    pollution when combined with the langfuse OTel global tracer provider.
+    Internal-token callers invoke a run on behalf of an end user, so the
+    ``_current_user`` ContextVar is never that end user. The caller instead
+    carries the real owner in the run request's ``config['context']['user_id']``,
+    which ``resolve_runtime_user_id(runtime)`` must prefer over the contextvar —
+    even though conftest's autouse fixture injects ``test-user-autouse`` into it.
     """
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
     from deerflow.config.tracing_config import reset_tracing_config
-    from deerflow.runtime.runs import worker as worker_module
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-ctx-user",
+        thread_id="thread-ctx",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    await run_agent(
+        _FakeBridge(),
+        _FakeRunManager(),
+        record,
+        ctx=ctx,
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={
+            "configurable": {"thread_id": "thread-ctx"},
+            "context": {"user_id": "real-end-user"},
+        },
+    )
+
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    # context.user_id wins over the contextvar's ``test-user-autouse``.
+    assert metadata.get("langfuse_user_id") == "real-end-user"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_falls_back_to_default_user_when_unset(monkeypatch):
+    """When no user is in the contextvar (and no context.user_id), langfuse_user_id
+    falls back to 'default'.
+
+    Uses ``monkeypatch.setattr`` to redirect ``get_effective_user_id`` to return
+    ``"default"`` rather than directly mutating the contextvar — direct contextvar
+    operations across pytest test boundaries have produced spooky cross-file
+    pollution when combined with the langfuse OTel global tracer provider.
+
+    The worker resolves the trace user via ``resolve_runtime_user_id(runtime)``;
+    with no ``context.user_id`` it falls back to ``get_effective_user_id()`` — so
+    we patch that fallback at its definition module (``user_context``), which is
+    the name ``resolve_runtime_user_id`` actually calls.
+    """
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+    from deerflow.runtime import user_context as user_context_module
     from deerflow.runtime.user_context import DEFAULT_USER_ID
 
     reset_tracing_config()
-    monkeypatch.setattr(worker_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
+    monkeypatch.setattr(user_context_module, "get_effective_user_id", lambda: DEFAULT_USER_ID)
 
     fake_agent = _FakeAgent()
 
@@ -201,6 +282,7 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
         config={
             "configurable": {"thread_id": "thread-default"},
             "metadata": {
+                DEERFLOW_TRACE_METADATA_KEY: "explicit-deerflow-trace",
                 "langfuse_session_id": "custom-session-id",
                 "langfuse_user_id": "explicit-user",
             },
@@ -211,8 +293,60 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     # Caller-supplied keys win.
     assert metadata["langfuse_session_id"] == "custom-session-id"
     assert metadata["langfuse_user_id"] == "explicit-user"
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "explicit-deerflow-trace"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "explicit-deerflow-trace"
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_inbound_header_trace_overrides_metadata(monkeypatch):
+    """A valid inbound ``X-Trace-Id`` wins over ``config.metadata.deerflow_trace_id``."""
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-header-override",
+        thread_id="thread-header",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    with request_trace_context("header-trace-1"):
+        header_token = mark_trace_id_from_request_header(from_header=True)
+        try:
+            await run_agent(
+                _FakeBridge(),
+                _FakeRunManager(),
+                record,
+                ctx=ctx,
+                agent_factory=agent_factory,
+                graph_input={"messages": []},
+                config={
+                    "configurable": {"thread_id": "thread-header"},
+                    "metadata": {
+                        DEERFLOW_TRACE_METADATA_KEY: "metadata-trace-ignored",
+                    },
+                },
+            )
+        finally:
+            reset_trace_id_from_request_header(header_token)
+
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "header-trace-1"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "header-trace-1"
 
 
 @pytest.mark.asyncio

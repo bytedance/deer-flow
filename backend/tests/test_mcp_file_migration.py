@@ -46,6 +46,9 @@ class TestLocalPathFromUri:
         assert mcp_tools._local_path_from_uri("https://example.com/a.png") is None
         assert mcp_tools._local_path_from_uri("data:image/png;base64,AAAA") is None
 
+    def test_malformed_uri_is_ignored(self):
+        assert mcp_tools._local_path_from_uri("//[::1/foo.png") is None
+
     def test_relative_path_is_ignored_without_base_dir(self):
         assert mcp_tools._local_path_from_uri("relative/path.txt") is None
 
@@ -192,6 +195,14 @@ class TestRewriteLocalPathsInText:
 
         assert result == text
 
+    def test_malformed_path_like_text_is_left_untouched(self, paths: Paths):
+        text = "Saved at //[::1/foo.png"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
+
+        assert result == text
+
     def test_playwright_markdown_path_is_rewritten_twice_without_copy(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         _workspace_file(paths, ".playwright-mcp/page.png", content=b"png")
@@ -327,11 +338,19 @@ class TestRewriteLocalPathsInText:
 
 class TestWorkspaceSnapshots:
     def test_changed_workspace_files_detects_created_and_modified_files(self, paths: Paths):
+        import time
+
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         existing = _workspace_file(paths, "existing.txt", content=b"old")
         before = mcp_tools._snapshot_workspace_files(workspace)
 
-        existing.write_bytes(b"new")
+        # Ensure the mtime advances so the change is detectable.  Without the
+        # sleep, write_bytes(b"new") may land in the same nanosecond as the
+        # snapshot, and since b"old" and b"new" have the same length, the
+        # (mtime_ns, size) signature stays identical → _changed_workspace_files
+        # misses the modification.
+        time.sleep(0.05)
+        existing.write_bytes(b"new_content")  # different length guarantees size change too
         created = _workspace_file(paths, "created.txt", content=b"created")
 
         changed = set(mcp_tools._changed_workspace_files(workspace, before))
@@ -499,6 +518,15 @@ class TestConvertCallToolResultRewrites:
 
         assert content[0]["type"] == "text"
         assert content[0]["text"] == "hello"
+
+    def test_malformed_path_like_text_result_does_not_raise(self, paths: Paths):
+        result = CallToolResult(content=[TextContent(type="text", text="Saved at //[::1/foo.png")], isError=False)
+
+        with _patch_paths(paths):
+            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "Saved at //[::1/foo.png"
 
     def test_image_content_passthrough(self, paths: Paths):
         from mcp.types import ImageContent

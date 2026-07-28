@@ -18,6 +18,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
+from deerflow.runtime.goal import parse_goal_command
+
+from .command_registry import format_command_help
 from .input_history import InputHistory
 from .render import render_header, render_status, render_transcript
 from .runtime import stream_actions
@@ -34,7 +37,8 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = "Commands:  /new  /threads  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_KEYS = "Keys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
 
 
 class SelectScreen(ModalScreen):
@@ -351,16 +355,32 @@ class DeerFlowTUI(App):
         # which applies skill-activation semantics on the raw text.
         self._send_to_agent(text)
 
+    def _dispatch_still_working(self) -> None:
+        self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+
     def _handle_builtin(self, name: str, args: str) -> None:
         if name == "quit":
+            # Mirror action_interrupt (Ctrl+C): an active run must be interrupted
+            # before we tear the app down. Otherwise the worker thread is left
+            # running against an app that no longer exists — its next
+            # call_from_thread fails silently and the in-flight turn (plus any
+            # post-run persistence, e.g. thread title) is quietly abandoned.
+            if self._streaming:
+                self._interrupt_run()
             self.exit()
         elif name == "help":
             self._dispatch(SystemMessage(_HELP_TEXT))
         elif name == "new":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._conv_thread_id = None
             self.state = initial_state()
             self._dispatch(SystemMessage("Started a new thread."))
         elif name == "clear":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._dispatch(ClearRows())
         elif name == "model":
             self._open_model_picker()
@@ -368,6 +388,8 @@ class DeerFlowTUI(App):
             self._open_thread_switcher()
         elif name == "resume":
             self._resume_thread(args)
+        elif name == "goal":
+            self._handle_goal(args)
         elif name == "skills":
             self._show_skills()
         elif name == "mcp":
@@ -446,6 +468,44 @@ class DeerFlowTUI(App):
         self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
         self._refresh_header()
 
+    def _handle_goal(self, args: str) -> None:
+        command = parse_goal_command(args)
+
+        if command.kind == "status":
+            if not self._conv_thread_id:
+                self._dispatch(SystemMessage("No active goal."))
+                return
+            try:
+                goal = self.session.client.get_goal(self._conv_thread_id).get("goal")
+            except Exception:  # noqa: BLE001
+                self._dispatch(SystemMessage("Could not read goal.", tone="error"))
+                return
+            if not goal:
+                self._dispatch(SystemMessage("No active goal."))
+                return
+            self._dispatch(SystemMessage(f"Goal: {goal.get('objective')}"))
+            return
+
+        if command.kind == "clear":
+            if self._conv_thread_id:
+                try:
+                    self.session.client.clear_goal(self._conv_thread_id)
+                except Exception:  # noqa: BLE001
+                    self._dispatch(SystemMessage("Could not clear goal.", tone="error"))
+                    return
+            self._dispatch(SystemMessage("Goal cleared."))
+            return
+
+        if self._conv_thread_id is None:
+            self._conv_thread_id = str(uuid.uuid4())
+            self._refresh_header()
+        try:
+            goal = self.session.client.set_goal(self._conv_thread_id, command.objective).get("goal")
+        except Exception:  # noqa: BLE001
+            self._dispatch(SystemMessage("Could not set goal.", tone="error"))
+            return
+        self._dispatch(SystemMessage(f"Goal set: {goal.get('objective') if goal else command.objective}"))
+
     def _show_skills(self) -> None:
         names = ", ".join(self._skill_names) or "none"
         self._dispatch(SystemMessage(f"Enabled skills ({self._skills}): {names}"))
@@ -504,7 +564,7 @@ class DeerFlowTUI(App):
 
     def _send_to_agent(self, text: str) -> None:
         if self._streaming:
-            self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+            self._dispatch_still_working()
             return
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())

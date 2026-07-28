@@ -154,6 +154,16 @@ body:
         commit: abcdef1
 
   - type: textarea
+    id: support_bundle
+    attributes:
+      label: Support bundle summary
+      description: For local setup, configuration, sandbox, or runtime issues, run `make support-bundle` and paste the generated `*-issue-summary.md` here. AI-assisted reports can start from `*-issue-draft.md`, but every REQUIRED placeholder must be replaced before filing. Attach the zip only if a maintainer asks for the evidence bundle or the summary is not enough.
+      placeholder: |
+        ## DeerFlow support bundle summary
+        - Triage status: ...
+        - Active signals: ...
+
+  - type: textarea
     id: additional
     attributes:
       label: Additional context

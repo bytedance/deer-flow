@@ -137,7 +137,7 @@ def _make_skill(allowed_tools):
         skill_file=Path("/tmp/s/SKILL.md"),
         relative_path=Path("s"),
         category="public",
-        allowed_tools=allowed_tools,
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
         enabled=True,
     )
 

@@ -10,6 +10,7 @@ from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
     claim_unique_filename,
+    cleanup_stale_upload_staging_files,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
@@ -186,6 +187,49 @@ class TestListFilesInDir:
         result = list_files_in_dir(tmp_path)
         assert result["count"] == 1
         assert result["files"][0]["filename"] == "file.txt"
+
+    def test_filters_only_upload_staging_files(self, tmp_path):
+        (tmp_path / ".env").write_text("intentional dotfile")
+        (tmp_path / ".upload-active.part").write_text("partial")
+        (tmp_path / ".upload-note.txt").write_text("intentional upload")
+        (tmp_path / "draft.part").write_text("intentional upload")
+        (tmp_path / "visible.txt").write_text("visible")
+
+        result = list_files_in_dir(tmp_path)
+
+        assert result["count"] == 4
+        assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
+
+
+# ---------------------------------------------------------------------------
+# cleanup_stale_upload_staging_files
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupStaleUploadStagingFiles:
+    def test_removes_only_stale_staging_files_from_all_upload_layouts(self, tmp_path):
+        legacy_uploads = tmp_path / "threads" / "thread-legacy" / "user-data" / "uploads"
+        user_uploads = tmp_path / "users" / "owner-1" / "threads" / "thread-owned" / "user-data" / "uploads"
+        unrelated_uploads = tmp_path / "misc" / "thread-other" / "user-data" / "uploads"
+        for uploads_dir in (legacy_uploads, user_uploads, unrelated_uploads):
+            uploads_dir.mkdir(parents=True)
+
+        (legacy_uploads / ".upload-old.part").write_text("legacy partial")
+        (user_uploads / ".upload-new.part").write_text("user partial")
+        (unrelated_uploads / ".upload-ignore.part").write_text("outside layout")
+        (legacy_uploads / ".env").write_text("intentional dotfile")
+        (legacy_uploads / ".upload-note.txt").write_text("intentional upload")
+        (legacy_uploads / "draft.part").write_text("intentional upload")
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 2
+        assert not (legacy_uploads / ".upload-old.part").exists()
+        assert not (user_uploads / ".upload-new.part").exists()
+        assert (unrelated_uploads / ".upload-ignore.part").exists()
+        assert (legacy_uploads / ".env").exists()
+        assert (legacy_uploads / ".upload-note.txt").exists()
+        assert (legacy_uploads / "draft.part").exists()
 
 
 # ---------------------------------------------------------------------------
