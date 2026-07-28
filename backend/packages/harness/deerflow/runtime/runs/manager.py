@@ -1234,6 +1234,11 @@ class RunManager:
             if outcome == CancelOutcome.requested:
                 action = winning_action or action
                 durable_cancel_won = True
+            elif outcome == CancelOutcome.unknown:
+                logger.warning(
+                    "Proceeding with local cancellation for run %s after durable cancel persistence failed",
+                    run_id,
+                )
             elif outcome != CancelOutcome.lease_valid_elsewhere:
                 return outcome
 

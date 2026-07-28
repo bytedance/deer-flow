@@ -1745,6 +1745,44 @@ async def test_first_cancel_action_wins_when_retry_lands_on_owner():
 
 
 @pytest.mark.anyio
+async def test_local_owner_cancel_falls_back_when_durable_request_fails():
+    """A local owner can still abort its own task when durable cancel persistence fails."""
+
+    class FailingCancelStore(MemoryRunStore):
+        async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+            raise RuntimeError("store unavailable")
+
+    store = FailingCancelStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=30),
+    )
+
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "interrupted"
+        assert stored["cancel_action"] is None
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.anyio
 async def test_owner_cancel_retry_on_peer_is_accepted():
     """A peer must treat the owner's interrupted status as an accepted cancel."""
     store = MemoryRunStore()
