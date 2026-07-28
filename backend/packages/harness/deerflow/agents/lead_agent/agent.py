@@ -384,9 +384,13 @@ def build_middlewares(
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
-    # Add MemoryMiddleware (after TitleMiddleware) — skipped in enabled tool mode
+    # Add MemoryMiddleware after TitleMiddleware. Tool mode normally skips it;
+    # conversation-extraction backends may explicitly retain passive writes.
     if should_use_memory_tools(resolved_app_config.memory):
-        pass
+        from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
+
+        if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
+            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
     else:
         if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")

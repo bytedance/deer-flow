@@ -1,5 +1,6 @@
 """Middleware for memory mechanism."""
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, override
 
@@ -49,17 +50,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         self._agent_name = agent_name
         self._memory_config = memory_config
 
-    @override
-    def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
-        """Queue conversation for memory update after agent completes.
-
-        Args:
-            state: The current agent state.
-            runtime: The runtime context.
-
-        Returns:
-            None (no state changes needed from this middleware).
-        """
+    def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str | None] | None:
+        """Resolve one write request without invoking the manager."""
         config = self._memory_config or get_memory_config()
         if not config.enabled:
             return None
@@ -95,6 +87,16 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if trace_id is None:
             trace_id = get_current_trace_id()
 
+        return thread_id, messages, user_id, trace_id
+
+    @override
+    def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Queue conversation for memory update after agent completes."""
+        add_args = self._resolve_add_args(state, runtime)
+        if add_args is None:
+            return None
+        thread_id, messages, user_id, trace_id = add_args
+
         # Hand raw messages to the manager; the backend filters to user + final-AI
         # turns, validates, detects correction/reinforcement, and enqueues.
         get_memory_manager().add(
@@ -105,4 +107,21 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             trace_id=trace_id,
         )
 
+        return None
+
+    @override
+    async def aafter_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
+        """Use the manager's async boundary on LangGraph's async execution path."""
+        add_args = self._resolve_add_args(state, runtime)
+        if add_args is None:
+            return None
+        thread_id, messages, user_id, trace_id = add_args
+        manager = await asyncio.to_thread(get_memory_manager)
+        await manager.aadd(
+            thread_id,
+            messages,
+            agent_name=self._agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
         return None

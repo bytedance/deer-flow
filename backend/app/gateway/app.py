@@ -228,7 +228,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from deerflow.agents.memory import get_memory_manager
 
         if startup_config.memory.enabled:
-            manager = get_memory_manager()
+            manager = await asyncio.to_thread(get_memory_manager)
             warm_retrieval = getattr(manager, "warm_retrieval", None)
             if callable(warm_retrieval):
                 retrieval_warm_task = asyncio.create_task(
@@ -252,7 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         from deerflow.agents.memory import get_memory_manager
 
-        manager = get_memory_manager()
+        manager = await asyncio.to_thread(get_memory_manager)
         warmed = await asyncio.wait_for(
             asyncio.to_thread(manager.warm),
             timeout=5,
@@ -411,7 +411,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if app_cfg.memory.enabled:
                 from deerflow.agents.memory import get_memory_manager
 
-                manager = get_memory_manager()
+                manager = await asyncio.to_thread(get_memory_manager)
                 flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
                 completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
                 if completed:

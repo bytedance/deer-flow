@@ -1627,7 +1627,7 @@ summarization:
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
-#   manager_class       - Backend selector: registered name (deermem/noop/openviking) or dotted path
+#   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
@@ -1666,7 +1666,7 @@ memory:
   # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
   shutdown_flush_timeout_seconds: 30.0
   # Memory backend selector. Either a registered backend name (matching a
-  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / mem0 / noop)
   # or a dotted import path to a MemoryManager subclass.
   manager_class: deermem
   # Memory operation mode:
@@ -1674,9 +1674,10 @@ memory:
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
-  # memory_search/add/update/delete go through the active backend; backends
-  # without fact-CRUD return a JSON error instead of crashing.)
+  # Normally only one mode runs at a time. A backend that needs conversation-
+  # level extraction may retain passive writes in tool mode while still
+  # exposing query-aware search (mem0 does this). Tool calls go through the
+  # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
