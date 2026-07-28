@@ -110,6 +110,20 @@ def _reset_frozen_checkpoint_channel_mode(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_frozen_delta_snapshot_frequency(monkeypatch):
+    """Reset the process-global frozen delta snapshot frequency between tests.
+
+    Same restart-required semantics as the checkpoint channel mode freeze
+    above: ``make_lead_agent`` freezes it from the app config, and the suite
+    builds many agents with different configs in one process.
+    """
+    from deerflow.agents import thread_state
+
+    monkeypatch.setattr(thread_state, "_frozen_delta_snapshot_frequency", None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _restore_title_config_singleton():
     """Reset ``_title_config`` to its pristine default after every test.
 

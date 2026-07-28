@@ -6,6 +6,7 @@ import {
   extractTextFromMessage,
   extractReasoningContentFromMessage,
   getBranchableAssistantGroupIds,
+  getLatestEditableTurn,
   getMessageCopyData,
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
@@ -14,6 +15,7 @@ import {
   hasContent,
   hasReasoning,
   isAssistantMessageGroupStreaming,
+  isHiddenFromUIMessage,
   parseUploadedFiles,
   stripInternalMarkers,
   stripUploadedFilesTag,
@@ -130,6 +132,88 @@ describe("branchable assistant groups", () => {
     expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual([
       "ai-history",
     ]);
+  });
+});
+
+describe("latest editable user turn", () => {
+  test("returns the latest completed human turn", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-history", type: "ai", content: "Historical answer" },
+      { id: "human-2", type: "human", content: "Use tools" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+      { id: "ai-final", type: "ai", content: "Final answer" },
+    ] as Message[];
+
+    const turn = getLatestEditableTurn(getMessageGroups(messages), false);
+
+    expect(turn?.humanMessage.id).toBe("human-2");
+  });
+
+  test("returns null while the current turn is loading", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      { id: "ai-1", type: "ai", content: "Answer" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), true)).toBeNull();
+  });
+
+  test("returns null when the latest turn has no final assistant text", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        name: "web_search",
+        tool_call_id: "tool-1",
+        content: "result",
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when the latest assistant text still has tool calls", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Question" },
+      {
+        id: "ai-tool",
+        type: "ai",
+        content: "Let me search first.",
+        tool_calls: [{ id: "tool-1", name: "web_search", args: {} }],
+      },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
+  });
+
+  test("returns null when a later human turn is incomplete", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "First question" },
+      { id: "ai-1", type: "ai", content: "First answer" },
+      { id: "human-2", type: "human", content: "Follow up" },
+    ] as Message[];
+
+    expect(getLatestEditableTurn(getMessageGroups(messages), false)).toBeNull();
   });
 });
 
@@ -294,6 +378,96 @@ describe("inline <think> tag splitting", () => {
     const message = aiMessage("Documentation: `<think>");
     expect(extractContentFromMessage(message)).toBe("Documentation: `<think>");
     expect(extractReasoningContentFromMessage(message)).toBeNull();
+  });
+
+  test("re-splits when the same message object gets new content", () => {
+    // Streaming replaces `content` on the accumulating message, so a split
+    // cached against the message object must be keyed by the content it was
+    // derived from.
+    const message = aiMessage("<think>first</think>one");
+
+    expect(extractContentFromMessage(message)).toBe("one");
+    expect(extractReasoningContentFromMessage(message)).toBe("first");
+
+    (message as { content: string }).content = "<think>second</think>two";
+
+    expect(extractContentFromMessage(message)).toBe("two");
+    expect(extractReasoningContentFromMessage(message)).toBe("second");
+    expect(hasReasoning(message)).toBe(true);
+  });
+});
+
+describe("isHiddenFromUIMessage", () => {
+  function contentReadCounter(
+    message: Omit<Message, "content">,
+    content: string,
+  ) {
+    const counter = { reads: 0 };
+    const probe = {
+      ...message,
+      get content() {
+        counter.reads++;
+        return content;
+      },
+    } as unknown as Message;
+    return { probe, counter };
+  }
+
+  test("does not read AI content to decide visibility", () => {
+    // Only the human branch consults the text, but this predicate runs over
+    // every message on every stream chunk (grouping, dedup, human-input
+    // state), so reading AI content here costs a full content scan per
+    // message per chunk.
+    const { probe, counter } = contentReadCounter(
+      { id: "ai-visible", type: "ai" } as Message,
+      "<think>long reasoning</think>a long streamed answer",
+    );
+
+    expect(isHiddenFromUIMessage(probe)).toBe(false);
+    expect(counter.reads).toBe(0);
+  });
+
+  test("does not read content when a control message name already hides it", () => {
+    const { probe, counter } = contentReadCounter(
+      { id: "summary-1", type: "ai", name: "summary" } as Message,
+      "compressed context",
+    );
+
+    expect(isHiddenFromUIMessage(probe)).toBe(true);
+    expect(counter.reads).toBe(0);
+  });
+
+  test("still hides a human message that is only slash skill activation", () => {
+    const message = {
+      id: "slash-activation",
+      type: "human",
+      content:
+        "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>",
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(true);
+  });
+
+  test("keeps a human message that carries real text alongside the activation", () => {
+    const message = {
+      id: "slash-activation-with-task",
+      type: "human",
+      content:
+        "<slash_skill_activation>\n<skill_content># SKILL.md</skill_content>\n</slash_skill_activation>\nreal user task",
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(false);
+  });
+
+  test("hides any message flagged with hide_from_ui", () => {
+    const message = {
+      id: "hidden-1",
+      type: "human",
+      content: "internal reply",
+      additional_kwargs: { hide_from_ui: true },
+    } as Message;
+
+    expect(isHiddenFromUIMessage(message)).toBe(true);
   });
 });
 

@@ -249,6 +249,31 @@ def test_direct_langgraph_request_cannot_select_delta_in_full_process(
     assert CHECKPOINT_MODE_METADATA_KEY not in config["metadata"]
 
 
+def test_make_lead_agent_freezes_delta_snapshot_frequency_from_app_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents import thread_state
+    from deerflow.agents.lead_agent import agent as lead_agent
+    from deerflow.config.app_config import AppConfig
+
+    app_config = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local.provider:LocalSandboxProvider"},
+            "database": {"checkpoint_delta_snapshot_frequency": 7},
+        }
+    )
+    monkeypatch.setattr(lead_agent, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        lead_agent,
+        "_make_lead_agent",
+        lambda config, *, app_config: object(),
+    )
+
+    lead_agent.make_lead_agent({"configurable": {}})
+
+    assert thread_state._frozen_delta_snapshot_frequency == 7
+
+
 def test_gateway_runtime_app_config_can_supply_its_frozen_internal_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
