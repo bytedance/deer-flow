@@ -1050,6 +1050,7 @@ tool_output:
 
 suggestions:
   enabled: true
+  max_suggestions: 3
 
 
 # ============================================================================
