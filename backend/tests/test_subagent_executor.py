@@ -1667,6 +1667,47 @@ class TestSkillAllowedTools:
         assert "declared empty allowed-tools" in caplog.text
 
     @pytest.mark.anyio
+    async def test_explicit_tools_config_skips_skill_allowed_tools_filtering(self, classes, mock_agent, msg, caplog):
+        """When sub-agent has explicit tools config, skill allowed-tools must not over-trim.
+
+        Regression test for #4492: a sub-agent with config.tools=["bash", "read_file"]
+        should NOT have its tools reduced to just ["bash"] when a loaded skill has
+        allowed_tools=["bash"]. The sub-agent's explicit tool config takes precedence.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+
+        explicit_config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+            tools=["bash", "read_file", "web_search"],
+        )
+
+        final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search"), NamedTool("tool_search")]
+        executor = SubagentExecutor(config=explicit_config, tools=tools, thread_id="test-thread")
+
+        async def load_skills():
+            return [_skill("restricted", ["bash"]), _skill("reader", ["read_file"])]
+
+        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock, caplog.at_level("INFO"):
+            await executor._aexecute("Task")
+
+        # The sub-agent explicitly configured tools=["bash", "read_file", "web_search"]
+        # Skill allowed_tools should NOT further restrict this
+        final_tool_names = [tool.name for tool in create_agent_mock.call_args.args[0]]
+        assert "bash" in final_tool_names
+        assert "read_file" in final_tool_names
+        assert "web_search" in final_tool_names
+        # tool_search is a framework tool that should still be present
+        assert "tool_search" in final_tool_names
+        assert "skipping skill allowed-tools filtering" in caplog.text
+
+    @pytest.mark.anyio
     async def test_skill_load_failure_fails_without_creating_agent(self, classes, base_config, mock_agent):
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(config=base_config, tools=[NamedTool("bash")], thread_id="test-thread")

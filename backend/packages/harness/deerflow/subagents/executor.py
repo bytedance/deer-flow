@@ -596,6 +596,20 @@ class SubagentExecutor:
         return all_skills
 
     def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
+        """Apply skill allowed-tools policy to base tools.
+
+        When the sub-agent has explicit tool configuration (config.tools is not None),
+        the skill allowed-tools policy is skipped because the sub-agent's own tool
+        allowlist already provides the necessary restriction. Without this guard,
+        a skill's allowed-tools could over-trim the tool list by removing tools
+        that the sub-agent was explicitly configured to access.
+        """
+        if self.config.tools is not None:
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name}: "
+                f"skipping skill allowed-tools filtering (explicit tools config: {self.config.tools})"
+            )
+            return self._base_tools
         return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
 
     async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
