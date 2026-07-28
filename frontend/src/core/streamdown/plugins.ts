@@ -53,17 +53,30 @@ export const streamdownSmoothStreamingAnimation = {
  *
  * A trailing `2.` or `-` is parsed as an empty list item while content is
  * streaming. Hide that transient item, then mark it for a matching marker
- * animation as soon as its first child arrives.
+ * animation as soon as its first child arrives. Keep mid-list empty items in
+ * the box tree so ordered-list counters never renumber later items.
  */
 export function rehypeStreamingListItems() {
   return (tree: Root) => {
-    visit(tree, "element", (node) => {
+    visit(tree, "element", (node, index, parent) => {
       if (node.tagName !== "li") {
         return;
       }
 
       if (node.children.length === 0) {
-        node.properties.hidden = true;
+        const isTrailingListItem =
+          index !== undefined &&
+          parent?.type === "element" &&
+          (parent.tagName === "ol" || parent.tagName === "ul") &&
+          !parent.children
+            .slice(index + 1)
+            .some(
+              (sibling) =>
+                sibling.type === "element" && sibling.tagName === "li",
+            );
+        if (isTrailingListItem) {
+          node.properties.hidden = true;
+        }
         return;
       }
 

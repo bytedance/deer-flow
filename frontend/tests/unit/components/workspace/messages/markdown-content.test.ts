@@ -125,6 +125,18 @@ describe("MarkdownContent streaming lists", () => {
     expect(html).not.toContain('data-streaming-list-item="true"');
   });
 
+  it("keeps a mid-list empty item visible so ordered counters stay stable", () => {
+    const html = renderMarkdown(
+      ["1. First", "2.", "3. Third"].join("\n"),
+      true,
+    );
+    const listItems = html.match(/<li[^>]*>/g);
+
+    expect(listItems).toHaveLength(3);
+    expect(listItems?.[1]).not.toContain("hidden");
+    expect(html).not.toContain('hidden=""');
+  });
+
   it("marks nested list items without hiding existing content", () => {
     const html = renderMarkdown(
       ["1. Parent", "   - Nested child"].join("\n"),
