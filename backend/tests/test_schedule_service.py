@@ -64,6 +64,42 @@ class _BlindRunRepo(InMemoryScheduledRunRepository):
         return False
 
 
+class _LaunchWritesMidReadTaskRepo(InMemoryScheduledTaskRepository):
+    """`record_launch` commits between the completion hook's read and its write.
+
+    That ordering is not exotic -- `dispatch_task` performs its two bookkeeping
+    writes after the launch returns, and a run that fails fast reaches the hook
+    in between. Modelling it here rather than with real concurrency keeps the
+    window deterministic.
+    """
+
+    def __init__(self, *, launch_next_run_at: datetime) -> None:
+        super().__init__()
+        self._launch_next_run_at = launch_next_run_at
+        self._armed = False
+
+    def arm(self) -> None:
+        """Fire the interleaving on the next read, once."""
+        self._armed = True
+
+    async def get(self, task_id: str, *, user_id: str):
+        task = await super().get(task_id, user_id=user_id)
+        if self._armed:
+            self._armed = False
+            await self.record_launch(
+                task_id,
+                status=TaskStatus.ENABLED,
+                next_run_at=self._launch_next_run_at,
+                last_run_at=NOW,
+                last_run_id="run-1",
+                last_thread_id="thread-1",
+                last_error=None,
+                increment_run_count=True,
+                protect_terminal=True,
+            )
+        return task
+
+
 def make_service(
     *,
     tasks: InMemoryScheduledTaskRepository | None = None,
@@ -472,6 +508,42 @@ class TestRunCompletion:
             ),
             now=NOW,
         )
+
+    async def test_a_cron_task_survives_a_launch_write_landing_mid_completion(self):
+        """The interleaving `dispatch_task` already admits is possible.
+
+        A run that fails fast reaches this hook while the dispatch path has not
+        yet written its bookkeeping, so the hook reads a task still carrying the
+        elapsed `next_run_at`. If the write-back replays that whole snapshot,
+        the launch path's fresh fire time is rolled back and the task lands in
+        `running` with no live claim -- a shape neither `claim_due` branch nor
+        `cancel_stuck_once_tasks` can reach, i.e. permanently unschedulable.
+        """
+        tasks = _LaunchWritesMidReadTaskRepo(launch_next_run_at=NOW + timedelta(days=1))
+        runs = InMemoryScheduledRunRepository()
+        service = make_service(tasks=tasks, runs=runs)
+        task = await create_cron_task(service)
+        await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        record = runs.all_runs()[0]
+        tasks.arm()
+
+        await service.handle_run_completion(
+            RunOutcome(
+                task_id=task.task_id,
+                record_id=record.record_id,
+                run_id="run-1",
+                user_id="user-1",
+                status=RunStatus.FAILED,
+                error="boom",
+            ),
+            now=NOW,
+        )
+
+        after = await service.get_task(task.task_id, user_id="user-1")
+        assert after.last_error == "boom", "the completion still records its verdict"
+        assert after.next_run_at == NOW + timedelta(days=1), "the launch path's fire time must survive"
+        claimed = await tasks.claim_due(now=NOW + timedelta(days=2), lease_seconds=120, limit=10)
+        assert [t.task_id for t in claimed] == [task.task_id], "the task must remain schedulable"
 
 
 class TestReconcileOnStartup:

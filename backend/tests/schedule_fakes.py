@@ -154,6 +154,22 @@ class InMemoryScheduledTaskRepository:
         row.lease_owner = None
         row.lease_expires_at = None
 
+    async def record_completion(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        status: TaskStatus | None,
+        error: str | None,
+    ) -> None:
+        row = self._rows.get(task_id)
+        if row is None or row.task.user_id != user_id:
+            return
+        # Only the verdict; every scheduling field belongs to record_launch.
+        row.task = replace(row.task, last_error=error)
+        if status is not None:
+            row.task = replace(row.task, status=status)
+
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         cancelled = 0
         for row in self._rows.values():

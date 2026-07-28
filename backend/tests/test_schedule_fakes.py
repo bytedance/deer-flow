@@ -352,6 +352,84 @@ class TestRecordLaunch:
         )
 
 
+class TestRecordCompletion:
+    """The completion hook's write.
+
+    Deliberately as narrow as `record_launch` is, and for the same reason: the
+    two race, so neither may write through the whole aggregate. This one owns
+    the terminal verdict and nothing else -- every scheduling field belongs to
+    the launch path, which may commit at any point around it.
+    """
+
+    async def test_records_the_terminal_status_and_error(self, tasks):
+        await tasks.add(make_task(status=TaskStatus.RUNNING, schedule=ONCE))
+
+        await tasks.record_completion("task-1", user_id="user-1", status=TaskStatus.FAILED, error="boom")
+
+        task = await tasks.get("task-1", user_id="user-1")
+        assert task.status is TaskStatus.FAILED
+        assert task.last_error == "boom"
+
+    async def test_a_none_status_records_the_error_and_leaves_the_status(self, tasks):
+        """A cron task's schedule outlives any single run, so only what went
+        wrong is recorded."""
+        await tasks.add(make_task(status=TaskStatus.ENABLED, schedule=CRON))
+
+        await tasks.record_completion("task-1", user_id="user-1", status=None, error="boom")
+
+        task = await tasks.get("task-1", user_id="user-1")
+        assert task.status is TaskStatus.ENABLED
+        assert task.last_error == "boom"
+
+    async def test_never_rolls_back_a_concurrent_launch_write(self, tasks):
+        """The regression this method exists to prevent.
+
+        A fast-failing run reaches the completion hook while the dispatch path
+        is still writing its bookkeeping. Whichever lands second must not undo
+        the other: the launch owns the schedule, the completion owns the
+        verdict.
+        """
+        await tasks.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+        await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)
+
+        next_at = NOW + timedelta(days=1)
+        await tasks.record_launch(
+            "task-1",
+            status=TaskStatus.ENABLED,
+            next_run_at=next_at,
+            last_run_at=NOW,
+            last_run_id="run-1",
+            last_thread_id="thread-1",
+            last_error=None,
+            increment_run_count=True,
+            protect_terminal=True,
+        )
+
+        await tasks.record_completion("task-1", user_id="user-1", status=None, error="boom")
+
+        task = await tasks.get("task-1", user_id="user-1")
+        assert task.next_run_at == next_at, "the launch path's next fire time must survive"
+        assert task.run_count == 1, "the launch path's run count must survive"
+        assert task.last_run_id == "run-1"
+        assert task.last_thread_id == "thread-1"
+        assert task.last_error == "boom", "the completion still records its verdict"
+        # The whole point: the task is still reachable by the next poll.
+        claimed = await tasks.claim_due(now=NOW + timedelta(days=2), lease_seconds=120, limit=10)
+        assert [t.task_id for t in claimed] == ["task-1"]
+
+    async def test_another_users_task_is_untouched(self, tasks):
+        await tasks.add(make_task(status=TaskStatus.ENABLED))
+
+        await tasks.record_completion("task-1", user_id="someone-else", status=TaskStatus.FAILED, error="boom")
+
+        task = await tasks.get("task-1", user_id="user-1")
+        assert task.status is TaskStatus.ENABLED
+        assert task.last_error is None
+
+    async def test_unknown_task_is_ignored(self, tasks):
+        await tasks.record_completion("nope", user_id="user-1", status=TaskStatus.FAILED, error="boom")
+
+
 class TestCancelStuckOnceTasks:
     async def test_cancels_a_launched_once_task_with_no_claim(self, tasks):
         """Launched, so the claim was released; the completion hook then died

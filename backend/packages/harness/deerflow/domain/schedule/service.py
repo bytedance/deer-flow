@@ -350,16 +350,22 @@ class ScheduleService:
             error=outcome.error,
             finished_at=now,
         )
+        # Read to ask the aggregate what this outcome means, then write only
+        # that. `status_after_completion` reads nothing but the schedule type,
+        # which no concurrent write can change, so this read carries no
+        # time-of-check risk -- and `record_completion` deliberately does not
+        # write the fields that a concurrent `record_launch` owns.
         task = await self._tasks.get(outcome.task_id, user_id=outcome.user_id)
         if task is None:
             return
         # The error is recorded whether or not the status moves: a cron task
         # keeps its schedule but still reports what went wrong last time.
-        updated = replace(task, last_error=outcome.error)
-        new_status = task.status_after_completion(outcome.status)
-        if new_status is not None:
-            updated = replace(updated, status=new_status)
-        await self._tasks.save(updated)
+        await self._tasks.record_completion(
+            outcome.task_id,
+            user_id=outcome.user_id,
+            status=task.status_after_completion(outcome.status),
+            error=outcome.error,
+        )
 
     async def reconcile_on_startup(self, *, error: str) -> tuple[int, int]:
         """Clean up what a process crash left behind, returning what was fixed.

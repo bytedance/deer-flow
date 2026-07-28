@@ -155,6 +155,40 @@ class ScheduledTaskRepository(Protocol):
         """
         ...
 
+    async def record_completion(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        status: TaskStatus | None,
+        error: str | None,
+    ) -> None:
+        """Write a finished run's verdict onto the task.
+
+        Deliberately NOT expressed as `save(task)`, for the same reason
+        `record_launch` is not: the two race. A run that fails fast reaches its
+        completion hook while the dispatch path is still writing its
+        bookkeeping, so a read-modify-write through the aggregate would replay
+        a snapshot taken before that write and roll it back -- restoring an
+        elapsed `next_run_at` and an out-of-date `run_count`, and leaving the
+        task in `running` with no live claim, which neither `claim_due` branch
+        nor `cancel_stuck_once_tasks` can reach.
+
+        The two writes therefore own disjoint fields: the launch owns the
+        schedule, this owns the verdict. Nothing here touches `next_run_at`,
+        `last_run_at`, `last_run_id`, `last_thread_id`, `run_count` or the
+        claim.
+
+        `status` is `None` when the verdict must not move the status -- every
+        cron task, whose schedule outlives any single run. `error` is written
+        either way, so a cron task still reports what went wrong last time.
+
+        Scoped by `user_id` like every other read: a task belonging to someone
+        else is left alone rather than reported. An unknown task is ignored --
+        one deleted mid-flight simply has nothing to update.
+        """
+        ...
+
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         """Reconcile `once` tasks orphaned mid-flight by a process crash.
 

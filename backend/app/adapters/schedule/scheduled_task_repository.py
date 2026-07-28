@@ -259,6 +259,28 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
             row.updated_at = datetime.now(UTC)
             await session.commit()
 
+    async def record_completion(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        status: TaskStatus | None,
+        error: str | None,
+    ) -> None:
+        async with self._sf() as session:
+            row = await session.get(ScheduledTaskRow, task_id)
+            if row is None or row.user_id != user_id:
+                return
+            # Field-level on purpose: `record_launch` may commit on either side
+            # of this write, and the two must not undo each other. Assigning
+            # anything below `last_error` here is what reintroduces the race --
+            # see the port docstring.
+            row.last_error = error
+            if status is not None:
+                row.status = str(status)
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         """Reconcile `once` tasks orphaned in `running` by a process crash.
 
