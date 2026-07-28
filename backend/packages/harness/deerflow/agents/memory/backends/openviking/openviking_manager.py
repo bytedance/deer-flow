@@ -258,10 +258,22 @@ class OpenVikingMemoryManager(MemoryManager):
                 state = self._load_state(session_id)
                 submitted_ids = list(state.get("submitted_message_ids", state.get("seen_message_ids", [])))
                 committed_ids = list(state.get("committed_message_ids", state.get("seen_message_ids", [])))
-                submitted = set(submitted_ids)
                 converted = _convert_messages(messages, self._should_keep_hidden_message)
-                pending = [message for message in converted if message.message_id not in submitted]
+                prefix_count = _matching_submitted_prefix_count(state, submitted_ids, converted)
+                if prefix_count is not None:
+                    pending = converted[prefix_count:]
+                else:
+                    submitted = set(submitted_ids)
+                    pending = [message for message in converted if message.message_id not in submitted]
                 if not pending:
+                    if prefix_count is None and converted:
+                        state = {
+                            **state,
+                            "schema_version": 3,
+                            "submitted_prefix_count": len(converted),
+                            "submitted_prefix_digest": _message_sequence_digest(converted),
+                        }
+                        self._save_state(session_id, state)
                     return
                 try:
                     self._client.ensure_session(identity, session_id)
@@ -278,10 +290,14 @@ class OpenVikingMemoryManager(MemoryManager):
                     return
                 submitted_ids.extend(message.message_id for message in pending)
                 state = {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "session_id": session_id,
                     "submitted_message_ids": submitted_ids[-self._config.max_seen_message_ids :],
                     "committed_message_ids": committed_ids[-self._config.max_seen_message_ids :],
+                    "submitted_prefix_count": len(converted),
+                    "submitted_prefix_digest": _message_sequence_digest(converted),
+                    "committed_prefix_count": state.get("committed_prefix_count"),
+                    "committed_prefix_digest": state.get("committed_prefix_digest"),
                     "last_commit_task_id": state.get("last_commit_task_id"),
                     "last_archive_uri": state.get("last_archive_uri"),
                 }
@@ -301,8 +317,10 @@ class OpenVikingMemoryManager(MemoryManager):
 
                 state = {
                     **state,
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "committed_message_ids": state["submitted_message_ids"],
+                    "committed_prefix_count": state["submitted_prefix_count"],
+                    "committed_prefix_digest": state["submitted_prefix_digest"],
                     "last_commit_task_id": commit.task_id,
                     "last_archive_uri": commit.archive_uri,
                 }
@@ -397,6 +415,39 @@ def _canonical_agent_scope(agent_name: str | None) -> str:
 def _session_id(identity: OpenVikingIdentity, thread_id: str) -> str:
     digest = hashlib.sha256(f"{_SESSION_NAMESPACE}\0{identity.account}\0{identity.user}\0{thread_id}".encode()).hexdigest()
     return f"df_{digest[:48]}"
+
+
+def _matching_submitted_prefix_count(
+    state: dict[str, Any],
+    submitted_ids: list[str],
+    messages: list[OpenVikingMessage],
+) -> int | None:
+    count = state.get("submitted_prefix_count")
+    digest = state.get("submitted_prefix_digest")
+    if isinstance(count, int) and 0 <= count <= len(messages) and isinstance(digest, str):
+        if _message_sequence_digest(messages[:count]) == digest:
+            return count
+        return None
+
+    # Schema v2 only retained a recent suffix of submitted IDs. When that
+    # suffix still appears intact, it safely anchors the append-only prefix and
+    # avoids a one-time duplicate submission during migration to schema v3.
+    if submitted_ids and len(submitted_ids) <= len(messages):
+        message_ids = [message.message_id for message in messages]
+        width = len(submitted_ids)
+        for start in range(len(message_ids) - width, -1, -1):
+            if message_ids[start : start + width] == submitted_ids:
+                return start + width
+    return None
+
+
+def _message_sequence_digest(messages: list[OpenVikingMessage]) -> str:
+    digest = hashlib.sha256()
+    for message in messages:
+        encoded = message.message_id.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def _convert_messages(

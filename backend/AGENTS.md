@@ -875,14 +875,20 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   results into the shared contract. It hashes `(user_id, agent_name)` into a
   safe OpenViking trusted-user identity for hard scope isolation and keeps
   bounded message watermarks below
-  `{storage_path}/openviking/sessions/`. The watermark separately records
-  submitted and committed message IDs: once batch submission succeeds, a
-  later update never resubmits those messages or retries an ambiguous commit.
-  A future batch can commit the still-open Session together with new messages. Session
-  locks are weakly cached, async entrypoints offload synchronous HTTP and file
-  IO, and graceful shutdown rejects new work before draining all in-flight
-  client operations within its timeout. It does not implement DeerMem fact
-  CRUD/import/export and must not import the OpenViking embedded runtime.
+  `{storage_path}/openviking/sessions/`. The watermark combines a constant-size
+  ordered-prefix digest for append-only histories with a bounded recent-ID
+  fallback for compaction and separately records submitted and committed
+  progress. Once batch submission succeeds, a later update never resubmits
+  those messages or retries an ambiguous commit; a future batch can commit the
+  still-open Session together with new messages. Schema-v2 recent-ID
+  watermarks migrate without duplicating their anchored history. The shared
+  HTTP client has explicit total/keep-alive connection limits and jittered
+  exponential retry delays, and its configuration representation omits the API
+  key. Session locks are weakly cached, async entrypoints offload synchronous
+  HTTP and file IO, and graceful shutdown rejects new work before draining all
+  in-flight client operations within its timeout. It does not implement
+  DeerMem fact CRUD/import/export and must not import the OpenViking embedded
+  runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
 - Middleware mode queue debounces (30s default), batches updates, and commits global summaries plus the selected/default agent's fact delta through a user-level lock, optimistic user-memory revisions, per-fact revisions, and a recoverable target-file journal. Only explicitly marked point operations may rebase a stale shared revision, and only while every addressed fact still satisfies its original absent/revision precondition. Snapshot-derived clear/trim/consolidation operations instead reload the complete document and recompute their intent on a manifest conflict, with a bounded retry. Typed manifest/fact conflict subclasses keep that decision independent of exception text, and same-ID creates and stale same-fact writes fail. Scope-lock objects are weakly cached so inactive users do not grow a process-lifetime map. Cache validation does not scale with the fact-file count: its token combines the shared JSON's `(mtime_ns, size, revision)`, so the persisted revision invalidates stale caches even when a coarse-mtime filesystem reports identical metadata for same-size writes; direct out-of-band Markdown edits require `reload()`. Atomic replacement also syncs the parent directory on POSIX so the rename is durable. DeerMem translates private storage conflict/corruption exceptions to the backend-neutral MemoryManager contract; the Gateway maps them to HTTP 409 and a stable HTTP 500 response respectively. A normal default-manager read automatically migrates legacy facts from the global JSON into `__default__`; it also adopts the earlier implicit `lead-agent` fact bucket only when that directory has no custom-agent `config.yaml`, and rejects unexpected files instead of deleting them. The v1-to-v2 migration is one-way for the running application: operators must stop DeerFlow and snapshot the configured storage root before upgrade. Before any destructive v2 write, every migrated JSON source is durably retained as `{manifest_filename}.v1.bak`; a missing-write or mismatched existing backup aborts without modifying v1 data. Legacy per-agent JSON is deleted only after its non-empty summaries are safely adopted or confirmed identical; summary conflicts keep the source file and fail loudly.

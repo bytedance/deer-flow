@@ -1690,6 +1690,9 @@ memory:
   #   auth_mode: trusted
   #   account: deerflow
   #   api_key_env: OPENVIKING_API_KEY
+  #   max_connections: 100
+  #   max_keepalive_connections: 20
+  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
   #   startup_policy: fail_fast
   #   failure_policy:
   #     read: fail_open

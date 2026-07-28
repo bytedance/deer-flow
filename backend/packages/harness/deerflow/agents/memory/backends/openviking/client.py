@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -48,7 +49,16 @@ class OpenVikingHttpClient:
             write=config.write_timeout_seconds,
             pool=config.pool_timeout_seconds,
         )
-        self._client = httpx.Client(base_url=config.base_url, timeout=timeout, transport=transport)
+        limits = httpx.Limits(
+            max_connections=config.max_connections,
+            max_keepalive_connections=config.max_keepalive_connections,
+        )
+        self._client = httpx.Client(
+            base_url=config.base_url,
+            timeout=timeout,
+            limits=limits,
+            transport=transport,
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -207,16 +217,16 @@ class OpenVikingHttpClient:
                 response = self._client.request(method, path, headers=self._headers(identity), **kwargs)
             except httpx.TimeoutException as exc:
                 if attempt + 1 < attempts:
-                    time.sleep(0.05 * (2**attempt))
+                    time.sleep(_retry_delay(attempt))
                     continue
                 raise OpenVikingTimeoutError(operation, "OpenViking request timed out") from exc
             except httpx.TransportError as exc:
                 if attempt + 1 < attempts:
-                    time.sleep(0.05 * (2**attempt))
+                    time.sleep(_retry_delay(attempt))
                     continue
                 raise OpenVikingUnavailableError(operation, "OpenViking is unavailable") from exc
             if response.status_code in {429, 502, 503, 504} and attempt + 1 < attempts:
-                time.sleep(0.05 * (2**attempt))
+                time.sleep(_retry_delay(attempt))
                 continue
             if response.status_code >= 400:
                 try:
@@ -230,3 +240,8 @@ class OpenVikingHttpClient:
                 raise error_type(operation, message, status_code=response.status_code, code=code)
             return response
         raise OpenVikingUnavailableError(operation, "OpenViking request failed")
+
+
+def _retry_delay(attempt: int) -> float:
+    base_delay = 0.05 * (2**attempt)
+    return base_delay + random.uniform(0.0, base_delay)
