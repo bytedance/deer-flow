@@ -671,6 +671,59 @@ def _answer_run_fixtures() -> tuple[FakeEventStore, FakeRunManager]:
     return event_store, run_manager
 
 
+def test_prepare_edit_regenerate_payload_preserves_a_rename_the_replay_base_predates():
+    """Replaying a turn must not roll the thread back to an older title (#4457)."""
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(id="human-1", content="original question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    base = _checkpoint("ckpt-base", [])
+    base.checkpoint["channel_values"]["title"] = "auto generated title"
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    latest.checkpoint["channel_values"]["title"] = "User renamed title"
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1",
+            "edited question",
+            _request(FakeCheckpointer([latest, base]), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+    assert response.input["title"] == "User renamed title"
+
+
+def test_prepare_edit_regenerate_payload_lets_an_untitled_base_name_the_edited_turn():
+    """A base with no title belongs to a thread that has not been named yet.
+
+    Pinning the current title there would keep a name generated from the prompt
+    the edit just replaced, so leave the channel empty and let the title
+    middleware name the rewritten turn.
+    """
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(id="human-1", content="original question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    latest.checkpoint["channel_values"]["title"] = "title of the replaced question"
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1",
+            "edited question",
+            _request(FakeCheckpointer([latest, _checkpoint("ckpt-base", [])]), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+    assert "title" not in response.input
+
+
 def test_prepare_regenerate_payload_replays_the_pre_swap_user_message_id():
     """Replaying `{id}__user` would make the reminder middleware skip the turn.
 

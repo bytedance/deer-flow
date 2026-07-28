@@ -1147,7 +1147,10 @@ class TestLeakSurfaces:
 
         config = {
             "context": {
-                "secrets": {"ERP_TOKEN": _SECRET},
+                "secrets": {
+                    "ERP_TOKEN": _SECRET,
+                    "nested": {"secondary": _SECRET},
+                },
                 "thread_id": "t",
                 "model_name": "m",
                 "__slash_skill_secret_source": {
@@ -1170,7 +1173,10 @@ class TestLeakSurfaces:
         assert "secrets" not in redacted["context"]
         assert SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY not in redacted["context"]
         # Original is untouched (live config still has secrets).
-        assert config["context"]["secrets"] == {"ERP_TOKEN": _SECRET}
+        assert config["context"]["secrets"] == {
+            "ERP_TOKEN": _SECRET,
+            "nested": {"secondary": _SECRET},
+        }
 
     def test_redact_config_secrets_handles_none_and_no_context(self):
         from deerflow.runtime.secret_context import redact_config_secrets
