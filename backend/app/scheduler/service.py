@@ -21,6 +21,28 @@ _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _SKIP_ACTIVE_RUN_ERROR = "skipped: a previous run of this task is still active"
 
 
+def _as_datetime(value: Any) -> datetime | None:
+    """Coerce a timestamp read back off a task dict into a real datetime.
+
+    ``ScheduledTaskRepository._row_to_dict`` runs every timestamp column
+    through ``coerce_iso``, so what a caller reads is an ISO *string* while the
+    column it goes back into is a ``DateTime``. Only the skip path performs
+    that round trip -- every other write passes ``now`` straight through -- so
+    the coercion lives here rather than being pushed into the repository, which
+    would loosen the type of an otherwise strict boundary.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        # Display-only bookkeeping: an unparseable stored timestamp must not
+        # take down the poll cycle along with every task queued behind it.
+        logger.warning("Dropping unparseable timestamp %r while recording a skipped occurrence", value)
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 class ScheduledTaskService:
     def __init__(
         self,
@@ -291,7 +313,11 @@ class ScheduledTaskService:
             task["id"],
             status=self._task_status_for_skip(task),
             next_run_at=next_at,
-            last_run_at=task.get("last_run_at"),
+            # A skip is not an execution, so the launch bookkeeping is carried
+            # over unchanged. `update_after_launch` assigns unconditionally, so
+            # "unchanged" has to be spelled out by passing the current values
+            # back -- and `last_run_at` comes back as an ISO string.
+            last_run_at=_as_datetime(task.get("last_run_at")),
             last_run_id=task.get("last_run_id"),
             last_thread_id=task.get("last_thread_id"),
             last_error=error if task["schedule_type"] == "once" else None,
