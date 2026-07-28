@@ -308,6 +308,38 @@ Phase 1 最低验证要求：
 - **延期：** Models、Skills、Sandbox 权限；前端 effective-permissions 展示；
   management route 的 provider 迁移。
 
+### 2026-07-28 — Phase 3 / Models authorization (list / use)
+
+- **背景：** Phase 2A 合并后，route-level 权限已由 provider 派生，但模型仍然对所有
+  已认证用户开放——`list_models` 返回全部模型，`_resolve_model_name` 不检查角色。
+  RFC §9 Phase 3 要求覆盖 Models/Skills/Sandbox 三个资源类型。
+- **决策（Gateway 路由层）：** 新增 `resolve_model_authorization(user, *, is_internal)`
+  返回 `(provider, principal)`，复用 Phase 2A 的 `_get_cached_route_provider` 和
+  `build_principal_from_context`，包括 `INTERNAL_SYSTEM_ROLE → None` pop。
+  `list_models` 使用 `provider.filter_resources(principal, "model", names)` 批量过滤；
+  `get_model` 使用 `provider.authorize(AuthzRequest(resource="model", action="use",
+  target=model_name))`。deny → 403（模型存在但角色无权使用），provider 解析失败 →
+  `_AuthorizationUnavailable`（携带 `fail_closed` 标志）。
+- **决策（运行时解析层）：** 新增 `_authorize_model_name(model_name, *, context,
+  app_config)` 在 `_resolve_model_name` 之后执行。deny 时按 RFC §9 优雅降级：回退到
+  `filter_resources` 返回的第一个允许模型并记录 warning，而不是崩溃。全部模型被拒 +
+  `fail_closed` → `ValueError`（与现有"无模型配置"契约一致）；fail-open 返回原名。
+- **否决方案：** 不为 `get_model` 引入 `"read"` action——RFC §9 将 `get_model` 映射到
+  `model:use`，引入第三个 action 会增加 RBAC 配置面而无实际收益。不在 `_resolve_model_name`
+  内部做授权——该函数是纯解析（request → config → default fallback），授权检查放在调用
+  点之后，保持单一职责。
+- **兼容性：** `authorization.enabled: false` 时两条路径均为 no-op（路由返回全部模型，
+  解析返回原名）。匿名请求（user=None）不触发过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS`
+  已包含 `"model": "models"`，无需 schema 变更。
+- **证据：** `tests/test_models_authorization.py`（19 tests）覆盖 disabled/anonymous/
+  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景，以及 disabled/allowed/
+  graceful-fallback/all-denied-fail-closed/all-denied-fail-open/custom-provider-list-vs-use
+  运行时场景；
+  `test_authorization_*.py` + `test_lead_agent_model_resolution.py` +
+  `test_auth_middleware.py` 共 318 tests 全部通过。
+- **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
+  management route 的 provider 迁移。
+
 ### 新记录模板
 
 ```markdown
