@@ -110,7 +110,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
-        memory=SimpleNamespace(enabled=True, mode="tool"),
+        memory=SimpleNamespace(enabled=True, mode="tool", injection_enabled=False),
         acp_agents={},
     )
     middleware_config = SimpleNamespace(
@@ -133,6 +133,8 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "<memory_tool_system>" in tool_prompt
     assert "memory_search" in tool_prompt
     assert "memory_add" in tool_prompt
+    assert "agent facts are not injected automatically" in tool_prompt
+    assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
