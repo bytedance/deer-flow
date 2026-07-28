@@ -68,6 +68,10 @@ class RetrievalPort(Protocol):
 
     def search(self, query: str, *, scopes: list[dict[str, str | None]], top_k: int, mode: str, filters: dict[str, Any] | None) -> list[dict[str, Any]]: ...
 
+    def clear(self, *, scopes: list[dict[str, str | None]] | None = None) -> None: ...
+
+    def rebuild(self, records: list[tuple[dict[str, Any], dict[str, str | None], str]], *, scopes: list[dict[str, str | None]] | None) -> None: ...
+
 
 RetrievalNotification = tuple[str, dict[str, Any] | str, str | None]
 ScopedRetrievalNotifications = tuple[str, list[RetrievalNotification]]
@@ -408,6 +412,9 @@ class MemoryStorage(abc.ABC):
         """Clear global summaries and every agent fact bucket for one user."""
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release optional storage resources."""
+
 
 class FileMemoryStorage(MemoryStorage):
     def __init__(self, config: DeerMemConfig, retrieval: RetrievalPort | None = None):
@@ -416,6 +423,12 @@ class FileMemoryStorage(MemoryStorage):
         self._memory_cache: dict[tuple[str | None, str | None], tuple[dict[str, Any], tuple[Any, ...]]] = {}
         self._cache_lock = threading.Lock()
         self._scope_locks: weakref.WeakValueDictionary[tuple[str | None, str | None], threading.RLock] = weakref.WeakValueDictionary()
+        self._retrieval_dirty_scopes: set[tuple[str | None, str | None]] = set()
+
+    def close(self) -> None:
+        """Release the retrieval adapter owned by this storage instance."""
+        if self._retrieval is not None:
+            self._retrieval.close()
 
     @staticmethod
     def _cache_key(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[str | None, str | None]:
@@ -463,6 +476,8 @@ class FileMemoryStorage(MemoryStorage):
                     self._retrieval.remove(str(value), scope=scope)
             except Exception:
                 logger.exception("Retrieval notification failed for %s", value)
+                with self._cache_lock:
+                    self._retrieval_dirty_scopes.add(self._cache_key(agent_name, user_id=user_id))
 
     @staticmethod
     def _validate_loaded_fact(
@@ -991,7 +1006,7 @@ class FileMemoryStorage(MemoryStorage):
             self._memory_cache[key] = (copy.deepcopy(document), signature)
         return copy.deepcopy(document)
 
-    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None, _rebuild_retrieval: bool = True) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)
         key = self._cache_key(agent_name, user_id=user_id)
         legacy_path = self._legacy_agent_memory_path(path, agent_name) if agent_name is not None else None
@@ -1012,6 +1027,8 @@ class FileMemoryStorage(MemoryStorage):
         signature = self._scope_signature(path, agent_name)
         with self._cache_lock:
             self._memory_cache[key] = (copy.deepcopy(document), signature)
+        if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
+            self.rebuild_index([{"userId": user_id, "agentName": agent_name}])
         return copy.deepcopy(document)
 
     def migrate(
@@ -1029,7 +1046,7 @@ class FileMemoryStorage(MemoryStorage):
             self._recover_if_needed(path)
             migrated, from_version, notifications = self._migrate_locked(path, agent_name, user_id=user_id, include_global=True)
         self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
-        document = self.reload(agent_name, user_id=user_id)
+        document = self.reload(agent_name, user_id=user_id, _rebuild_retrieval=False)
         return {
             "migrated": migrated,
             "fromVersion": from_version,
@@ -1385,7 +1402,25 @@ class FileMemoryStorage(MemoryStorage):
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if self._retrieval is not None:
+            requested_keys = {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
+            with self._cache_lock:
+                dirty = requested_keys & self._retrieval_dirty_scopes
+            if dirty:
+                dirty_scopes = [{"userId": user_id, "agentName": agent_name} for user_id, agent_name in dirty]
+                rebuild_result = self.rebuild_index(dirty_scopes)
+                if rebuild_result.get("failed"):
+                    return self._search_substring(query, scopes=scopes, top_k=top_k, filters=filters)
             return self._retrieval.search(query, scopes=scopes, top_k=top_k, mode=mode, filters=filters)
+        return self._search_substring(query, scopes=scopes, top_k=top_k, filters=filters)
+
+    def _search_substring(
+        self,
+        query: str,
+        *,
+        scopes: list[dict[str, str | None]],
+        top_k: int,
+        filters: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
         query_lower = query.strip().lower()
         if not query_lower or top_k <= 0:
             return []
@@ -1402,6 +1437,7 @@ class FileMemoryStorage(MemoryStorage):
     def rebuild_index(self, scopes: list[dict[str, str | None]] | None = None) -> dict[str, Any]:
         if self._retrieval is None:
             return {"supported": False, "indexed": 0, "failed": 0, "reason": "retrieval_not_configured"}
+        records: list[tuple[dict[str, Any], dict[str, str | None], str]] = []
         indexed = 0
         failed = 0
         if scopes is None:
@@ -1422,8 +1458,7 @@ class FileMemoryStorage(MemoryStorage):
                         raise MemoryStorageCorruption(f"Fact user scope does not match directory for {path}")
                     validate_agent_name(expected_agent)
                     self._validate_loaded_fact(fact, path, user_id=original_user, agent_name=expected_agent)
-                    self.notify_fact_upsert(fact, path=str(path))
-                    indexed += 1
+                    records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
                 except Exception:
                     logger.exception("Failed to rebuild retrieval index for %s", path)
                     failed += 1
@@ -1436,11 +1471,42 @@ class FileMemoryStorage(MemoryStorage):
                     continue
                 for fact in self.list_facts(**kwargs):
                     try:
-                        self.notify_fact_upsert(fact, path=str(fact_file_path(memory_path, fact["id"], agent_name=agent_name)))
-                        indexed += 1
+                        records.append((fact, _scope_dict(kwargs.get("user_id"), agent_name), str(fact_file_path(memory_path, fact["id"], agent_name=agent_name))))
                     except Exception:
                         logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
                         failed += 1
+
+        bulk_rebuild = getattr(self._retrieval, "rebuild", None)
+        if callable(bulk_rebuild):
+            try:
+                bulk_rebuild(records, scopes=scopes)
+                indexed = len(records)
+                with self._cache_lock:
+                    if scopes is None:
+                        self._retrieval_dirty_scopes.clear()
+                    else:
+                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
+            except Exception:
+                logger.exception("Failed to atomically rebuild retrieval index")
+                failed += len(records) or 1
+                return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
+        else:
+            clear = getattr(self._retrieval, "clear", None)
+            if callable(clear):
+                clear(scopes=scopes)
+            for fact, scope, path in records:
+                try:
+                    self.notify_fact_upsert(fact, path=path)
+                    indexed += 1
+                except Exception:
+                    logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
+                    failed += 1
+            if failed == 0:
+                with self._cache_lock:
+                    if scopes is None:
+                        self._retrieval_dirty_scopes.clear()
+                    else:
+                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
         return {"supported": True, "indexed": indexed, "failed": failed}
 
     def retrieval_status(self) -> dict[str, Any]:
@@ -1459,8 +1525,13 @@ class FileMemoryStorage(MemoryStorage):
 def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None) -> MemoryStorage:
     if retrieval is None and config.retrieval_adapter:
         try:
-            module_path, factory_name = config.retrieval_adapter.rsplit(".", 1)
-            factory = getattr(importlib.import_module(module_path), factory_name)
+            if config.retrieval_adapter == "fts5":
+                from .retrieval import create_fts5_retrieval
+
+                factory = create_fts5_retrieval
+            else:
+                module_path, factory_name = config.retrieval_adapter.rsplit(".", 1)
+                factory = getattr(importlib.import_module(module_path), factory_name)
             retrieval = factory(config)
         except Exception as exc:
             raise ValueError(f"backend_config.retrieval_adapter={config.retrieval_adapter!r} failed to load: {exc}") from exc

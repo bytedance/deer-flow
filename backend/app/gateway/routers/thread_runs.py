@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -50,6 +51,7 @@ REGENERATE_HISTORY_RAW_SCAN_LIMIT = REGENERATE_HISTORY_SCAN_LIMIT * 2
 THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
+THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -88,6 +90,16 @@ class RegeneratePrepareResponse(BaseModel):
     checkpoint: dict[str, Any]
     metadata: dict[str, Any]
     target_run_id: str
+
+
+class EditRegeneratePrepareRequest(BaseModel):
+    human_message_id: str = Field(..., min_length=1, description="Source human message id to edit and rerun")
+    replacement_text: str = Field(..., min_length=1, description="Replacement user-visible text")
+
+
+class EditRegeneratePrepareResponse(RegeneratePrepareResponse):
+    replacement_human_message_id: str
+    source_message_ids: list[str]
 
 
 class ThreadMessagesPageResponse(BaseModel):
@@ -263,6 +275,15 @@ def _message_additional_kwargs(message: Any) -> dict[str, Any]:
     return dict(value or {}) if isinstance(value, dict) else {}
 
 
+def _message_tool_calls(message: Any) -> list[Any]:
+    value = getattr(message, "tool_calls", None)
+    if value is None and isinstance(message, dict):
+        value = message.get("tool_calls")
+    if value is None:
+        value = _message_additional_kwargs(message).get("tool_calls")
+    return list(value) if isinstance(value, list) else []
+
+
 def _is_hidden_or_control_message(message: Any) -> bool:
     message_type = _message_type(message)
     additional_kwargs = _message_additional_kwargs(message)
@@ -284,6 +305,11 @@ def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
     return checkpoint_messages(snapshot)
+
+
+def _checkpoint_values(snapshot: Any) -> dict[str, Any]:
+    values = getattr(snapshot, "values", None)
+    return dict(values) if isinstance(values, dict) else {}
 
 
 def _checkpoint_configurable(checkpoint_tuple: Any) -> dict[str, Any]:
@@ -320,6 +346,54 @@ def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
     if name:
         clean_message["name"] = name
     return clean_message
+
+
+def _clean_human_message_for_edit(message: Any, *, replacement_id: str, replacement_text: str) -> dict[str, Any]:
+    source_kwargs = _message_additional_kwargs(message)
+    additional_kwargs: dict[str, Any] = {}
+    for key in ("files", "referenced_message_contexts"):
+        if key in source_kwargs:
+            additional_kwargs[key] = deepcopy(source_kwargs[key])
+
+    clean_message: dict[str, Any] = {
+        "type": "human",
+        "id": replacement_id,
+        "content": [{"type": "text", "text": replacement_text}],
+        "additional_kwargs": additional_kwargs,
+    }
+    name = _message_name(message)
+    if name:
+        clean_message["name"] = name
+    return clean_message
+
+
+def _is_terminal_assistant_text_message(message: Any) -> bool:
+    return _is_visible_ai_message(message) and bool(_message_text(message).strip()) and not _message_tool_calls(message)
+
+
+def _has_active_goal(snapshot: Any) -> bool:
+    goal = _checkpoint_values(snapshot).get("goal")
+    return isinstance(goal, dict) and goal.get("status") == "active"
+
+
+def _latest_editable_turn(messages: list[Any], human_message_id: str) -> tuple[int, Any, int, Any, list[str]]:
+    latest_human_index = next((index for index in range(len(messages) - 1, -1, -1) if _is_visible_human_message(messages[index])), None)
+    if latest_human_index is None or _message_id(messages[latest_human_index]) != human_message_id:
+        raise HTTPException(status_code=409, detail="Only the latest completed user turn can be edited")
+
+    source_human = messages[latest_human_index]
+    last_ai_index: int | None = None
+    for index, message in enumerate(messages[latest_human_index + 1 :], start=latest_human_index + 1):
+        if _is_visible_human_message(message):
+            break
+        if _is_visible_ai_message(message):
+            last_ai_index = index
+
+    if last_ai_index is None or not _is_terminal_assistant_text_message(messages[last_ai_index]):
+        raise HTTPException(status_code=409, detail="Only completed assistant text turns can be edited")
+
+    source_message_ids = [message_id for message in messages[latest_human_index : last_ai_index + 1] if (message_id := _message_id(message))]
+    return latest_human_index, source_human, last_ai_index, messages[last_ai_index], source_message_ids
 
 
 def _event_message_id(row: dict[str, Any]) -> str | None:
@@ -441,6 +515,32 @@ async def _find_base_checkpoint_before_human(
     )
 
 
+def _run_status_value(record: Any) -> str | None:
+    status = getattr(record, "status", None)
+    if isinstance(status, RunStatus):
+        return status.value
+    return str(status) if status is not None else None
+
+
+async def _require_successful_source_run(thread_id: str, run_id: str, request: Request) -> RunRecord:
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    record = await run_mgr.get(run_id, user_id=user_id)
+    if record is None:
+        # The run-event journal is the authoritative lookup above. This fallback
+        # only covers recent in-memory/store hydration gaps for the latest turn.
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
+        record = next((candidate for candidate in records if getattr(candidate, "run_id", None) == run_id), None)
+    if record is None:
+        raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+    record_thread_id = getattr(record, "thread_id", None)
+    if isinstance(record_thread_id, str) and record_thread_id and record_thread_id != thread_id:
+        raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+    if _run_status_value(record) != RunStatus.success.value:
+        raise HTTPException(status_code=409, detail="Only successful assistant runs can be edited and rerun")
+    return record
+
+
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
     accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
@@ -490,12 +590,100 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         "regenerate_from_run_id": target_run_id,
         "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
     }
+    regenerate_input: dict[str, Any] = {"messages": [_clean_human_message_for_regenerate(previous_human)]}
+    latest_values = latest_checkpoint.values if isinstance(latest_checkpoint.values, dict) else {}
+    latest_title = latest_values.get("title")
+    if isinstance(latest_title, str) and latest_title:
+        # Regenerate resumes from the checkpoint before the target human turn.
+        # That checkpoint can predate a manual rename, so replay the current
+        # title as graph input instead of letting checkpoint rollback restore
+        # the older automatically generated title (#4457).
+        regenerate_input["title"] = latest_title
     return RegeneratePrepareResponse(
-        input={"messages": [_clean_human_message_for_regenerate(previous_human)]},
+        input=regenerate_input,
         checkpoint=checkpoint,
         metadata=metadata,
         target_run_id=target_run_id,
     )
+
+
+async def _prepare_edit_regenerate_payload(
+    thread_id: str,
+    human_message_id: str,
+    replacement_text: str,
+    request: Request,
+) -> EditRegeneratePrepareResponse:
+    normalized_text = replacement_text.strip()
+    if not normalized_text:
+        raise HTTPException(status_code=409, detail="Edited message cannot be empty")
+
+    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    try:
+        latest_checkpoint = await accessor.aget(latest_config)
+    except Exception as exc:
+        logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
+        raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
+    latest_checkpoint_id = _checkpoint_configurable(latest_checkpoint).get("checkpoint_id")
+    if not latest_checkpoint_id:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} has no checkpoint")
+
+    messages = _checkpoint_messages(latest_checkpoint)
+    if _has_active_goal(latest_checkpoint):
+        raise HTTPException(status_code=409, detail="Cannot edit while a goal is active")
+
+    _, source_human, _, source_ai, source_message_ids = _latest_editable_turn(messages, human_message_id)
+    source_text = get_original_user_content_text(_message_content(source_human), _message_additional_kwargs(source_human)).strip()
+    if normalized_text == source_text:
+        raise HTTPException(status_code=409, detail="Edited message is unchanged")
+
+    source_human_id = _message_id(source_human)
+    source_ai_id = _message_id(source_ai)
+    if not source_human_id:
+        raise HTTPException(status_code=409, detail="The source user message is missing an id")
+    if not source_ai_id:
+        raise HTTPException(status_code=409, detail="The source assistant message is missing an id")
+
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, source_human_id, request)
+    target_run_id = await _find_target_run_id(thread_id, source_ai_id, source_ai, source_human, request)
+    source_record = await _require_successful_source_run(thread_id, target_run_id, request)
+    checkpoint = _checkpoint_response(base_checkpoint_tuple)
+    replacement_human_message_id = str(uuid.uuid4())
+    source_metadata = getattr(source_record, "metadata", None) or {}
+    existing_group_id = source_metadata.get("edit_version_group_id") if isinstance(source_metadata, dict) else None
+    # Reserved for future edit-chain grouping across repeated edits of the same
+    # original prompt; current visibility still keys off regenerate_from_run_id.
+    edit_version_group_id = existing_group_id if isinstance(existing_group_id, str) and existing_group_id else source_human_id
+    metadata = {
+        "replay_kind": "edit",
+        "regenerate_from_message_id": source_ai_id,
+        "regenerate_from_run_id": target_run_id,
+        "regenerate_checkpoint_id": checkpoint["checkpoint_id"],
+        "edit_from_message_id": source_human_id,
+        "edit_message_id": replacement_human_message_id,
+        "edit_version_group_id": edit_version_group_id,
+    }
+    return EditRegeneratePrepareResponse(
+        input={
+            "messages": [
+                _clean_human_message_for_edit(
+                    source_human,
+                    replacement_id=replacement_human_message_id,
+                    replacement_text=normalized_text,
+                )
+            ]
+        },
+        checkpoint=checkpoint,
+        metadata=metadata,
+        target_run_id=target_run_id,
+        replacement_human_message_id=replacement_human_message_id,
+        source_message_ids=source_message_ids,
+    )
+
+
+async def _default_history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_id: str | None) -> set[str]:
+    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
+    edit_visibility = await run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id)
+    return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +700,17 @@ async def prepare_regenerate_run(
 ) -> RegeneratePrepareResponse:
     """Prepare input and checkpoint for regenerating the latest assistant turn."""
     return await _prepare_regenerate_payload(thread_id, body.message_id, request)
+
+
+@router.post("/{thread_id}/runs/edit-regenerate/prepare", response_model=EditRegeneratePrepareResponse)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def prepare_edit_regenerate_run(
+    thread_id: str,
+    body: EditRegeneratePrepareRequest,
+    request: Request,
+) -> EditRegeneratePrepareResponse:
+    """Prepare input and checkpoint for editing then rerunning the latest user turn."""
+    return await _prepare_edit_regenerate_payload(thread_id, body.human_message_id, body.replacement_text, request)
 
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
@@ -744,12 +943,23 @@ async def list_thread_messages(
     after_seq: int | None = Query(default=None, ge=1),
 ) -> list[dict]:
     """Return displayable messages for a thread (across all runs), with feedback attached."""
-    event_store = get_run_event_store(request)
-    messages = await event_store.list_messages(thread_id, limit=limit, before_seq=before_seq, after_seq=after_seq)
-
     # Resolve the caller once; it is needed both to scope the feedback query
     # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)
+    run_mgr = get_run_manager(request)
+    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
+    messages, _ = await _scan_visible_thread_messages(
+        thread_id,
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=after_seq,
+        request=request,
+        user_id=user_id,
+        hidden_run_ids=hidden_run_ids,
+        include_middleware=True,
+        include_extra=False,
+        batch_size=THREAD_MESSAGE_LEGACY_SCAN_BATCH,
+    )
 
     # Find the last AI message per run_id. AI messages are persisted by
     # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
@@ -784,7 +994,6 @@ async def list_thread_messages(
         else:
             msg["feedback"] = None
 
-    run_mgr = get_run_manager(request)
     runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     run_durations = compute_run_durations(runs)
 
@@ -801,6 +1010,122 @@ async def list_thread_messages(
     return messages
 
 
+async def _scan_visible_thread_messages(
+    thread_id: str,
+    *,
+    limit: int,
+    before_seq: int | None,
+    after_seq: int | None,
+    request: Request,
+    user_id: str | None,
+    hidden_run_ids: set[str],
+    include_middleware: bool,
+    include_extra: bool,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Scan raw message rows until ``limit`` visible rows survive filtering."""
+    event_store = get_run_event_store(request)
+    needed = limit + 1 if include_extra else limit
+
+    if after_seq is not None:
+        visible: list[dict[str, Any]] = []
+        scan_after = after_seq
+        while len(visible) < needed:
+            raw = await event_store.list_messages(
+                thread_id,
+                limit=batch_size,
+                after_seq=scan_after,
+                user_id=user_id,
+            )
+            if not raw:
+                break
+            _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
+            reached_before_bound = False
+            for row in raw:
+                if before_seq is not None and row["seq"] >= before_seq:
+                    reached_before_bound = True
+                    break
+                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
+                    continue
+                visible.append(row)
+                if len(visible) == needed:
+                    break
+            next_scan_after = max(row["seq"] for row in raw)
+            if next_scan_after <= scan_after:
+                _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=None, scan_after=scan_after, next_cursor=next_scan_after, row_count=len(raw))
+            scan_after = next_scan_after
+            if reached_before_bound or len(raw) < batch_size:
+                break
+        has_more = len(visible) > limit
+        return visible[:limit], has_more
+
+    visible_desc: list[dict[str, Any]] = []
+    scan_before = before_seq
+    while len(visible_desc) < needed:
+        raw = await event_store.list_messages(
+            thread_id,
+            limit=batch_size,
+            before_seq=scan_before,
+            user_id=user_id,
+        )
+        if not raw:
+            break
+        _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
+        for row in reversed(raw):
+            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
+                continue
+            visible_desc.append(row)
+            if len(visible_desc) == needed:
+                break
+        next_scan_before = min(row["seq"] for row in raw)
+        if scan_before is not None and next_scan_before >= scan_before:
+            _raise_non_advancing_message_scan(thread_id=thread_id, scan_before=scan_before, scan_after=None, next_cursor=next_scan_before, row_count=len(raw))
+        scan_before = next_scan_before
+        if len(raw) < batch_size:
+            break
+    has_more = len(visible_desc) > limit
+    return list(reversed(visible_desc[:limit])), has_more
+
+
+def _validate_message_scan_rows(
+    rows: list[dict[str, Any]],
+    *,
+    thread_id: str,
+    scan_before: int | None,
+    scan_after: int | None,
+) -> None:
+    invalid_seq_rows = [row for row in rows if not isinstance(row.get("seq"), int)]
+    if invalid_seq_rows:
+        logger.error(
+            "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s scan_after=%s row_count=%d invalid_count=%d",
+            thread_id,
+            scan_before,
+            scan_after,
+            len(rows),
+            len(invalid_seq_rows),
+        )
+        raise RuntimeError("Run event message rows are missing sequence values")
+
+
+def _raise_non_advancing_message_scan(
+    *,
+    thread_id: str,
+    scan_before: int | None,
+    scan_after: int | None,
+    next_cursor: int,
+    row_count: int,
+) -> None:
+    logger.error(
+        "Thread message scan cursor did not advance: thread_id=%s scan_before=%s scan_after=%s next_cursor=%s row_count=%d",
+        thread_id,
+        scan_before,
+        scan_after,
+        next_cursor,
+        row_count,
+    )
+    raise RuntimeError("Run event message scan did not advance its cursor")
+
+
 async def _scan_thread_message_page(
     thread_id: str,
     *,
@@ -810,57 +1135,20 @@ async def _scan_thread_message_page(
     user_id: str | None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
-    event_store = get_run_event_store(request)
     run_mgr = get_run_manager(request)
-    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
-    visible_desc: list[dict[str, Any]] = []
-    scan_before = before_seq
-
-    while len(visible_desc) < limit + 1:
-        raw = await event_store.list_messages(
-            thread_id,
-            limit=THREAD_MESSAGE_PAGE_SCAN_BATCH,
-            before_seq=scan_before,
-            user_id=user_id,
-        )
-        if not raw:
-            break
-
-        invalid_seq_rows = [row for row in raw if not isinstance(row.get("seq"), int)]
-        if invalid_seq_rows:
-            logger.error(
-                "Thread message scan found rows without sequence values: thread_id=%s scan_before=%s row_count=%d invalid_count=%d",
-                thread_id,
-                scan_before,
-                len(raw),
-                len(invalid_seq_rows),
-            )
-            raise RuntimeError("Run event message rows are missing sequence values")
-
-        for row in reversed(raw):
-            if _is_thread_history_hidden_message_row(row) or row.get("run_id") in superseded_run_ids:
-                continue
-            visible_desc.append(row)
-            if len(visible_desc) == limit + 1:
-                break
-
-        raw_seqs = [row["seq"] for row in raw]
-        next_scan_before = min(raw_seqs)
-        if scan_before is not None and next_scan_before >= scan_before:
-            logger.error(
-                "Thread message scan cursor did not advance: thread_id=%s scan_before=%s next_scan_before=%s row_count=%d",
-                thread_id,
-                scan_before,
-                next_scan_before,
-                len(raw),
-            )
-            raise RuntimeError("Run event message scan did not advance its cursor")
-        scan_before = next_scan_before
-        if len(raw) < THREAD_MESSAGE_PAGE_SCAN_BATCH:
-            break
-
-    has_more = len(visible_desc) > limit
-    return list(reversed(visible_desc[:limit])), has_more
+    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
+    return await _scan_visible_thread_messages(
+        thread_id,
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=None,
+        request=request,
+        user_id=user_id,
+        hidden_run_ids=hidden_run_ids,
+        include_middleware=False,
+        include_extra=True,
+        batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
+    )
 
 
 async def _enrich_thread_message_page(

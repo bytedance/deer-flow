@@ -17,6 +17,7 @@ import warnings
 
 import pytest
 from langchain.tools import ToolRuntime
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from deerflow.sandbox.tools import (
     bash_tool,
@@ -27,6 +28,7 @@ from deerflow.sandbox.tools import (
     str_replace_tool,
     write_file_tool,
 )
+from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
 from deerflow.tools.builtins.present_file_tool import present_file_tool
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 from deerflow.tools.builtins.task_tool import task_tool
@@ -55,6 +57,7 @@ _TOOL_CASES = [
     (read_file_tool, {"description": "read", "path": "/tmp/x"}),
     (write_file_tool, {"description": "write", "path": "/tmp/x", "content": "hi"}),
     (str_replace_tool, {"description": "replace", "path": "/tmp/x", "old_str": "a", "new_str": "b"}),
+    (list_uploaded_files, {"include_outline": False, "max_results": 20}),
     (present_file_tool, {"filepaths": ["/tmp/x"], "tool_call_id": "call-1"}),
     (view_image_tool, {"image_path": "/tmp/img.png", "tool_call_id": "call-1"}),
     (task_tool, {"description": "do", "prompt": "go", "subagent_type": "general-purpose", "tool_call_id": "call-1"}),
@@ -99,6 +102,13 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
     assert append_field.default is False
     assert append_field.description
     assert "append" in append_field.description
+
+
+def test_list_uploaded_files_model_schema_excludes_injected_runtime() -> None:
+    """The model-facing schema must not expose ToolRuntime internals."""
+    parameters = convert_to_openai_tool(list_uploaded_files)["function"]["parameters"]
+
+    assert set(parameters["properties"]) == {"include_outline", "max_results"}
 
 
 @pytest.mark.parametrize("tool_obj", [case[0] for case in _TOOL_CASES], ids=[case[0].name for case in _TOOL_CASES])

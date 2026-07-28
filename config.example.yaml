@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 29
+config_version: 30
 
 # ============================================================================
 # Logging
@@ -763,10 +763,16 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
-  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no API key)
+  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
-  # ideal for JavaScript-heavy sites. Self-host (JWT auth is off by default, no key):
-  #   docker run -d -p 11235:11235 --shm-size=1g unclecode/crawl4ai:0.8.6
+  # ideal for JavaScript-heavy sites. Self-host it:
+  #   docker run -d -p 11235:11235 --shm-size=1g \
+  #     -e CRAWL4AI_API_TOKEN=$CRAWL4AI_TOKEN unclecode/crawl4ai:0.9.2
+  # Crawl4AI >= 0.9 is secure-by-default: a bearer token is REQUIRED on every request
+  # except GET /health, and a server started without CRAWL4AI_API_TOKEN binds 127.0.0.1
+  # only (so a container/remote DeerFlow cannot reach it at all). Set the same value in
+  # the server env and in `token:` below, or requests fail with HTTP 401.
+  # Use >= 0.8.7: earlier images, including 0.8.6, carry known pre-auth RCEs.
   # For Docker deployments, use the Docker service name instead of localhost.
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -774,10 +780,10 @@ tools:
   #   group: web
   #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
   #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
+  #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
-  #   # token: $CRAWL4AI_TOKEN            # Bearer token (only if the server has JWT auth enabled)
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
@@ -790,7 +796,7 @@ tools:
   #   use: deerflow.community.browserless.tools:web_capture_tool
   #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
-  #   timeout_s: 30                         # Request timeout in seconds
+  #   timeout_s: 30                         # Request timeout in seconds (`timeout` also accepted)
   #   output_format: png                    # png, jpeg, or webp
   #   full_page: true                       # Capture entire page instead of viewport only
   #   viewport_width: 1280
@@ -1354,6 +1360,27 @@ sandbox:
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
+# Option 5: Tenki cloud microVM Sandbox
+# Runs each sandbox as an isolated Tenki cloud microVM. Released sandboxes stay
+# in an in-process warm pool and are reclaimed by the same user/thread without a
+# cold start. Requires the optional SDK: pip install "deerflow-harness[tenki]".
+# sandbox:
+#   use: deerflow.community.tenki:TenkiSandboxProvider
+#   # api_key: $TENKI_API_KEY        # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
+#   # base_url: https://tenki.cloud  # optional; SDK default when omitted
+#   # image: my-base-image           # optional; Tenki account default base image when omitted
+#   # project_id: proj_...           # optional; auto-selected if the account has exactly one
+#   # workspace_id: ws_...           # optional; auto-selected if the account has exactly one
+#   # cpu_cores: 2                   # optional per-sandbox vCPUs
+#   # memory_mb: 2048                # optional per-sandbox memory
+#   # replicas: 3                    # active + warm microVM cap per gateway process
+#   # idle_timeout: 600              # warm microVM idle seconds before terminate; 0 disables
+#   # max_duration: 14400            # Tenki sandbox lifetime in seconds; 0 uses the account default
+#   # sticky: false                  # pin the microVM to its host (only matters with pause/resume)
+#   # home_dir: /home/tenki          # writable dir backing /mnt/user-data
+#   # environment:                   # injected into every command (and as create-time env)
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
@@ -1647,7 +1674,7 @@ memory:
     strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
     manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
-    retrieval_adapter: ""       # optional dotted factory(config) supplied by the retrieval module
+    retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
     debounce_seconds: 30 # Wait time before processing queued updates
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always
@@ -1804,6 +1831,30 @@ skill_evolution:
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data
+
+# ============================================================================
+# Inbound webhook dedupe storage (cross-pod redelivery dedup — issue #4120)
+# ============================================================================
+# Where the ChannelManager records inbound webhook dedupe state.
+#
+# backend: auto     -- (default) Postgres whenever database.backend=postgres,
+#                       including multi-replica K8s where each pod runs a single
+#                       worker but shares one DB. Otherwise an in-process memory
+#                       store (single-DB, single-pod).
+#                       NOTE: multi-replica deployments must use a Postgres DB;
+#                       if database.backend is sqlite/memory, 'auto' falls back to
+#                       the per-pod memory store and cross-pod dedupe is disabled.
+# backend: memory   -- In-process store only. Per-pod: a webhook redelivered to
+#                       a DIFFERENT replica is NOT deduped. Not recommended for
+#                       multi-worker deployments (logs a startup WARNING).
+# backend: postgres -- Share dedupe state across pods via the application DB.
+#                       REQUIRED for any multi-replica deployment. If
+#                       database.backend is not 'postgres', a WARNING is logged and
+#                       the store falls back to the in-process memory store.
+#
+# dedupe_storage:
+#   backend: auto
+
   # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
   pool_recycle: 300
   # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
@@ -2036,6 +2087,7 @@ run_ownership:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
+#     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
 #     enabled: false
@@ -2152,15 +2204,18 @@ run_ownership:
 #   provider:
 #     use: deerflow.authz.rbac:RbacAuthorizationProvider
 #     config:
-#       # A known role with no `tools` policy is unrestricted for tools.
-#       # Define `tools` for every role whose tool access should be constrained.
+#       # A known role with no policy for a resource is unrestricted for it.
+#       # Define both `tools` and `routes` wherever access should be constrained.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
+#           routes: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
+#           routes: {allow: "*"}
 #         guest:
 #           tools: {allow: ["web_search", "read_file"]}
+#           routes: {allow: ["threads:read", "runs:read"]}
 authorization:
   enabled: false
 
