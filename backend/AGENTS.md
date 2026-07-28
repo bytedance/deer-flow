@@ -229,7 +229,10 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   offloading the uploads-directory scan off the event loop);
   `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
   offloading upload directory creation, staged writes, chmod/cleanup,
-  directory scans/deletes, and remote sandbox sync off the event loop); and
+  directory scans/deletes, and remote sandbox sync off the event loop);
+  `test_openviking_memory_backend.py` (locks the OpenViking backend's async
+  add/context/search entrypoints offloading synchronous HTTP and watermark
+  filesystem IO); and
   `test_workspace_changes_recorder.py` (locks the offload around the snapshot
   text cache lifecycle — roots resolution, `mkdtemp`, and the `shutil.rmtree`
   on both the capture-failure branch and `record_workspace_changes`' `finally`).
@@ -847,6 +850,22 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 
 **Workflow**:
 - `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `resolve_runtime_user_id(runtime)`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`. `DynamicContextMiddleware` passes the same resolved identity to the memory read path. On standalone Agent Server runs, server-owned auth identity is also resolved during lead-agent construction, normalized through `make_safe_user_id` for DeerFlow storage, and explicitly reused for custom-agent config/SOUL, user skills, skill policy, and prompt assembly; ordinary client `user_id` values cannot override `langgraph_auth_user_id`. On the embedded Gateway path, `inject_authenticated_user_context` removes client-supplied `langgraph_auth_user` / `langgraph_auth_user_id` from both RunnableConfig sections before graph construction, so those reserved fields cannot impersonate Agent Server auth.
+- The optional `openviking` backend under
+  `packages/harness/deerflow/agents/memory/backends/openviking/` is a
+  remote-only HTTP adapter. Select it with
+  `memory.manager_class: openviking` and keep `memory.mode: middleware`. It
+  commits filtered turns to OpenViking Sessions and maps remote memory search
+  results into the shared contract. It hashes `(user_id, agent_name)` into a
+  safe OpenViking trusted-user identity for hard scope isolation and keeps
+  bounded message watermarks below
+  `{storage_path}/openviking/sessions/`. The watermark separately records
+  submitted and committed message IDs: once batch submission succeeds, a
+  later update never resubmits those messages or retries an ambiguous commit.
+  A future batch can commit the still-open Session together with new messages. Session
+  locks are weakly cached, async entrypoints offload synchronous HTTP and file
+  IO, and graceful shutdown rejects new work before draining all in-flight
+  client operations within its timeout. It does not implement DeerMem fact
+  CRUD/import/export and must not import the OpenViking embedded runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, prompt injection, manual CRUD primitives, and the updater backend.
 - Middleware mode queue debounces (30s default), batches updates, and commits global summaries plus the selected/default agent's fact delta through a user-level lock, optimistic user-memory revisions, per-fact revisions, and a recoverable target-file journal. Only explicitly marked point operations may rebase a stale shared revision, and only while every addressed fact still satisfies its original absent/revision precondition. Snapshot-derived clear/trim/consolidation operations instead reload the complete document and recompute their intent on a manifest conflict, with a bounded retry. Typed manifest/fact conflict subclasses keep that decision independent of exception text, and same-ID creates and stale same-fact writes fail. Scope-lock objects are weakly cached so inactive users do not grow a process-lifetime map. Cache validation does not scale with the fact-file count: its token combines the shared JSON's `(mtime_ns, size, revision)`, so the persisted revision invalidates stale caches even when a coarse-mtime filesystem reports identical metadata for same-size writes; direct out-of-band Markdown edits require `reload()`. Atomic replacement also syncs the parent directory on POSIX so the rename is durable. DeerMem translates private storage conflict/corruption exceptions to the backend-neutral MemoryManager contract; the Gateway maps them to HTTP 409 and a stable HTTP 500 response respectively. A normal default-manager read automatically migrates legacy facts from the global JSON into `__default__`; it also adopts the earlier implicit `lead-agent` fact bucket only when that directory has no custom-agent `config.yaml`, and rejects unexpected files instead of deleting them. The v1-to-v2 migration is one-way for the running application: operators must stop DeerFlow and snapshot the configured storage root before upgrade. Before any destructive v2 write, every migrated JSON source is durably retained as `{manifest_filename}.v1.bak`; a missing-write or mismatched existing backup aborts without modifying v1 data. Legacy per-agent JSON is deleted only after its non-empty summaries are safely adopted or confirmed identical; summary conflicts keep the source file and fail loudly.

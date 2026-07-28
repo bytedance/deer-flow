@@ -960,6 +960,15 @@ Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navi
 
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
+DeerFlow also includes an optional `openviking` memory backend. It connects to
+an independent OpenViking server over HTTP, submits completed turns through
+OpenViking Sessions, and recalls remote memories for prompt injection while
+leaving DeerMem as the default. The initial integration supports
+`memory.mode: middleware`. Submitted-message watermarks prevent a failed
+Session commit from duplicating already accepted messages on retry; see
+[OpenViking memory backend](docs/OPENVIKING.md) for configuration and Docker
+startup.
+
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
 
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.

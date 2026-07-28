@@ -1618,7 +1618,7 @@ summarization:
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
-#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   manager_class       - Backend selector: registered name (deermem/noop/openviking) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
@@ -1671,6 +1671,27 @@ memory:
   mode: middleware
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  #
+  # OpenViking HTTP example (replace this DeerMem backend_config block when
+  # manager_class is openviking; OpenViking currently supports middleware mode):
+  #
+  # backend_config:
+  #   base_url: http://openviking:1933
+  #   auth_mode: trusted
+  #   account: deerflow
+  #   api_key_env: OPENVIKING_API_KEY
+  #   startup_policy: fail_fast
+  #   failure_policy:
+  #     read: fail_open
+  #     write: log_and_drop
+  #   retrieval:
+  #     top_k: 8
+  #     score_threshold: 0.25
+  #     max_injection_chars: 12000
+  #
+  # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
+  # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
+  # optional Compose overlay uses the internal http://openviking:1933 address.
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
