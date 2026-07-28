@@ -84,6 +84,12 @@ Create a new sandbox Pod + Service.
 
 `user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
 
+When the Gateway mounts that same storage at its DeerFlow home and the PVC
+subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
+`config.yaml` to skip redundant upload-time sandbox acquire/sync. Leave the
+field unset when using unrelated storage or when the mount relationship is
+uncertain.
+
 **Response**:
 ```json
 {

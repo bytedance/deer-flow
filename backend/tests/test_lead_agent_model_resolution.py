@@ -1192,14 +1192,14 @@ def test_memory_middleware_async_path_uses_async_manager_call(monkeypatch):
 
     manager = SimpleNamespace(aadd=AsyncMock(), add=MagicMock(side_effect=AssertionError("sync add must not run")))
     monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
-    monkeypatch.setattr(memory_middleware_module, "get_effective_user_id", lambda: "user-1")
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
-    runtime = MagicMock(context={"thread_id": "thread-1"})
+    runtime = MagicMock(context={"thread_id": "thread-1", "user_id": "user-1"})
 
     result = asyncio.run(middleware.aafter_agent({"messages": [HumanMessage(content="hello")]}, runtime=runtime))
 
     assert result is None
     manager.aadd.assert_awaited_once()
+    assert manager.aadd.await_args.kwargs["user_id"] == "user-1"
     manager.add.assert_not_called()
 
 

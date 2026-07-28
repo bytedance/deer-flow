@@ -34,6 +34,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
+from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -690,23 +691,35 @@ def build_checkpoint_state_mutation_accessor(
 # Cache of factory-built accessor graphs. Accessor operations (aget_state /
 # aupdate_state) never execute graph nodes or middleware, so per-request
 # variations (user, model, skills) cannot affect materialization semantics;
-# the compiled graph is stable per (assistant_id, mode, app_config). The
+# the compiled graph is stable per (assistant_id, mode, snapshot_frequency,
+# app_config). The
 # factory and app_config identities are re-validated on every call so patched
 # factories take effect immediately and a config.yaml hot-reload (which
 # rebuilds the AppConfig object) never serves a stale compiled graph — the
 # cached reference keeps the old config alive, so id-reuse cannot produce a
-# false hit. Bounded: cleared when too many distinct assistants appear.
+# false hit. Bounded: cleared when too many distinct assistants appear. The
+# cap is configurable (database.checkpoint_graph_cache.accessor_graph_max)
+# and re-read on every eviction check, so a hot-reload takes effect without
+# a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
-_state_accessor_graph_cache: dict[tuple[str | None, str], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, config: dict[str, Any]) -> Any:
+def _accessor_graph_cache_max(app_config: Any) -> int:
+    return resolve_checkpoint_graph_cache_max(
+        getattr(app_config, "database", None),
+        "accessor_graph_max",
+        _STATE_ACCESSOR_GRAPH_CACHE_MAX,
+    )
+
+
+def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
     app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode)
+    key = (assistant_id, mode, snapshot_frequency)
     cached = _state_accessor_graph_cache.get(key)
     if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
         return cached[2]
-    if len(_state_accessor_graph_cache) >= _STATE_ACCESSOR_GRAPH_CACHE_MAX:
+    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
         _state_accessor_graph_cache.clear()
     graph = agent_factory(config=config)
     _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
@@ -811,7 +824,7 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, config)
+        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is

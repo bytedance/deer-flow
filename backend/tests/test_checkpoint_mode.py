@@ -23,6 +23,41 @@ def test_process_mode_change_requires_restart(monkeypatch: pytest.MonkeyPatch) -
         checkpoint_mode.freeze_checkpoint_channel_mode("delta")
 
 
+def test_process_snapshot_frequency_change_requires_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    assert checkpoint_mode.freeze_checkpoint_snapshot_frequency(250) == 250
+    assert checkpoint_mode.frozen_checkpoint_snapshot_frequency() == 250
+    assert checkpoint_mode.freeze_checkpoint_snapshot_frequency(250) == 250
+    with pytest.raises(checkpoint_mode.CheckpointModeReconfigurationError, match="restart"):
+        checkpoint_mode.freeze_checkpoint_snapshot_frequency(500)
+
+
+@pytest.mark.parametrize("snapshot_frequency", [0, -1])
+def test_process_snapshot_frequency_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_frequency: int,
+) -> None:
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    with pytest.raises(ValueError, match="snapshot frequency must be positive"):
+        checkpoint_mode.freeze_checkpoint_snapshot_frequency(snapshot_frequency)
+    assert checkpoint_mode.frozen_checkpoint_snapshot_frequency() is None
+
+
+def test_resolve_snapshot_frequency_prefers_explicit_then_frozen_then_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    assert checkpoint_mode.resolve_checkpoint_snapshot_frequency() == 10
+    assert checkpoint_mode.resolve_checkpoint_snapshot_frequency(100) == 100
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", 250)
+    assert checkpoint_mode.resolve_checkpoint_snapshot_frequency() == 250
+    assert checkpoint_mode.resolve_checkpoint_snapshot_frequency(100) == 100
+
+
 def _config() -> dict:
     return {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
 
@@ -153,6 +188,49 @@ def test_yaml_mode_change_is_rejected_when_graph_is_reconstructed(tmp_path, monk
         reset_app_config()
 
 
+def test_yaml_snapshot_frequency_change_is_rejected_when_graph_is_reconstructed(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.agents.lead_agent import agent as lead_agent
+    from deerflow.config.app_config import reset_app_config
+    from deerflow.runtime import checkpoint_mode
+
+    config_path = tmp_path / "config.yaml"
+
+    def write_config(snapshot_frequency: int) -> None:
+        config_path.write_text(
+            "\n".join(
+                (
+                    "sandbox:",
+                    "  use: deerflow.sandbox.local.provider:LocalSandboxProvider",
+                    "database:",
+                    "  checkpoint_channel_mode: delta",
+                    "  checkpoint_delta:",
+                    f"    snapshot_frequency: {snapshot_frequency}",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    write_config(250)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    monkeypatch.setattr(lead_agent, "_make_lead_agent", lambda config, *, app_config: object())
+    reset_app_config()
+    try:
+        lead_agent.make_lead_agent({"configurable": {}})
+        assert checkpoint_mode.frozen_checkpoint_snapshot_frequency() == 250
+
+        write_config(500)
+        future_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (future_mtime, future_mtime))
+
+        with pytest.raises(checkpoint_mode.CheckpointModeReconfigurationError, match="restart"):
+            lead_agent.make_lead_agent({"configurable": {}})
+    finally:
+        reset_app_config()
+
+
 @pytest.mark.asyncio
 async def test_gateway_runtime_rejects_mode_different_from_frozen_process(
     monkeypatch: pytest.MonkeyPatch,
@@ -252,14 +330,14 @@ def test_direct_langgraph_request_cannot_select_delta_in_full_process(
 def test_make_lead_agent_freezes_delta_snapshot_frequency_from_app_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from deerflow.agents import thread_state
     from deerflow.agents.lead_agent import agent as lead_agent
     from deerflow.config.app_config import AppConfig
+    from deerflow.runtime import checkpoint_mode
 
     app_config = AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local.provider:LocalSandboxProvider"},
-            "database": {"checkpoint_delta_snapshot_frequency": 7},
+            "database": {"checkpoint_delta": {"snapshot_frequency": 7}},
         }
     )
     monkeypatch.setattr(lead_agent, "get_app_config", lambda: app_config)
@@ -271,7 +349,7 @@ def test_make_lead_agent_freezes_delta_snapshot_frequency_from_app_config(
 
     lead_agent.make_lead_agent({"configurable": {}})
 
-    assert thread_state._frozen_delta_snapshot_frequency == 7
+    assert checkpoint_mode.frozen_checkpoint_snapshot_frequency() == 7
 
 
 def test_gateway_runtime_app_config_can_supply_its_frozen_internal_mode(
