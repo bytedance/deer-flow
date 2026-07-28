@@ -557,6 +557,33 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
     return record
 
 
+async def _find_interrupted_target_run_id(
+    thread_id: str,
+    source_human: Any,
+    request: Request,
+) -> str | None:
+    source_run_id = _message_additional_kwargs(source_human).get("run_id")
+    if not isinstance(source_run_id, str) or not source_run_id:
+        return None
+
+    run_mgr = get_run_manager(request)
+    user_id = await get_current_user(request)
+    record = await run_mgr.get(source_run_id, user_id=user_id)
+    if record is None:
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=20)
+        record = next(
+            (candidate for candidate in records if getattr(candidate, "run_id", None) == source_run_id),
+            None,
+        )
+    if record is None:
+        return None
+    if getattr(record, "thread_id", None) != thread_id:
+        return None
+    if _run_status_value(record) != RunStatus.interrupted.value:
+        return None
+    return source_run_id
+
+
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
     accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
@@ -571,18 +598,41 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
     messages = _checkpoint_messages(latest_checkpoint)
     target_index = next((i for i, message in enumerate(messages) if _message_id(message) == message_id), None)
     if target_index is None:
-        raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
-    target_message = messages[target_index]
-    if not _is_visible_ai_message(target_message):
-        raise HTTPException(status_code=409, detail="Only visible assistant messages can be regenerated")
+        # A response interrupted during an LLM call can be visible in the live
+        # stream without ever reaching a checkpoint. The server-stamped run ID
+        # on the latest user message is the durable link to that partial turn.
+        previous_human = next(
+            (message for message in reversed(messages) if _is_visible_human_message(message)),
+            None,
+        )
+        target_run_id = await _find_interrupted_target_run_id(thread_id, previous_human, request) if previous_human is not None else None
+        if target_run_id is None:
+            raise HTTPException(status_code=404, detail=f"Message {message_id} not found")
+    else:
+        target_message = messages[target_index]
+        if not _is_visible_ai_message(target_message):
+            raise HTTPException(status_code=409, detail="Only visible assistant messages can be regenerated")
 
-    latest_visible_ai = next((message for message in reversed(messages) if _is_visible_ai_message(message)), None)
-    if _message_id(latest_visible_ai) != message_id:
-        raise HTTPException(status_code=409, detail="Only the latest assistant message can be regenerated")
+        latest_visible_ai = next((message for message in reversed(messages) if _is_visible_ai_message(message)), None)
+        if _message_id(latest_visible_ai) != message_id:
+            raise HTTPException(status_code=409, detail="Only the latest assistant message can be regenerated")
 
-    previous_human = next((message for message in reversed(messages[:target_index]) if _is_visible_human_message(message)), None)
+        previous_human = next((message for message in reversed(messages[:target_index]) if _is_visible_human_message(message)), None)
+        target_run_id = (
+            await _find_target_run_id(
+                thread_id,
+                message_id,
+                target_message,
+                previous_human,
+                request,
+            )
+            if previous_human is not None
+            else None
+        )
     if previous_human is None:
         raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
+    if target_run_id is None:
+        raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     previous_human_id = _message_id(previous_human)
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
@@ -592,13 +642,6 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         previous_human_id,
         request,
         head_checkpoint=latest_checkpoint,
-    )
-    target_run_id = await _find_target_run_id(
-        thread_id,
-        message_id,
-        target_message,
-        previous_human,
-        request,
     )
     checkpoint = _checkpoint_response(base_checkpoint_tuple)
     metadata = {

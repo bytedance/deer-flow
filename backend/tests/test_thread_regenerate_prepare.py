@@ -445,6 +445,100 @@ def test_prepare_regenerate_payload_preserves_latest_thread_title():
     assert response.input["title"] == "User renamed title"
 
 
+def test_prepare_regenerate_payload_supports_latest_interrupted_response_missing_from_checkpoint():
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    human = HumanMessage(
+        id="human-1",
+        content="question",
+        additional_kwargs={"run_id": "run-interrupted"},
+    )
+    base = _checkpoint("ckpt-base", [])
+    latest = _checkpoint("ckpt-human", [human])
+    checkpointer = FakeCheckpointer([latest, base])
+    run_manager = FakeRunManager(
+        [
+            SimpleNamespace(
+                run_id="run-interrupted",
+                thread_id="thread-1",
+                status=RunStatus.interrupted,
+            )
+        ]
+    )
+
+    response = asyncio.run(
+        _prepare_regenerate_payload(
+            "thread-1",
+            "lc_run--partial-response",
+            _request(
+                checkpointer,
+                FakeEventStore([]),
+                run_manager=run_manager,
+            ),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+    assert response.target_run_id == "run-interrupted"
+    assert response.metadata == {
+        "regenerate_from_message_id": "lc_run--partial-response",
+        "regenerate_from_run_id": "run-interrupted",
+        "regenerate_checkpoint_id": "ckpt-base",
+    }
+    assert response.input["messages"][0]["id"] == "human-1"
+
+
+@pytest.mark.parametrize(
+    ("status", "record_thread_id"),
+    [
+        (RunStatus.success, "thread-1"),
+        (RunStatus.interrupted, "another-thread"),
+    ],
+)
+def test_prepare_regenerate_payload_does_not_accept_unverified_missing_response(
+    status: RunStatus,
+    record_thread_id: str,
+):
+    from app.gateway.routers.thread_runs import _prepare_regenerate_payload
+
+    human = HumanMessage(
+        id="human-1",
+        content="question",
+        additional_kwargs={"run_id": "source-run"},
+    )
+    checkpointer = FakeCheckpointer(
+        [
+            _checkpoint("ckpt-human", [human]),
+            _checkpoint("ckpt-base", []),
+        ]
+    )
+    run_manager = FakeRunManager(
+        [
+            SimpleNamespace(
+                run_id="source-run",
+                thread_id=record_thread_id,
+                status=status,
+            )
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            _prepare_regenerate_payload(
+                "thread-1",
+                "missing-response",
+                _request(
+                    checkpointer,
+                    FakeEventStore([]),
+                    run_manager=run_manager,
+                ),
+            )
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Message missing-response not found"
+
+
 def test_prepare_regenerate_payload_does_not_mutate_legacy_single_checkpoint_branch():
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 
