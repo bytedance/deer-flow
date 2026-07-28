@@ -32,6 +32,22 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
+_REASONING_EFFORT_NORMALIZE: dict[str, str] = {"minimal": "low"}
+
+
+def _normalize_reasoning_effort(target: dict) -> None:
+    """Normalize known-but-invalid reasoning_effort values to their closest valid equivalent.
+
+    ``"minimal"`` is sent by the frontend for flash mode and was previously also
+    hardcoded in the thinking-disabled path, but it is not a valid OpenAI API
+    value (valid: low/medium/high/xhigh/max). Map it to ``"low"`` silently.
+    """
+    for key, value in _REASONING_EFFORT_NORMALIZE.items():
+        for dict_key in ("reasoning_effort",):
+            if target.get(dict_key) == key:
+                target[dict_key] = value
+
+
 def _declares_api_base(model_class: type) -> bool:
     """Whether *model_class* declares ``api_base`` as its own constructor field.
 
@@ -255,7 +271,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
+            model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
@@ -268,6 +284,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+    else:
+        _normalize_reasoning_effort(kwargs)
+        _normalize_reasoning_effort(model_settings_from_config)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.

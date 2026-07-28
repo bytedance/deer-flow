@@ -198,7 +198,7 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
 def test_thinking_disabled_openai_gateway_format(monkeypatch):
     """When thinking is configured via extra_body (OpenAI-compatible gateway),
-    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=minimal."""
+    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=low."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
     cfg = _make_app_config(
         [
@@ -224,7 +224,7 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
     factory_module.create_chat_model(name="openai-gw", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    assert captured.get("reasoning_effort") == "minimal"
+    assert captured.get("reasoning_effort") == "low"
     assert "thinking" not in captured  # must NOT set the direct thinking param
 
 
@@ -463,8 +463,8 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
     # When supports_reasoning_effort=True, it should NOT be cleared to None
-    # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
-    assert captured.get("reasoning_effort") == "minimal"
+    # The disable path sets it to "low"; supports_reasoning_effort=True keeps it
+    assert captured.get("reasoning_effort") == "low"
 
 
 # ---------------------------------------------------------------------------
@@ -1065,7 +1065,7 @@ def test_create_chat_model_resolves_patched_mimo_provider(model_id):
 
 def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disabled(monkeypatch):
     """When reasoning_effort is set in config.yaml (extra field) AND the thinking-disabled
-    path also injects reasoning_effort=minimal into kwargs, the factory must not raise
+    path also injects reasoning_effort=low into kwargs, the factory must not raise
     TypeError: got multiple values for keyword argument 'reasoning_effort'."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
     # ModelConfig.extra="allow" means extra fields from config.yaml land in model_dump()
@@ -1095,8 +1095,35 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
-    assert captured.get("reasoning_effort") == "minimal"
+    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=low
+    assert captured.get("reasoning_effort") == "low"
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort normalization (issue #4514)
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_effort_minimal_normalized_to_low(monkeypatch):
+    """When frontend sends reasoning_effort='minimal' (flash mode), it must be
+    normalized to 'low' because 'minimal' is not a valid OpenAI API value."""
+    factory_module = monkeypatch.ModuleType("deerflow.models.factory")
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: None)
+    monkeypatch.setattr(factory_module, "_create_model", lambda *a, **kw: None)
+
+    from deerflow.models.factory import _normalize_reasoning_effort
+
+    target = {"reasoning_effort": "minimal"}
+    _normalize_reasoning_effort(target)
+    assert target["reasoning_effort"] == "low"
+
+    target = {"reasoning_effort": "high"}
+    _normalize_reasoning_effort(target)
+    assert target["reasoning_effort"] == "high"
+
+    target = {}
+    _normalize_reasoning_effort(target)
+    assert "reasoning_effort" not in target
 
 
 # ---------------------------------------------------------------------------
