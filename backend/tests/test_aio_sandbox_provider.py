@@ -11,12 +11,55 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.config.paths import Paths, join_host_path
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),
     ("user-94361", "thread-94361"),
 )
+
+# ── thread-data mount configuration ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("sandbox_overrides", "expected"),
+    [
+        ({}, None),
+        ({"thread_data_mounts": True}, True),
+        ({"thread_data_mounts": False}, False),
+    ],
+)
+def test_load_config_preserves_thread_data_mounts_override(sandbox_overrides, expected, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        **sandbox_overrides,
+    )
+    app_config = SimpleNamespace(sandbox=sandbox_config, stream_bridge=None)
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    assert provider._load_config()["thread_data_mounts"] is expected
+
+
+@pytest.mark.parametrize(
+    ("backend_is_local", "override", "expected"),
+    [
+        (True, None, True),
+        (False, None, False),
+        (True, False, False),
+        (False, True, True),
+    ],
+)
+def test_thread_data_mounts_override_precedes_backend_detection(backend_is_local, override, expected):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {} if override is None else {"thread_data_mounts": override}
+    provider._backend = object.__new__(aio_mod.LocalContainerBackend) if backend_is_local else object()
+
+    assert provider.uses_thread_data_mounts is expected
+
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 

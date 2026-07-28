@@ -167,6 +167,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         container_prefix: deer-flow-sandbox
         idle_timeout: 600               # Idle timeout in seconds (0 to disable)
         replicas: 3                     # Max concurrent sandbox containers (LRU eviction when exceeded)
+        thread_data_mounts: null        # null = backend auto-detection
         mounts:                         # Volume mounts for local containers
           - host_path: /path/on/host
             container_path: /path/in/container
@@ -255,8 +256,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         Local container backends bind-mount the thread data directories, so files
         written by the gateway are already visible when the sandbox starts.
-        Remote backends may require explicit file sync.
+        Remote backends may require explicit file sync. Operators can override
+        this detection when gateway and remote sandboxes share the same storage.
         """
+        override = self._config.get("thread_data_mounts")
+        if override is not None:
+            return override
         return isinstance(self._backend, LocalContainerBackend)
 
     # ── Factory methods ──────────────────────────────────────────────────
@@ -302,6 +307,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
+            "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             "ownership": getattr(sandbox_config, "ownership", None),
             # A redis stream bridge means the deployment is multi-instance, which
