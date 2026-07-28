@@ -1,4 +1,5 @@
 from unittest.mock import MagicMock, patch
+
 from governance_lingxing_mcp.client import LingXingClient
 from governance_lingxing_mcp.config import LXConfig
 
