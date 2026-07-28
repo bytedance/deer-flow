@@ -61,7 +61,7 @@ flowchart LR
         C["deerflow/scheduler/schedules.py<br/>时区 / cron 计算"]
     end
     subgraph TODO["🚧 待建 · 外圈"]
-        AD["app/infra/persistence/<br/>app/infra/schedule/<br/>app/scheduler/poller.py"]
+        AD["app/adapters/schedule/<br/>app/scheduler/poller.py"]
     end
 
     R -.->|尚未调用| SV
@@ -231,12 +231,12 @@ America/New_York 的 "0 9 * * *"
 {"cron": "0 9 * * *"}  ←──→  ScheduleSpec(CRON, "Asia/Shanghai", cron="0 9 * * *")
         （JSON 列 / HTTP 字段）        （值对象）
                     ↑
-        app/infra/schedule/spec_mapping.py
+     app/adapters/schedule/spec_mapping.py
 ```
 
 这不是洁癖，是一条可执行的判据：**一旦领域方法的签名里出现 `Mapping[str, Any]`，就说明领域在处理持久化/传输格式了**。解析这件事天然可以切成两半——结构校验（键在不在？值是不是字符串？）属于边界，值校验（cron 是不是 5 段、时区认不认识、`run_at` 有没有）属于 `__post_init__`。切开之后领域完全不需要看见 dict，签名全部强类型。
 
-同样的形状在 Feedback 上下文里也成立：`Feedback` 聚合对 ORM 行一无所知，转换全在 `app/infra/persistence/feedback.py`。
+同样的形状在 Feedback 上下文里也成立：`Feedback` 聚合对 ORM 行一无所知，转换全在 `app/adapters/feedback/feedback_repository.py`。
 
 ---
 

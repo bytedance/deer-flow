@@ -1,9 +1,11 @@
-"""Wire/storage <-> ScheduleSpec mapping.
+"""Boundary mapping (not a port implementation) -- wire/storage <-> ScheduleSpec.
 
-`schedule_spec` is both an HTTP request field and a JSON column -- one shape,
-two boundaries -- so the mapping lives here once and both the router and the
-SQL adapter import it, rather than the domain growing a `Mapping[str, Any]` in
-its signatures.
+Unlike its siblings in this package, this module implements no port: it is the
+shared translation both of them need. `schedule_spec` is both an HTTP request
+field and a JSON column -- one shape, two boundaries -- so the mapping lives
+here once and both callers import it (`scheduled_task_repository` for the
+stored column, the scheduled-task router for the request body), rather than the
+domain growing a `Mapping[str, Any]` in its signatures.
 
 The split is deliberate: **structural** checks (is the key present? is it a
 str?) belong to this boundary, **value** rules (5-field cron, resolvable

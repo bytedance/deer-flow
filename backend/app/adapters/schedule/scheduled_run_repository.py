@@ -1,7 +1,8 @@
-"""SQL adapter for the schedule context's execution-record repository.
+"""Secondary adapter (owned persistence) -- the scheduled_task_runs table in SQL.
 
-Secondary adapter implementing `ScheduledRunRepository`. Queries are migrated
-unchanged from the legacy repository.
+Implements `ScheduledRunRepository` from `deerflow.domain.schedule.ports`. This
+context owns the `scheduled_task_runs` table and writes its own queries.
+Queries are migrated unchanged from the legacy repository.
 
 The load-bearing piece is the `IntegrityError` translation in `add`: the
 partial unique index `uq_scheduled_task_run_active` is the atomic arbiter of
@@ -29,7 +30,7 @@ from deerflow.domain.schedule.model import (
 from deerflow.domain.schedule.ports import ScheduledRunRepository
 
 # Transitional: the ORM row stays in the harness until engine, models, and
-# migrations move into app/infra together.
+# migrations move into app/adapters together.
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 
 _ACTIVE_STATUS_VALUES = tuple(str(status) for status in ACTIVE_RUN_STATUSES)

@@ -1,10 +1,12 @@
-"""SQL adapter for the schedule context's task repository.
+"""Secondary adapter (owned persistence) -- the scheduled_tasks table in SQL.
 
-Sibling of `run_sql.py`; both consume `spec_mapping` for the stored JSON spec.
+Implements `ScheduledTaskRepository` from `deerflow.domain.schedule.ports`.
+This context owns the `scheduled_tasks` table and writes its own queries, so
+SQL/ORM vocabulary stops at this file: methods exchange domain objects and
+normalize SQLite's tz-naive reads.
 
-Secondary adapter implementing `ScheduledTaskRepository`. SQL/ORM vocabulary
-stops at this file: methods exchange domain objects and normalize SQLite's
-tz-naive reads.
+Sibling of `scheduled_run_repository.py`; both consume `spec_mapping` for the
+stored JSON spec.
 
 **The queries are migrated unchanged from the legacy repository.** The claim
 statement's `FOR UPDATE SKIP LOCKED` and the `protect_terminal` conditional
@@ -22,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.infra.schedule.spec_mapping import spec_to_domain, spec_to_wire
+from app.adapters.schedule.spec_mapping import spec_to_domain, spec_to_wire
 from deerflow.domain.schedule.model import (
     TERMINAL_TASK_STATUSES,
     ContextMode,
@@ -33,7 +35,7 @@ from deerflow.domain.schedule.model import (
 from deerflow.domain.schedule.ports import ScheduledTaskRepository
 
 # Transitional: the ORM row stays in the harness until engine, models, and
-# migrations move into app/infra together.
+# migrations move into app/adapters together.
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 logger = logging.getLogger(__name__)

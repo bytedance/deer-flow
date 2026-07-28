@@ -28,8 +28,8 @@ from schedule_fakes import (
     InMemoryScheduledTaskRepository,
 )
 
-from app.infra.schedule.run_sql import SqlScheduledRunRepository
-from app.infra.schedule.task_sql import SqlScheduledTaskRepository
+from app.adapters.schedule.scheduled_run_repository import SqlScheduledRunRepository
+from app.adapters.schedule.scheduled_task_repository import SqlScheduledTaskRepository
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.domain.schedule.model import (
     ACTIVE_RUN_STATUSES,

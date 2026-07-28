@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.infra.schedule.spec_mapping import spec_to_domain, spec_to_wire
+from app.adapters.schedule.spec_mapping import spec_to_domain, spec_to_wire
 from deerflow.domain.schedule.model import InvalidScheduleError, ScheduleSpec, ScheduleType
 
 
