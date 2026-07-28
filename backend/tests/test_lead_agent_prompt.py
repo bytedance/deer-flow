@@ -133,6 +133,8 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "<memory_tool_system>" in tool_prompt
     assert "memory_search" in tool_prompt
     assert "memory_add" in tool_prompt
+    assert "agent facts are not injected automatically" in tool_prompt
+    assert "global user and history summaries" in tool_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
