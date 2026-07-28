@@ -96,7 +96,7 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template()
 
@@ -125,7 +125,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
@@ -157,7 +157,7 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
     monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=explicit_config)
 
@@ -196,7 +196,7 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=explicit_config)
 
@@ -220,7 +220,7 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         subagent_enabled=True,
@@ -249,7 +249,7 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         subagent_enabled=True,
@@ -288,7 +288,7 @@ def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypa
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     enforced = SubagentLimitMiddleware(max_concurrent=1).max_concurrent
     assert enforced == 1  # 1 must pass through, not be bumped to 2
@@ -597,7 +597,7 @@ def test_apply_prompt_template_legacy_path_does_not_mention_describe_skill(monke
     config = _make_minimal_app_config()
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=config)
 
@@ -613,7 +613,7 @@ def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch
     config = _make_minimal_app_config()
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         app_config=config,
