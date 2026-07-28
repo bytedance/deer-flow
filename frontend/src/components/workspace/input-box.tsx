@@ -81,6 +81,7 @@ import {
   type SidecarContext,
 } from "@/core/sidecar";
 import { useSkills } from "@/core/skills/hooks";
+import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import { compactThreadContext } from "@/core/threads/api";
@@ -398,6 +399,8 @@ export function InputBox({
   const { data: suggestionsConfig } = useSuggestionsConfig();
   const suggestionsConfigLoaded = suggestionsConfig !== undefined;
   const suggestionsEnabled = suggestionsConfig?.enabled;
+  const maxFollowupSuggestions =
+    suggestionsConfig?.max_suggestions ?? DEFAULT_MAX_SUGGESTIONS;
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [polishingInput, setPolishingInput] = useState(false);
@@ -1998,7 +2001,7 @@ export function InputBox({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         messages: recent,
-        n: 3,
+        n: maxFollowupSuggestions,
         model_name: context.model_name ?? undefined,
       }),
       signal: controller.signal,
@@ -2013,7 +2016,7 @@ export function InputBox({
         const suggestions = (data.suggestions ?? [])
           .map((s) => (typeof s === "string" ? s.trim() : ""))
           .filter((s) => s.length > 0)
-          .slice(0, 5);
+          .slice(0, maxFollowupSuggestions);
         setFollowups(suggestions);
       })
       .catch(() => {
@@ -2028,6 +2031,7 @@ export function InputBox({
     context.model_name,
     disabled,
     isMock,
+    maxFollowupSuggestions,
     status,
     suggestionsConfigLoaded,
     suggestionsEnabled,

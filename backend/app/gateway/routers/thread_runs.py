@@ -39,6 +39,7 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
+from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.workspace_changes import get_workspace_changes_response
 
@@ -213,13 +214,17 @@ async def _raise_lease_valid_elsewhere(
 
 
 def _record_to_response(record: RunRecord) -> RunResponse:
+    kwargs = dict(record.kwargs or {})
+    if "config" in kwargs:
+        kwargs["config"] = redact_config_secrets(kwargs["config"])
+
     return RunResponse(
         run_id=record.run_id,
         thread_id=record.thread_id,
         assistant_id=record.assistant_id,
         status=record.status.value,
-        metadata=record.metadata,
-        kwargs=record.kwargs,
+        metadata=redact_metadata_secrets(record.metadata),
+        kwargs=kwargs,
         multitask_strategy=record.multitask_strategy,
         created_at=record.created_at,
         updated_at=record.updated_at,
@@ -369,6 +374,11 @@ def _clean_human_message_for_edit(message: Any, *, replacement_id: str, replacem
 
 def _is_terminal_assistant_text_message(message: Any) -> bool:
     return _is_visible_ai_message(message) and bool(_message_text(message).strip()) and not _message_tool_calls(message)
+
+
+def _has_title(values: dict[str, Any]) -> bool:
+    title = values.get("title")
+    return isinstance(title, str) and bool(title)
 
 
 def _has_active_goal(snapshot: Any) -> bool:
@@ -705,16 +715,28 @@ async def _prepare_edit_regenerate_payload(
         "edit_message_id": replacement_human_message_id,
         "edit_version_group_id": edit_version_group_id,
     }
+    edit_input: dict[str, Any] = {
+        "messages": [
+            _clean_human_message_for_edit(
+                source_human,
+                replacement_id=replacement_human_message_id,
+                replacement_text=normalized_text,
+            )
+        ]
+    }
+    base_values = base_checkpoint_tuple.values if isinstance(getattr(base_checkpoint_tuple, "values", None), dict) else {}
+    latest_values = latest_checkpoint.values if isinstance(latest_checkpoint.values, dict) else {}
+    latest_title = latest_values.get("title")
+    if _has_title(base_values) and isinstance(latest_title, str) and latest_title:
+        # The replay base can predate a manual rename, so replay the current
+        # title rather than letting checkpoint rollback restore the older one
+        # (#4457, the same rollback regenerate already guards against). An
+        # untitled base is deliberately left alone: it belongs to a thread the
+        # title middleware has not named yet, and pinning the current title
+        # there would keep a name generated from the prompt this edit replaced.
+        edit_input["title"] = latest_title
     return EditRegeneratePrepareResponse(
-        input={
-            "messages": [
-                _clean_human_message_for_edit(
-                    source_human,
-                    replacement_id=replacement_human_message_id,
-                    replacement_text=normalized_text,
-                )
-            ]
-        },
+        input=edit_input,
         checkpoint=checkpoint,
         metadata=metadata,
         target_run_id=target_run_id,
@@ -1326,7 +1348,23 @@ async def list_run_events(
     """
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
-    return await event_store.list_events(thread_id, run_id, event_types=types, task_id=task_id, limit=limit, after_seq=after_seq)
+    events = await event_store.list_events(
+        thread_id,
+        run_id,
+        event_types=types,
+        task_id=task_id,
+        limit=limit,
+        after_seq=after_seq,
+    )
+    return [
+        {
+            **event,
+            "metadata": redact_metadata_secrets(event.get("metadata")),
+        }
+        if isinstance(event, dict) and "metadata" in event
+        else event
+        for event in events
+    ]
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")
