@@ -34,6 +34,19 @@ def test_process_snapshot_frequency_change_requires_restart(monkeypatch: pytest.
         checkpoint_mode.freeze_checkpoint_snapshot_frequency(500)
 
 
+@pytest.mark.parametrize("snapshot_frequency", [0, -1])
+def test_process_snapshot_frequency_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_frequency: int,
+) -> None:
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    with pytest.raises(ValueError, match="snapshot frequency must be positive"):
+        checkpoint_mode.freeze_checkpoint_snapshot_frequency(snapshot_frequency)
+    assert checkpoint_mode.frozen_checkpoint_snapshot_frequency() is None
+
+
 def test_resolve_snapshot_frequency_prefers_explicit_then_frozen_then_default(monkeypatch: pytest.MonkeyPatch) -> None:
     from deerflow.runtime import checkpoint_mode
 

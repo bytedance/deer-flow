@@ -60,6 +60,8 @@ def freeze_checkpoint_snapshot_frequency(snapshot_frequency: int) -> int:
     delta migration semantics are unchanged by the frequency value.
     """
     global _frozen_checkpoint_snapshot_frequency
+    if snapshot_frequency <= 0:
+        raise ValueError("snapshot frequency must be positive")
     if _frozen_checkpoint_snapshot_frequency is None:
         _frozen_checkpoint_snapshot_frequency = snapshot_frequency
     elif _frozen_checkpoint_snapshot_frequency != snapshot_frequency:
