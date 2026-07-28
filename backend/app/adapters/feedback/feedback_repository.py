@@ -1,11 +1,15 @@
-"""SQL adapters for the feedback bounded context.
+"""Secondary adapter (owned persistence) -- the feedback table in SQL.
 
-Secondary adapters implementing the ports declared in
-``deerflow.domain.feedback.ports``. SQL/ORM vocabulary stops at this
-file: methods exchange domain objects, translate ``IntegrityError`` into
-domain errors, and normalize SQLite's tz-naive reads. Queries were
-migrated unchanged from the legacy repository (now removed) to preserve
-behavior.
+Implements ``FeedbackRepository`` from ``deerflow.domain.feedback.ports``.
+This context owns the ``feedback`` table and writes its own queries, so
+SQL/ORM vocabulary stops at this file: methods exchange domain objects,
+translate ``IntegrityError`` into domain errors, and normalize SQLite's
+tz-naive reads. Queries were migrated unchanged from the legacy repository
+(now removed) to preserve behavior.
+
+Sibling adapter: ``run_lookup.py`` serves the same context but owns no
+table and writes no SQL -- see its docstring for why that distinction is
+worth keeping visible.
 """
 
 from __future__ import annotations
@@ -17,10 +21,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.domain.feedback.model import DuplicateFeedbackError, Feedback
-from deerflow.domain.feedback.ports import FeedbackRepository, RunLookup
+from deerflow.domain.feedback.ports import FeedbackRepository
 
 # Transitional: the ORM row stays in the harness until PR-N moves engine,
-# models, and migrations into app/infra.
+# models, and migrations into app/adapters.
 from deerflow.persistence.feedback.model import FeedbackRow
 
 
@@ -137,18 +141,3 @@ class SqlFeedbackRepository(FeedbackRepository):
             await session.delete(row)
             await session.commit()
             return True
-
-
-class RunStoreRunLookup(RunLookup):
-    """Adapts the framework ``RunStore`` (wide interface) to the narrow
-    ``RunLookup`` port -- reuses the existing lookup, no new SQL.
-
-    Used by the service for run-ownership checks before writing feedback.
-    """
-
-    def __init__(self, run_store) -> None:
-        self._run_store = run_store
-
-    async def thread_of(self, run_id: str) -> str | None:
-        run = await self._run_store.get(run_id)
-        return run.get("thread_id") if run else None

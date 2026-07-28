@@ -76,7 +76,7 @@ async def test_run_repository_emits_tz_aware_timestamps(tmp_path):
 
 @pytest.mark.anyio
 async def test_feedback_repository_emits_tz_aware_timestamps(tmp_path):
-    from app.infra.persistence.feedback import SqlFeedbackRepository
+    from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
     from deerflow.domain.feedback import Feedback
 
     repo = SqlFeedbackRepository(await _init_sqlite(tmp_path))

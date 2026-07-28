@@ -105,7 +105,7 @@ class TestSqlFeedbackRepository(FeedbackRepositoryContract):
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
         import deerflow.persistence.feedback.model  # noqa: F401  (register FeedbackRow)
-        from app.infra.persistence.feedback import SqlFeedbackRepository
+        from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
         from deerflow.persistence.base import Base
 
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")

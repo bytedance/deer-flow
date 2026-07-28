@@ -400,10 +400,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
-            from app.infra.persistence.feedback import (
-                RunStoreRunLookup,
-                SqlFeedbackRepository,
-            )
+            from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
+            from app.adapters.feedback.run_lookup import RunStoreRunLookup
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
