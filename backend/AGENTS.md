@@ -229,7 +229,10 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   offloading the uploads-directory scan off the event loop);
   `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
   offloading upload directory creation, staged writes, chmod/cleanup,
-  directory scans/deletes, and remote sandbox sync off the event loop); and
+  directory scans/deletes, and remote sandbox sync off the event loop);
+  `test_openviking_memory_backend.py` (locks the OpenViking backend's async
+  add/context/search entrypoints offloading synchronous HTTP and watermark
+  filesystem IO); and
   `test_workspace_changes_recorder.py` (locks the offload around the snapshot
   text cache lifecycle — roots resolution, `mkdtemp`, and the `shutil.rmtree`
   on both the capture-failure branch and `record_workspace_changes`' `finally`).
@@ -823,7 +826,13 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   results into the shared contract. It hashes `(user_id, agent_name)` into a
   safe OpenViking trusted-user identity for hard scope isolation and keeps
   bounded message watermarks below
-  `{storage_path}/openviking/sessions/`. It does not implement DeerMem fact
+  `{storage_path}/openviking/sessions/`. The watermark separately records
+  submitted and committed message IDs: once batch submission succeeds, a
+  later update never resubmits those messages or retries an ambiguous commit.
+  A future batch can commit the still-open Session together with new messages. Session
+  locks are weakly cached, async entrypoints offload synchronous HTTP and file
+  IO, and graceful shutdown rejects new work before draining all in-flight
+  client operations within its timeout. It does not implement DeerMem fact
   CRUD/import/export and must not import the OpenViking embedded runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, prompt injection, manual CRUD primitives, and the updater backend.

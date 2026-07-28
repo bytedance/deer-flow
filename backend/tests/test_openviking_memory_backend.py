@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
+import threading
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +11,7 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from deerflow.agents.memory.backends.openviking.client import OpenVikingAuthenticationError, OpenVikingHttpClient
+from deerflow.agents.memory.backends.openviking.client import OpenVikingAuthenticationError, OpenVikingHttpClient, OpenVikingUnavailableError
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
 from deerflow.agents.memory.backends.openviking.models import (
     OpenVikingCommitResult,
@@ -204,7 +207,47 @@ def test_manager_filters_messages_commits_and_deduplicates(tmp_path: Path) -> No
     ]
     assert len(client.committed) == 1
     watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    assert json.loads(watermark.read_text(encoding="utf-8"))["last_commit_task_id"] == "task-1"
+    state = json.loads(watermark.read_text(encoding="utf-8"))
+    assert state["last_commit_task_id"] == "task-1"
+    assert state["submitted_message_ids"] == state["committed_message_ids"]
+
+
+def test_manager_does_not_resubmit_messages_after_failed_commit(tmp_path: Path) -> None:
+    manager, client = _manager(tmp_path)
+    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
+    original_commit = client.commit_session
+    commit_attempts = 0
+
+    def fail_once(identity: OpenVikingIdentity, session_id: str) -> OpenVikingCommitResult:
+        nonlocal commit_attempts
+        commit_attempts += 1
+        if commit_attempts == 1:
+            raise OpenVikingUnavailableError("session.commit", "temporary failure")
+        return original_commit(identity, session_id)
+
+    client.commit_session = fail_once  # type: ignore[method-assign]
+
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
+    failed_state = json.loads(watermark.read_text(encoding="utf-8"))
+    assert failed_state["submitted_message_ids"] == ["df_h1", "df_a1"]
+    assert failed_state["committed_message_ids"] == []
+
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 1
+    assert commit_attempts == 1
+
+    messages.append(HumanMessage("new information", id="h2"))
+    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+
+    assert len(client.added) == 2
+    assert [message.message_id for message in client.added[1][2]] == ["df_h2"]
+    assert commit_attempts == 2
+    recovered_state = json.loads(watermark.read_text(encoding="utf-8"))
+    assert recovered_state["submitted_message_ids"] == recovered_state["committed_message_ids"]
+    assert recovered_state["last_commit_task_id"] == "task-1"
 
 
 def test_manager_identity_is_stable_and_agent_isolated(tmp_path: Path) -> None:
@@ -246,8 +289,80 @@ def test_manager_rejects_tool_mode(tmp_path: Path) -> None:
         OpenVikingMemoryManager.from_config(_backend_config(tmp_path), mode="tool")
 
 
-def test_manager_shutdown_closes_client(tmp_path: Path) -> None:
+def test_manager_session_locks_do_not_accumulate(tmp_path: Path) -> None:
+    manager, _ = _manager(tmp_path)
+    lock = manager._session_lock("session-1")
+    lock_ref = weakref.ref(lock)
+
+    assert len(manager._session_locks) == 1
+    del lock
+    gc.collect()
+
+    assert lock_ref() is None
+    assert len(manager._session_locks) == 0
+
+
+@pytest.mark.asyncio
+async def test_manager_async_methods_offload_sync_operations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, _ = _manager(tmp_path)
+    event_loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    def fake_add(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> None:
+        worker_threads.append(threading.get_ident())
+
+    def fake_get_context(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> str:
+        worker_threads.append(threading.get_ident())
+        return "context"
+
+    def fake_search(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        worker_threads.append(threading.get_ident())
+        return [{"id": "memory-1"}]
+
+    monkeypatch.setattr(OpenVikingMemoryManager, "add", fake_add)
+    monkeypatch.setattr(OpenVikingMemoryManager, "get_context", fake_get_context)
+    monkeypatch.setattr(OpenVikingMemoryManager, "search", fake_search)
+
+    await manager.aadd("thread-1", [], user_id="alice")
+    assert await manager.aget_context("alice") == "context"
+    assert await manager.asearch("query", user_id="alice") == [{"id": "memory-1"}]
+
+    assert len(worker_threads) == 3
+    assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+
+
+def test_manager_shutdown_waits_for_in_flight_write(tmp_path: Path) -> None:
     manager, client = _manager(tmp_path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_add = client.add_messages
+
+    def blocking_add(
+        identity: OpenVikingIdentity,
+        session_id: str,
+        messages: list[OpenVikingMessage],
+    ) -> int:
+        write_started.set()
+        assert release_write.wait(2)
+        return original_add(identity, session_id, messages)
+
+    client.add_messages = blocking_add  # type: ignore[method-assign]
+    write_thread = threading.Thread(
+        target=manager.add,
+        args=("thread-1", [HumanMessage("hello", id="h1")]),
+        kwargs={"user_id": "alice"},
+    )
+    write_thread.start()
+    assert write_started.wait(1)
+
+    assert manager.shutdown_flush(0.01) is False
+    assert client.closed is False
+    manager.add("thread-2", [HumanMessage("ignored", id="h2")], user_id="alice")
+    assert len(client.ensured) == 1
+
+    release_write.set()
+    write_thread.join(2)
+    assert not write_thread.is_alive()
 
     assert manager.shutdown_flush(1) is True
     assert client.closed is True

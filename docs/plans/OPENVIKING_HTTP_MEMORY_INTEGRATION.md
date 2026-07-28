@@ -293,10 +293,11 @@ OpenViking 后端处理流程：
   -> 计算 Agent scope 与 Session ID
   -> 过滤框架内部消息
   -> 转换 user/assistant 文本消息
-  -> 根据同步水位去除已提交消息
+  -> 根据同步水位去除已提交到 Session 的消息
   -> 批量写入 OpenViking Session
+  -> 原子记录 submitted 水位
   -> commit Session
-  -> 记录 commit task_id 和最新水位
+  -> 推进 committed 水位并记录 commit task_id
   -> 返回，不等待后台提取完成
 ```
 
@@ -329,11 +330,12 @@ OpenViking 后端处理流程：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "session_id": "df_...",
-  "last_committed_message_ids": ["..."],
+  "submitted_message_ids": ["..."],
+  "committed_message_ids": ["..."],
   "last_commit_task_id": "...",
-  "updated_at": "..."
+  "last_archive_uri": "viking://..."
 }
 ```
 
@@ -348,9 +350,19 @@ OpenViking 后端处理流程：
 - 原子写入；
 - 不保存消息正文；
 - 记录一个有界的近期 message ID 窗口，而不是无限增长；
-- 批量添加成功但 commit 结果未知时，不提前推进“已提交”水位；
+- 批量添加成功后立即推进 `submitted_message_ids`，避免 commit 结果未知时
+  在下一轮重复添加消息；
+- commit 结果未知时不自动重试该 commit；后续相同历史直接跳过，出现新消息时
+  只添加新消息，并由新的 commit 一并归档仍留在 Session 中的旧消息；
+- commit 成功后将 `committed_message_ids` 推进到 submitted 水位并保存
+  task/archive 元数据；
 - 网络超时后需要区分“请求未到达”和“服务端可能已处理”；
 - 若 OpenViking API 支持客户端 message ID，应始终发送 DeerFlow 的稳定 message ID。
+
+这里的 submitted 水位只解决“批量添加已明确成功、随后 commit 失败”的确定性
+重复路径。如果批量添加在服务端成功、但客户端在收到响应或保存水位前中断，
+没有服务端幂等键仍无法做到 exactly-once；多 Gateway 部署同样需要共享水位或
+OpenViking 原生幂等支持。
 
 如果 DeerFlow 消息缺少稳定 ID，应基于角色、规范化内容和在本轮中的稳定位置生成适配器 ID，但该方案只作为兼容路径。
 

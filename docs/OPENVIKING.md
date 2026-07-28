@@ -196,9 +196,16 @@ The DeerFlow entrypoint is <http://localhost:2026>.
   the main agent continues.
 - With `write: log_and_drop`, a failed OpenViking commit is logged without
   failing an already generated assistant response.
+- Once a message batch is accepted, DeerFlow persists a submitted-message
+  watermark before committing the Session. If commit then fails, later updates
+  do not resubmit those messages or retry the ambiguous commit; a future batch
+  can commit the still-open Session together with new messages.
 - OpenViking commit is eventually consistent: accepting a commit archives the
   messages immediately, while summary and memory extraction finish in a
   background task.
+- Graceful shutdown stops admitting new memory operations, waits up to
+  `shutdown_flush_timeout_seconds` for active reads and writes, and closes the
+  shared HTTP client only after they drain.
 
 For deployments where a lost memory update is unacceptable, a durable outbox
 is still required; the initial plugin intentionally does not claim

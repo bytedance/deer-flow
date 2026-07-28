@@ -7,12 +7,15 @@ memory search results back to DeerFlow's backend-neutral shapes.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
 import threading
+import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -41,9 +44,12 @@ class OpenVikingMemoryManager(MemoryManager):
     _config: OpenVikingConfig = PrivateAttr()
     _client: OpenVikingHttpClient = PrivateAttr()
     _should_keep_hidden_message: Callable[[Any], bool] | None = PrivateAttr(default=None)
-    _session_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
+    _session_locks: weakref.WeakValueDictionary[str, threading.RLock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
     _session_locks_guard: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _lifecycle: threading.Condition = PrivateAttr(default_factory=threading.Condition)
+    _active_operations: int = PrivateAttr(default=0)
     _closed: bool = PrivateAttr(default=False)
+    _client_closed: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context: Any) -> None:
         self._config = OpenVikingConfig.from_backend_config(self.backend_config)
@@ -85,6 +91,24 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> None:
         self._write_conversation(thread_id, messages, agent_name=agent_name, user_id=user_id)
 
+    async def aadd(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self.add,
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
+
     def get_context(
         self,
         user_id: str | None,
@@ -92,21 +116,40 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None = None,
         thread_id: str | None = None,
     ) -> str:
-        try:
-            hits = self._search_hits(
-                self._config.injection_query,
-                top_k=self._config.search_top_k,
-                user_id=user_id,
-                agent_name=agent_name,
-                category=None,
-                thread_id=thread_id,
-            )
-        except OpenVikingClientError:
-            if self._config.read_failure_policy == "raise":
-                raise
-            logger.warning("OpenViking context retrieval failed; continuing without injected memory", exc_info=True)
+        if not self._begin_operation():
             return ""
-        return _format_context(hits, max_chars=self._config.max_injection_chars)
+        try:
+            try:
+                hits = self._search_hits(
+                    self._config.injection_query,
+                    top_k=self._config.search_top_k,
+                    user_id=user_id,
+                    agent_name=agent_name,
+                    category=None,
+                    thread_id=thread_id,
+                )
+            except OpenVikingClientError:
+                if self._config.read_failure_policy == "raise":
+                    raise
+                logger.warning("OpenViking context retrieval failed; continuing without injected memory", exc_info=True)
+                return ""
+            return _format_context(hits, max_chars=self._config.max_injection_chars)
+        finally:
+            self._end_operation()
+
+    async def aget_context(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            self.get_context,
+            user_id,
+            agent_name=agent_name,
+            thread_id=thread_id,
+        )
 
     def search(
         self,
@@ -119,43 +162,77 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> list[dict[str, Any]]:
         if not query.strip():
             return []
-        try:
-            hits = self._search_hits(
-                query,
-                top_k=top_k,
-                user_id=user_id,
-                agent_name=agent_name,
-                category=category,
-                thread_id=None,
-            )
-        except OpenVikingClientError:
-            if self._config.read_failure_policy == "raise":
-                raise
-            logger.warning("OpenViking memory search failed; returning no results", exc_info=True)
+        if not self._begin_operation():
             return []
-        return [_hit_to_fact(hit) for hit in hits]
+        try:
+            try:
+                hits = self._search_hits(
+                    query,
+                    top_k=top_k,
+                    user_id=user_id,
+                    agent_name=agent_name,
+                    category=category,
+                    thread_id=None,
+                )
+            except OpenVikingClientError:
+                if self._config.read_failure_policy == "raise":
+                    raise
+                logger.warning("OpenViking memory search failed; returning no results", exc_info=True)
+                return []
+            return [_hit_to_fact(hit) for hit in hits]
+        finally:
+            self._end_operation()
+
+    async def asearch(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self.search,
+            query,
+            top_k,
+            user_id=user_id,
+            agent_name=agent_name,
+            category=category,
+        )
 
     def warm(self) -> bool | None:
-        try:
-            healthy = self._client.health()
-        except OpenVikingClientError:
-            if self._config.startup_policy == "fail_fast":
-                raise
-            logger.warning("OpenViking health check failed; memory will run in degraded mode", exc_info=True)
+        if not self._begin_operation():
             return False
-        if not healthy and self._config.startup_policy == "fail_fast":
-            raise RuntimeError("OpenViking health check returned an unhealthy response")
-        if not healthy:
-            logger.warning("OpenViking health check returned unhealthy; memory will run in degraded mode")
-        return healthy
+        try:
+            try:
+                healthy = self._client.health()
+            except OpenVikingClientError:
+                if self._config.startup_policy == "fail_fast":
+                    raise
+                logger.warning("OpenViking health check failed; memory will run in degraded mode", exc_info=True)
+                return False
+            if not healthy and self._config.startup_policy == "fail_fast":
+                raise RuntimeError("OpenViking health check returned an unhealthy response")
+            if not healthy:
+                logger.warning("OpenViking health check returned unhealthy; memory will run in degraded mode")
+            return healthy
+        finally:
+            self._end_operation()
 
     def shutdown_flush(self, timeout: float) -> bool:
-        """Close the HTTP pool.
-
-        Writes are synchronous and receive commit acceptance before returning,
-        so this backend has no local debounce queue to drain.
-        """
-        self._closed = True
+        """Stop new operations, drain in-flight work, then close the HTTP pool."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lifecycle:
+            self._closed = True
+            while self._active_operations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._lifecycle.wait(remaining)
+            if self._client_closed:
+                return True
+            self._client_closed = True
         self._client.close()
         return True
 
@@ -167,46 +244,71 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None,
         user_id: str | None,
     ) -> None:
-        if self._closed:
+        if not self._begin_operation():
             logger.warning("OpenViking write ignored after backend shutdown")
             return
-        if not thread_id:
-            raise ValueError("OpenViking memory write requires thread_id")
+        try:
+            if not thread_id:
+                raise ValueError("OpenViking memory write requires thread_id")
 
-        identity = self._identity(user_id, agent_name)
-        session_id = _session_id(identity, thread_id)
-        lock = self._session_lock(session_id)
-        with lock:
-            state = self._load_state(session_id)
-            seen = set(state.get("seen_message_ids", []))
-            converted = _convert_messages(messages, self._should_keep_hidden_message)
-            pending = [message for message in converted if message.message_id not in seen]
-            if not pending:
-                return
-            try:
-                self._client.ensure_session(identity, session_id)
-                self._client.add_messages(identity, session_id, pending)
-                commit = self._client.commit_session(identity, session_id)
-            except OpenVikingClientError:
-                if self._config.write_failure_policy == "raise":
-                    raise
-                logger.error(
-                    "OpenViking memory write failed; dropping this update (session=%s, messages=%d)",
-                    session_id,
-                    len(pending),
-                    exc_info=True,
-                )
-                return
+            identity = self._identity(user_id, agent_name)
+            session_id = _session_id(identity, thread_id)
+            lock = self._session_lock(session_id)
+            with lock:
+                state = self._load_state(session_id)
+                submitted_ids = list(state.get("submitted_message_ids", state.get("seen_message_ids", [])))
+                committed_ids = list(state.get("committed_message_ids", state.get("seen_message_ids", [])))
+                submitted = set(submitted_ids)
+                converted = _convert_messages(messages, self._should_keep_hidden_message)
+                pending = [message for message in converted if message.message_id not in submitted]
+                if not pending:
+                    return
+                try:
+                    self._client.ensure_session(identity, session_id)
+                    self._client.add_messages(identity, session_id, pending)
+                except OpenVikingClientError:
+                    if self._config.write_failure_policy == "raise":
+                        raise
+                    logger.error(
+                        "OpenViking memory message submission failed; dropping this update (session=%s, messages=%d)",
+                        session_id,
+                        len(pending),
+                        exc_info=True,
+                    )
+                    return
+                submitted_ids.extend(message.message_id for message in pending)
+                state = {
+                    "schema_version": 2,
+                    "session_id": session_id,
+                    "submitted_message_ids": submitted_ids[-self._config.max_seen_message_ids :],
+                    "committed_message_ids": committed_ids[-self._config.max_seen_message_ids :],
+                    "last_commit_task_id": state.get("last_commit_task_id"),
+                    "last_archive_uri": state.get("last_archive_uri"),
+                }
+                self._save_state(session_id, state)
 
-            recent_ids = [*state.get("seen_message_ids", []), *(message.message_id for message in pending)]
-            state = {
-                "schema_version": 1,
-                "session_id": session_id,
-                "seen_message_ids": recent_ids[-self._config.max_seen_message_ids :],
-                "last_commit_task_id": commit.task_id,
-                "last_archive_uri": commit.archive_uri,
-            }
-            self._save_state(session_id, state)
+                try:
+                    commit = self._client.commit_session(identity, session_id)
+                except OpenVikingClientError:
+                    if self._config.write_failure_policy == "raise":
+                        raise
+                    logger.error(
+                        "OpenViking memory commit failed; preserving submitted watermark without retry (session=%s)",
+                        session_id,
+                        exc_info=True,
+                    )
+                    return
+
+                state = {
+                    **state,
+                    "schema_version": 2,
+                    "committed_message_ids": state["submitted_message_ids"],
+                    "last_commit_task_id": commit.task_id,
+                    "last_archive_uri": commit.archive_uri,
+                }
+                self._save_state(session_id, state)
+        finally:
+            self._end_operation()
 
     def _search_hits(
         self,
@@ -237,9 +339,22 @@ class OpenVikingMemoryManager(MemoryManager):
         digest = hashlib.sha256(f"{self._config.account}\0{raw_user}\0{agent_scope}".encode()).hexdigest()
         return OpenVikingIdentity(account=self._config.account, user=f"df_{digest[:40]}")
 
-    def _session_lock(self, session_id: str) -> threading.Lock:
+    def _session_lock(self, session_id: str) -> threading.RLock:
         with self._session_locks_guard:
-            return self._session_locks.setdefault(session_id, threading.Lock())
+            return self._session_locks.setdefault(session_id, threading.RLock())
+
+    def _begin_operation(self) -> bool:
+        with self._lifecycle:
+            if self._closed:
+                return False
+            self._active_operations += 1
+            return True
+
+    def _end_operation(self) -> None:
+        with self._lifecycle:
+            self._active_operations -= 1
+            if self._active_operations == 0:
+                self._lifecycle.notify_all()
 
     def _state_path(self, session_id: str) -> Path:
         root = Path(self._config.storage_path or ".") / "openviking" / "sessions"

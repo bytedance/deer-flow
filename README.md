@@ -935,7 +935,8 @@ DeerFlow also includes an optional `openviking` memory backend. It connects to
 an independent OpenViking server over HTTP, submits completed turns through
 OpenViking Sessions, and recalls remote memories for prompt injection while
 leaving DeerMem as the default. The initial integration supports
-`memory.mode: middleware`; see
+`memory.mode: middleware`. Submitted-message watermarks prevent a failed
+Session commit from duplicating already accepted messages on retry; see
 [OpenViking memory backend](docs/OPENVIKING.md) for configuration and Docker
 startup.
 
