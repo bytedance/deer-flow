@@ -822,6 +822,7 @@ export const zhCN: Translations = {
         auth: "授权",
         sandboxRuntime: "沙箱运行时",
         sandboxRuntimeInitContainer: "由 init container 提供",
+        sandboxRuntimeBroker: "由 broker sidecar 提供",
         sandboxRuntimeGatewayDownload: "由 Gateway 提供",
         sandboxRuntimeNotReady: "未就绪 —— 对话时 lark-cli 可能不可用",
         notInstalled: "尚未安装",

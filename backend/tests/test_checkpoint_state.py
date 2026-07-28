@@ -82,6 +82,19 @@ def _assert_delta_config_is_copied(original: dict[str, Any], forwarded: dict[str
     assert forwarded["metadata"][CHECKPOINT_MODE_METADATA_KEY] == "delta"
 
 
+def test_mutation_graph_bakes_snapshot_frequency_into_fallback_schema() -> None:
+    from langgraph.channels import DeltaChannel
+
+    from deerflow.runtime.checkpoint_state import build_state_mutation_graph
+
+    default_graph = build_state_mutation_graph("compact", "delta")
+    assert isinstance(default_graph.channels["messages"], DeltaChannel)
+    assert default_graph.channels["messages"].snapshot_frequency == 10
+
+    low_cadence = build_state_mutation_graph("compact", "delta", snapshot_frequency=250)
+    assert low_cadence.channels["messages"].snapshot_frequency == 250
+
+
 def test_sync_accessor_binds_persistence_guards_operations_and_preserves_input() -> None:
     graph = FakeGraph()
     saver = FakeCheckpointer()

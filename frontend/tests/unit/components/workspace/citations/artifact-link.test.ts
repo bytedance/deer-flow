@@ -28,6 +28,18 @@ describe("ArtifactLink rendering", () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
+  it("renders citation labels when children are React elements", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ArtifactLink,
+        { href: "https://example.com/report" },
+        createElement("span", null, "citation:Test Source"),
+      ),
+    );
+    expect(html).not.toContain("citation:");
+    expect(html).toContain("Test Source");
+  });
+
   it("renders scheme-less relative hrefs as navigable anchors", () => {
     const tests = ["report.md", "./report.md", "../assets/chart.png"];
     for (const href of tests) {

@@ -1650,8 +1650,8 @@ async def test_cancel_takeover_from_crashed_worker():
 
 
 @pytest.mark.anyio
-async def test_cancel_refuses_active_lease_from_other_worker():
-    """cancel must return lease_valid_elsewhere when the run is owned by another worker with a valid lease."""
+async def test_cancel_requests_active_lease_from_other_worker():
+    """A cancel routed to a peer must durably notify the live owner."""
     store = MemoryRunStore()
     grace = 10
     valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
@@ -1659,11 +1659,168 @@ async def test_cancel_refuses_active_lease_from_other_worker():
 
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
     outcome = await manager.cancel("run-alive")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
 
     row = await store.get("run-alive")
     assert row is not None
-    assert row["status"] == "running"  # untouched
+    assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+    assert row["cancel_requested_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_non_owner_cancel_is_observed_by_owner_heartbeat():
+    """Heartbeat signals the owner task without performing terminal writes."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+        # Match local idempotency: once accepted, a later action cannot change
+        # whether the owner rolls back or merely interrupts.
+        assert await peer.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
+
+        await owner._renew_leases()
+        await asyncio.sleep(0)
+
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+        assert record.status == RunStatus.running
+        assert record.task.cancelled()
+
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "running"
+        assert stored["cancel_action"] == "rollback"
+
+        # The worker's existing cancellation path, not heartbeat, owns the
+        # terminal status write and any rollback cleanup.
+        await owner.set_status(
+            record.run_id,
+            RunStatus.error,
+            error="Rolled back by user",
+        )
+        next_run = await peer.create_or_reject("thread-1")
+        assert next_run.status == RunStatus.pending
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_first_cancel_action_wins_when_retry_lands_on_owner():
+    """Routing a retry to the owner must not replace the durable first action."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+        assert await owner.cancel(record.run_id, action="interrupt") == CancelOutcome.cancelled
+        await asyncio.sleep(0)
+
+        assert record.abort_action == "rollback"
+        assert record.task.cancelled()
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["cancel_action"] == "rollback"
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_local_owner_cancel_falls_back_when_durable_request_fails():
+    """A local owner can still abort its own task when durable cancel persistence fails."""
+
+    class FailingCancelStore(MemoryRunStore):
+        async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+            raise RuntimeError("store unavailable")
+
+    store = FailingCancelStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=30),
+    )
+
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "interrupted"
+        assert stored["cancel_action"] is None
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.anyio
+async def test_owner_cancel_retry_on_peer_is_accepted():
+    """A peer must treat the owner's interrupted status as an accepted cancel."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+
+    assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    assert await peer.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+    assert stored["cancel_action"] == "rollback"
+
+
+@pytest.mark.anyio
+async def test_owner_cancel_uses_store_while_terminal_status_is_staged_locally():
+    """A staged local terminal status must not bypass the durable cancel CAS."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    # Event-store finalization stages success in memory before persisting it.
+    record.status = RunStatus.success
+
+    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["cancel_action"] == "rollback"
 
 
 @pytest.mark.anyio
@@ -1687,7 +1844,7 @@ async def test_cancel_returns_not_active_locally_when_heartbeat_disabled():
 
 @pytest.mark.anyio
 async def test_cancel_takeover_race_owner_renewed_lease():
-    """When the owner heartbeats between our read and the conditional UPDATE, cancel must return lease_valid_elsewhere."""
+    """When takeover loses to a renewal, cancellation must notify the live owner."""
     store = MemoryRunStore()
     grace = 10
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
@@ -1709,12 +1866,13 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
 
     outcome = await manager.cancel("run-race")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
+    assert (await store.get("run-race"))["cancel_action"] == "interrupt"
 
 
 @pytest.mark.anyio
 async def test_cancel_takeover_respects_grace_seconds():
-    """Cancel must not take over when the lease is within the grace window."""
+    """Within the grace window, cancellation must notify rather than take over."""
     store = MemoryRunStore()
     grace = 10
     # Lease expired, but only by 3s — still within the 10s grace window
@@ -1723,7 +1881,8 @@ async def test_cancel_takeover_respects_grace_seconds():
 
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
     outcome = await manager.cancel("run-grace")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
+    assert (await store.get("run-grace"))["cancel_action"] == "interrupt"
 
 
 @pytest.mark.anyio
@@ -1742,7 +1901,28 @@ async def test_cancel_not_cancellable_for_store_terminal_run():
 # ---------------------------------------------------------------------------
 
 
-def _make_cancel_test_app(mgr: RunManager):
+class _EndingCrossProcessBridge:
+    supports_cross_process = True
+
+    async def publish(self, run_id, event, data):
+        return None
+
+    async def publish_end(self, run_id):
+        return None
+
+    def subscribe(self, run_id, *, last_event_id=None, heartbeat_interval=15.0):
+        from deerflow.runtime import END_SENTINEL
+
+        async def events():
+            yield END_SENTINEL
+
+        return events()
+
+    async def cleanup(self, run_id, *, delay=0):
+        return None
+
+
+def _make_cancel_test_app(mgr: RunManager, *, bridge=None):
     """Build a TestClient wired with the thread_runs router + memory bridge."""
     from _router_auth_helpers import make_authed_test_app
     from fastapi.testclient import TestClient
@@ -1753,12 +1933,12 @@ def _make_cancel_test_app(mgr: RunManager):
     app = make_authed_test_app()
     app.include_router(thread_runs.router)
     app.state.run_manager = mgr
-    app.state.stream_bridge = MemoryStreamBridge()
+    app.state.stream_bridge = bridge or MemoryStreamBridge()
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_http_cancel_non_owner_valid_lease_returns_409_with_retry_after():
-    """POST /cancel on a non-owning worker with a valid lease must return 409 + Retry-After."""
+def test_http_cancel_non_owner_valid_lease_returns_202():
+    """POST /cancel must not fail solely because routing chose a non-owner."""
     store = MemoryRunStore()
     grace = 10
     valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
@@ -1776,15 +1956,105 @@ def test_http_cancel_non_owner_valid_lease_returns_409_with_retry_after():
     client = _make_cancel_test_app(mgr)
 
     resp = client.post("/api/threads/t1/runs/run-alive/cancel")
-    assert resp.status_code == 409
-    assert "Retry-After" in resp.headers
-    # Retry-After = remaining lease (≈60s) + grace (10s) = ≈70s
-    retry_after = int(resp.headers["Retry-After"])
-    assert 50 <= retry_after <= 75
+    assert resp.status_code == 202
+    assert "Retry-After" not in resp.headers
 
-    # Store row must be untouched
+    # The owner remains fenced, while the cancellation request is durable.
     row = asyncio.run(store.get("run-alive"))
     assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+
+
+def test_http_stream_action_non_owner_without_shared_bridge_returns_202():
+    """A peer cancel is accepted without subscribing to an unreachable local stream."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-stream",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr)
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-stream/stream",
+        params={"action": "interrupt"},
+    )
+
+    assert resp.status_code == 202
+    row = asyncio.run(store.get("run-alive-stream"))
+    assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+
+
+def test_http_cancel_non_owner_wait_uses_shared_bridge():
+    """wait=true observes remote owner finalization through the shared bridge."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-wait",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr, bridge=_EndingCrossProcessBridge())
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-wait/cancel",
+        params={"action": "rollback", "wait": "true"},
+    )
+
+    assert resp.status_code == 204
+    row = asyncio.run(store.get("run-alive-wait"))
+    assert row["cancel_action"] == "rollback"
+
+
+def test_http_stream_action_non_owner_uses_shared_bridge():
+    """The SDK stop path drains the remote owner's shared stream after accept."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-shared-stream",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr, bridge=_EndingCrossProcessBridge())
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-shared-stream/stream",
+        params={"action": "interrupt"},
+    )
+
+    assert resp.status_code == 200
+    assert "event: end" in resp.text
+    row = asyncio.run(store.get("run-alive-shared-stream"))
+    assert row["cancel_action"] == "interrupt"
 
 
 def test_http_cancel_non_owner_expired_lease_returns_202_takeover():
@@ -2171,34 +2441,3 @@ def test_compute_retry_after_normal():
     assert val is not None
     # lease_expires_at is ~45s from now + grace_seconds 10 = ~55, within reason
     assert 40 <= val <= 65
-
-
-# ---------------------------------------------------------------------------
-# HTTP — stream endpoint cross-worker 409
-# ---------------------------------------------------------------------------
-
-
-def test_http_stream_action_interrupt_non_owner_returns_409_with_retry_after():
-    """POST /stream?action=interrupt on a non-owner with valid lease must
-    return 409 + Retry-After, not hang on SSE."""
-    store = MemoryRunStore()
-    grace = 10
-    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-    asyncio.run(
-        store.put(
-            "run-alive-stream",
-            thread_id="t1",
-            status="running",
-            owner_worker_id="alive-worker",
-            lease_expires_at=valid_lease,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-    )
-    mgr = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
-    client = _make_cancel_test_app(mgr)
-
-    resp = client.post("/api/threads/t1/runs/run-alive-stream/stream", params={"action": "interrupt"})
-    assert resp.status_code == 409
-    assert "Retry-After" in resp.headers
-    retry_after = int(resp.headers["Retry-After"])
-    assert 50 <= retry_after <= 75

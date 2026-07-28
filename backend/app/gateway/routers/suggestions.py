@@ -8,6 +8,7 @@ import deerflow.utils.llm_text as llm_text
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.suggestions_config import DEFAULT_MAX_SUGGESTIONS, MAX_SUGGESTIONS_LIMIT
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,7 @@ class SuggestionMessage(BaseModel):
 
 class SuggestionsRequest(BaseModel):
     messages: list[SuggestionMessage] = Field(..., description="Recent conversation messages")
-    n: int = Field(default=3, ge=1, le=5, description="Number of suggestions to generate")
+    n: int = Field(default=DEFAULT_MAX_SUGGESTIONS, ge=1, le=MAX_SUGGESTIONS_LIMIT, description="Number of suggestions to generate")
     model_name: str | None = Field(default=None, description="Optional model override")
 
 
@@ -32,6 +33,7 @@ class SuggestionsResponse(BaseModel):
 
 class SuggestionsConfigResponse(BaseModel):
     enabled: bool = Field(..., description="Whether follow-up suggestions are enabled globally")
+    max_suggestions: int = Field(..., ge=1, le=MAX_SUGGESTIONS_LIMIT, description="Maximum number of follow-up suggestions to generate")
 
 
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
@@ -76,6 +78,10 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     return "\n".join(parts).strip()
 
 
+def _configured_max_suggestions(config: AppConfig) -> int:
+    return getattr(config.suggestions, "max_suggestions", DEFAULT_MAX_SUGGESTIONS)
+
+
 @router.get(
     "/suggestions/config",
     response_model=SuggestionsConfigResponse,
@@ -85,7 +91,7 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
 async def get_suggestions_config(
     config: AppConfig = Depends(get_config),
 ) -> SuggestionsConfigResponse:
-    return SuggestionsConfigResponse(enabled=config.suggestions.enabled)
+    return SuggestionsConfigResponse(enabled=config.suggestions.enabled, max_suggestions=_configured_max_suggestions(config))
 
 
 @router.post(
@@ -106,7 +112,7 @@ async def generate_suggestions(
     if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
-    n = body.n
+    n = min(body.n, _configured_max_suggestions(config))
     conversation = _format_conversation(body.messages)
     if not conversation:
         return SuggestionsResponse(suggestions=[])

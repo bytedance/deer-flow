@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 
 import { isSafeHref } from "../messages/markdown-link";
 
-import { CitationLink } from "./citation-link";
+import { CitationLink, extractReactNodeText } from "./citation-link";
 
 function isExternalUrl(href: string | undefined): boolean {
   return !!href && /^https?:\/\//.test(href);
@@ -33,8 +33,9 @@ export function ArtifactLink(props: AnchorHTMLAttributes<HTMLAnchorElement>) {
       </span>
     );
   }
-  if (typeof props.children === "string") {
-    const match = /^citation:(.+)$/.exec(props.children);
+  const childrenText = extractReactNodeText(props.children);
+  if (childrenText !== null) {
+    const match = /^citation:(.+)$/.exec(childrenText);
     if (match) {
       const [, text] = match;
       return <CitationLink {...props}>{text}</CitationLink>;

@@ -1,6 +1,7 @@
 """Tool error handling middleware and shared runtime middleware builders."""
 
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, override
 
@@ -318,6 +319,8 @@ def build_subagent_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
+    available_skills: set[str] | None = None,
+    user_id: str | None = None,
     authorization_provider=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -333,6 +336,31 @@ def build_subagent_runtime_middlewares(
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+    )
+
+    # Enabled/configured skills are discoverable metadata, not automatically
+    # active authority. Mirror the lead agent's activation + policy pair so a
+    # subagent keeps its ordinary tool set until a slash command or a completed
+    # SKILL.md read activates the corresponding allowed-tools declaration.
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+
+    slash_source_owner_token = secrets.token_urlsafe(24)
+    middlewares.append(
+        SkillActivationMiddleware(
+            available_skills=available_skills,
+            app_config=app_config,
+            user_id=user_id,
+            slash_source_owner_token=slash_source_owner_token,
+        )
+    )
+    middlewares.append(
+        SkillToolPolicyMiddleware(
+            available_skills=available_skills,
+            app_config=app_config,
+            user_id=user_id,
+            slash_source_owner_token=slash_source_owner_token,
+        )
     )
 
     if model_name is None and app_config.models:

@@ -152,13 +152,12 @@ def test_timing_saver_records_cumulative_ms() -> None:
 
 
 def _reset_checkpoint_freezes(monkeypatch: pytest.MonkeyPatch) -> None:
-    from deerflow.agents import thread_state
     from deerflow.config.app_config import reset_app_config
     from deerflow.runtime import checkpoint_mode
 
     reset_app_config()
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
-    monkeypatch.setattr(thread_state, "_frozen_delta_snapshot_frequency", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
 
 
 @pytest.mark.parametrize("mode,frequency", [("full", None), ("delta", 10)])
@@ -212,7 +211,7 @@ def test_run_case_fails_when_warm_cache_is_not_hit(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(
         gateway_services,
         "_state_accessor_graph",
-        lambda agent_factory, assistant_id, mode, config: agent_factory(config=config),
+        lambda agent_factory, assistant_id, mode, snapshot_frequency, config: agent_factory(config=config),
     )
     case = bench.ProductionCase(
         mode="full",
