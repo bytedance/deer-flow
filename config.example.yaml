@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 30
+config_version: 31
 
 # ============================================================================
 # Logging
@@ -1252,6 +1252,15 @@ sandbox:
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
+#
+#   # Optional: Override whether the sandbox already sees the gateway's
+#   # thread workspace/uploads/outputs through shared mounts.
+#   # Omit this field to auto-detect from the backend (local containers: true;
+#   # remote/provisioner backends: false). Set true only when the deployment
+#   # guarantees both sides use the same thread user-data directories, such as
+#   # a correctly aligned shared PVC, NFS volume, hostPath, or bind mount.
+#   # true skips per-upload sandbox acquire/sync; false forces explicit sync.
+#   # thread_data_mounts: true
 #
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path

@@ -922,6 +922,14 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log.
 
+`AioSandboxProvider` normally detects thread-data mounts from its backend: local
+containers use the mounted gateway directories, while remote/provisioner
+sandboxes receive uploaded files through explicit synchronization. Deployments
+where both sides are guaranteed to share the same thread user-data directories
+can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
+acquire and sync. Leave the field unset for automatic detection; setting it
+incorrectly can make uploaded files unavailable inside the sandbox.
+
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
 ```

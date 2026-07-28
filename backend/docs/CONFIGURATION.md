@@ -413,6 +413,25 @@ sandbox:
 
 When using Docker development (`make docker-start`), DeerFlow starts the `provisioner` service only if this provisioner mode is configured. In local or plain Docker sandbox modes, `provisioner` is skipped.
 
+Remote/provisioner backends default to explicit file synchronization because
+DeerFlow cannot infer whether their `/mnt/user-data` mount points reference the
+same storage as the Gateway. When the deployment guarantees that both sides use
+the same thread user-data directories, opt out of that extra transfer:
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+  thread_data_mounts: true
+```
+
+Leave `thread_data_mounts` unset to retain backend auto-detection. Set it to
+`false` to force explicit synchronization even for a local container backend.
+Only set it to `true` after verifying the Gateway's
+`users/{user_id}/threads/{thread_id}/user-data` directory and the sandbox's
+`/mnt/user-data` are the same storage; a false positive skips synchronization
+and makes newly uploaded files unavailable inside the sandbox.
+
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
