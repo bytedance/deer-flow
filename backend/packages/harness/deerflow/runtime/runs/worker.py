@@ -389,6 +389,9 @@ class RunContext:
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
+    # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
+    # this process" (embedded/tests) and resolves to the config default.
+    checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
 
 

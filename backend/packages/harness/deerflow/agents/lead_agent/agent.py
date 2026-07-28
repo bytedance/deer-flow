@@ -46,7 +46,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import freeze_delta_snapshot_frequency, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -56,6 +56,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
@@ -518,7 +519,10 @@ def make_lead_agent(config: RunnableConfig):
             runtime_app_config.database.checkpoint_channel_mode,
         )
     mode = freeze_checkpoint_channel_mode(requested_mode)
-    freeze_delta_snapshot_frequency(runtime_app_config.database.checkpoint_delta_snapshot_frequency)
+    # The snapshot cadence travels with the mode: restart-required, frozen
+    # from the app config, and deliberately not client-injectable (a forged
+    # configurable key must not recompile the channel table either).
+    freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
     return _make_lead_agent(config, app_config=runtime_app_config)
 

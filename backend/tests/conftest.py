@@ -97,7 +97,8 @@ def _reset_skill_storage_singleton():
 def _reset_frozen_checkpoint_channel_mode(monkeypatch):
     """Reset the process-global frozen checkpoint channel mode between tests.
 
-    Production treats ``checkpoint_channel_mode`` as restart-required: the
+    Production treats ``checkpoint_channel_mode`` (and the delta
+    ``snapshot_frequency`` frozen alongside it) as restart-required: the
     first client/app freezes it for the process. The test suite builds many
     clients and apps with different modes in one process, so the freeze must
     not leak across tests. Mirrors the per-test ``monkeypatch.setattr``
@@ -106,20 +107,7 @@ def _reset_frozen_checkpoint_channel_mode(monkeypatch):
     from deerflow.runtime import checkpoint_mode
 
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _reset_frozen_delta_snapshot_frequency(monkeypatch):
-    """Reset the process-global frozen delta snapshot frequency between tests.
-
-    Same restart-required semantics as the checkpoint channel mode freeze
-    above: ``make_lead_agent`` freezes it from the app config, and the suite
-    builds many agents with different configs in one process.
-    """
-    from deerflow.agents import thread_state
-
-    monkeypatch.setattr(thread_state, "_frozen_delta_snapshot_frequency", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
     yield
 
 

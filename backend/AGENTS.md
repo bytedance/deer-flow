@@ -943,7 +943,11 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
 
-**Mode is process-frozen and restart-required.** `make_lead_agent` and the embedded `DeerFlowClient` freeze the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) and the delta snapshot frequency (`agents/thread_state.py::freeze_delta_snapshot_frequency`, from the `checkpoint_delta_snapshot_frequency` config knob, default 1000 — restart-required like the mode) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). Adapted middleware schemas are cached by schema, mode, and resolved snapshot frequency so a pre-freeze ephemeral graph cannot leave a stale default-frequency schema behind. A second, different mode or frequency in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
+**Mode is process-frozen and restart-required.** `make_lead_agent` and the embedded `DeerFlowClient` freeze the resolved mode (`runtime/checkpoint_mode.py::freeze_checkpoint_channel_mode`) before compiling the graph with the mode-matched schema (`agents/thread_state.py::get_thread_state_schema`, plus `adapt_state_schema_for_mode` / `normalize_middleware_state_schemas` for middleware state). Adapted middleware schemas are cached by schema, mode, and resolved snapshot frequency so a pre-freeze ephemeral graph cannot leave a stale default-frequency schema behind. A second, different mode or frequency in the same process raises `CheckpointModeReconfigurationError`. To switch: edit config, restart.
+
+**Delta snapshot cadence is configurable but frozen with the mode.** `database.checkpoint_delta.snapshot_frequency` (default `10`) sets the `DeltaChannel` snapshot cadence. It is frozen alongside the mode (`freeze_checkpoint_snapshot_frequency`; non-positive direct inputs raise `ValueError`, while a frozen-value mismatch raises `CheckpointModeReconfigurationError`), restart-required, and must match across every process sharing one checkpoint database — the cadence lives in each compiled graph's channel table and is deliberately NOT stamped into checkpoint metadata, so the mode-compatibility marker and full -> delta migration semantics are unchanged. Schema helpers resolve it explicit-arg -> frozen -> default, and every schema/graph cache (`_delta_thread_state_schema`, `_adapt_state_schema_for_delta`, the client agent-config key, the gateway accessor-graph cache) keys on the resolved value.
+
+**Compiled-graph cache cap is configurable and hot-reloadable.** `database.checkpoint_graph_cache.accessor_graph_max` (default `64`) bounds the gateway accessor-graph cache, which clears wholesale at the cap. The cap is re-read on every eviction check (`resolve_checkpoint_graph_cache_max`), so a config.yaml reload takes effect without a restart — a size change never affects graph semantics, only eviction timing.
 
 **Compatibility is asymmetric and fail-closed.** Every checkpoint written in delta mode carries metadata marker `deerflow_checkpoint_channel_mode: "delta"` (injected via `inject_checkpoint_mode`; absence of marker = full, so pre-feature checkpoints need no migration). Before any state read/write, `ensure_checkpoint_mode_compatible` rejects a full-mode process opening a delta thread with `CheckpointModeMismatchError` (surfaced as HTTP 409 with the cause and thread id by the threads router; `CheckpointModeReconfigurationError` maps to 503) — a full-mode raw read of a delta blob would silently return empty/partial `messages`. The reverse direction is allowed: delta-mode processes read full checkpoints transparently (old full checkpoints seed the delta channel), so full → delta is the smooth migration path; delta → full requires materializing/converting the data first. Detection also honors upstream's `counters_since_delta_snapshot.messages` metadata, and an explicit config marker takes precedence over any ambient context value.
 
@@ -958,10 +962,10 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
 
 **Where things live**:
-- `runtime/checkpoint_mode.py` — mode freeze, marker injection, delta detection, compatibility gate, both error types
+- `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
 - `checkpoint_patches.py` (package root) — checkpoint-machinery patches: delta-history folding for `InMemorySaver` (delegating to the base walk), stable message IDs across materialization, upstream first-write drop fix, and `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty (MISSING) channel — Union-typed reducer channels (`sandbox`/`goal`/`todos`/`promoted`) have no constructible default, so a replace-style write into a fresh branch thread or a never-written channel stored the wrapper literally and crashed the next consumer (#4380; probe-guarded, stands down if upstream fixes it)
-- `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `DELTA_MESSAGES_FIELD` (`DeltaChannel` whose `snapshot_frequency` resolves from the `checkpoint_delta_snapshot_frequency` config knob via `freeze_delta_snapshot_frequency`/`resolved_delta_snapshot_frequency`; 1000 is only the default), schema adaptation helpers
+- `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer)
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`
 
@@ -974,8 +978,9 @@ logical checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time
 and peak RSS as versioned JSONL. The controller alternates mode order and rejects
 performance data when paired modes materialize different state. Its default 1 GiB
 estimated cumulative full-payload cap skips both modes of an oversized pair when
-`full` is selected; intentional `--modes delta` diagnostics bypass this
-full-payload cap, so size those runs explicitly. Use `--allow-large-cases` only
+`full` is selected, including every delta cadence in a `--snapshot-frequencies`
+sweep; intentional `--modes delta` diagnostics bypass this full-payload cap, so
+size those runs explicitly. Use `--allow-large-cases` only
 on a provisioned machine. Duplicate CSV matrix values are ignored with a warning;
 use `--repetitions` for repeated samples. Summarize paired successful repetitions
 with `scripts/benchmark/checkpoint/summarize_channels.py` (all ratios are
@@ -1003,8 +1008,8 @@ deterministic model, real `AsyncSqliteSaver`), then measure
 `GET /threads/{id}/state` and `POST /threads/{id}/history` through the real
 Gateway route stack in the same event loop (httpx ASGITransport), split into
 cold/warm accessor-graph-cache samples. It sweeps `snapshot_frequency`
-(config: `checkpoint_delta_snapshot_frequency`, process-frozen like the
-mode), pairs every delta frequency against the same full row, and fails both
+(config: `checkpoint_delta.snapshot_frequency`, process-frozen like the mode),
+pairs every delta frequency against the same full row, and fails both
 rows of a pair when materialized or wire digests diverge. Each case must have
 more than the two discarded warm-up turns, and SQLite DB/WAL/SHM sizes are
 captured while the saver is still open so they represent the online storage
