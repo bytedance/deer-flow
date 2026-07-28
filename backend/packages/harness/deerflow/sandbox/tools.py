@@ -1364,6 +1364,9 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime state not available")
 
     # Check if sandbox already exists in state
+    # Discarding fork_restored is safe: after_agent short-circuits on the
+    # still-wrapped state before the context-based release branch, so this
+    # reuse path never releases the parent sandbox.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
@@ -1411,6 +1414,8 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    # Same discard as the sync path above: the reuse path never releases,
+    # because after_agent short-circuits on the still-wrapped state first.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
