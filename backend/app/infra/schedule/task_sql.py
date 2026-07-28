@@ -1,5 +1,7 @@
 """SQL adapter for the schedule context's task repository.
 
+Sibling of `run_sql.py`; both consume `spec_mapping` for the stored JSON spec.
+
 Secondary adapter implementing `ScheduledTaskRepository`. SQL/ORM vocabulary
 stops at this file: methods exchange domain objects and normalize SQLite's
 tz-naive reads.
