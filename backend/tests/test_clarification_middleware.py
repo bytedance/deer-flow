@@ -121,6 +121,64 @@ class TestFormatClarificationMessage:
         assert "3. True" in result
         assert "4. None" in result
 
+    def test_options_as_xml_to_dict_single(self, middleware):
+        """Bug case (#4526): model emits XML-style options parsed to a single dict."""
+        args = {
+            "question": "Which option?",
+            "clarification_type": "approach_choice",
+            "options": {"item": "Option A", "$text": "Option B"},
+        }
+        result = middleware._format_clarification_message(args)
+        assert "1. Option A" in result
+        assert "2. Option B" in result
+
+    def test_options_as_xml_to_dict_multiple(self, middleware):
+        """XML-to-dict parser converts <item>A</item><item>B</item> to nested dict."""
+        args = {
+            "question": "Which option?",
+            "clarification_type": "approach_choice",
+            "options": {"item": [{"$text": "Option A"}, {"$text": "Option B"}, {"$text": "Option C"}]},
+        }
+        result = middleware._format_clarification_message(args)
+        assert "1. Option A" in result
+        assert "2. Option B" in result
+        assert "3. Option C" in result
+
+    def test_options_as_xml_to_dict_mixed_structure(self, middleware):
+        """Complex XML-to-dict with nested elements and text nodes."""
+        args = {
+            "question": "Pick one",
+            "clarification_type": "approach_choice",
+            "options": {
+                "item": [
+                    {"$text": "First choice"},
+                    {"sub": {"$text": "Second choice"}},
+                    "Third choice",
+                ],
+            },
+        }
+        result = middleware._format_clarification_message(args)
+        assert "1. First choice" in result
+        assert "2. Second choice" in result
+        assert "3. Third choice" in result
+
+    def test_dict_options_normalized_in_payload(self, middleware):
+        """Dict options must produce correct structured payload, not raw dict strings."""
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Pick your environment",
+                "clarification_type": "approach_choice",
+                "options": {"item": [{"$text": "Development"}, {"$text": "Production"}]},
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+        assert payload["input_mode"] == "choice_with_other"
+        assert payload["options"] == [
+            {"id": "option-1", "label": "Development", "value": "Development"},
+            {"id": "option-2", "label": "Production", "value": "Production"},
+        ]
+
 
 class TestHumanInputPayload:
     """Tests for structured human input request payloads."""

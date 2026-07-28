@@ -85,6 +85,32 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
         return f"clarification:{digest}"
 
+    def _extract_scalar_values(self, obj: Any) -> list[str]:
+        """Recursively extract scalar leaf values from an XML-to-dict structure.
+
+        When models emit XML-style options (e.g. ``<item>A</item><item>B</item>``),
+        upstream parsers convert them to nested dicts (e.g. ``{"item": [{"$text": "A"}, {"$text": "B"}]}``).
+        This method flattens those structures into a clean list of displayable strings.
+        """
+        result: list[str] = []
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "$text":
+                    if isinstance(value, (str, int, float)):
+                        text = str(value).strip()
+                        if text:
+                            result.append(text)
+                else:
+                    result.extend(self._extract_scalar_values(value))
+        elif isinstance(obj, list):
+            for item in obj:
+                result.extend(self._extract_scalar_values(item))
+        elif isinstance(obj, (str, int, float)):
+            text = str(obj).strip()
+            if text:
+                result.append(text)
+        return result
+
     def _normalize_options(self, raw_options: Any) -> list[str]:
         """Normalize tool-provided options into displayable string values."""
         options = raw_options
@@ -100,6 +126,13 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         if options is None:
             return []
+
+        # Handle XML-to-dict parsing results: models that emit XML-style
+        # option tags get parsed into nested dict structures that would
+        # otherwise render as raw Python dict syntax in the UI.
+        if isinstance(options, dict):
+            options = self._extract_scalar_values(options)
+
         if not isinstance(options, list):
             options = [options]
 
