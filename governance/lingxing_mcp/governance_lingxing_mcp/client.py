@@ -31,8 +31,12 @@ class LingXingClient:
             if entry is not None and time.time() < entry[1]:
                 return entry[0]
 
-        # 构造签名参数
-        access_token = self._auth.get_access_token()
+        # 构造签名参数（鉴权失败也返回统一 dict，避免异常逃逸到调用方）
+        try:
+            access_token = self._auth.get_access_token()
+        except Exception as e:
+            logger.warning("lingxing auth failed for %s %s: %s", method, path, e)
+            return {"code": -1, "message": f"auth failed: {e}", "data": []}
         sign_params = dict(params)
         sign_params["access_token"] = access_token
         sign_params["app_key"] = self._config.app_id
