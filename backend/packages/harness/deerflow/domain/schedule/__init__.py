@@ -9,7 +9,6 @@ tests, not everyday call-site symbols.
 
 from deerflow.domain.schedule.model import (
     ACTIVE_RUN_STATUSES,
-    CRON_FIELD_COUNT,
     TERMINAL_RUN_STATUSES,
     TERMINAL_TASK_STATUSES,
     ActiveRunConflictError,
@@ -35,7 +34,6 @@ from deerflow.domain.schedule.model import (
 
 __all__ = [
     "ACTIVE_RUN_STATUSES",
-    "CRON_FIELD_COUNT",
     "TERMINAL_RUN_STATUSES",
     "TERMINAL_TASK_STATUSES",
     "ActiveRunConflictError",

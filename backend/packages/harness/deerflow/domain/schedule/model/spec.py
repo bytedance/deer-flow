@@ -118,6 +118,9 @@ class ScheduleSpec:
         zone = ZoneInfo(self.timezone)
         next_local = croniter(self.cron, now.astimezone(zone)).get_next(datetime)
         if next_local.tzinfo is None:
+            # Unreachable with an aware input on today's croniter, and kept
+            # verbatim from schedules.py:51-52 rather than dropped: it costs
+            # one branch and guards a library detail we do not control.
             next_local = next_local.replace(tzinfo=zone)
         return next_local.astimezone(UTC)
 

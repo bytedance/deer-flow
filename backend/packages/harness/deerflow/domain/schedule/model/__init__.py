@@ -39,12 +39,11 @@ from deerflow.domain.schedule.model.errors import (
     ThreadNotFoundError,
 )
 from deerflow.domain.schedule.model.run import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledRun
-from deerflow.domain.schedule.model.spec import CRON_FIELD_COUNT, SchedulePolicy, ScheduleSpec
+from deerflow.domain.schedule.model.spec import SchedulePolicy, ScheduleSpec
 from deerflow.domain.schedule.model.task import TERMINAL_TASK_STATUSES, ScheduledTask
 
 __all__ = [
     "ACTIVE_RUN_STATUSES",
-    "CRON_FIELD_COUNT",
     "TERMINAL_RUN_STATUSES",
     "TERMINAL_TASK_STATUSES",
     "ActiveRunConflictError",

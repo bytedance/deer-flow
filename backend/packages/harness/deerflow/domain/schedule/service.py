@@ -80,6 +80,14 @@ class DispatchResult:
 
 
 class ScheduleService:
+    """Every scheduled-task use case, orchestrated over the four output ports.
+
+    The input port of this context: primary adapters (an HTTP router, the
+    poller, the run-completion hook) call these methods and translate what
+    comes back. Domain errors are allowed to propagate -- mapping them onto a
+    protocol is the adapter's job, not this class's.
+    """
+
     def __init__(
         self,
         *,
@@ -98,9 +106,15 @@ class ScheduleService:
     # ------------------------------------------------------------------ reads
 
     async def list_tasks(self, user_id: str) -> list[ScheduledTask]:
+        """Every task the user owns, newest first."""
         return await self._tasks.list_by_user(user_id)
 
     async def list_tasks_by_thread(self, user_id: str, thread_id: str) -> list[ScheduledTask]:
+        """The user's tasks bound to one thread.
+
+        Only reuse_thread tasks can appear: a fresh-thread task carries no
+        binding to show.
+        """
         return await self._tasks.list_by_user_and_thread(user_id, thread_id)
 
     async def get_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
@@ -190,10 +204,15 @@ class ScheduleService:
         return await self._save(task)
 
     async def pause_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
+        """Stop claiming this task until it is resumed.
+
+        Refused while the task is being dispatched -- see `ensure_mutable`.
+        """
         task = await self.get_task(task_id, user_id=user_id)
         return await self._save(task.paused())
 
     async def resume_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
+        """Re-admit this task to claiming. Same gate as `pause_task`."""
         task = await self.get_task(task_id, user_id=user_id)
         return await self._save(task.resumed())
 

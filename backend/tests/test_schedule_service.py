@@ -555,6 +555,33 @@ class TestTaskManagement:
         assert updated.prompt == task.prompt
         assert updated.schedule == task.schedule
 
+    async def test_update_can_change_the_prompt(self):
+        service = make_service()
+        task = await create_cron_task(service)
+
+        updated = await service.update_task(task.task_id, user_id="user-1", now=NOW, prompt="new instructions")
+
+        assert updated.prompt == "new instructions"
+        assert updated.title == task.title
+
+    async def test_a_task_deleted_mid_update_reports_as_missing(self):
+        """get_task saw it, save no longer does -- a concurrent delete landed
+        in between. The caller gets the same not-found it would have got a
+        moment earlier, rather than a None leaking out."""
+
+        class _VanishingRepo(InMemoryScheduledTaskRepository):
+            async def save(self, _task):
+                return None
+
+        tasks = _VanishingRepo()
+        service = make_service(tasks=tasks)
+        task = await create_cron_task(service)
+
+        with pytest.raises(TaskNotFoundError):
+            await service.update_task(task.task_id, user_id="user-1", now=NOW, title="x")
+        with pytest.raises(TaskNotFoundError):
+            await service.pause_task(task.task_id, user_id="user-1")
+
     async def test_context_is_changed_through_the_packaged_value(self):
         """context_mode and thread_id move together, so they are supplied
         together -- which is what lets every other update field use plain

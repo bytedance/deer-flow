@@ -174,6 +174,12 @@ class TestEnsureLaunchable:
         spec = cron_spec("* * * * *", "UTC")
         assert spec.ensure_launchable(NOW, MIN_60) is not None
 
+    def test_naive_now_is_read_as_utc(self):
+        """Same tolerance as next_after: a caller handing over a naive clock
+        reading must not silently shift the delay floor by the local offset."""
+        spec = once_spec(after_seconds=3600)
+        assert spec.ensure_launchable(NOW.replace(tzinfo=None), MIN_60) == spec.ensure_launchable(NOW, MIN_60)
+
     def test_matches_next_after_for_a_valid_once_schedule(self):
         spec = once_spec(after_seconds=3600)
         assert spec.ensure_launchable(NOW, MIN_60) == spec.next_after(NOW)
