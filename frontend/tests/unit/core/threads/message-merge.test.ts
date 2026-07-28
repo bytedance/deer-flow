@@ -14,6 +14,7 @@ import {
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
   reconcileThreadHistoryRows,
   removeSetItems,
@@ -467,6 +468,54 @@ test("buildThreadMessagesPageUrl returns a relative URL behind nginx", () => {
   );
 });
 
+test("parseThreadMessagesPageResponse accepts a valid history page", () => {
+  const response = {
+    data: [runMessage(1), runMessage(2)],
+    has_more: true,
+    next_before_seq: 1,
+  };
+
+  expect(parseThreadMessagesPageResponse(response)).toBe(response);
+});
+
+test.each([
+  ["missing", undefined],
+  ["non-numeric", "2"],
+  ["fractional", 2.5],
+  ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+])(
+  "parseThreadMessagesPageResponse rejects a %s row seq",
+  (_description, seq) => {
+    expect(() =>
+      parseThreadMessagesPageResponse({
+        data: [{ ...runMessage(1), seq }],
+        has_more: false,
+        next_before_seq: null,
+      }),
+    ).toThrow("invalid seq");
+  },
+);
+
+test("parseThreadMessagesPageResponse rejects duplicate row seq values", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1), runMessage(1)],
+      has_more: false,
+      next_before_seq: null,
+    }),
+  ).toThrow("duplicate seq");
+});
+
+test("parseThreadMessagesPageResponse rejects an invalid pagination cursor", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1)],
+      has_more: true,
+      next_before_seq: null,
+    }),
+  ).toThrow("invalid next_before_seq");
+});
+
 test("flattenThreadHistoryPages prepends backward pages in global seq order", () => {
   expect(
     flattenThreadHistoryPages([
@@ -555,6 +604,47 @@ test("reconcileThreadHistoryRows trusts a complete snapshot and prunes missing r
       true,
     ),
   ).toEqual(currentRows);
+});
+
+test("reconcileThreadHistoryRows preserves existing history when a row seq is invalid", () => {
+  const previousRows = [runMessage(1), runMessage(2)];
+  const invalidRow = {
+    ...runMessage(3),
+    seq: undefined,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  expect(reconcileThreadHistoryRows(previousRows, [invalidRow], false)).toBe(
+    previousRows,
+  );
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
+});
+
+test("reconcileThreadHistoryRows keeps insertion order on an invalid initial snapshot", () => {
+  const first = {
+    ...runMessage(1),
+    seq: undefined,
+    content: { id: "first", type: "human", content: "first" } as Message,
+  } as unknown as RunMessage;
+  const second = {
+    ...runMessage(2),
+    seq: undefined,
+    content: { id: "second", type: "ai", content: "second" } as Message,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const currentRows = [first, second];
+
+  expect(reconcileThreadHistoryRows([], currentRows, false)).toBe(currentRows);
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
 });
 
 test("infinite history refetch recalculates older-page cursors from the refreshed newest page", async () => {

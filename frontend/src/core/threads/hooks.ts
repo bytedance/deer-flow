@@ -292,6 +292,56 @@ export type ThreadMessagesPageResponse = {
   next_before_seq: number | null;
 };
 
+function isValidThreadMessageSeq(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * Validate the sequence fields that history reconciliation and pagination use
+ * as runtime identities. The static RunMessage type cannot protect this JSON
+ * boundary from version skew or malformed responses.
+ */
+export function parseThreadMessagesPageResponse(
+  value: unknown,
+): ThreadMessagesPageResponse {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Thread history returned an invalid response.");
+  }
+
+  const data = Reflect.get(value, "data");
+  const hasMore = Reflect.get(value, "has_more");
+  const nextBeforeSeq = Reflect.get(value, "next_before_seq");
+  if (!Array.isArray(data) || typeof hasMore !== "boolean") {
+    throw new Error("Thread history returned an invalid response.");
+  }
+
+  const seenSeqs = new Set<number>();
+  for (const row of data) {
+    const seq =
+      typeof row === "object" && row !== null
+        ? Reflect.get(row, "seq")
+        : undefined;
+    if (!isValidThreadMessageSeq(seq)) {
+      throw new Error("Thread history returned a row with an invalid seq.");
+    }
+    if (seenSeqs.has(seq)) {
+      throw new Error("Thread history returned duplicate seq values.");
+    }
+    seenSeqs.add(seq);
+  }
+
+  if (
+    (hasMore && !isValidThreadMessageSeq(nextBeforeSeq)) ||
+    (!hasMore && nextBeforeSeq !== null)
+  ) {
+    throw new Error(
+      "Thread history returned an invalid next_before_seq cursor.",
+    );
+  }
+
+  return value as ThreadMessagesPageResponse;
+}
+
 export function getThreadHistoryNextPageParam(
   lastPage: ThreadMessagesPageResponse,
 ): number | undefined {
@@ -353,10 +403,20 @@ export function reconcileThreadHistoryRows(
   currentRows: RunMessage[],
   isAuthoritativeComplete: boolean,
 ): RunMessage[] {
-  const rowsBySeq = new Map<number, RunMessage>();
   const sourceRows = isAuthoritativeComplete
     ? currentRows
     : [...previousRows, ...currentRows];
+  if (sourceRows.some((row) => !isValidThreadMessageSeq(row.seq))) {
+    console.error(
+      "Thread history reconciliation received an invalid sequence value.",
+    );
+    // Never skip an invalid row or feed it into Map/Array.sort: either choice
+    // can silently lose or misorder messages. A failed refresh keeps the last
+    // known-good snapshot; an invalid first snapshot degrades to server order.
+    return previousRows.length > 0 ? previousRows : currentRows;
+  }
+
+  const rowsBySeq = new Map<number, RunMessage>();
   for (const row of sourceRows) {
     rowsBySeq.set(row.seq, row);
   }
@@ -2177,7 +2237,7 @@ export function useThreadHistory(
           ),
         );
       }
-      return (await response.json()) as ThreadMessagesPageResponse;
+      return parseThreadMessagesPageResponse(await response.json());
     },
     getNextPageParam: getThreadHistoryNextPageParam,
   });
