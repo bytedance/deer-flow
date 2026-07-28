@@ -25,6 +25,7 @@ from deerflow.domain.schedule.model import (
     RunStatus,
     ScheduledRun,
     ScheduledTask,
+    ScheduleType,
     TaskStatus,
 )
 from deerflow.domain.schedule.ports import LaunchedRun
@@ -155,7 +156,7 @@ class InMemoryScheduledTaskRepository:
     async def cancel_stuck_once_tasks(self, *, error: str) -> int:
         cancelled = 0
         for row in self._rows.values():
-            stuck = row.task.status is TaskStatus.RUNNING and row.task.schedule.schedule_type.value == "once" and row.lease_expires_at is None
+            stuck = row.task.status is TaskStatus.RUNNING and row.task.schedule.schedule_type is ScheduleType.ONCE and row.lease_expires_at is None
             if stuck:
                 row.task = replace(row.task, status=TaskStatus.CANCELLED, last_error=error)
                 cancelled += 1

@@ -14,9 +14,28 @@ CRON_FIELD_COUNT = 5
 
 @dataclass(frozen=True)
 class SchedulePolicy:
-    """Operator-tunable thresholds the domain needs but must not read itself."""
+    """Operator-tunable thresholds the domain needs but must not read itself.
+
+    Built by the composition root from the scheduler configuration and passed
+    in. Deliberately not held by any aggregate: a task whose meaning changes
+    with deployment config is not a domain object.
+
+    The defaults are the permissive ones on purpose -- "nobody configured a
+    policy" must not invent a business constraint. Real values only ever
+    arrive from the outer ring.
+    """
 
     min_once_delay_seconds: int = 0
+    """How far ahead a one-shot schedule must be at submission time. Read by
+    `ScheduleSpec.ensure_launchable`; a cron schedule is never subject to it."""
+
+    max_concurrent_runs: int = 1
+    """Ceiling on active scheduled executions across ALL tasks. Long runs
+    accumulate across polls, so each poll may only claim into what is left."""
+
+    lease_seconds: int = 60
+    """How long a claim on a task stays valid. Bounds how quickly a task
+    orphaned between claim and dispatch becomes reachable again."""
 
 
 @dataclass(frozen=True)
