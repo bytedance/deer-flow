@@ -180,7 +180,9 @@ function useStableMessageGroups(
   const previousGroupsRef = useRef<ThreadMessageGroup[]>([]);
   const previousIsLoadingRef = useRef(false);
   return useMemo(() => {
-    const nextGroups = getMessageGroups(messages);
+    const nextGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: isLoading,
+    });
     const previousGroups = previousGroupsRef.current;
     const activeGroupIndex =
       isLoading || previousIsLoadingRef.current ? nextGroups.length - 1 : -1;
