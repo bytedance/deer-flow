@@ -8,6 +8,7 @@ import {
   reasoningPlugins,
   streamdownPlugins,
   streamdownRenderingPlugins,
+  streamdownSmoothStreamingAnimation,
   streamdownWordAnimation,
 } from "@/core/streamdown/plugins";
 
@@ -22,6 +23,15 @@ test("streaming word animation uses Streamdown's stable incremental animation", 
     animation: "fadeIn",
     duration: 200,
     sep: "word",
+  });
+});
+
+test("smooth message streaming does not add a cumulative word delay", () => {
+  expect(streamdownSmoothStreamingAnimation).toEqual({
+    animation: "fadeIn",
+    duration: 200,
+    sep: "word",
+    stagger: 0,
   });
 });
 
