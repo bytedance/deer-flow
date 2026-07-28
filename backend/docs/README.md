@@ -7,6 +7,8 @@ This directory contains detailed documentation for the DeerFlow backend.
 | Document | Description |
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture overview |
+| [HEXAGONAL_ARCHITECTURE_zh.md](HEXAGONAL_ARCHITECTURE_zh.md) | 六边形（Ports & Adapters）分层总纲：规则、AWS 官方结构对应、两类从适配器、边界如何被测试守住 |
+| [FEEDBACK_DESIGN_zh.md](FEEDBACK_DESIGN_zh.md) | 用户反馈模块设计：首个完成的六边形切片，聚合/端口/适配器逐层走读与二次开发指引 |
 | [API.md](API.md) | Complete API reference |
 | [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, platform-trust (IM / Internal Auth), and per-user isolation |
 | [SSO.md](SSO.md) | OIDC / SSO single sign-on |
@@ -39,6 +41,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
 3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Building integrations?** Check [API.md](API.md) for API reference
+5. **Wondering why the layers are split the way they are?** Read [HEXAGONAL_ARCHITECTURE_zh.md](HEXAGONAL_ARCHITECTURE_zh.md) for the rules, then [FEEDBACK_DESIGN_zh.md](FEEDBACK_DESIGN_zh.md) for a worked example
 
 ## Document Organization
 
@@ -46,6 +49,8 @@ This directory contains detailed documentation for the DeerFlow backend.
 docs/
 ├── README.md                  # This file
 ├── ARCHITECTURE.md            # System architecture
+├── HEXAGONAL_ARCHITECTURE_zh.md  # Hexagonal layering rules (zh)
+├── FEEDBACK_DESIGN_zh.md      # Feedback module design (zh) — first hexagonal slice
 ├── API.md                     # API reference
 ├── AUTH_DESIGN.md             # User authentication and isolation design
 ├── CONFIGURATION.md           # Configuration guide
