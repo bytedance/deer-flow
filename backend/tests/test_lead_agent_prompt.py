@@ -334,7 +334,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
 
     manager = SimpleNamespace(get_context=fake_get_context)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
-    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+    monkeypatch.setattr("deerflow.runtime.user_context.resolve_runtime_user_id", lambda runtime: "user-1")
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
 
     context = prompt_module._get_memory_context("agent-a", app_config=explicit_config)
@@ -344,6 +344,39 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     assert captured == {
         "agent_name": "agent-a",
         "user_id": "user-1",
+    }
+
+
+def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True),
+    )
+    captured: dict[str, object] = {}
+
+    def fail_resolve_runtime_user_id(runtime):
+        raise AssertionError("explicit user_id must bypass ambient identity resolution")
+
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+        captured["agent_name"] = agent_name
+        captured["user_id"] = user_id
+        return "remember this"
+
+    monkeypatch.setattr("deerflow.runtime.user_context.resolve_runtime_user_id", fail_resolve_runtime_user_id)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: SimpleNamespace(get_context=fake_get_context),
+    )
+
+    context = prompt_module._get_memory_context(
+        "agent-a",
+        app_config=explicit_config,
+        user_id="runtime-user",
+    )
+
+    assert "<memory>" in context
+    assert captured == {
+        "agent_name": "agent-a",
+        "user_id": "runtime-user",
     }
 
 
