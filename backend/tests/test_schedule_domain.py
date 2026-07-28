@@ -13,12 +13,13 @@ through the service's integration tests.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from deerflow.domain.schedule.model import (
-    ACTIVE_RUN_STATUSES,
     ContextMode,
     InvalidContextModeError,
     InvalidScheduleError,
@@ -101,15 +102,12 @@ class TestScheduleSpecInvariants:
         assert spec.run_at.astimezone(UTC) == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
 
     def test_aware_run_at_is_left_alone(self):
+        """Covers the shape the frontend submits (`zonedLocalToUtcIso`, trailing
+        Z): already aware, so localization must leave it alone rather than
+        reinterpreting it in the task's timezone. Parsing that spelling is
+        `from_primitives`' job and is tested there."""
         run_at = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
         assert ScheduleSpec.once_at(run_at, "Asia/Shanghai").run_at == run_at
-
-    def test_zulu_iso_input_is_accepted_as_the_same_instant(self):
-        """The shape the frontend actually submits: `zonedLocalToUtcIso` output,
-        which carries a trailing Z. It is already aware, so localization must
-        leave it alone rather than reinterpreting it in the task's timezone."""
-        spec = ScheduleSpec.once_at(datetime.fromisoformat("2026-08-01T01:00:00Z"), "Asia/Shanghai")
-        assert spec.run_at == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------- A2. from_primitives
@@ -249,9 +247,26 @@ class TestEnsureLaunchable:
         spec = once_spec(after_seconds=3600)
         assert spec.ensure_launchable(NOW.replace(tzinfo=None), MIN_60) == spec.ensure_launchable(NOW, MIN_60)
 
-    def test_matches_next_after_for_a_valid_once_schedule(self):
-        spec = once_spec(after_seconds=3600)
-        assert spec.ensure_launchable(NOW, MIN_60) == spec.next_after(NOW)
+
+class TestSchedulePolicyDefaults:
+    """ "Nobody configured a policy" must not invent a business constraint.
+
+    Real values only ever arrive from the composition root (spec.py:22-25). The
+    defaults being the permissive ones is what keeps an unconfigured deployment
+    from silently rejecting schedules a configured one would accept -- so they
+    are pinned here rather than left to whatever the dataclass happens to say.
+    """
+
+    def test_defaults_are_permissive(self):
+        policy = SchedulePolicy()
+        assert policy.min_once_delay_seconds == 0
+        assert policy.max_concurrent_runs == 1
+        assert policy.lease_seconds == 60
+
+    def test_the_default_delay_floor_admits_an_imminent_once_schedule(self):
+        """The consequence of the constant above, stated as behaviour: with no
+        configured policy a one-second-away one-shot is legal."""
+        assert once_spec(after_seconds=1).ensure_launchable(NOW, SchedulePolicy()) == NOW + timedelta(seconds=1)
 
 
 # ---------------------------------------------------------------- D. value semantics
@@ -412,17 +427,14 @@ class TestStatusAfterCompletion:
         ("outcome", "expected"),
         [
             (RunStatus.SUCCESS, TaskStatus.COMPLETED),
+            # INTERRUPTED is CANCELLED rather than FAILED: a user cancel or a
+            # same-thread takeover carries no execution failure.
             (RunStatus.INTERRUPTED, TaskStatus.CANCELLED),
             (RunStatus.FAILED, TaskStatus.FAILED),
         ],
     )
     def test_once_maps_each_terminal_outcome(self, outcome, expected):
         assert make_task(schedule=once_spec()).status_after_completion(outcome) is expected
-
-    def test_interrupted_is_cancelled_not_failed(self):
-        """A user cancel or same-thread takeover carries no execution failure."""
-        task = make_task(schedule=once_spec())
-        assert task.status_after_completion(RunStatus.INTERRUPTED) is TaskStatus.CANCELLED
 
 
 # ---------------------------------------------------------------- G. mutability gate
@@ -453,6 +465,16 @@ class TestMutabilityGate:
         task = make_task(status=TaskStatus.ENABLED)
         task.paused()
         assert task.status is TaskStatus.ENABLED
+
+    def test_transitions_leave_updated_at_to_the_repository(self):
+        """The repository stamps `updated_at` on write (task.py:54-57). A second
+        clock read here would make the domain impure and a competing source of
+        truth for the same column."""
+        task = make_task(status=TaskStatus.ENABLED)
+        assert task.paused().updated_at == task.updated_at
+        assert task.paused().resumed().updated_at == task.updated_at
+        assert task.with_schedule(cron_spec("0 10 * * *"), now=NOW, policy=NO_DELAY).updated_at == task.updated_at
+        assert task.with_context(ContextMode.FRESH_THREAD_PER_RUN, None).updated_at == task.updated_at
 
 
 # ---------------------------------------------------------------- H. with_schedule
@@ -525,12 +547,20 @@ class TestResolveExecutionThread:
 
     def test_reuse_thread_with_an_empty_thread_falls_back_to_a_fresh_one(self):
         """Unreachable for new aggregates (__post_init__ forbids it) but rows
-        predating that invariant can still carry this shape."""
-        task = make_task()
+        predating that invariant can still carry this shape.
+
+        Asserting against the fresh-thread semantics rather than against `None`:
+        the fallback has to mint a real, distinct thread per call, which is what
+        the fresh-thread branch means.
+        """
         legacy = ScheduledTask.__new__(ScheduledTask)
         object.__setattr__(legacy, "context_mode", ContextMode.REUSE_THREAD)
         object.__setattr__(legacy, "thread_id", None)
-        assert ScheduledTask.resolve_execution_thread(legacy) != task.thread_id
+
+        first = ScheduledTask.resolve_execution_thread(legacy)
+        second = ScheduledTask.resolve_execution_thread(legacy)
+        assert uuid.UUID(first), "a real thread id, not a placeholder"
+        assert first != second, "a fresh thread per call, like FRESH_THREAD_PER_RUN"
 
 
 # ---------------------------------------------------------------- K. ScheduledRun
@@ -555,5 +585,27 @@ class TestScheduledRun:
         second = ScheduledRun.queued(task_id="task-1", thread_id="t", scheduled_for=NOW, trigger=TriggerKind.MANUAL)
         assert first.record_id != second.record_id
 
-    def test_active_statuses_are_exactly_queued_and_running(self):
-        assert ACTIVE_RUN_STATUSES == (RunStatus.QUEUED, RunStatus.RUNNING)
+    @pytest.mark.parametrize(
+        ("status", "active"),
+        [
+            (RunStatus.QUEUED, True),
+            (RunStatus.RUNNING, True),
+            (RunStatus.SUCCESS, False),
+            (RunStatus.FAILED, False),
+            (RunStatus.SKIPPED, False),
+            (RunStatus.INTERRUPTED, False),
+        ],
+    )
+    def test_only_queued_and_running_occupy_the_active_slot(self, status, active):
+        """Stated as behaviour over every status rather than as an equality
+        against ACTIVE_RUN_STATUSES -- restating the constant proves nothing,
+        since editing it would edit the assertion with it. The other half of
+        this rule, that the set matches the partial unique index's predicate,
+        cannot be checked from a dependency-free domain test and lives in
+        test_scheduled_task_models.py.
+        """
+        run = replace(
+            ScheduledRun.queued(task_id="task-1", thread_id="thread-1", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED),
+            status=status,
+        )
+        assert run.is_active is active

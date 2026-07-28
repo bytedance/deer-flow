@@ -32,7 +32,6 @@ from app.adapters.schedule.scheduled_run_repository import SqlScheduledRunReposi
 from app.adapters.schedule.scheduled_task_repository import SqlScheduledTaskRepository
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.domain.schedule.model import (
-    ACTIVE_RUN_STATUSES,
     ActiveRunConflictError,
     ContextMode,
     RunStatus,
@@ -531,9 +530,6 @@ class TestRunStatusWrites:
         assert by_id[active.record_id].status is RunStatus.INTERRUPTED
         assert by_id[active.record_id].error == "gateway restarted"
         assert by_id[done.record_id].status is RunStatus.SKIPPED
-
-    async def test_active_statuses_are_exactly_queued_and_running(self):
-        assert ACTIVE_RUN_STATUSES == (RunStatus.QUEUED, RunStatus.RUNNING)
 
 
 class TestLauncherAndThreadLookup:

@@ -176,6 +176,11 @@ class TestFullLifecycle:
         assert after_skip.run_count == 1, "a skip is not an execution"
         assert after_skip.last_run_id == after_launch.last_run_id, "bookkeeping carried over"
         assert after_skip.status is TaskStatus.ENABLED
+        # Only a lost one-shot occurrence is worth surfacing; a cron task simply
+        # waits for its next turn, so the skip must not leave a user-visible
+        # error behind (service.py:455). The `once` half is covered by
+        # TestOnceTaskDispatch.test_a_skipped_once_task_is_failed_not_completed.
+        assert after_skip.last_error is None, "a routine cron overlap is not an error to report"
 
         # -- the first run finally finishes ----------------------------------
         record = next(r for r in runs.all_runs() if r.status is RunStatus.RUNNING)
@@ -270,6 +275,47 @@ class TestDispatchOutcomes:
         assert result.run_id is None
         assert "provider exploded" in result.error
         assert runs.all_runs()[0].status is RunStatus.FAILED
+
+    async def test_a_failed_launch_replaces_the_previous_run_bookkeeping(self):
+        """A failed launch is still an execution *attempt*, so it overwrites the
+        launch bookkeeping rather than carrying it over the way a skip does
+        (contrast `_finalize_skip`, which passes the current values back).
+
+        `record_launch` assigns every field unconditionally, so this is what
+        `last_run_id=None` in `_fail` actually means for a task that had already
+        run successfully: the id of the previous, unrelated run must not be left
+        pointing at a launch that never happened.
+        """
+        launcher = FakeRunLauncher()
+        runs = InMemoryScheduledRunRepository()
+        service = make_service(runs=runs, launcher=launcher)
+        task = await create_cron_task(service)
+        await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        succeeded = await service.get_task(task.task_id, user_id="user-1")
+        assert succeeded.last_run_id == "run-1", "precondition: a successful launch was recorded"
+
+        # The slot has to be free, or the next dispatch is an overlap instead.
+        await service.handle_run_completion(
+            RunOutcome(
+                task_id=task.task_id,
+                record_id=runs.all_runs()[0].record_id,
+                run_id="run-1",
+                user_id="user-1",
+                status=RunStatus.SUCCESS,
+                error=None,
+            ),
+            now=NOW,
+        )
+        launcher.fail_with = LaunchFailedError("provider exploded")
+        reloaded = await service.get_task(task.task_id, user_id="user-1")
+
+        await service.dispatch_task(reloaded, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        after = await service.get_task(task.task_id, user_id="user-1")
+        assert after.last_run_id is None, "no run started, so no run id to point at"
+        assert after.last_error == "provider exploded"
+        assert after.last_run_at == NOW, "the attempt itself is timestamped"
+        assert after.run_count == 1, "a failed launch is not a completed execution"
 
     async def test_busy_thread_on_the_scheduled_path_degrades_to_a_skip(self):
         launcher = FakeRunLauncher(fail_with=ThreadBusyError("thread busy"))
@@ -412,16 +458,34 @@ class TestRunOnceBudget:
         assert len(results) == 2
         assert all(r.outcome is DispatchOutcome.LAUNCHED for r in results)
 
-    async def test_a_claimed_task_is_marked_running_before_dispatch(self):
+    async def test_the_claim_is_held_across_the_launch_and_released_after(self):
         """Claiming is what makes the task uneditable while it is being
-        dispatched, so the claim must land before the launch."""
+        dispatched, so the claim has to be live *at the moment of the launch* --
+        not merely taken at some point and released by the end.
+
+        The launch is the only place that ordering is observable, so the
+        launcher double reads the repository from inside `launch`. Asserting
+        only on the end state would pass even if the claim were taken after the
+        run had already started.
+        """
         tasks = InMemoryScheduledTaskRepository()
-        service = make_service(tasks=tasks)
+        observed: dict = {}
+
+        class _ObservingLauncher(FakeRunLauncher):
+            async def launch(self, **kwargs):
+                task_id = kwargs["metadata"]["scheduled_task_id"]
+                observed["lease"] = tasks.lease_of(task_id)
+                observed["status"] = (await tasks.get(task_id, user_id="user-1")).status
+                return await super().launch(**kwargs)
+
+        service = make_service(tasks=tasks, launcher=_ObservingLauncher())
         task = await create_cron_task(service)
 
         await service.run_once(now=task.next_run_at + timedelta(seconds=1))
 
-        assert tasks.lease_of(task.task_id) == (None, None), "the claim is released after dispatch"
+        assert observed["status"] is TaskStatus.RUNNING, "the claim marks the task running before the launch"
+        assert observed["lease"][1] is not None, "and the lease is still held while the run starts"
+        assert tasks.lease_of(task.task_id) == (None, None), "released only once the dispatch is done"
 
 
 # ==================================================================== completion
@@ -493,8 +557,28 @@ class TestRunCompletion:
         assert after.status is TaskStatus.ENABLED, "the schedule outlives any single run"
         assert after.last_error == "boom"
 
-    async def test_a_task_deleted_mid_flight_is_not_an_error(self):
-        service, task, record = await self._launched_once_task()
+    async def test_a_task_deleted_mid_flight_still_finalizes_its_run(self):
+        """A task deleted while its run was in flight has nothing to write back,
+        and that is not an error -- but the *run* record must still be closed.
+
+        The hook writes the record first and only then reads the task, so
+        asserting on the record is what keeps that ordering honest; a test that
+        only checked "no exception" would stay green if the record write were
+        dropped entirely.
+        """
+        runs = InMemoryScheduledRunRepository()
+        service = make_service(runs=runs)
+        task = await service.create_task(
+            user_id="user-1",
+            title="one shot",
+            prompt="go",
+            schedule=once_spec(),
+            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+            thread_id=None,
+            now=NOW,
+        )
+        await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        record = runs.all_runs()[0]
         await service.delete_task(task.task_id, user_id="user-1")
 
         await service.handle_run_completion(
@@ -508,6 +592,11 @@ class TestRunCompletion:
             ),
             now=NOW,
         )
+
+        stored = runs.all_runs()[0]
+        assert stored.status is RunStatus.SUCCESS, "the execution record is finalized regardless"
+        assert stored.finished_at == NOW
+        assert await runs.count_active() == 0, "the active slot is freed"
 
     async def test_a_cron_task_survives_a_launch_write_landing_mid_completion(self):
         """The interleaving `dispatch_task` already admits is possible.
