@@ -712,6 +712,19 @@ def _resolve_sandbox_runtime_readiness(
 
 
 LARK_BROKER_MODE_TTL_SECONDS = 60
+# Negative results (broker not active) are cached longer than positive ones: a
+# non-broker remote-provisioner deployment stays non-broker for the life of the
+# process far more often than it flips on, so this keeps the hot bash path from
+# re-probing every minute. A positive result still refreshes on the shorter TTL.
+LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS = 300
+# Tight probe budget on the per-bash-call hot path: unlike the Settings status
+# probe (5s, user is waiting on a page), this runs inline before a sandbox
+# lark-cli command, so a slow/unreachable provisioner must not add seconds of
+# latency to every first-call-per-TTL for non-broker deployments.
+LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS = 1.5
+# Guards the cache attribute on sandbox_lark_broker_active against concurrent
+# bash invocations so the correctness story doesn't rely on idempotent races.
+_LARK_BROKER_MODE_CACHE_LOCK = threading.Lock()
 
 
 def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
@@ -722,6 +735,10 @@ def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
     remote provisioner that reports a configured broker image; any other config
     (local AIO, init-container binary mode, unreachable provisioner) is False, so
     the caller falls back to the credential-mount overlay.
+
+    The probe uses a tight timeout and negatives are cached longer than positives
+    so a non-broker remote-provisioner deployment does not pay a latency penalty
+    on the bash hot path.
     """
     if config is None:
         try:
@@ -732,15 +749,20 @@ def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
             return False
 
     now = time.monotonic()
-    cached = getattr(sandbox_lark_broker_active, "_cache", None)
-    if cached is not None and now - cached[0] < LARK_BROKER_MODE_TTL_SECONDS:
-        return cached[1]
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        cached = getattr(sandbox_lark_broker_active, "_cache", None)
+        if cached is not None:
+            ts, value = cached
+            ttl = LARK_BROKER_MODE_TTL_SECONDS if value else LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS
+            if now - ts < ttl:
+                return value
 
     active = False
     if _uses_aio_sandbox(config) and _uses_remote_provisioner(config):
-        caps = _probe_provisioner_capabilities(config)
+        caps = _probe_provisioner_capabilities(config, timeout=LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS)
         active = bool(caps and caps["lark_cli_broker_image"])
-    sandbox_lark_broker_active._cache = (now, active)  # type: ignore[attr-defined]
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        sandbox_lark_broker_active._cache = (now, active)  # type: ignore[attr-defined]
     return active
 
 
@@ -920,12 +942,14 @@ def _uses_remote_provisioner(config: AppConfig) -> bool:
     return bool(_sandbox_config_value(config, "provisioner_url"))
 
 
-def _probe_provisioner_capabilities(config: AppConfig) -> dict[str, bool] | None:
+def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) -> dict[str, bool] | None:
     """Best-effort read of the provisioner's lark-cli capabilities.
 
     Returns the capability dict when the provisioner answers, or None when it
-    can't be reached. Used only to surface a sandbox-runtime readiness signal;
-    failures degrade to "not ready" rather than raising.
+    can't be reached. Used both for the status readiness signal and to select
+    broker vs. binary mode on the bash hot path; failures degrade to "not
+    ready"/"not broker" rather than raising. ``timeout`` is caller-tunable so the
+    per-bash-call probe can use a tighter budget than the Settings status probe.
     """
     base = _sandbox_config_value(config, "provisioner_url")
     if not base:
@@ -935,7 +959,7 @@ def _probe_provisioner_capabilities(config: AppConfig) -> dict[str, bool] | None
     url = f"{base.rstrip('/')}/api/capabilities"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "deer-flow", **headers})
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, dict):
             return None
@@ -945,12 +969,6 @@ def _probe_provisioner_capabilities(config: AppConfig) -> dict[str, bool] | None
         }
     except Exception:
         return None
-
-
-def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
-    """Back-compat wrapper returning only the init-image capability."""
-    caps = _probe_provisioner_capabilities(config)
-    return None if caps is None else caps["lark_cli_init_image"]
 
 
 def start_lark_config(user_id: str, *, brand: str = "feishu") -> LarkConfigStartResult:

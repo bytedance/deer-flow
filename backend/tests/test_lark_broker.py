@@ -153,6 +153,21 @@ def test_health_endpoint(broker_server) -> None:
         assert json.loads(resp.read().decode())["ok"] is True
 
 
+def test_exec_endpoint_returns_500_json_on_unexpected_error(broker_server, monkeypatch) -> None:
+    """An unexpected exec error must return a structured 500, not close the
+    connection with no body (which the shim would see as an opaque transport
+    failure)."""
+    host, port = broker_server
+
+    def _boom(*_args, **_kwargs):
+        raise PermissionError("simulated exec failure")
+
+    monkeypatch.setattr(lark_broker, "run_lark_cli", _boom)
+    status, body = _post_exec(host, port, {"args": ["auth", "status"]})
+    assert status == 500
+    assert body["error"]
+
+
 # ── Shim script ─────────────────────────────────────────────────────────────
 
 
@@ -192,12 +207,151 @@ def test_shim_fails_loudly_when_broker_unreachable(tmp_path: Path) -> None:
 def test_install_shim_writes_runtime_layout(tmp_path: Path) -> None:
     """install-shim mode stages the same bin/lark-cli + marker layout Pattern A
     uses, marked kind=shim so the runtime validator tolerates absent binaries.
+
+    bin/lark-cli is now the POSIX-sh launcher and the Python body lives beside it
+    as bin/lark-cli-shim.py, so broker mode does not hard-depend on a resolvable
+    #!/usr/bin/env python3 shebang.
     """
     dest = tmp_path / "runtime"
     launcher = lark_broker.install_shim(str(dest), version="v1.0.65")
 
     assert Path(launcher) == dest / "bin" / "lark-cli"
-    assert (dest / "bin" / "lark-cli").read_text(encoding="utf-8") == lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+    launcher_text = (dest / "bin" / "lark-cli").read_text(encoding="utf-8")
+    assert launcher_text.startswith("#!/bin/sh")
+    # The shim body's absolute path is baked into the launcher (not derived from
+    # $0, which is the bare command name when run off PATH).
+    shim_body = dest / "bin" / lark_broker.LARK_CLI_BROKER_SHIM_FILENAME
+    assert str(shim_body) in launcher_text
+    assert lark_broker._LARK_CLI_BROKER_SHIM_PATH_PLACEHOLDER not in launcher_text
     assert os.access(dest / "bin" / "lark-cli", os.X_OK)
+    assert shim_body.read_text(encoding="utf-8") == lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+    assert os.access(shim_body, os.X_OK)
     marker = json.loads((dest / ".deerflow-lark-cli-runtime.json").read_text())
     assert marker == {"version": "v1.0.65", "kind": "shim"}
+
+
+def test_launcher_resolves_python_and_forwards(broker_server, tmp_path: Path) -> None:
+    """The /bin/sh launcher finds python3 on PATH and execs the shim body."""
+    host, port = broker_server
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    # A PATH that has the python from this test runner so the launcher resolves it.
+    py_dir = str(Path(sys.executable).parent)
+    completed = subprocess.run(
+        [str(launcher), "do", "--boom"],
+        input=b"",
+        capture_output=True,
+        env={
+            "PATH": py_dir + os.pathsep + "/usr/bin:/bin",
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+        },
+        timeout=30,
+    )
+    assert completed.returncode == 7
+    assert b"ERR:do --boom" in completed.stderr
+
+
+def test_launcher_can_pin_interpreter_via_env(broker_server, tmp_path: Path) -> None:
+    """DEERFLOW_LARK_BROKER_PYTHON pins the interpreter for images with no python3
+    on PATH (the launcher must not silently ENOEXEC)."""
+    host, port = broker_server
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    completed = subprocess.run(
+        [str(launcher), "ping"],
+        input=b"",
+        capture_output=True,
+        # Deliberately no python on PATH; the pin is the only way to resolve it.
+        env={
+            "PATH": "/nonexistent",
+            lark_broker.LARK_BROKER_PYTHON_ENV: sys.executable,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+        },
+        timeout=30,
+    )
+    assert completed.returncode == 0
+
+
+def test_launcher_fails_loudly_without_python(tmp_path: Path) -> None:
+    """With no python interpreter resolvable, the launcher exits 127 with an
+    actionable message rather than an opaque ENOEXEC."""
+    dest = tmp_path / "runtime"
+    lark_broker.install_shim(str(dest), version="v1.0.65")
+    launcher = dest / "bin" / "lark-cli"
+
+    completed = subprocess.run(
+        [str(launcher), "auth", "status"],
+        input=b"",
+        capture_output=True,
+        env={"PATH": "/nonexistent"},
+        timeout=30,
+    )
+    assert completed.returncode == 127
+    assert b"Python 3 interpreter" in completed.stderr
+
+
+# ── cwd is not forwarded (command surface only, no sandbox file I/O) ─────────
+
+
+def test_exec_payload_omits_cwd(tmp_path: Path) -> None:
+    """The shim must not forward cwd: the broker can't see the sandbox FS, so a
+    dead cwd field would imply support that does not exist."""
+    assert '"cwd"' not in lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+    assert "os.getcwd()" not in lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT
+
+
+# ── subcommand denylist (issue #4338 hardening) ──────────────────────────────
+
+
+def test_parse_deny_subcommands() -> None:
+    assert lark_broker.parse_deny_subcommands(None) == ()
+    assert lark_broker.parse_deny_subcommands("") == ()
+    assert lark_broker.parse_deny_subcommands("config show, auth token") == (
+        ("config", "show"),
+        ("auth", "token"),
+    )
+    # Blank entries are dropped.
+    assert lark_broker.parse_deny_subcommands("config show, ,") == (("config", "show"),)
+
+
+def test_denied_subcommand_is_refused_before_spawning_binary(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="/broker/only/config",
+        data_dir="/broker/only/data",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, ["config", "show", "--json"], b"")
+    assert result.exit_code == 126
+    assert b"disabled in broker mode" in result.stderr
+    # The stub echoes argv on stdout; a refused call never runs it.
+    assert result.stdout == b""
+
+
+def test_denied_subcommand_matches_through_leading_flags(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    # Options interleaved with the subcommand path are skipped when matching.
+    result = run_lark_cli(config, ["--json", "config", "show"], b"")
+    assert result.exit_code == 126
+
+
+def test_allowed_subcommand_still_runs_with_denylist(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, ["auth", "status"], b"")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout.decode())
+    assert payload["argv"] == ["auth", "status"]

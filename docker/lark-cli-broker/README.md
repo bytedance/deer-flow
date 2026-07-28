@@ -10,14 +10,11 @@ Result: the raw `appSecret` / OAuth token files **never exist in the sandbox
 filesystem**, so a compromised or prompt-injected agent can no longer
 `cat`/exfiltrate them — while any authorized `lark-cli` subcommand still runs.
 
-See the design at
-[`docs/superpowers/specs/2026-07-27-lark-sandbox-credential-broker-design.md`](../../docs/superpowers/specs/2026-07-27-lark-sandbox-credential-broker-design.md).
-
 ## Two modes, one image
 
 Dispatched by the first CLI argument:
 
-- `install-shim <dest>` — **init container**: writes the Python shim +
+- `install-shim <dest>` — **init container**: writes the launcher + Python shim +
   `.deerflow-lark-cli-runtime.json` (`kind: "shim"`) into the shared `emptyDir`
   at `<dest>` (default `/mnt/integrations/lark-cli/runtime`), then exits `0`. The
   sandbox then finds `bin/lark-cli` exactly where
@@ -27,9 +24,18 @@ Dispatched by the first CLI argument:
   `127.0.0.1:8788` with the real `lark-cli` and the credential env pointing at
   the sidecar-only `/var/lark/{config,data}` mounts.
 
-The shim is written from the in-process constant `LARK_CLI_BROKER_SHIM_SCRIPT`
-(`deerflow.integrations.lark_broker`), so the image's shim can never drift from
-the Gateway's copy.
+The executable on `PATH` (`bin/lark-cli`) is a `/bin/sh` **launcher** that
+resolves a Python 3 interpreter and execs the **shim body** (`bin/lark-cli-shim.py`)
+beside it (by its baked-in absolute path, since `$0` is the bare command name
+when run off `PATH`); both are written from the in-process
+`LARK_CLI_BROKER_LAUNCHER_TEMPLATE` / `LARK_CLI_BROKER_SHIM_SCRIPT`
+(`deerflow.integrations.lark_broker`), so the image's copies can never drift from
+the Gateway's. Splitting the sh launcher from the Python body means broker mode
+does **not** hard-depend on `python3` resolving via a `#!/usr/bin/env python3`
+shebang: if no `python3`/`python` is on the sandbox `PATH`, the launcher exits
+`127` with an actionable message (set `DEERFLOW_LARK_BROKER_PYTHON` to a known
+interpreter path) instead of an opaque ENOEXEC. The stock `all-in-one-sandbox`
+image ships Python 3, so the default path needs no configuration.
 
 ## Build
 
@@ -71,11 +77,35 @@ and pointing the provisioner at it:
 
 ## Broker HTTP contract (loopback)
 
-- `POST /v1/exec` — body `{"args": [...], "stdin_b64": "...", "cwd": "..."}`;
-  response `{"exit_code", "stdout_b64", "stderr_b64", "truncated"}`. `args` is run
-  with `shell=False`, so a sandbox-supplied argument can never be shell-injected.
-  The broker injects the credential env itself; the client cannot override it.
+- `POST /v1/exec` — body `{"args": [...], "stdin_b64": "..."}`; response
+  `{"exit_code", "stdout_b64", "stderr_b64", "truncated"}`. `args` is run with
+  `shell=False`, so a sandbox-supplied argument can never be shell-injected. The
+  broker injects the credential env itself; the client cannot override it.
+  Unexpected broker-side errors return a `500 {"error": ...}` so the shim always
+  gets a structured response rather than an opaque transport failure.
 - `GET /v1/health` — `{"ok": true}`.
 
 Bound to loopback only. In K8s the sandbox and sidecar share the Pod network
 namespace, so `127.0.0.1` reaches the sidecar and nothing outside the Pod can.
+
+### No file I/O relative to the sandbox cwd
+
+The broker runs `lark-cli` in the **sidecar's** working directory and cannot see
+the sandbox filesystem, so the sandbox's cwd is intentionally **not** forwarded.
+`lark-cli` subcommands that read or write files by a path relative to the
+sandbox cwd (e.g. uploading a local file) are therefore unsupported in broker
+mode — this is a command-surface-only bridge, not a filesystem bridge. Absolute
+paths still refer to the sidecar's filesystem, not the sandbox's.
+
+### Optional subcommand denylist (hardening)
+
+The broker removes the credential *files* from the sandbox, but the full
+`lark-cli` command surface stays reachable, so any subcommand that prints/exports
+tokens could still exfiltrate them. Set `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`
+on the sidecar to a comma-separated list of command prefixes the broker should
+refuse (matched against the leading non-flag tokens), e.g.
+`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`. Denied calls
+return exit `126` with a `subcommand ... is disabled` message and never spawn the
+binary. Empty by default (no behavior change); confirm the deployed `lark-cli`
+version's subcommand surface has no trivial secret-dump command before enabling
+broker mode in production.

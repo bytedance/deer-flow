@@ -73,6 +73,10 @@ LARK_CLI_RUNTIME_VOLUME_NAME = "lark-cli-runtime"
 # plaintext config/data credential dirs into the sandbox container. Empty ⇒ broker
 # off (Pattern A / legacy behavior). Broker supersedes Pattern A when both are set.
 LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
+# Optional comma-separated lark-cli subcommand denylist forwarded to the broker
+# sidecar (issue #4338 hardening). Empty ⇒ no subcommand is blocked. See the
+# broker README's "subcommand denylist" section.
+LARK_CLI_BROKER_DENY_SUBCOMMANDS = os.environ.get("DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS", "")
 LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 # Where the broker sidecar reads the per-user credentials (sidecar-only paths).
@@ -777,16 +781,26 @@ def _build_lark_cli_broker_sidecars(
         if USERDATA_PVC_NAME:
             sidecar_mount.sub_path = _extra_mount_pvc_sub_path(mount.host_path)
         volume_mounts.append(sidecar_mount)
+    broker_env = [
+        k8s_client.V1EnvVar(name="LARKSUITE_CLI_CONFIG_DIR", value=LARK_BROKER_SIDECAR_CONFIG_PATH),
+        k8s_client.V1EnvVar(name="LARKSUITE_CLI_DATA_DIR", value=LARK_BROKER_SIDECAR_DATA_PATH),
+    ]
+    # Forward the optional subcommand denylist so the broker refuses secret-dump
+    # subcommands (issue #4338 hardening); omitted when unset ⇒ nothing blocked.
+    if LARK_CLI_BROKER_DENY_SUBCOMMANDS:
+        broker_env.append(
+            k8s_client.V1EnvVar(
+                name="DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS",
+                value=LARK_CLI_BROKER_DENY_SUBCOMMANDS,
+            )
+        )
     return [
         k8s_client.V1Container(
             name="lark-cli-broker",
             image=LARK_CLI_BROKER_IMAGE,
             image_pull_policy="IfNotPresent",
             args=["serve"],
-            env=[
-                k8s_client.V1EnvVar(name="LARKSUITE_CLI_CONFIG_DIR", value=LARK_BROKER_SIDECAR_CONFIG_PATH),
-                k8s_client.V1EnvVar(name="LARKSUITE_CLI_DATA_DIR", value=LARK_BROKER_SIDECAR_DATA_PATH),
-            ],
+            env=broker_env,
             volume_mounts=volume_mounts,
             security_context=k8s_client.V1SecurityContext(
                 privileged=False,
