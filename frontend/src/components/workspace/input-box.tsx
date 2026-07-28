@@ -73,7 +73,6 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
-import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import {
@@ -1301,14 +1300,6 @@ export function InputBox({
     dismissedSkillSuggestionValue !== textInput.value;
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
   const composerLocked = isComposerDisabled || polishingInput;
   const inputPolishUndoAvailable =
     !polishingInput &&
@@ -1317,7 +1308,6 @@ export function InputBox({
   const inputPolishDisabled =
     isComposerDisabled ||
     isMockThread ||
-    hasOpenHumanInputCard ||
     polishingInput ||
     (!inputPolishUndoAvailable &&
       (status === "streaming" ||
