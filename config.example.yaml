@@ -607,6 +607,8 @@ models:
   #   model: Qwen/Qwen3-32B
   #   api_key: $VLLM_API_KEY
   #   base_url: http://localhost:8000/v1
+  #   # Enable only when the endpoint reports cumulative usage on every stream chunk.
+  #   cumulative_stream_usage: true
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
