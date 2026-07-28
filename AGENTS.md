@@ -12,6 +12,15 @@ guide rather than expecting full detail here:
 - **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
+## Tooling
+
+- **Python 3.12+**, managed with `uv` (do not use pip directly). Backend commands must run
+  with `PYTHONPATH=.` set (the Makefile handles this).
+- **Node.js 22+**, managed with `pnpm 10.26+**. Install with `corepack enable && corepack
+  prepare pnpm@10.26.2 --activate`.
+- Pre-commit hooks run `ruff` (lint + format) on `backend/` and `eslint` + `prettier` on
+  `frontend/`. Install with `make install` (which runs `pre-commit install --overwrite`).
+
 ## What is DeerFlow
 
 DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
@@ -112,6 +121,23 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
+## CI Checks
+
+PRs must pass these workflows (all in `.github/workflows/`):
+
+| Workflow | What it enforces |
+|---|---|
+| `lint-check.yml` | `uv lock --check` (backend deps in sync), `make lint` (ruff), `pnpm check` (eslint + prettier) |
+| `backend-unit-tests.yml` | `make test` — full backend test suite |
+| `frontend-unit-tests.yml` | `make test` — frontend unit tests (Rstest) |
+| `backend-blocking-io-tests.yml` | `make test-blocking-io` — hard-fail blocking IO runtime gate |
+| `e2e-tests.yml` | Playwright E2E tests (frontend) |
+| `verify-versions.yml` | Package version consistency across pyproject.toml, package.json, CHANGELOG |
+
+Run the equivalent checks locally before pushing:
+- Backend: `cd backend && make lint && make test`
+- Frontend: `cd frontend && pnpm check && pnpm test`
+
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
@@ -135,3 +161,7 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+
+## 飞书能力接入（lark-cli）
+
+DeerFlow 通过飞书官方 `lark-cli`（npm `@larksuite/cli`）调用飞书能力（发消息、多维表 CRUD 等），不自建飞书 MCP Server。lark-cli 官方 27 个 skill 包通过 git submodule 放在 `skills/public/lark/`，格式兼容 deer-flow 技能系统（`parse_skill_file` 只提取 `name`/`description`，忽略 `metadata.requires.bins`/`version` 等）。挂载在 `skills/public/` 而非 `skills/custom/`，避免 `UserScopedSkillStorage` 的 shadow-mount 语义导致 lark skills 在用户创建自己的 custom skill 后消失。当前显式声明 `lark-shared`、`lark-im`、`lark-base` 三个 skill 启用。详见 [backend/docs/FEISHU_MCP_INTEGRATION.md](backend/docs/FEISHU_MCP_INTEGRATION.md)。

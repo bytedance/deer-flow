@@ -1,0 +1,3 @@
+[submodule "skills/public/lark"]
+	path = skills/public/lark
+	url = https://github.com/larksuite/cli.git
