@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 #: Keys the host factory injects into backend_config; accepted and ignored.
 _HOST_INJECTED_KEYS = frozenset({"storage_path", "should_keep_hidden_message"})
@@ -30,6 +31,9 @@ class Mem0Config:
     api_key_env: str = "MEM0_API_KEY"
     #: mem0 Platform API root; point at a self-hosted server for on-prem.
     base_url: str = "https://api.mem0.ai"
+    #: Permit sending the API token over plaintext HTTP. Intended only for
+    #: trusted local development networks.
+    allow_insecure_http: bool = False
     #: Max memories injected by get_context / default search breadth (1-1000).
     top_k: int = 8
     #: Minimum relevance score for search() results (mem0 `threshold`, 0-1).
@@ -56,6 +60,7 @@ class Mem0Config:
             - {
                 "api_key_env",
                 "base_url",
+                "allow_insecure_http",
                 "top_k",
                 "score_threshold",
                 "max_injection_chars",
@@ -71,10 +76,14 @@ class Mem0Config:
         unknown_fp = set(failure_policy) - {"read", "write"}
         if unknown_fp:
             raise ValueError(f"mem0 failure_policy has unknown keys: {sorted(unknown_fp)}")
+        allow_insecure_http = cfg.get("allow_insecure_http", False)
+        if not isinstance(allow_insecure_http, bool):
+            raise ValueError("mem0 allow_insecure_http must be a boolean")
 
         config = cls(
             api_key_env=str(cfg.get("api_key_env", "MEM0_API_KEY")),
             base_url=str(cfg.get("base_url", "https://api.mem0.ai")).rstrip("/"),
+            allow_insecure_http=allow_insecure_http,
             top_k=int(cfg.get("top_k", 8)),
             score_threshold=float(cfg.get("score_threshold", 0.1)),
             max_injection_chars=int(cfg.get("max_injection_chars", 12000)),
@@ -99,6 +108,11 @@ class Mem0Config:
             raise ValueError("mem0 timeout_seconds must be positive")
         if not config.api_key_env.strip():
             raise ValueError("mem0 api_key_env must be a non-empty env var name")
+        parsed_base_url = urlsplit(config.base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            raise ValueError("mem0 base_url must be an absolute http:// or https:// URL")
+        if parsed_base_url.scheme == "http" and not config.allow_insecure_http:
+            raise ValueError("mem0 base_url must use https:// because it carries the API key; set allow_insecure_http: true only for trusted local development")
         return config
 
     def resolve_api_key(self) -> str:

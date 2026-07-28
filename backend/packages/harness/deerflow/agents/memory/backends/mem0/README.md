@@ -16,6 +16,7 @@ memory:
   backend_config:
     api_key_env: MEM0_API_KEY          # key read from env, never in config.yaml
     base_url: https://api.mem0.ai      # or your self-hosted mem0 server
+    allow_insecure_http: false         # true only for trusted local HTTP dev
     top_k: 8
     score_threshold: 0.1
     max_injection_chars: 12000
@@ -27,6 +28,11 @@ memory:
 ```
 
 Set the key in the environment: `export MEM0_API_KEY=...`
+
+`base_url` must use HTTPS because every request carries the API key. For a
+trusted local-development server that only exposes HTTP, opt in explicitly
+with `allow_insecure_http: true`; do not use that setting across an untrusted
+network.
 
 ## Identity mapping
 

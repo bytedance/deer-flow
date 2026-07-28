@@ -20,6 +20,8 @@ _UPLOAD_BLOCK_RE = re.compile(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*
 def extract_message_text(message: Any) -> str:
     """Extract plain text from message content (str or content-block list)."""
     content = getattr(message, "content", "")
+    if content is None:
+        return ""
     if isinstance(content, list):
         parts: list[str] = []
         for part in content:

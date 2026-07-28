@@ -248,6 +248,9 @@ Boundary check (harness → app import firewall):
 Memory backend async boundary:
 - `MemoryMiddleware.aafter_agent` calls `MemoryManager.aadd`; network-backed
   managers must override their `a*` methods to offload or use native async I/O.
+- The mem0 backend requires an HTTPS `base_url` by default because requests
+  carry an API token. Plain HTTP requires the explicit
+  `backend_config.allow_insecure_http: true` local-development opt-in.
 - Gateway memory routes offload the synchronous management contract with
   `asyncio.to_thread`, so backend file or HTTP I/O does not run on the ASGI
   event loop. Gateway startup and shutdown also resolve the manager off-loop,

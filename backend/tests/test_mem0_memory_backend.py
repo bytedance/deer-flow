@@ -17,6 +17,7 @@ class TestMem0Config:
         cfg = Mem0Config.from_backend_config({})
         assert cfg.api_key_env == "MEM0_API_KEY"
         assert cfg.base_url == "https://api.mem0.ai"
+        assert cfg.allow_insecure_http is False
         assert cfg.top_k == 8
         assert cfg.score_threshold == 0.1
         assert cfg.max_injection_chars == 12000
@@ -30,6 +31,7 @@ class TestMem0Config:
             {
                 "api_key_env": "MY_MEM0_KEY",
                 "base_url": "http://mem0.local:8888/",
+                "allow_insecure_http": True,
                 "top_k": 5,
                 "score_threshold": 0.3,
                 "max_injection_chars": 4000,
@@ -40,6 +42,7 @@ class TestMem0Config:
         )
         assert cfg.api_key_env == "MY_MEM0_KEY"
         assert cfg.base_url == "http://mem0.local:8888"  # trailing slash stripped
+        assert cfg.allow_insecure_http is True
         assert cfg.top_k == 5
         assert cfg.score_threshold == 0.3
         assert cfg.max_injection_chars == 4000
@@ -55,6 +58,15 @@ class TestMem0Config:
         # into every backend's backend_config).
         cfg = Mem0Config.from_backend_config({"storage_path": "/tmp/x", "should_keep_hidden_message": None})
         assert cfg.base_url == "https://api.mem0.ai"
+
+    def test_insecure_http_requires_explicit_opt_in(self) -> None:
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            Mem0Config.from_backend_config({"base_url": "http://mem0.local:8888"})
+
+    @pytest.mark.parametrize("base_url", ["mem0.local:8888", "ftp://mem0.local", "https:///missing-host"])
+    def test_invalid_base_url_rejected(self, base_url: str) -> None:
+        with pytest.raises(ValueError, match="base_url"):
+            Mem0Config.from_backend_config({"base_url": base_url, "allow_insecure_http": True})
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -254,6 +266,11 @@ class TestMessageFiltering:
         msg = AIMessage(content=[{"type": "text", "text": "part one"}, "part two"])
         assert extract_message_text(msg) == "part one part two"
 
+    def test_extract_message_text_treats_none_as_empty(self) -> None:
+        msg = AIMessage(content="")
+        msg.content = None
+        assert extract_message_text(msg) == ""
+
 
 from typing import Any  # noqa: E402
 
@@ -272,6 +289,7 @@ class FakeMem0Client:
         self.search_results: list[dict[str, Any]] = []
         self.list_results: list[dict[str, Any]] = []
         self.error: Exception | None = None
+        self.closed = False
 
     def _maybe_raise(self) -> None:
         if self.error is not None:
@@ -301,7 +319,7 @@ class FakeMem0Client:
         self.pings += 1
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 @pytest.fixture(autouse=True)
@@ -348,6 +366,11 @@ class TestMem0ManagerConstruction:
     def test_supports_search_enables_tool_mode(self) -> None:
         mgr, _fake = _manager(mode="tool")
         assert mgr.supports_search is True
+
+    def test_close_releases_http_client(self) -> None:
+        mgr, fake = _manager()
+        mgr.close()
+        assert fake.closed is True
 
 
 class TestMem0ManagerAdd:

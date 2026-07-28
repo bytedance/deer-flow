@@ -102,6 +102,10 @@ class Mem0Manager(MemoryManager):
             mgr._client.ping()
         return mgr
 
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self._client.close()
+
     # ── Error policies ───────────────────────────────────────────────────
     def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
         try:
