@@ -575,11 +575,13 @@ function LarkIntegrationCard() {
                   ok={data.sandbox_runtime_ready}
                   value={
                     data.sandbox_runtime_ready
-                      ? data.sandbox_runtime_mode === "init-container"
-                        ? t.settings.integrations.lark
-                            .sandboxRuntimeInitContainer
-                        : t.settings.integrations.lark
-                            .sandboxRuntimeGatewayDownload
+                      ? data.sandbox_runtime_mode === "broker"
+                        ? t.settings.integrations.lark.sandboxRuntimeBroker
+                        : data.sandbox_runtime_mode === "init-container"
+                          ? t.settings.integrations.lark
+                              .sandboxRuntimeInitContainer
+                          : t.settings.integrations.lark
+                              .sandboxRuntimeGatewayDownload
                       : (data.sandbox_runtime_detail ??
                         t.settings.integrations.lark.sandboxRuntimeNotReady)
                   }

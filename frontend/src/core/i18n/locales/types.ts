@@ -726,6 +726,7 @@ export interface Translations {
         auth: string;
         sandboxRuntime: string;
         sandboxRuntimeInitContainer: string;
+        sandboxRuntimeBroker: string;
         sandboxRuntimeGatewayDownload: string;
         sandboxRuntimeNotReady: string;
         notInstalled: string;

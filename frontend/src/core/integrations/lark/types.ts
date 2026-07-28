@@ -20,7 +20,8 @@ export interface LarkAuthProbe {
 export type LarkSandboxRuntimeMode =
   | "none"
   | "gateway-download"
-  | "init-container";
+  | "init-container"
+  | "broker";
 
 export interface LarkIntegrationStatus {
   installed: boolean;
