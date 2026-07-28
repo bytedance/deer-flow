@@ -29,4 +29,4 @@ def query_parent_ad(
     result = client.request("POST", API_PATH, params=params, ttl_seconds=1800)
     if result.get("code") != 0:
         return []
-    return result.get("data", [])
+    return result.get("data") or []

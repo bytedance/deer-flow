@@ -46,4 +46,4 @@ def query_review_rating(
     result = client.request("POST", API_PATH, params=params, ttl_seconds=0)
     if result.get("code") != 0:
         return []
-    return result.get("data", [])
+    return result.get("data") or []

@@ -31,4 +31,4 @@ def query_keyword_share(
     result = client.request("POST", API_PATH, params=params, ttl_seconds=21600)
     if result.get("code") != 0:
         return []
-    return result.get("data", [])
+    return result.get("data") or []

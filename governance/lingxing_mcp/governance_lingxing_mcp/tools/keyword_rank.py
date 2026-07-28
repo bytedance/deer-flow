@@ -40,4 +40,4 @@ def query_keyword_rank(
         return [
             {"warning": "keyword rank API not available, endpoint may have changed"}
         ]
-    return result.get("data", [])
+    return result.get("data") or []

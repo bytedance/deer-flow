@@ -52,6 +52,13 @@
           }
         }
       }
+    },
+    "lingxing-mcp": {
+      "enabled": false,
+      "type": "sse",
+      "url": "http://localhost:8102/sse",
+      "description": "领星 ERP API 包装（需配置 LINGXING_APP_ID/SECRET 环境变量）",
+      "tool_call_timeout": 60
     }
   },
   "skills": {

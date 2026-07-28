@@ -102,6 +102,18 @@ def test_query_parent_sales_missing_data_field_returns_empty():
     assert out == []
 
 
+def test_query_parent_sales_null_data_returns_empty():
+    """data 显式为 null 时返回空列表（原 bug: get("data", []) 返回 None）。"""
+    client = _make_client({"code": 0, "msg": "查询异常", "data": None})
+    out = query_parent_sales(
+        client,
+        sid=[1],
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+    )
+    assert out == []
+
+
 def test_query_parent_sales_str_sid_passes_through():
     """sid 支持字符串传入，原样透传。"""
     client = _make_client({"code": 0, "data": []})

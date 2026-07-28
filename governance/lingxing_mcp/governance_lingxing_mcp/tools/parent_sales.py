@@ -29,4 +29,4 @@ def query_parent_sales(
     result = client.request("POST", API_PATH, params=params, ttl_seconds=21600)  # 6h
     if result.get("code") != 0:
         return []
-    return result.get("data", [])
+    return result.get("data") or []
