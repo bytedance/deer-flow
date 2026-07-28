@@ -73,6 +73,10 @@ def load_sample_for_users(
     if not user_ids:
         return 0
 
+    sample_facts = sample.get("facts", [])
+    expected_ids = {str(fact["id"]) for fact in sample_facts if isinstance(fact, dict) and fact.get("id")}
+    expected_contents = {str(fact["content"]) for fact in sample_facts if isinstance(fact, dict) and not fact.get("id") and fact.get("content")}
+
     if not no_backup:
         if backup_root is None:
             raise ValueError("backup_root is required when backups are enabled")
@@ -86,9 +90,14 @@ def load_sample_for_users(
 
     for user_id in user_ids:
         try:
-            import_memory(copy.deepcopy(sample), user_id=user_id)
+            imported = import_memory(copy.deepcopy(sample), user_id=user_id)
         except OSError as exc:
             raise OSError(f"Failed to import memory for user {user_id}: {exc}") from exc
+        imported_facts = imported.get("facts", []) if isinstance(imported, dict) else []
+        imported_ids = {str(fact["id"]) for fact in imported_facts if isinstance(fact, dict) and fact.get("id")}
+        imported_contents = {str(fact["content"]) for fact in imported_facts if isinstance(fact, dict) and fact.get("content")}
+        if not expected_ids <= imported_ids or not expected_contents <= imported_contents:
+            raise OSError(f"Imported memory was not persisted for user {user_id}")
 
     return len(user_ids)
 
@@ -104,7 +113,7 @@ async def load_sample_for_all_users(
     sys.path.insert(0, str(backend_dir / "packages" / "harness"))
 
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-    from deerflow.agents.memory.updater import get_memory_data, import_memory_data
+    from deerflow.agents.memory.manager import get_memory_manager
     from deerflow.config.app_config import AppConfig
     from deerflow.config.paths import get_paths
     from deerflow.persistence.engine import (
@@ -113,8 +122,9 @@ async def load_sample_for_all_users(
         init_engine_from_config,
     )
 
-    config = await asyncio.to_thread(AppConfig.from_file, str(repo_root / "config.yaml"))
+    config = await asyncio.to_thread(AppConfig.from_file)
     require_persistent_database(config.database.backend)
+    manager = await asyncio.to_thread(get_memory_manager)
 
     await init_engine_from_config(config.database)
     try:
@@ -133,8 +143,8 @@ async def load_sample_for_all_users(
             user_ids,
             backup_root=backup_root,
             no_backup=no_backup,
-            load_memory=get_memory_data,
-            import_memory=import_memory_data,
+            load_memory=manager.get_memory,
+            import_memory=manager.import_memory,
         )
         return count, backup_root
     finally:
