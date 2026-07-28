@@ -401,7 +401,6 @@ export default function AgentChatPage() {
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading ||
-                      hasOpenHumanInputCard ||
                       (!isNewThread && isHistoryLoading)
                     }
                     onContextChange={(context) =>
