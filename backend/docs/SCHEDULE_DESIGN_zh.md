@@ -4,7 +4,7 @@
 >
 > 配套文档：[`HEXAGONAL_ARCHITECTURE_zh.md`](HEXAGONAL_ARCHITECTURE_zh.md)（本文遵循的架构分层）、`backend/AGENTS.md`（编码规约与调度相关的运行时约定）。
 >
-> **本文当前只覆盖领域模型层**（`domain/schedule/model/`）——六边形迁移的第一步。端口、应用服务与适配器仍在旧位置，见 §2。
+> **本文覆盖整个内圈**（`domain/schedule/`：模型、端口、应用服务）。适配器与入口仍在旧位置，见 §2。
 
 ---
 
@@ -42,56 +42,68 @@ run 结束后回写执行记录，并算出下一次的时间
 
 **这一节请先读，否则你会在代码库里迷路。**
 
-模块正处于六边形重构的中途。领域模型已经落地，但**生产代码路径还没有切过来**：
+模块正处于六边形重构的中途。**整个内圈已经落地**，但生产代码路径还没有切过来：
 
 ```mermaid
 flowchart LR
     subgraph NEW["✅ 已落地 · 内圈"]
-        M["deerflow/domain/schedule/model/<br/>ScheduleSpec · ScheduledTask · ScheduledRun"]
+        direction TB
+        SV["service.py<br/>ScheduleService（用例编排）"]
+        PO["ports.py<br/>4 个 Protocol + 2 个 DTO"]
+        M["model/<br/>ScheduleSpec · ScheduledTask · ScheduledRun"]
+        SV --> PO
+        SV --> M
     end
     subgraph OLD["⏳ 仍是旧形态 · 生产路径"]
-        R["app/gateway/routers/scheduled_tasks.py<br/>入参校验 + 业务判断混在一起"]
+        R["gateway/routers/scheduled_tasks.py<br/>入参校验 + 业务判断混在一起"]
         S["app/scheduler/service.py<br/>轮询 + 派发编排 + 状态推导"]
-        P["deerflow/persistence/scheduled_task*/sql.py<br/>仓储返回裸 dict"]
+        P["persistence/scheduled_task*/sql.py<br/>仓储返回裸 dict"]
         C["deerflow/scheduler/schedules.py<br/>时区 / cron 计算"]
     end
-    subgraph TODO["🚧 待建"]
-        PO["domain/schedule/ports.py"]
-        SV["domain/schedule/service.py"]
-        AD["app/infra/persistence/ + app/infra/schedule/"]
+    subgraph TODO["🚧 待建 · 外圈"]
+        AD["app/infra/persistence/<br/>app/infra/schedule/<br/>app/scheduler/poller.py"]
     end
 
-    R -.->|尚未调用| M
-    S -.->|尚未调用| M
-    M --> PO --> SV --> AD
+    R -.->|尚未调用| SV
+    S -.->|尚未调用| SV
+    AD -.->|将实现| PO
 
-    style M fill:#d8ecff
+    style NEW fill:#eef6ff
     style OLD fill:#f5f5f5
 ```
 
 含义很具体：
 
-- **`domain/schedule/model/` 是唯一的真相声明处**，但目前只有域测试在用它。运行中的定时任务走的仍是 `app/scheduler/service.py` 那套。
-- 两边**规则内容一致**（模型是逐条从旧代码搬迁的，每个方法的 docstring 都标了来源行号），但**代码是重复的**。这是迁移中间态的正常代价。
-- 你现在改一条业务规则，要**两边都改**，直到迁移完成。旧位置见 §10 的索引。
-- 新增业务规则请**只写在领域模型里**，然后在旧位置调用它——不要再往 router / service 里加新的判断。
+- **`domain/schedule/` 是唯一的真相声明处**，但目前只有测试在用它。运行中的定时任务走的仍是 `app/scheduler/service.py` 那套。
+- 两边**规则内容一致**（内圈是逐条从旧代码搬迁的，每个方法的 docstring 都标了来源行号），但**代码是重复的**。这是迁移中间态的正常代价。
+- 你现在改一条业务规则，要**两边都改**，直到迁移完成。旧位置见 §12 的索引。
+- 新增业务规则请**只写在内圈**，然后在旧位置调用它——不要再往 router / 旧 service 里加新的判断。
 
-迁移完成后 `app/scheduler/service.py`、`deerflow/scheduler/` 整包、两个 `sql.py` 都会消失，本文会补上端口与服务层章节。
+**还差什么**：四个端口都没有真实实现。适配器落地后，`app/scheduler/service.py`、`deerflow/scheduler/` 整包、两个 `sql.py` 都会消失，router 瘦身成协议转换。
 
----
-
-## 3. 领域模型全景
-
-`packages/harness/deerflow/domain/schedule/model/` 是一个包而非单文件，因为这个上下文有两个聚合加一个值对象：
+## 3. 内圈全景
 
 ```
-model/
-├── errors.py    9 个领域错误，零依赖
-├── enums.py     5 个枚举，零依赖
-├── spec.py      ScheduleSpec（值对象）· SchedulePolicy（值对象）
-├── task.py      ScheduledTask（聚合根）· TERMINAL_TASK_STATUSES
-└── run.py       ScheduledRun（聚合）· ACTIVE/TERMINAL_RUN_STATUSES
+domain/schedule/
+├── service.py       ScheduleService —— 用例编排（input port）
+├── ports.py         4 个 Protocol + LaunchedRun / RunOutcome（output ports）
+└── model/           领域模型；是包而非单文件，因为这里有两个聚合加值对象
+    ├── errors.py    9 个领域错误，零依赖
+    ├── enums.py     6 个枚举，零依赖
+    ├── spec.py      ScheduleSpec（值对象）· SchedulePolicy（值对象）
+    ├── task.py      ScheduledTask（聚合根）· TERMINAL_TASK_STATUSES
+    └── run.py       ScheduledRun（聚合）· ACTIVE/TERMINAL_RUN_STATUSES
 ```
+
+三层的纪律各不相同：
+
+| 文件 | 职责 | 纪律 |
+|---|---|---|
+| `model/` | 业务事实与不变量 | 零依赖；不知道存储和 HTTP 存在；不变量在构造期校验 |
+| `ports.py` | 领域声明的接口 | 技术中立——签名里不出现 SQL、表名、HTTP 状态码、运行时类型 |
+| `service.py` | 用例编排 | 内圈唯一调用 output port 的地方；`user_id` 显式传参；自身不含业务规则 |
+
+一个关键理解：**service 调用 port 是合法的**——port 是领域自己声明、自己拥有的接口，调用自己的抽象不构成对外圈的依赖。运行时注入的实现来自外圈，但 service 只见 Protocol 类型。
 
 **纪律**：这一层零基础设施依赖——没有 SQL、没有 HTTP、没有配置读取、不看时钟（`now` 一律由调用方显式传入）。CI 的 `tests/test_harness_domain_purity.py` 会 AST 扫描整个 `domain/` 目录执法。唯一的第三方依赖是 `croniter`，它是确定性纯计算库（无 IO、无全局状态），与标准库 `zoneinfo` 同性质——日历计算本身就是定时任务的领域知识。
 
@@ -359,21 +371,144 @@ flowchart TD
 
 ---
 
-## 7. 二次开发指引
+## 7. 端口：领域对外的四个依赖
 
-### 7.1 给任务加一个字段
+`ports.py` 声明领域需要外界做什么，由外圈实现。签名一律技术中立——出现 SQL、表名、HTTP 状态码就是越界了。
+
+| 端口 | 回答什么问题 |
+|---|---|
+| `ScheduledTaskRepository` | 规则存在哪、怎么按用户隔离、怎么原子地认领到期任务 |
+| `ScheduledRunRepository` | 执行记录存在哪、谁来仲裁"一个任务只能有一条活跃执行" |
+| `RunLauncher` | 怎么真正启动一次 agent run |
+| `ThreadLookup` | 这个 thread 存在吗、这个用户能用吗 |
+
+外加两个 DTO：`LaunchedRun`（启动成功后拿到的 run 身份）、`RunOutcome`（一次执行到达终态的领域表述）。
+
+### 7.1 三条约定，比签名更重要
+
+**① 越权一律表现为"不存在"。** 别人的任务在读取时返回 `None` / `False` / 从列表里消失，而不是抛权限错误——调用方不能借此判断"这个 id 到底存不存在"。
+
+**② `RunLauncher` 只允许两种异常逃逸。**
+
+```
+执行 thread 已经忙  ->  ThreadBusyError
+其他任何失败        ->  LaunchFailedError
+```
+
+这条约定是**整个重构的支点**。旧代码的编排层要靠 `isinstance(exc, HTTPException) and exc.status_code == 409` 去嗅探"线程忙"，于是业务逻辑依赖了 Web 框架。翻译交给适配器之后，领域只认自己的两个错误。两者必须区分，因为结果不同：自动调度遇到线程忙是一次跳过的机会，真正的失败则要记为失败。
+
+**③ `RunOutcome` 挡住运行时类型。** 旧的完成回调直接吃 `deerflow.runtime.RunRecord`——一个基础设施类型，纯度测试会拦下它。现在由外圈先转换成 `RunOutcome`，顺带承担了旧代码内联做的过滤：一次不带定时任务元数据、或还没到终态的 run，压根产生不出 `RunOutcome`，service 也就不会被调用。
+
+### 7.2 两个刻意的缺席
+
+**没有 `Clock` 端口。** `now` 一律由调用方显式传参（`run_once(now=...)`、`dispatch_task(now=...)`），领域从不读时钟，测试天然确定。再加一个 `Clock` 只会制造"到底该用参数还是 `self._clock.now()`"的第二个真相源。
+
+**`claim_due` 不接收"谁在认领"。** 那是**进程身份**，不是规则。适配器可以记一个（诊断用），但没有任何代码读回来——决定认领能否被接管的只有过期时间。相比之下 `lease_seconds`（多久算过期）留在了 `SchedulePolicy` 里，因为它直接决定崩溃后多快能恢复，是领域关心的策略。
+
+### 7.3 原子性归实现，不归契约
+
+`claim_due` 的 docstring 明说：单线程语义（选哪些行、写什么状态）是契约的一部分，**原子性不是**。一个内存实现可以满足全部单线程规则却毫无并发保证。
+
+这条边界很重要——`tests/schedule_fakes.py` 的模块 docstring 和 `test_schedule_fakes.py` 都重复了它：**契约测试全绿不代表可以跑多个调度器实例**。并发由真数据库上的 `test_scheduled_task_dispatch_race.py` 单独负责。
+
+---
+
+## 8. 应用服务：用例编排
+
+`ScheduleService` 是这个上下文的 input port。主适配器（HTTP router、轮询器、完成回调）调它，然后把返回值翻译成自己的协议。它**自身不含业务规则**——每个判断都委托给聚合。
+
+### 8.1 用例清单
+
+| 分类 | 方法 |
+|---|---|
+| 读 | `list_tasks` · `list_tasks_by_thread` · `get_task` · `list_task_runs` |
+| 写 | `create_task` · `update_task` · `pause_task` · `resume_task` · `delete_task` |
+| 派发 | `trigger_task`（手动） · `run_once`（轮询一轮） · `dispatch_task`（单次派发） |
+| 生命周期 | `handle_run_completion` · `reconcile_on_startup` |
+
+### 8.2 `dispatch_task`：四条出口
+
+整个模块的风险中心。它把一个到期任务变成一次执行，有且只有四种结局：
+
+```mermaid
+flowchart TD
+    A["dispatch_task(task, now, trigger)"] --> B["resolve_execution_thread()<br/>只调一次"]
+    B --> C{"skips_on_overlap<br/>且已有活跃执行?"}
+    C -->|是, 手动| D["CONFLICT<br/>不留任何记录"]
+    C -->|是, 自动| E["SKIPPED<br/>写终态墓碑"]
+    C -->|否| F["创建 queued 记录"]
+    F -->|"活跃槽位被抢"| G{"trigger?"}
+    G -->|手动| D
+    G -->|自动| E
+    F -->|插入成功| H["launcher.launch(...)"]
+    H -->|ThreadBusyError + 自动 + skip| E
+    H -->|ThreadBusyError + 其他| I["CONFLICT<br/>留失败记录"]
+    H -->|LaunchFailedError| J["FAILED"]
+    H -->|成功| K["LAUNCHED<br/>回写两张表"]
+
+    style D fill:#fff0e0
+    style E fill:#e8f0ff
+    style J fill:#ffe0e0
+    style K fill:#e2f7e2
+```
+
+**快路径与槽位仲裁必须产生相同结果。** `has_active` 是非原子的快路径——两个并发派发可以都通过它。真正的仲裁者是仓储：第二条活跃记录会被拒绝，抛 `ActiveRunConflictError`。调用方**不能分辨自己被哪一种机制拦下**，否则重试行为就会分叉。`test_schedule_service.py` 里那条断言逐字段比较两条路径的 `DispatchResult`，就是钉死这一点。
+
+**只有 launch 被 try 包住。** 端口契约保证它只逃逸两种异常，所以后续记账写入的失败是真故障，会如实冒泡。旧代码把 launch 和记账一起包在 `except Exception` 里，结果是一次**已经成功启动**的执行会因为记账失败被标记成 failed。
+
+### 8.3 `run_once`：预算是全局的
+
+```python
+active = await runs.count_active()          # 跨所有任务
+budget = policy.max_concurrent_runs - active
+if budget <= 0: return []
+claimed = await tasks.claim_due(now=..., lease_seconds=..., limit=budget)
+```
+
+`max_concurrent_runs` 限制的是**同时活跃的执行总数**，不是每轮的批量大小。长时间运行的任务会跨轮次累积，所以每一轮只能认领进剩余的额度。把它当成"每轮最多认领 N 个"会让长任务把系统压垮。
+
+### 8.4 更新任务：为什么 `context` 是打包的
+
+```python
+await service.update_task(
+    task_id, user_id=..., now=...,
+    title=None,            # None = 不改
+    prompt=None,
+    schedule=None,
+    context=ContextChange(ContextMode.REUSE_THREAD, "thread-1"),
+)
+```
+
+`None` 表示"没传"，不需要哨兵值。这能成立的唯一原因是：所有可选字段里，只有 `thread_id` 的 `None` 本身有含义（解绑），而它和 `context_mode` 本来就一起变化——`with_context` 同时接收两者，切换到 fresh 模式就意味着清空绑定。打包成 `ContextChange` 之后歧义消失，其余字段就能用最朴素的 `None`。
+
+这也正好对上 HTTP 层：router 的 PATCH 本来就是 `exclude_none` 语义。
+
+### 8.5 完成回调与启动清扫
+
+`handle_run_completion(outcome, now)` 先写执行记录的终态，再看任务：`once` 推向终态（成功→completed / 中断→cancelled / 失败→failed），`cron` 保持状态不变。**但 `last_error` 无条件写入**——cron 任务保住了调度，仍然要报告上次出了什么问题。任务在 run 飞行途中被删掉不算错误，静默返回。
+
+`reconcile_on_startup(error)` 依次跑两个清扫并返回修复计数。它**不吞异常**——部分清扫失败要不要阻塞启动，是调用方的策略，不是领域的。
+
+---
+
+## 9. 二次开发指引
+
+### 9.1 给任务加一个字段
 
 例：加一个 `notify_on_failure: bool`。
 
 1. `model/task.py` 的 `ScheduledTask` 加字段（带默认值）
 2. 若有约束，写进 `__post_init__`
-3. `persistence/scheduled_tasks/model.py` 的 ORM 行加列
-4. 新增一个 alembic revision（`cd backend && make migrate-rev MSG="..."`），用 `_helpers.py` 的幂等 helper
-5. router 的请求/响应模型加字段
-6. 前端 `frontend/src/core/scheduled-tasks/types.ts` 同步
-7. 域测试补一条
+3. 若用户要能设置它：`service.py` 的 `create_task` / `update_task` 加参数
+4. `persistence/scheduled_tasks/model.py` 的 ORM 行加列
+5. 新增一个 alembic revision（`cd backend && make migrate-rev MSG="..."`），用 `_helpers.py` 的幂等 helper
+6. router 的请求/响应模型加字段
+7. 前端 `frontend/src/core/scheduled-tasks/types.ts` 同步
+8. 域测试补一条；若走了第 3 步，service 测试也补一条
 
-### 7.2 加一种调度类型
+端口通常不用动——`add` / `save` 交换的是整个聚合，多一个字段不改变签名。
+
+### 9.2 加一种调度类型
 
 例：加 `interval`（每 N 分钟）。
 
@@ -385,11 +520,23 @@ flowchart TD
 
 不需要改数据库——`schedule_spec` 是 JSON 列。
 
-### 7.3 改一条状态推导规则
+### 9.3 改一条状态推导规则
 
-只改 `model/task.py` 对应的那个方法，**顺便改 `app/scheduler/service.py` 里的旧副本**（见 §2）。域测试里对应的真值表用例必须同步更新——那张表就是规则的规格说明。
+只改 `model/task.py` 对应的那个方法，**顺便改 `app/scheduler/service.py` 里的旧副本**（见 §2）。`domain/schedule/service.py` 一般不用动——它只调用聚合，不复制规则。
 
-### 7.4 加一种重叠策略
+域测试里对应的真值表用例必须同步更新——那张表就是规则的规格说明。
+
+### 9.4 加一个用例
+
+例：加"克隆一个任务"。
+
+1. `service.py` 加方法：读出聚合 → 用聚合方法或 `replace` 造出新的 → 经 `add` 持久化
+2. **不要在 service 里写规则**。如果发现自己在写 `if task.status is ...`，那条判断属于聚合
+3. 只有当现有端口回答不了你的问题时才加端口方法——先问"这是新的存储能力，还是我把编排写复杂了"
+4. service 测试补一组（全 fake，零 IO）
+5. router 加端点，把领域错误映射成 HTTP 码
+
+### 9.5 加一种重叠策略
 
 例：加 `queue`（排队而非跳过）。
 
@@ -401,15 +548,17 @@ flowchart TD
 
 动手前先读 `backend/AGENTS.md` 里关于这个索引的整段说明。
 
-### 7.5 不要做的事
+### 9.6 不要做的事
 
-- **不要在 router 或 service 里新增业务判断**——那是迁移前的旧形态，新规则一律进领域模型
+- **不要在 router 或旧 service 里新增业务判断**——新规则一律进聚合
+- **不要在 `domain/schedule/service.py` 里写规则**——它只编排；出现 `if task.status is ...` 就说明放错地方了
 - **不要在领域层读配置或时钟**——阈值通过 `SchedulePolicy` 注入，`now` 显式传参；CI 的纯度测试会拦截基础设施导入
+- **不要让端口签名沾上技术词汇**——`Mapping[str, Any]`、HTTP 状态码、表名出现在 `ports.py` 里都是信号
 - **不要为定时执行另建一套运行栈**——必须复用现有的 run 生命周期
 
 ---
 
-## 8. 常见陷阱速查
+## 10. 常见陷阱速查
 
 | 陷阱 | 后果 |
 |---|---|
@@ -420,10 +569,13 @@ flowchart TD
 | 改了 `ACTIVE_RUN_STATUSES` 没改索引谓词 | 快路径与数据库仲裁者判断不一致 |
 | 终态任务改了调度但没重新武装 | 接口返回 200，任务永不触发 |
 | 只改领域模型，忘了 `app/scheduler/service.py` | 迁移完成前，生产行为不变 |
+| 适配器让 `launch` 逃逸出第三种异常 | 领域收到不认识的错误；线程忙被记成失败而不是跳过 |
+| 快路径与槽位仲裁产生不同结果 | 调用方能分辨被哪种机制拦下，重试行为分叉 |
+| 把契约测试全绿当成可以多实例 | fake 没有任何原子性；并发由真数据库的 dispatch_race 测试负责 |
 
 ---
 
-## 9. 术语表
+## 11. 术语表
 
 | 术语 | 含义 |
 |---|---|
@@ -436,21 +588,31 @@ flowchart TD
 | 重叠（overlap） | 到点时上一次执行还没结束 |
 | 墓碑（tombstone） | 被跳过的那次执行留下的终态记录 |
 | 重新武装（re-arm） | 把终态任务拉回 `enabled` 使其可再次被认领 |
+| 端口（port） | 领域声明、外圈实现的技术中立接口 |
+| input port | 用例接口，被入口调用——这里就是 `ScheduleService` |
+| output port | 领域对外的依赖，被适配器实现——这里是四个 Protocol |
+| 聚合（aggregate） | 一致性边界，不变量在构造期成立 |
+| 活跃槽位（active slot） | 一个任务同时最多持有一条 `queued`/`running` 执行 |
 
 ---
 
-## 10. 代码索引
+## 12. 代码索引
 
-**领域模型（已迁移，本文覆盖）**
+**内圈（已迁移，本文覆盖）**
 
 | 文件 | 内容 |
 |---|---|
-| [`domain/schedule/model/enums.py`](../packages/harness/deerflow/domain/schedule/model/enums.py) | `TaskStatus` `RunStatus` `ScheduleType` `ContextMode` `TriggerKind` |
+| [`domain/schedule/service.py`](../packages/harness/deerflow/domain/schedule/service.py) | `ScheduleService` · `DispatchResult` · `ContextChange` |
+| [`domain/schedule/ports.py`](../packages/harness/deerflow/domain/schedule/ports.py) | 4 个 Protocol · `LaunchedRun` · `RunOutcome` |
+| [`domain/schedule/model/enums.py`](../packages/harness/deerflow/domain/schedule/model/enums.py) | `TaskStatus` `RunStatus` `ScheduleType` `ContextMode` `TriggerKind` `DispatchOutcome` |
 | [`domain/schedule/model/errors.py`](../packages/harness/deerflow/domain/schedule/model/errors.py) | 9 个领域错误 |
 | [`domain/schedule/model/spec.py`](../packages/harness/deerflow/domain/schedule/model/spec.py) | `ScheduleSpec` `SchedulePolicy` |
 | [`domain/schedule/model/task.py`](../packages/harness/deerflow/domain/schedule/model/task.py) | `ScheduledTask` `TERMINAL_TASK_STATUSES` |
 | [`domain/schedule/model/run.py`](../packages/harness/deerflow/domain/schedule/model/run.py) | `ScheduledRun` `ACTIVE_RUN_STATUSES` `TERMINAL_RUN_STATUSES` |
 | [`tests/test_schedule_domain.py`](../tests/test_schedule_domain.py) | 域测试，全同步零 IO；四张真值表逐格覆盖 |
+| [`tests/test_schedule_service.py`](../tests/test_schedule_service.py) | 用例测试；完整生命周期跑在 fake 上，是迁移的验收标准 |
+| [`tests/schedule_fakes.py`](../tests/schedule_fakes.py) | 四个端口的内存实现 |
+| [`tests/test_schedule_fakes.py`](../tests/test_schedule_fakes.py) | 端口语义；适配器落地后升级成契约测试 |
 
 **尚未迁移（生产路径，见 §2）**
 
