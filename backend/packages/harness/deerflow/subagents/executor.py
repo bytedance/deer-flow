@@ -606,8 +606,7 @@ class SubagentExecutor:
         """
         if self.config.tools is not None:
             logger.info(
-                f"[trace={self.trace_id}] Subagent {self.config.name}: "
-                f"skipping skill allowed-tools filtering (explicit tools config: {self.config.tools})"
+                f"[trace={self.trace_id}] Subagent {self.config.name}: skipping skill allowed-tools filtering (explicit tools config: {self.config.tools})"
             )
             return self._base_tools
         return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
