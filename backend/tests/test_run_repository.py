@@ -993,6 +993,84 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_request_cancel_is_returned_by_owner_lease_renewal(self, tmp_path):
+        """The SQL store must atomically carry the first cancel action to the owner."""
+        repo = await _make_repo(tmp_path)
+        lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=lease,
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        assert await repo.request_cancel("run-1", action="interrupt") == "rollback"
+
+        renewal = await repo.renew_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+        )
+
+        assert renewal.renewed is True
+        assert renewal.cancel_action == "rollback"
+        row = await repo.get("run-1")
+        assert row["cancel_action"] == "rollback"
+        assert row["cancel_requested_at"] is not None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_request_cancel_rejects_terminal_run(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-1", thread_id="t1", status="success")
+
+        assert await repo.request_cancel("run-1", action="interrupt") is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancel_request_wins_before_owner_completion(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is False
+        assert result.cancel_action == "rollback"
+        assert (await repo.get("run-1"))["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_owner_completion_wins_before_cancel_request(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is True
+        assert await repo.request_cancel("run-1", action="rollback") is None
+        assert (await repo.get("run-1"))["status"] == "success"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
         """The SQL takeover CAS must reject a candidate renewed after its scan."""
         repo = await _make_repo(tmp_path)

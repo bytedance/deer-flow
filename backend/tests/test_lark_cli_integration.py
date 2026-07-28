@@ -419,9 +419,23 @@ def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: True)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False})
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
+    assert ready is True
+    assert detail is None
+
+
+def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    # Broker (Pattern B) wins even when the init image is also configured.
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": True})
+    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    assert mode == "broker"
     assert ready is True
     assert detail is None
 
@@ -432,7 +446,7 @@ def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: False)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": False, "lark_cli_broker_image": False})
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
@@ -445,7 +459,7 @@ def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -
         use="deerflow.community.aio_sandbox:AioSandboxProvider",
         provisioner_url="http://provisioner:8002",
     )
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", lambda _config: None)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: None)
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
@@ -462,11 +476,80 @@ def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) 
     def _fail(_config):  # pragma: no cover - must not be called
         raise AssertionError("provisioner should not be probed when probe=False")
 
-    monkeypatch.setattr(lark_cli, "_probe_provisioner_lark_cli_init_image", _fail)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _fail)
     mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
     assert mode == "init-container"
     assert ready is False
     assert detail is None
+
+
+def _reset_broker_mode_cache() -> None:
+    if hasattr(lark_cli.sandbox_lark_broker_active, "_cache"):
+        del lark_cli.sandbox_lark_broker_active._cache
+
+
+def test_sandbox_lark_broker_active_uses_tight_hot_path_timeout(monkeypatch, tmp_path) -> None:
+    """The per-bash-call broker probe must use the tight hot-path timeout, not the
+    5s Settings-status budget, so non-broker remote-provisioner users don't pay a
+    multi-second latency hit on the first lark-cli call per TTL."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    seen: dict[str, float] = {}
+
+    def _capture(_config, *, timeout):
+        seen["timeout"] = timeout
+        return {"lark_cli_init_image": False, "lark_cli_broker_image": True}
+
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _capture)
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        assert seen["timeout"] == lark_cli.LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_caches_negative_result(monkeypatch, tmp_path) -> None:
+    """A non-broker result is cached (longer TTL) so the hot path stops probing."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    calls = {"n": 0}
+
+    def _probe(_config, *, timeout):
+        calls["n"] += 1
+        return {"lark_cli_init_image": True, "lark_cli_broker_image": False}
+
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _probe)
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is False
+        assert lark_cli.sandbox_lark_broker_active(config) is False
+        # Second call served from cache — the provisioner is probed only once.
+        assert calls["n"] == 1
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_false_without_remote_provisioner(monkeypatch, tmp_path) -> None:
+    """Local AIO (no provisioner URL) never probes and is never broker mode."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider")
+
+    def _fail(_config, *, timeout):  # pragma: no cover - must not be called
+        raise AssertionError("no provisioner should be probed without a provisioner_url")
+
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _fail)
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is False
+    finally:
+        _reset_broker_mode_cache()
 
 
 def test_install_lark_integration_is_idempotent_across_reinstalls(monkeypatch, tmp_path):

@@ -154,23 +154,64 @@ Declare interceptors in `extensions_config.json` using the `mcpInterceptors` fie
 
 Each entry is a Python import path in `module:variable` format (resolved via `resolve_variable`). The variable must be a **no-arg builder function** that returns an async interceptor compatible with `MultiServerMCPClient`’s `tool_interceptors` interface, or `None` to skip.
 
-Example interceptor that injects auth headers from LangGraph metadata:
+Example interceptor that injects an authorization header from the request-scoped
+LangGraph secret context:
 
 ```python
+from langgraph.config import get_config
+
+
 def build_auth_interceptor():
     async def interceptor(request, handler):
-        from langgraph.config import get_config
-        metadata = get_config().get("metadata", {})
-        headers = dict(request.headers or {})
-        if token := metadata.get("auth_token"):
-            headers["X-Auth-Token"] = token
-        return await handler(request.override(headers=headers))
+        config = get_config()
+        secrets = (config.get("context") or {}).get("secrets") or {}
+        token = secrets.get("MCP_AUTH_TOKEN")
+        if token:
+            request = request.override(
+                headers={**(request.headers or {}), "Authorization": f"Bearer {token}"}
+            )
+        return await handler(request)
+
     return interceptor
 ```
+
+Supply the credential on each run request through `config.context.secrets`:
+
+```json
+{
+  "metadata": {"source": "my-client"},
+  "config": {
+    "context": {
+      "secrets": {"MCP_AUTH_TOKEN": "<request-scoped credential>"}
+    }
+  }
+}
+```
+
+Both `metadata.auth_token` and `config.metadata.auth_token` are rejected with HTTP 422 at run admission and are never supported
+interceptor paths. Do not put credentials in either metadata surface; use
+`config.context.secrets`, whose values remain available to the live interceptor
+but are removed from persisted and API-visible run configuration copies.
 
 - A single string value is accepted and normalized to a one-element list.
 - Invalid paths or builder failures are logged as warnings without blocking other interceptors.
 - The builder return value must be `callable`; non-callable values are skipped with a warning.
+
+### Migrating legacy MCP credentials
+
+Deployments that previously sent `metadata.auth_token` or `config.metadata.auth_token` must:
+
+1. Update the caller and interceptor to use `config.context.secrets` as shown
+   above.
+2. Rotate the exposed credential before resuming authenticated MCP traffic.
+3. Locate and remove every retained legacy copy according to the deployment's
+   retention policy, including database rows, run events, application or proxy
+   logs, snapshots, exports, and backups.
+
+Current history APIs hide legacy `metadata.auth_token` and `config.metadata.auth_token` values, but hiding a response does not erase
+material already retained by those systems. Restarting or upgrading DeerFlow does
+not rotate credentials or perform historical cleanup; operators must complete
+both actions explicitly.
 
 ## How It Works
 

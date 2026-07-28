@@ -548,6 +548,50 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
 
+    async def _finish_cancellation(
+        action: str,
+        *,
+        restore_checkpoint: bool = True,
+    ) -> None:
+        nonlocal checkpoint_rollback_completed
+        await run_manager.set_finalizing(run_id, True)
+        if action == "rollback":
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error="Rolled back by user",
+                **terminal_status_kwargs,
+            )
+            if not restore_checkpoint:
+                return
+            try:
+                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    rollback_point=rollback_point,
+                    snapshot_capture_failed=snapshot_capture_failed,
+                )
+                logger.info(
+                    "Run %s rolled back to pre-run checkpoint %s",
+                    run_id,
+                    pre_run_checkpoint_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Run %s cancellation rollback failed",
+                    run_id,
+                    exc_info=True,
+                )
+        else:
+            await run_manager.set_status(
+                run_id,
+                RunStatus.interrupted,
+                **terminal_status_kwargs,
+            )
+            logger.info("Run %s was cancelled", run_id)
+
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
         requested_modes: set[str] = set(normalized_stream_modes)
@@ -576,6 +620,11 @@ async def run_agent(
 
         start_outcome = await run_manager.try_start(run_id)
         if start_outcome is not RunStartOutcome.started:
+            if record.abort_event.is_set():
+                await _finish_cancellation(
+                    record.abort_action,
+                    restore_checkpoint=False,
+                )
             return
         started = True
 
@@ -881,45 +930,21 @@ async def run_agent(
 
         # 8. Final status
         if record.abort_event.is_set():
-            await run_manager.set_finalizing(run_id, True)
-            action = record.abort_action
-            if action == "rollback":
-                await run_manager.set_status(
-                    run_id,
-                    RunStatus.error,
-                    error="Rolled back by user",
-                    **terminal_status_kwargs,
-                )
-                try:
-                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                        accessor=accessor,
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        rollback_point=rollback_point,
-                        snapshot_capture_failed=snapshot_capture_failed,
-                    )
-                    logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                except Exception:
-                    logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
-            else:
-                await run_manager.set_status(
-                    run_id,
-                    RunStatus.interrupted,
-                    **terminal_status_kwargs,
-                )
+            await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
             await _ensure_finalizing_before_edit_failure(run_manager, record)
-            await run_manager.set_status(
+            cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error,
                 error=error_msg,
                 **terminal_status_kwargs,
             )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action)
         else:
             runtime_context = runtime.context if isinstance(runtime.context, dict) else None
             # Guard middlewares that hard-stop a run by stripping tool_calls
@@ -947,63 +972,40 @@ async def run_agent(
                 produced_output_paths,
             )
             delivery_error = _delivery_error(delivery_content)
-            await run_manager.set_status(
+            cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
                 error=delivery_error,
                 stop_reason=stop_reason,
                 **terminal_status_kwargs,
             )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action)
 
     except asyncio.CancelledError:
-        await run_manager.set_finalizing(run_id, True)
-        action = record.abort_action
-        if action == "rollback":
-            await run_manager.set_status(
-                run_id,
-                RunStatus.error,
-                error="Rolled back by user",
-                **terminal_status_kwargs,
-            )
-            try:
-                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                    accessor=accessor,
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    rollback_point=rollback_point,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                )
-                logger.info("Run %s was cancelled and rolled back", run_id)
-            except Exception:
-                logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
-        else:
-            await _ensure_finalizing_before_edit_failure(run_manager, record)
-            await run_manager.set_status(
-                run_id,
-                RunStatus.interrupted,
-                **terminal_status_kwargs,
-            )
-            logger.info("Run %s was cancelled", run_id)
+        await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
         error_msg = f"{exc}"
         logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_finalizing_before_edit_failure(run_manager, record)
-        await run_manager.set_status(
+        cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
             RunStatus.error,
             error=error_msg,
             **terminal_status_kwargs,
         )
-        await bridge.publish(
-            run_id,
-            "error",
-            {
-                "message": error_msg,
-                "name": type(exc).__name__,
-            },
-        )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": type(exc).__name__,
+                },
+            )
 
     finally:
         if record.ownership_lost:
@@ -1092,7 +1094,18 @@ async def run_agent(
                 # real worker outcome. Leaving a successful row inflight would
                 # let lease recovery rewrite it as an error with a synthetic
                 # zero receipt.
-                await run_manager.persist_current_status(run_id)
+                if record.abort_event.is_set():
+                    await run_manager.persist_current_status(run_id)
+                else:
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        record.status,
+                        error=record.error,
+                        stop_reason=record.stop_reason,
+                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action)
+                        await run_manager.persist_current_status(run_id)
             except Exception:
                 logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
