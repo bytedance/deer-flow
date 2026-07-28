@@ -660,6 +660,35 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
+        else:
+            allowed = None
+
+        # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+        # allowlist by the provider's "skill" policy so denied skills never
+        # reach the returned list (and are never turned into tools). Pass the
+        # already-loaded ``all_skills`` names as candidates so we don't pay a
+        # second ``load_skills`` round-trip inside the filter.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        authz_context = {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
+        allowed = filter_available_skills_by_authorization(
+            allowed,
+            context=authz_context,
+            app_config=resolved_app_config,
+            user_id=self.user_id,
+            candidate_skill_names=[s.name for s in all_skills],
+        )
+
+        if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
 

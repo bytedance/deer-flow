@@ -300,6 +300,21 @@ class DeerFlowClient:
         if model_name is None and self._app_config.models:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
+        # Phase 3: enforce skill authorization (Layer 1) on the embedded path
+        # too, mirroring ``_make_lead_agent`` (agent.py:675). Without this, a
+        # caller building the agent via ``DeerFlowClient(available_skills=...)``
+        # bypasses the role's ``skills`` policy: ``SkillActivationMiddleware``
+        # and the catalog/prompt would see the unfiltered set. ``self._available_skills``
+        # is left untouched (it feeds the cache key at line 282); the filtered
+        # result is a local used for assembly only.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        available_skills = filter_available_skills_by_authorization(
+            self._available_skills,
+            context=cfg,
+            app_config=self._app_config,
+            user_id=cfg.get("user_id"),
+        )
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
@@ -309,8 +324,8 @@ class DeerFlowClient:
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
         skills_list = get_enabled_skills_for_config(self._app_config)
-        if self._available_skills is not None:
-            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        if available_skills is not None:
+            skills_list = [s for s in skills_list if s.name in available_skills]
         skill_setup = build_skill_search_setup(
             skills_list,
             enabled=self._app_config.skills.deferred_discovery,
@@ -354,7 +369,7 @@ class DeerFlowClient:
                     config,
                     model_name=model_name,
                     agent_name=self._agent_name,
-                    available_skills=self._available_skills,
+                    available_skills=available_skills,
                     custom_middlewares=self._middlewares,
                     app_config=self._app_config,
                     deferred_setup=deferred_setup,
@@ -370,7 +385,7 @@ class DeerFlowClient:
                 max_concurrent_subagents=max_concurrent_subagents,
                 max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
                 mcp_routing_hints_section=mcp_routing_hints_section,
