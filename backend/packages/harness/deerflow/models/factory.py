@@ -269,15 +269,26 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
 
-    # Normalize known-but-invalid reasoning_effort values to their closest
-    # valid equivalent.  "minimal" is sent by the frontend for flash mode and
-    # was previously also hardcoded in the thinking-disabled path above, but
-    # it is not a valid API value (OpenAI expects low/medium/high/xhigh/max).
-    reasoning_effort_normalize: dict[str, str] = {"minimal": "low"}
-    if (effort := kwargs.get("reasoning_effort")) in reasoning_effort_normalize:
-        kwargs["reasoning_effort"] = reasoning_effort_normalize[effort]
-    if (effort := model_settings_from_config.get("reasoning_effort")) in reasoning_effort_normalize:
-        model_settings_from_config["reasoning_effort"] = reasoning_effort_normalize[effort]
+    # For DeepSeek vendor models: map "minimal" reasoning_effort to "low".
+    # The DeepSeek API does not accept "minimal" (the frontend's flash-mode
+    # shorthand); its valid reasoning_effort levels are low / medium / high.
+    #
+    # Detection uses three signals because the model class alone is
+    # insufficient — DeepSeek is commonly accessed via ChatOpenAI pointed at
+    # a deepseek endpoint.  api_base catches direct and proxied endpoints;
+    # the model name is the reliable fallback when the endpoint is a generic
+    # proxy or relay that does not mention "deepseek" in its URL.
+    _endpoint = model_settings_from_config.get("api_base") or ""
+    _is_deepseek = (
+        any(cls.__name__ == "ChatDeepSeek" for cls in model_class.__mro__)
+        or "deepseek" in _endpoint.lower()
+        or "deepseek" in (model_config.model or "").lower()
+    )
+    if _is_deepseek:
+        if (effort := kwargs.get("reasoning_effort")) and effort == "minimal":
+            kwargs["reasoning_effort"] = "low"
+        if (effort := model_settings_from_config.get("reasoning_effort")) and effort == "minimal":
+            model_settings_from_config["reasoning_effort"] = "low"
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
