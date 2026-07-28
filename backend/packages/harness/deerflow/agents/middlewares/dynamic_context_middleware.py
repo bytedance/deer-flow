@@ -60,6 +60,23 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
+# Suffix the ID-swap gives the real user message; the reminder SystemMessage
+# takes the original id so ``add_messages`` can replace it in place.
+INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+
+def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
+    """Return the id *message_id* had before the reminder ID-swap.
+
+    Replaying a persisted user turn must feed the graph the id the client
+    originally sent: a ``{id}__user`` message is skipped as an injection target,
+    so replaying one into a state that has no reminder yet silently drops the
+    date and memory block for that turn.
+    """
+
+    if isinstance(message_id, str) and message_id.endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
+        return message_id[: -len(INJECTED_USER_MESSAGE_ID_SUFFIX)] or message_id
+    return message_id
 
 
 def _extract_date(content: str) -> str | None:
@@ -120,7 +137,7 @@ def _is_user_injection_target(message: object) -> bool:
     # (id__user__user__user...) and ghost-message re-execution.
     # Using endswith (not substring "in") avoids false positives on IDs that
     # happen to contain "__user" in the middle.
-    if message.id and str(message.id).endswith("__user"):
+    if message.id and str(message.id).endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
         return False
     return True
 
@@ -232,7 +249,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         messages.append(
             HumanMessage(
                 content=original.content,
-                id=f"{stable_id}__user",
+                id=f"{stable_id}{INJECTED_USER_MESSAGE_ID_SUFFIX}",
                 name=original.name,
                 additional_kwargs=original.additional_kwargs,
             )

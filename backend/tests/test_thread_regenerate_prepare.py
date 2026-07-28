@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -21,6 +21,7 @@ def _checkpoint(
     *,
     metadata: dict | None = None,
     goal: dict | None = None,
+    next_tasks: tuple[str, ...] = (),
 ):
     channel_values = {"messages": messages}
     if goal is not None:
@@ -36,6 +37,7 @@ def _checkpoint(
         },
         checkpoint={"channel_values": channel_values},
         metadata=metadata or {},
+        next=next_tasks,
     )
 
 
@@ -117,6 +119,7 @@ class FakeAccessor:
             config=checkpoint.config,
             metadata=checkpoint.metadata,
             parent_config=getattr(checkpoint, "parent_config", None),
+            next=getattr(checkpoint, "next", ()),
         )
 
     async def aget(self, config):
@@ -629,7 +632,30 @@ def test_prepare_edit_regenerate_payload_returns_new_human_and_edit_metadata():
     }
 
 
-def _edit_source_run_fixtures() -> tuple[FakeEventStore, FakeRunManager]:
+def _first_turn_checkpointer() -> FakeCheckpointer:
+    """First-turn history where the user message's id is swapped mid-run.
+
+    ``DynamicContextMiddleware`` moves the first user message to ``{id}__user``
+    and gives ``{id}`` to the injected reminder, so every checkpoint written
+    before that node ran holds the same prompt under an id the replay-base
+    lookup cannot match (#4531).
+    """
+    system = SystemMessage(id="human-1", content="<system-reminder>date</system-reminder>")
+    swapped_human = HumanMessage(id="human-1__user", content="original question")
+    raw_human = HumanMessage(id="human-1", content="original question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    return FakeCheckpointer(
+        [
+            _checkpoint("ckpt-head", [system, swapped_human, ai]),
+            _checkpoint("ckpt-after-inject", [system, swapped_human], next_tasks=("LoopDetectionMiddleware.before_agent",)),
+            _checkpoint("ckpt-mid", [raw_human], next_tasks=("DynamicContextMiddleware.before_agent",)),
+            _checkpoint("ckpt-input", [], next_tasks=("__start__",)),
+            _checkpoint("ckpt-empty", []),
+        ]
+    )
+
+
+def _answer_run_fixtures() -> tuple[FakeEventStore, FakeRunManager]:
     event_store = FakeEventStore(
         [
             {
@@ -655,7 +681,7 @@ def test_prepare_edit_regenerate_payload_preserves_a_rename_the_replay_base_pred
     base.checkpoint["channel_values"]["title"] = "auto generated title"
     latest = _checkpoint("ckpt-ai", [human, ai])
     latest.checkpoint["channel_values"]["title"] = "User renamed title"
-    event_store, run_manager = _edit_source_run_fixtures()
+    event_store, run_manager = _answer_run_fixtures()
 
     response = asyncio.run(
         thread_runs._prepare_edit_regenerate_payload(
@@ -683,7 +709,7 @@ def test_prepare_edit_regenerate_payload_lets_an_untitled_base_name_the_edited_t
     ai = AIMessage(id="ai-1", content="answer v1")
     latest = _checkpoint("ckpt-ai", [human, ai])
     latest.checkpoint["channel_values"]["title"] = "title of the replaced question"
-    event_store, run_manager = _edit_source_run_fixtures()
+    event_store, run_manager = _answer_run_fixtures()
 
     response = asyncio.run(
         thread_runs._prepare_edit_regenerate_payload(
@@ -696,6 +722,83 @@ def test_prepare_edit_regenerate_payload_lets_an_untitled_base_name_the_edited_t
 
     assert response.checkpoint["checkpoint_id"] == "ckpt-base"
     assert "title" not in response.input
+
+
+def test_prepare_regenerate_payload_replays_the_pre_swap_user_message_id():
+    """Replaying `{id}__user` would make the reminder middleware skip the turn.
+
+    The replay base predates the injection, so the turn must re-enter the graph
+    under the id the client originally sent or it loses its date/memory block.
+    """
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        thread_runs._prepare_regenerate_payload(
+            "thread-1",
+            "ai-1",
+            _request(_first_turn_checkpointer(), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
+    assert response.input["messages"][0]["id"] == "human-1"
+
+
+def test_prepare_edit_regenerate_payload_skips_mid_run_replay_base_on_first_turn():
+    """The replay base must predate the turn, not sit inside the run that produced it.
+
+    ``ckpt-mid`` still holds the original prompt (under its pre-swap id) and owns
+    the injection node's pending writes, so replaying from it re-adds the prompt
+    the edit is meant to replace.
+    """
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1__user",
+            "edited question",
+            _request(_first_turn_checkpointer(), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
+    assert response.metadata["regenerate_checkpoint_id"] == "ckpt-empty"
+
+
+def test_prepare_edit_regenerate_payload_prefers_checkpoint_lineage():
+    """Edit replay must resolve its base the same lineage-first way regenerate does.
+
+    A chronological scan cannot tell sibling branches apart (#4358), so the head
+    checkpoint has to reach the lineage walk.
+    """
+    from app.gateway.routers import thread_runs
+
+    event_store, run_manager = _answer_run_fixtures()
+    checkpointer = _first_turn_checkpointer()
+    from app.gateway.checkpoint_lineage import CheckpointParentMissingError
+
+    walk = AsyncMock(side_effect=CheckpointParentMissingError("no parent link"))
+
+    with patch.object(thread_runs, "find_checkpoint_before_message", walk):
+        response = asyncio.run(
+            thread_runs._prepare_edit_regenerate_payload(
+                "thread-1",
+                "human-1__user",
+                "edited question",
+                _request(checkpointer, event_store, run_manager=run_manager),
+            )
+        )
+
+    assert walk.await_count == 1
+    head_checkpoint = walk.await_args.args[1]
+    assert head_checkpoint.config["configurable"]["checkpoint_id"] == "ckpt-head"
+    # Legacy checkpoints without parent links still degrade to the bounded scan.
+    assert response.checkpoint["checkpoint_id"] == "ckpt-empty"
 
 
 @pytest.mark.parametrize(

@@ -38,6 +38,7 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -344,7 +345,12 @@ def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
         "content": [{"type": "text", "text": content}],
         "additional_kwargs": additional_kwargs,
     }
-    message_id = _message_id(message)
+    # Replay the id the client originally sent. The dynamic-context reminder
+    # re-keys the first user message of a thread to `{id}__user`, and replaying
+    # that persisted id into a state that has no reminder yet makes the
+    # middleware treat the turn as already injected, silently dropping the date
+    # and memory block the original turn had.
+    message_id = strip_injected_user_message_id_suffix(_message_id(message))
     if message_id:
         clean_message["id"] = message_id
     name = _message_name(message)
@@ -653,7 +659,12 @@ async def _prepare_edit_regenerate_payload(
     if not source_ai_id:
         raise HTTPException(status_code=409, detail="The source assistant message is missing an id")
 
-    base_checkpoint_tuple = await _find_base_checkpoint_before_human(thread_id, source_human_id, request)
+    base_checkpoint_tuple = await _find_base_checkpoint_before_human(
+        thread_id,
+        source_human_id,
+        request,
+        head_checkpoint=latest_checkpoint,
+    )
     target_run_id = await _find_target_run_id(thread_id, source_ai_id, source_ai, source_human, request)
     source_record = await _require_successful_source_run(thread_id, target_run_id, request)
     checkpoint = _checkpoint_response(base_checkpoint_tuple)
