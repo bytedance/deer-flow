@@ -371,6 +371,11 @@ def _is_terminal_assistant_text_message(message: Any) -> bool:
     return _is_visible_ai_message(message) and bool(_message_text(message).strip()) and not _message_tool_calls(message)
 
 
+def _has_title(values: dict[str, Any]) -> bool:
+    title = values.get("title")
+    return isinstance(title, str) and bool(title)
+
+
 def _has_active_goal(snapshot: Any) -> bool:
     goal = _checkpoint_values(snapshot).get("goal")
     return isinstance(goal, dict) and goal.get("status") == "active"
@@ -662,16 +667,28 @@ async def _prepare_edit_regenerate_payload(
         "edit_message_id": replacement_human_message_id,
         "edit_version_group_id": edit_version_group_id,
     }
+    edit_input: dict[str, Any] = {
+        "messages": [
+            _clean_human_message_for_edit(
+                source_human,
+                replacement_id=replacement_human_message_id,
+                replacement_text=normalized_text,
+            )
+        ]
+    }
+    base_values = base_checkpoint_tuple.values if isinstance(getattr(base_checkpoint_tuple, "values", None), dict) else {}
+    latest_values = latest_checkpoint.values if isinstance(latest_checkpoint.values, dict) else {}
+    latest_title = latest_values.get("title")
+    if _has_title(base_values) and isinstance(latest_title, str) and latest_title:
+        # The replay base can predate a manual rename, so replay the current
+        # title rather than letting checkpoint rollback restore the older one
+        # (#4457, the same rollback regenerate already guards against). An
+        # untitled base is deliberately left alone: it belongs to a thread the
+        # title middleware has not named yet, and pinning the current title
+        # there would keep a name generated from the prompt this edit replaced.
+        edit_input["title"] = latest_title
     return EditRegeneratePrepareResponse(
-        input={
-            "messages": [
-                _clean_human_message_for_edit(
-                    source_human,
-                    replacement_id=replacement_human_message_id,
-                    replacement_text=normalized_text,
-                )
-            ]
-        },
+        input=edit_input,
         checkpoint=checkpoint,
         metadata=metadata,
         target_run_id=target_run_id,
