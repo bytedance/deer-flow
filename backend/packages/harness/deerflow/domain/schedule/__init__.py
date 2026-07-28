@@ -1,10 +1,10 @@
 """Schedule bounded context: standing instructions to run a prompt on time.
 
-Public API of the context. Import domain objects from here; ports will live in
+Public API of the context. Import domain objects from here; import ports from
 `deerflow.domain.schedule.ports` -- they are contracts consumed by adapters and
 tests, not everyday call-site symbols.
 
-`ScheduleService` is not exported yet: this commit lands the model only.
+`ScheduleService` is not exported yet: the application service has not landed.
 """
 
 from deerflow.domain.schedule.model import (
