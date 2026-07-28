@@ -903,6 +903,22 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     if isinstance(config.get("context"), dict):
         config["context"]["subagent_enabled"] = subagent_enabled
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+
+    # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+    # allowlist by the provider's "skill" policy so denied skills never
+    # appear in <skill_index>, can never be describe_skill'd, and cannot be
+    # slash-activated (SkillActivationMiddleware checks this set). When
+    # authorization is disabled, this is a no-op. ``available_skills=None``
+    # means "no agent-level allowlist" (all enabled skills); authorization
+    # still constrains via filter_resources in that case.
+    from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+    available_skills = filter_available_skills_by_authorization(
+        available_skills,
+        context=cfg,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+    )
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 

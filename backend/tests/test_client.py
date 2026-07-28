@@ -1138,6 +1138,7 @@ class TestEnsureAgent:
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.authz.skill_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})

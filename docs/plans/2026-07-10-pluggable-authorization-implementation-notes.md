@@ -339,8 +339,9 @@ Phase 1 最低验证要求：
 - **兼容性：** `authorization.enabled: false` 时两条路径均为 no-op（路由返回全部模型，
   解析返回原名）。匿名请求（user=None）不触发过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS`
   已包含 `"model": "models"`，无需 schema 变更。
-- **证据：** `tests/test_models_authorization.py`（24 tests）覆盖 disabled/anonymous/
-  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景，disabled/allowed/
+- **证据：** `tests/test_models_authorization.py`（26 tests）覆盖 disabled/anonymous/
+  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景（含 provider-resolution-error
+  fail-closed/fail-open），disabled/allowed/
   graceful-fallback/all-denied-fail-closed/all-denied-fail-open/custom-provider-list-vs-use/
   no-usable-fallback 运行时场景，以及 `DeerFlowClient._ensure_agent` 的 model:use 强制 +
   None 默认解析 + disabled no-op 集成场景；
@@ -348,6 +349,44 @@ Phase 1 最低验证要求：
   `test_auth_middleware.py` 共 318 tests 全部通过。
 - **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
   management route 的 provider 迁移。
+
+### 2026-07-28 — Phase 3 / Skills authorization (activate)
+
+- **背景：** Phase 2A 合并后，技能仍然对所有已认证用户开放——`available_skills`
+  仅由 agent config 白名单控制，不检查角色。RFC §9 Phase 3 要求覆盖 Skills 资源类型。
+  技能的 enforcement 与 Models 不同：技能没有 Gateway route，而是在 harness 层
+  （lead agent assembly + subagent executor + slash-activation middleware）执行。
+- **决策（Layer 1 — 装配阶段）：** 新增 `filter_available_skills_by_authorization()`
+  过滤技能名称集合（`set[str] | None`），而非 `Skill` 对象列表。在 lead agent
+  `_make_lead_agent` 中，该函数在 `_available_skill_names()` 之后、`_load_enabled_available_skills()`
+  之前执行，使得 catalog（`describe_skill`）和 `SkillActivationMiddleware`（slash 激活）
+  共享同一个已过滤的 allowlist。在 subagent `executor.py` 的 `_load_skills()` 中同样过滤
+  `config.skills` 白名单。
+- **决策（Layer 2 — 运行时 slash 激活）：** 不新增 middleware 代码。`SkillActivationMiddleware._resolve_activation`
+  已经检查 `reference.name not in self._available_skills`。由于 Layer 1 在装配阶段
+  过滤了 `available_skills`，被拒技能无法通过 slash 激活——无需额外的运行时检查。
+- **决策（候选集解析的 fail-closed）：** 当 `available_skills=None`（无 agent 级白名单）
+  且 `_all_configured_skill_names` 抛错（storage I/O 错误）时，不静默返回 `None`
+  （会让所有技能绕过授权）。改为让 `_all_configured_skill_names` 抛异常，调用方按
+  `fail_closed` 决策：fail-closed → `set()`（拒绝全部），fail-open → `None`（无限制）。
+  与 provider 错误的 fail-closed/open 处理对称。
+- **决策（通用过滤器）：** 新增 `filter_resources_by_authorization()` 在 `enforcement.py`，
+  是 `filter_tools_by_authorization` 的泛化版本，适用于任何有 `name` 属性的资源（技能、模型等）。
+- **否决方案：** 不在 `_resolve_activation` 中添加运行时 `authorize("skill", "activate")`
+  检查——那需要将 provider + principal 传入 middleware 构造函数，改变 `build_middlewares`
+  签名。Layer 1 allowlist 过滤已覆盖 slash 激活路径（middleware 检查同一个 set），避免
+  重复检查。不为技能新增独立 Gateway route（技能管理路由保持 `require_admin_user`，per §12 Q6）。
+- **兼容性：** `authorization.enabled: false` 时 `filter_available_skills_by_authorization`
+  是 no-op（返回原始 allowlist）。`available_skills=None`（无 agent 级白名单）+ 启用授权时，
+  从 config 解析全部技能名并过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含
+  `"skill": "skills"`，无需 schema 变更。对 test mock（SimpleNamespace app_config）安全：
+  使用 `getattr` + `is not True` 防御。
+- **证据：** `tests/test_skills_authorization.py`（15 tests）覆盖 disabled/RBAC allow/deny/
+  wildcard/empty/provider-error-fail-closed-fail-open/internal-caller 场景，generic filter，
+  以及候选集解析错误的 fail-closed/fail-open + 空配置无 bypass 回归；
+  既有 authz + skills 测试共 279 tests 全部通过。
+- **延期：** Sandbox 权限（Phase 3 后续 PR，已由 #4911 落地）；前端 effective-permissions 展示；
+  management route 的 provider 迁移。Models 权限由并行 PR（#4540）处理。
 
 ### 2026-08-02 — Phase 3 / Sandbox authorization (execute)
 
@@ -402,6 +441,7 @@ Phase 1 最低验证要求：
 - **延期：** Phase 3（Models/Skills/Sandbox）三资源类型完成；Phase 4 前端
   effective-permissions 展示；management route 的 provider 迁移；
   feishu/dingtalk 文件同步路径的 sandbox gate（身份传递机制待定）。
+
 
 ### 新记录模板
 
