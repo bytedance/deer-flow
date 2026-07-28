@@ -1,21 +1,26 @@
-"""Semantics of the in-memory schedule doubles.
+"""Contract suite for the schedule repository ports.
 
-These are the rules ``docs`` calls the port contract: what `claim_due` selects,
-when `add` refuses, what `protect_terminal` preserves. They are asserted here
-against the fakes so the doubles cannot drift from the ports they stand in for
-while the service tests lean on them.
+Every case here runs **twice**: once against the in-memory doubles and once
+against the SQL adapters on a real file-backed sqlite database. That is the
+point -- a rule stated in a port docstring has to hold for both, and a
+divergence becomes a failure rather than a surprise in production.
 
-This file is the seed of the contract suite: when the SQL adapters land, the
-same cases run against both implementations and any divergence between them
-becomes a failure rather than a surprise in production. Concurrency stays out
-of scope in both tiers -- see the note in ``schedule_fakes``.
+What the contract owns is single-threaded semantics: which rows `claim_due`
+selects, that `add` refuses a second active record, what `protect_terminal`
+preserves. What it deliberately does **not** own is atomicity -- the doubles
+provide none, and a green run here says nothing about two dispatchers racing.
+That is covered against a real database in
+``test_scheduled_task_dispatch_race.py``. Do not read a passing contract suite
+as licence to run more than one scheduler.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 from schedule_fakes import (
     FakeRunLauncher,
     FakeThreadLookup,
@@ -23,7 +28,11 @@ from schedule_fakes import (
     InMemoryScheduledTaskRepository,
 )
 
+from app.infra.persistence.scheduled_task_runs import SqlScheduledRunRepository
+from app.infra.persistence.scheduled_tasks import SqlScheduledTaskRepository
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.domain.schedule.model import (
+    ACTIVE_RUN_STATUSES,
     ActiveRunConflictError,
     ContextMode,
     RunStatus,
@@ -34,12 +43,74 @@ from deerflow.domain.schedule.model import (
     TriggerKind,
 )
 from deerflow.domain.schedule.ports import ScheduledRunRepository, ScheduledTaskRepository
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
 pytestmark = pytest.mark.asyncio
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
 CRON = ScheduleSpec.cron_schedule("0 9 * * *", "UTC")
 ONCE = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0, tzinfo=UTC), "UTC")
+
+
+@pytest_asyncio.fixture(params=["memory", "sql"])
+async def repos(request, tmp_path) -> AsyncIterator[tuple[ScheduledTaskRepository, ScheduledRunRepository]]:
+    """One parametrized fixture, two implementations of the same ports."""
+    if request.param == "memory":
+        yield InMemoryScheduledTaskRepository(), InMemoryScheduledRunRepository()
+        return
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        yield SqlScheduledTaskRepository(sf), SqlScheduledRunRepository(sf)
+    finally:
+        await close_engine()
+
+
+@pytest_asyncio.fixture
+async def tasks(repos) -> ScheduledTaskRepository:
+    return repos[0]
+
+
+@pytest_asyncio.fixture
+async def runs(repos) -> ScheduledRunRepository:
+    return repos[1]
+
+
+async def seed(
+    repo: ScheduledTaskRepository,
+    task: ScheduledTask,
+    *,
+    claimed_until: datetime | None = None,
+) -> ScheduledTask:
+    """Install a task, optionally already carrying a claim.
+
+    A claim cannot be installed through the port -- `claim_due` only stamps
+    tasks that are actually due, and these cases need shapes that claiming
+    would never produce (running with an *expired* claim, running with a live
+    one). So each implementation is set up directly: the fake exposes a seed
+    helper, and the SQL side writes the row. That is the one place this suite
+    reaches past the port, and it is why the assertions that follow go back
+    through it.
+    """
+    stored = await repo.add(task)
+    if claimed_until is None:
+        return stored
+
+    if isinstance(repo, InMemoryScheduledTaskRepository):
+        repo.seed(task, lease_owner="prior-worker", lease_expires_at=claimed_until)
+        return task
+
+    from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+
+    factory = get_session_factory()
+    assert factory is not None
+    async with factory() as session:
+        row = await session.get(ScheduledTaskRow, task.task_id)
+        row.lease_owner = "prior-worker"
+        row.lease_expires_at = claimed_until
+        await session.commit()
+    return task
 
 
 def make_task(
@@ -67,60 +138,107 @@ def make_task(
 
 class TestProtocolConformance:
     """`runtime_checkable` only checks that the methods exist, not their
-    signatures -- enough to catch a rename that updates one side only.
+    signatures -- enough to catch a rename that updates one side only."""
 
-    Declared async purely to match this module's asyncio mark; there is
-    nothing to await.
-    """
-
-    async def test_task_repository_satisfies_the_port(self):
-        assert isinstance(InMemoryScheduledTaskRepository(), ScheduledTaskRepository)
-
-    async def test_run_repository_satisfies_the_port(self):
-        assert isinstance(InMemoryScheduledRunRepository(), ScheduledRunRepository)
+    async def test_repositories_satisfy_their_ports(self, tasks, runs):
+        assert isinstance(tasks, ScheduledTaskRepository)
+        assert isinstance(runs, ScheduledRunRepository)
 
 
 class TestTaskOwnershipIsolation:
     """Another user's task must read as absent, never as forbidden."""
 
-    async def test_get_hides_another_users_task(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(user_id="owner"))
-        assert await repo.get("task-1", user_id="owner") is not None
-        assert await repo.get("task-1", user_id="intruder") is None
+    async def test_get_hides_another_users_task(self, tasks):
+        await tasks.add(make_task(user_id="owner"))
+        assert await tasks.get("task-1", user_id="owner") is not None
+        assert await tasks.get("task-1", user_id="intruder") is None
 
-    async def test_save_refuses_another_users_task(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(user_id="owner"))
-        assert await repo.save(make_task(user_id="intruder")) is None
-        assert (await repo.get("task-1", user_id="owner")).user_id == "owner"
+    async def test_save_refuses_another_users_task(self, tasks):
+        await tasks.add(make_task(user_id="owner"))
+        assert await tasks.save(make_task(user_id="intruder")) is None
+        stored = await tasks.get("task-1", user_id="owner")
+        assert stored.user_id == "owner"
 
-    async def test_delete_refuses_another_users_task(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(user_id="owner"))
-        assert await repo.delete("task-1", user_id="intruder") is False
-        assert await repo.get("task-1", user_id="owner") is not None
+    async def test_delete_refuses_another_users_task(self, tasks):
+        await tasks.add(make_task(user_id="owner"))
+        assert await tasks.delete("task-1", user_id="intruder") is False
+        assert await tasks.get("task-1", user_id="owner") is not None
 
-    async def test_list_by_thread_only_matches_bound_tasks(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task("bound", context_mode=ContextMode.REUSE_THREAD, thread_id="thread-1"))
-        await repo.add(make_task("unbound"))
-        listed = await repo.list_by_user_and_thread("user-1", "thread-1")
+    async def test_list_by_user_excludes_other_owners(self, tasks):
+        await tasks.add(make_task("mine", user_id="owner"))
+        await tasks.add(make_task("theirs", user_id="someone-else"))
+        assert [t.task_id for t in await tasks.list_by_user("owner")] == ["mine"]
+
+    async def test_list_by_thread_only_matches_bound_tasks(self, tasks):
+        await tasks.add(make_task("bound", context_mode=ContextMode.REUSE_THREAD, thread_id="thread-1"))
+        await tasks.add(make_task("unbound"))
+        listed = await tasks.list_by_user_and_thread("user-1", "thread-1")
         assert [task.task_id for task in listed] == ["bound"]
 
 
-class TestClaimDue:
-    async def test_claims_an_enabled_due_task_and_stamps_the_lease(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+class TestRoundTrip:
+    """What goes in comes back out -- including the value object, which the
+    SQL side has to rebuild from three separate columns."""
 
-        claimed = await repo.claim_due(now=NOW, lease_seconds=120, limit=10)
+    async def test_a_cron_task_round_trips(self, tasks):
+        original = await tasks.add(make_task(schedule=ScheduleSpec.cron_schedule("*/5 * * * *", "Asia/Shanghai")))
+        stored = await tasks.get(original.task_id, user_id="user-1")
+        assert stored.schedule == original.schedule
+        assert stored.schedule.cron == "*/5 * * * *"
+        assert stored.schedule.timezone == "Asia/Shanghai"
+
+    async def test_a_once_task_round_trips_to_the_same_instant(self, tasks):
+        original = await tasks.add(make_task(schedule=ONCE))
+        stored = await tasks.get(original.task_id, user_id="user-1")
+        assert stored.schedule == original.schedule
+
+    async def test_timestamps_come_back_timezone_aware(self, tasks):
+        """SQLite drops tzinfo on read; a naive datetime downstream would
+        compare wrong against an aware `now`."""
+        await tasks.add(make_task(next_run_at=NOW))
+        stored = await tasks.get("task-1", user_id="user-1")
+        assert stored.next_run_at.tzinfo is not None
+        assert stored.created_at.tzinfo is not None
+
+    async def test_save_replaces_the_whole_aggregate(self, tasks):
+        from dataclasses import replace
+
+        await tasks.add(make_task())
+        stored = await tasks.get("task-1", user_id="user-1")
+
+        await tasks.save(replace(stored, title="renamed", status=TaskStatus.PAUSED, run_count=7))
+
+        reloaded = await tasks.get("task-1", user_id="user-1")
+        assert reloaded.title == "renamed"
+        assert reloaded.status is TaskStatus.PAUSED
+        assert reloaded.run_count == 7
+
+
+class TestClaimDue:
+    async def test_claims_an_enabled_due_task(self, tasks):
+        await tasks.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+
+        claimed = await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)
 
         assert [task.task_id for task in claimed] == ["task-1"]
         assert claimed[0].status is TaskStatus.RUNNING
-        owner, expires = repo.lease_of("task-1")
-        assert owner is not None, "an implementation may record who claimed; nothing reads it back"
-        assert expires == NOW + timedelta(seconds=120)
+
+    async def test_a_claimed_task_is_not_claimed_again(self, tasks):
+        """The lease is not readable through the port, so the rule is asserted
+        the way it actually matters: a second claimer comes back empty."""
+        await tasks.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+        assert len(await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)) == 1
+
+        assert await tasks.claim_due(now=NOW, lease_seconds=120, limit=10) == []
+
+    async def test_the_claim_expires(self, tasks):
+        await tasks.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+        await tasks.claim_due(now=NOW, lease_seconds=60, limit=10)
+
+        later = NOW + timedelta(seconds=61)
+        reclaimed = await tasks.claim_due(now=later, lease_seconds=60, limit=10)
+
+        assert [task.task_id for task in reclaimed] == ["task-1"]
 
     @pytest.mark.parametrize(
         ("label", "task_kwargs"),
@@ -131,54 +249,41 @@ class TestClaimDue:
             ("completed", {"status": TaskStatus.COMPLETED, "next_run_at": NOW - timedelta(minutes=1)}),
         ],
     )
-    async def test_does_not_claim(self, label, task_kwargs):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(**task_kwargs))
-        assert await repo.claim_due(now=NOW, lease_seconds=120, limit=10) == [], label
+    async def test_does_not_claim(self, tasks, label, task_kwargs):
+        await tasks.add(make_task(**task_kwargs))
+        assert await tasks.claim_due(now=NOW, lease_seconds=120, limit=10) == [], label
 
-    async def test_does_not_steal_a_live_claim(self):
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(
-            make_task(next_run_at=NOW - timedelta(minutes=1)),
-            lease_owner="worker-1",
-            lease_expires_at=NOW + timedelta(seconds=60),
-        )
-        assert await repo.claim_due(now=NOW, lease_seconds=120, limit=10) == []
-
-    async def test_reclaims_a_task_stuck_mid_dispatch(self):
+    async def test_reclaims_a_task_stuck_mid_dispatch(self, tasks):
         """The claimer died between claiming and launching: status is running,
-        the lease has expired, and the task must not stay unreachable."""
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(
+        the claim has expired, and the task must not stay unreachable."""
+        await seed(
+            tasks,
             make_task(status=TaskStatus.RUNNING, next_run_at=NOW - timedelta(minutes=1)),
-            lease_owner="dead-worker",
-            lease_expires_at=NOW - timedelta(seconds=1),
+            claimed_until=NOW - timedelta(seconds=1),
         )
 
-        claimed = await repo.claim_due(now=NOW, lease_seconds=120, limit=10)
+        claimed = await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)
 
         assert [task.task_id for task in claimed] == ["task-1"]
-        assert repo.lease_of("task-1")[1] == NOW + timedelta(seconds=120), "the claim was re-stamped"
 
-    async def test_claims_the_most_overdue_first_and_honours_the_limit(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task("late", next_run_at=NOW - timedelta(hours=2)))
-        await repo.add(make_task("later", next_run_at=NOW - timedelta(hours=1)))
+    async def test_claims_the_most_overdue_first_and_honours_the_limit(self, tasks):
+        await tasks.add(make_task("late", next_run_at=NOW - timedelta(hours=2)))
+        await tasks.add(make_task("later", next_run_at=NOW - timedelta(hours=1)))
 
-        claimed = await repo.claim_due(now=NOW, lease_seconds=120, limit=1)
+        claimed = await tasks.claim_due(now=NOW, lease_seconds=120, limit=1)
 
         assert [task.task_id for task in claimed] == ["late"]
 
 
 class TestRecordLaunch:
-    async def test_writes_bookkeeping_and_releases_the_claim(self):
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(make_task(next_run_at=NOW), lease_owner="w", lease_expires_at=NOW + timedelta(seconds=60))
+    async def test_writes_bookkeeping_and_frees_the_task_for_the_next_round(self, tasks):
+        await tasks.add(make_task(next_run_at=NOW - timedelta(minutes=1)))
+        await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)
 
-        await repo.record_launch(
+        await tasks.record_launch(
             "task-1",
             status=TaskStatus.ENABLED,
-            next_run_at=NOW + timedelta(days=1),
+            next_run_at=NOW - timedelta(seconds=1),
             last_run_at=NOW,
             last_run_id="run-1",
             last_thread_id="thread-1",
@@ -186,19 +291,19 @@ class TestRecordLaunch:
             increment_run_count=True,
         )
 
-        task = await repo.get("task-1", user_id="user-1")
+        task = await tasks.get("task-1", user_id="user-1")
         assert task.status is TaskStatus.ENABLED
         assert task.last_run_id == "run-1"
         assert task.run_count == 1
-        assert repo.lease_of("task-1") == (None, None)
+        # The claim was released, so the next round can take it again.
+        assert len(await tasks.claim_due(now=NOW, lease_seconds=120, limit=10)) == 1
 
-    async def test_protect_terminal_keeps_a_concurrently_finalized_verdict(self):
+    async def test_protect_terminal_keeps_a_concurrently_finalized_verdict(self, tasks):
         """A fast-failing run's completion hook lands before the launch path's
         own write; the completion is authoritative."""
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(status=TaskStatus.COMPLETED, schedule=ONCE))
+        await tasks.add(make_task(status=TaskStatus.COMPLETED, schedule=ONCE))
 
-        await repo.record_launch(
+        await tasks.record_launch(
             "task-1",
             status=TaskStatus.RUNNING,
             next_run_at=None,
@@ -210,17 +315,16 @@ class TestRecordLaunch:
             protect_terminal=True,
         )
 
-        task = await repo.get("task-1", user_id="user-1")
+        task = await tasks.get("task-1", user_id="user-1")
         assert task.status is TaskStatus.COMPLETED, "the terminal status must survive"
         assert task.last_error is None, "the terminal error must survive"
         assert task.last_run_id == "run-1", "bookkeeping is still recorded"
         assert task.run_count == 1
 
-    async def test_without_protect_terminal_the_write_wins(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.add(make_task(status=TaskStatus.COMPLETED, schedule=ONCE))
+    async def test_without_protect_terminal_the_write_wins(self, tasks):
+        await tasks.add(make_task(status=TaskStatus.COMPLETED, schedule=ONCE))
 
-        await repo.record_launch(
+        await tasks.record_launch(
             "task-1",
             status=TaskStatus.FAILED,
             next_run_at=None,
@@ -231,13 +335,12 @@ class TestRecordLaunch:
             increment_run_count=False,
         )
 
-        task = await repo.get("task-1", user_id="user-1")
+        task = await tasks.get("task-1", user_id="user-1")
         assert task.status is TaskStatus.FAILED
         assert task.last_error == "boom"
 
-    async def test_unknown_task_is_ignored(self):
-        repo = InMemoryScheduledTaskRepository()
-        await repo.record_launch(
+    async def test_unknown_task_is_ignored(self, tasks):
+        await tasks.record_launch(
             "nope",
             status=TaskStatus.ENABLED,
             next_run_at=None,
@@ -250,30 +353,29 @@ class TestRecordLaunch:
 
 
 class TestCancelStuckOnceTasks:
-    async def test_cancels_a_launched_once_task_with_no_claim(self):
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(make_task(status=TaskStatus.RUNNING, schedule=ONCE))
+    async def test_cancels_a_launched_once_task_with_no_claim(self, tasks):
+        """Launched, so the claim was released; the completion hook then died
+        with the process. Expired-claim reclaim can never see this one."""
+        await tasks.add(make_task(status=TaskStatus.RUNNING, schedule=ONCE))
 
-        assert await repo.cancel_stuck_once_tasks(error="restarted") == 1
-        task = await repo.get("task-1", user_id="user-1")
+        assert await tasks.cancel_stuck_once_tasks(error="restarted") == 1
+        task = await tasks.get("task-1", user_id="user-1")
         assert task.status is TaskStatus.CANCELLED
         assert task.last_error == "restarted"
 
-    async def test_leaves_a_claimed_task_to_lease_expiry(self):
+    async def test_leaves_a_claimed_task_to_claim_expiry(self, tasks):
         """Claimed but not launched -- expired-claim reclaim recovers it, and
         cancelling here would throw away a dispatch that never happened."""
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(
-            make_task(status=TaskStatus.RUNNING, schedule=ONCE),
-            lease_owner="w",
-            lease_expires_at=NOW + timedelta(seconds=60),
+        await seed(
+            tasks,
+            make_task(status=TaskStatus.RUNNING, schedule=ONCE, next_run_at=NOW - timedelta(minutes=1)),
+            claimed_until=NOW + timedelta(seconds=60),
         )
-        assert await repo.cancel_stuck_once_tasks(error="restarted") == 0
+        assert await tasks.cancel_stuck_once_tasks(error="restarted") == 0
 
-    async def test_leaves_cron_tasks_alone(self):
-        repo = InMemoryScheduledTaskRepository()
-        repo.seed(make_task(status=TaskStatus.RUNNING, schedule=CRON))
-        assert await repo.cancel_stuck_once_tasks(error="restarted") == 0
+    async def test_leaves_cron_tasks_alone(self, tasks):
+        await tasks.add(make_task(status=TaskStatus.RUNNING, schedule=CRON))
+        assert await tasks.cancel_stuck_once_tasks(error="restarted") == 0
 
 
 class TestActiveSlot:
@@ -283,75 +385,83 @@ class TestActiveSlot:
     def _tombstone(self, task_id: str = "task-1") -> ScheduledRun:
         return ScheduledRun.skipped_tombstone(task_id=task_id, thread_id="thread-1", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED)
 
-    async def test_second_active_record_is_refused(self):
-        repo = InMemoryScheduledRunRepository()
-        await repo.add(self._queued())
+    async def test_second_active_record_is_refused(self, runs):
+        await runs.add(self._queued())
         with pytest.raises(ActiveRunConflictError):
-            await repo.add(self._queued())
+            await runs.add(self._queued())
 
-    async def test_a_tombstone_never_conflicts(self):
+    async def test_a_tombstone_never_conflicts(self, runs):
         """Terminal from birth, so it sits outside the active-slot rule -- this
         is why the skip path cannot reuse the queued factory."""
-        repo = InMemoryScheduledRunRepository()
-        await repo.add(self._queued())
-        await repo.add(self._tombstone())
-        assert await repo.count_active() == 1
+        await runs.add(self._queued())
+        await runs.add(self._tombstone())
+        assert await runs.count_active() == 1
 
-    async def test_another_task_is_unaffected(self):
-        repo = InMemoryScheduledRunRepository()
-        await repo.add(self._queued("task-1"))
-        await repo.add(self._queued("task-2"))
-        assert await repo.count_active() == 2
+    async def test_another_task_is_unaffected(self, runs):
+        await runs.add(self._queued("task-1"))
+        await runs.add(self._queued("task-2"))
+        assert await runs.count_active() == 2
 
-    async def test_slot_frees_up_once_the_record_terminalizes(self):
-        repo = InMemoryScheduledRunRepository()
-        first = await repo.add(self._queued())
-        await repo.update_status(first.record_id, status=RunStatus.SUCCESS, finished_at=NOW)
-        await repo.add(self._queued())
-        assert await repo.count_active() == 1
+    async def test_slot_frees_up_once_the_record_terminalizes(self, runs):
+        first = await runs.add(self._queued())
+        await runs.update_status(first.record_id, status=RunStatus.SUCCESS, finished_at=NOW)
+        await runs.add(self._queued())
+        assert await runs.count_active() == 1
 
-    async def test_has_active_is_scoped_to_one_task_while_count_is_global(self):
-        repo = InMemoryScheduledRunRepository()
-        await repo.add(self._queued("task-1"))
-        await repo.add(self._queued("task-2"))
-        assert await repo.has_active("task-1") is True
-        assert await repo.has_active("task-3") is False
-        assert await repo.count_active() == 2
+    async def test_has_active_is_scoped_to_one_task_while_count_is_global(self, runs):
+        await runs.add(self._queued("task-1"))
+        await runs.add(self._queued("task-2"))
+        assert await runs.has_active("task-1") is True
+        assert await runs.has_active("task-3") is False
+        assert await runs.count_active() == 2
+
+    async def test_a_run_round_trips(self, runs):
+        stored = await runs.add(self._queued())
+        listed = await runs.list_by_task("task-1", limit=10, offset=0)
+        assert [r.record_id for r in listed] == [stored.record_id]
+        assert listed[0].trigger is TriggerKind.SCHEDULED
+        assert listed[0].scheduled_for.tzinfo is not None
 
 
 class TestRunStatusWrites:
-    async def test_protect_terminal_backfills_without_overwriting(self):
-        repo = InMemoryScheduledRunRepository()
-        run = await repo.add(ScheduledRun.queued(task_id="t", thread_id="th", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED))
-        await repo.update_status(run.record_id, status=RunStatus.FAILED, error="boom", finished_at=NOW)
+    async def _one_queued(self, runs) -> ScheduledRun:
+        return await runs.add(ScheduledRun.queued(task_id="t", thread_id="th", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED))
+
+    async def test_protect_terminal_backfills_without_overwriting(self, runs):
+        run = await self._one_queued(runs)
+        await runs.update_status(run.record_id, status=RunStatus.FAILED, error="boom", finished_at=NOW)
 
         # The launch path's write arrives late.
-        await repo.update_status(run.record_id, status=RunStatus.RUNNING, run_id="run-1", started_at=NOW, protect_terminal=True)
+        await runs.update_status(run.record_id, status=RunStatus.RUNNING, run_id="run-1", started_at=NOW, protect_terminal=True)
 
-        stored = repo.all_runs()[0]
+        stored = (await runs.list_by_task("t", limit=10, offset=0))[0]
         assert stored.status is RunStatus.FAILED
         assert stored.error == "boom"
         assert stored.run_id == "run-1", "the id the completion could not know is backfilled"
         assert stored.started_at == NOW
 
-    async def test_unknown_record_is_ignored(self):
-        repo = InMemoryScheduledRunRepository()
-        await repo.update_status("nope", status=RunStatus.SUCCESS)
+    async def test_unknown_record_is_ignored(self, runs):
+        await runs.update_status("nope", status=RunStatus.SUCCESS)
 
-    async def test_mark_stale_active_terminalizes_orphans(self):
-        repo = InMemoryScheduledRunRepository()
-        active = await repo.add(ScheduledRun.queued(task_id="t", thread_id="th", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED))
-        done = await repo.add(ScheduledRun.skipped_tombstone(task_id="t", thread_id="th", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED))
+    async def test_mark_stale_active_terminalizes_orphans(self, runs):
+        active = await self._one_queued(runs)
+        done = await runs.add(ScheduledRun.skipped_tombstone(task_id="t", thread_id="th", scheduled_for=NOW, trigger=TriggerKind.SCHEDULED))
 
-        assert await repo.mark_stale_active(error="gateway restarted") == 1
+        assert await runs.mark_stale_active(error="gateway restarted") == 1
 
-        by_id = {run.record_id: run for run in repo.all_runs()}
+        by_id = {run.record_id: run for run in await runs.list_by_task("t", limit=10, offset=0)}
         assert by_id[active.record_id].status is RunStatus.INTERRUPTED
         assert by_id[active.record_id].error == "gateway restarted"
         assert by_id[done.record_id].status is RunStatus.SKIPPED
 
+    async def test_active_statuses_are_exactly_queued_and_running(self):
+        assert ACTIVE_RUN_STATUSES == (RunStatus.QUEUED, RunStatus.RUNNING)
+
 
 class TestLauncherAndThreadLookup:
+    """Fake-only: these two ports have no SQL implementation -- one starts a
+    run and the other asks the thread store, so both land in later adapters."""
+
     async def test_launcher_records_the_call_and_echoes_the_thread(self):
         launcher = FakeRunLauncher()
         launched = await launcher.launch(
