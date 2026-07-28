@@ -205,6 +205,89 @@ export function getBranchableAssistantGroupIds(
   return branchableGroupIds;
 }
 
+export type EditableTurn = {
+  humanMessage: Message;
+};
+
+function isTerminalAssistantTextMessage(message: Message | undefined): boolean {
+  return (
+    message?.type === "ai" &&
+    Boolean(extractTextFromMessage(message).trim()) &&
+    !hasToolCalls(message)
+  );
+}
+
+export function getLatestEditableTurn(
+  groups: MessageGroup[],
+  isCurrentTurnLoading: boolean,
+): EditableTurn | null {
+  if (isCurrentTurnLoading) {
+    return null;
+  }
+
+  let candidate: EditableTurn | null = null;
+  let currentHumanGroup: MessageGroup | null = null;
+  let currentTurnGroups: MessageGroup[] = [];
+  let lastAIGroup: MessageGroup | null = null;
+
+  const completeTurn = () => {
+    if (!currentHumanGroup) {
+      currentTurnGroups = [];
+      lastAIGroup = null;
+      return;
+    }
+
+    const humanMessage = currentHumanGroup?.messages.find(
+      (message) => message.type === "human" && message.id,
+    );
+    let assistantMessage: Message | undefined;
+    for (let i = (lastAIGroup?.messages.length ?? 0) - 1; i >= 0; i -= 1) {
+      const message = lastAIGroup?.messages[i];
+      if (message?.type === "ai" && message.id) {
+        assistantMessage = message;
+        break;
+      }
+    }
+
+    if (
+      currentHumanGroup &&
+      lastAIGroup?.type === "assistant" &&
+      humanMessage &&
+      isTerminalAssistantTextMessage(assistantMessage)
+    ) {
+      candidate = {
+        humanMessage,
+      };
+    } else {
+      candidate = null;
+    }
+
+    currentHumanGroup = null;
+    currentTurnGroups = [];
+    lastAIGroup = null;
+  };
+
+  for (const group of groups) {
+    if (group.type === "human") {
+      completeTurn();
+      currentHumanGroup = group;
+      currentTurnGroups = [group];
+      continue;
+    }
+
+    if (currentHumanGroup) {
+      currentTurnGroups.push(group);
+    }
+
+    if (group.messages.some((message) => message.type === "ai")) {
+      lastAIGroup = group;
+    }
+  }
+
+  completeTurn();
+  return candidate;
+}
+
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,

@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
 
+# The retrieval index is derived state, so shutdown only waits briefly for its
+# startup rebuild. The canonical memory flush keeps its full configured budget.
+_RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+
 
 async def _ensure_admin_user(app: FastAPI) -> None:
     """Startup hook: handle first boot and migrate orphan threads otherwise.
@@ -170,6 +174,18 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
+async def _warm_memory_retrieval(manager) -> None:
+    """Rebuild the derived retrieval index without delaying Gateway readiness."""
+    try:
+        rebuilt = await asyncio.to_thread(manager.warm_retrieval)
+        if rebuilt:
+            logger.info("Memory retrieval index rebuilt successfully")
+        else:
+            logger.warning("Memory retrieval index rebuild failed; scoped searches will retry lazily")
+    except Exception:
+        logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -203,6 +219,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         setup_monocle_tracing_if_enabled()
     except Exception:  # observability must never break startup
         logger.exception("Monocle tracing setup failed; continuing without it")
+
+    # Rebuild the derived memory retrieval index in the background. Scoped
+    # searches remain correct while this runs because DeerMem lazily rebuilds
+    # the requested scope when the full warm-up has not completed yet.
+    retrieval_warm_task: asyncio.Task[None] | None = None
+    try:
+        from deerflow.agents.memory import get_memory_manager
+
+        if startup_config.memory.enabled:
+            manager = get_memory_manager()
+            warm_retrieval = getattr(manager, "warm_retrieval", None)
+            if callable(warm_retrieval):
+                retrieval_warm_task = asyncio.create_task(
+                    _warm_memory_retrieval(manager),
+                    name="memory-retrieval-warm-up",
+                )
+        else:
+            logger.info("Memory is disabled; skipping retrieval index rebuild")
+    except Exception:
+        logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
@@ -350,9 +386,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
         # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
-        # session close + this drain + buffer), set on the gateway Helm
-        # deployment -- or K8s SIGKILLs the drain mid-flight and the loss this
-        # is fixing is silently re-introduced.
+        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
+        # mid-flight and the loss this is fixing is silently re-introduced.
+        # The retrieval index is derived from canonical memory files, so its
+        # wait is independently capped and never consumes the flush budget.
+        retrieval_warm_finished = True
+        if retrieval_warm_task is not None and not retrieval_warm_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(retrieval_warm_task),
+                    timeout=min(
+                        _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS,
+                        startup_config.memory.shutdown_flush_timeout_seconds,
+                    ),
+                )
+            except TimeoutError:
+                retrieval_warm_finished = False
+                logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
+
+        manager = None
         try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:
@@ -370,6 +423,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     )
         except Exception:
             logger.exception("Failed to flush memory queue on shutdown")
+        finally:
+            close = getattr(manager, "close", None)
+            if callable(close) and retrieval_warm_finished:
+                try:
+                    await asyncio.to_thread(close)
+                except Exception:
+                    logger.exception("Failed to close memory backend on shutdown")
 
     logger.info("Shutting down API Gateway")
 

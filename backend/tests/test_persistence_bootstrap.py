@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0008_thread_operation_kind"
+HEAD = "0009_webhook_dedupe"
 BASELINE = "0001_baseline"
 
 

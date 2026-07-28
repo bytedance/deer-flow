@@ -2072,6 +2072,18 @@ def test_grep_without_glob_is_unaffected():
     assert truncated is False
 
 
+def test_grep_single_file_path_with_matching_glob():
+    """A basename glob must also apply when the search root is one file."""
+    raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=raw_stdout, stderr="", exit_code=0)]))
+    sb = _make_sandbox(client)
+
+    matches, truncated = sb.grep("/mnt/user-data/uploads/report.md", "needle", glob="*.md")
+
+    assert [m.path for m in matches] == ["/home/user/uploads/report.md"]
+    assert truncated is False
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Capacity enforcement tests (#4339)
 # ──────────────────────────────────────────────────────────────────────────────
