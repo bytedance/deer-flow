@@ -307,12 +307,21 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
 # Server-owned authorization identity fields. These must never be accepted from
 # client-supplied ``body.config.context`` or ``body.config.configurable``. They
-# are either produced by Gateway auth state or admitted from a separately
-# authenticated internal request channel.
-#   ``is_internal``       — derived from ``request.state.auth_source``
-#   ``authz_attributes`` — Phase 1A has no Gateway-side producer; always cleared.
-#   ``channel_user_id``  — accepted only from trusted internal ``body.context``.
-_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset({"is_internal", "authz_attributes", "channel_user_id"})
+# are either produced by Gateway auth state, admitted from a separately
+# authenticated internal request channel, or reserved for LangGraph Server.
+#   ``is_internal``             — derived from ``request.state.auth_source``
+#   ``authz_attributes``        — Phase 1A has no Gateway-side producer; cleared.
+#   ``channel_user_id``         — accepted only from trusted internal context.
+#   ``langgraph_auth_user*``    — populated only by LangGraph Server auth.
+_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "is_internal",
+        "authz_attributes",
+        "channel_user_id",
+        "langgraph_auth_user",
+        "langgraph_auth_user_id",
+    }
+)
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),

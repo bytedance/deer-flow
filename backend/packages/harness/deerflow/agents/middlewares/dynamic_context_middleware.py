@@ -41,6 +41,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.user_context import resolve_runtime_user_id
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -165,7 +166,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> tuple[str, str | None]:
+    def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
         Framework-owned data (date) is separated from user-owned data (memory)
@@ -176,7 +177,15 @@ class DynamicContextMiddleware(AgentMiddleware):
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
         injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        memory_context = (
+            _get_memory_context(
+                self._agent_name,
+                app_config=self._app_config,
+                user_id=resolve_runtime_user_id(runtime),
+            )
+            if injection_enabled
+            else ""
+        )
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         date_reminder = "\n".join(
@@ -256,7 +265,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return messages
 
-    def _inject(self, state) -> dict | None:
+    def _inject(self, state, runtime: Runtime | None = None) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -275,7 +284,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            date_reminder, memory_block = self._build_full_reminder()
+            date_reminder, memory_block = self._build_full_reminder(runtime)
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
                 memory_block is not None,
@@ -299,7 +308,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        result = self._inject(state)
+        result = self._inject(state, runtime)
         self._record_effective_memory(state, result, runtime)
         return result
 
@@ -318,7 +327,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         # rather than hanging. Frozen context already in state remains active.
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._inject, state),
+                asyncio.to_thread(self._inject, state, runtime),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
         except TimeoutError:

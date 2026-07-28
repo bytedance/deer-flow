@@ -219,7 +219,21 @@ agent 在 sandbox 内看到统一虚拟路径：
 /mnt/user-data/outputs
 ```
 
-`ThreadDataMiddleware` 使用 `get_effective_user_id()` 解析当前用户并生成线程路径。没有认证上下文时会落到 `default` 用户桶，主要用于内部调用、嵌入式 client 或无 HTTP 的本地执行路径。
+`ThreadDataMiddleware`、`UploadsMiddleware` 与 memory 读写路径统一使用
+`resolve_runtime_user_id(runtime)` 解析当前用户。当前 LangGraph runtime
+优先使用 server-owned 的 `runtime.server_info.user.identity`；旧版或缺少
+`server_info` 的 standalone 路径继续读取 server-owned 的
+`configurable.langgraph_auth_user_id`；Gateway 内嵌路径在没有 Agent Server
+认证身份时使用认证后注入的 `runtime.context.user_id`。LangGraph 允许
+`BaseUser.identity` 使用邮箱等任意非空字符串，因此 server-owned auth
+身份会先通过 `make_safe_user_id` 转换为稳定、抗碰撞且目录安全的 DeerFlow
+storage ID；Agent Server 自身用于 metadata 授权过滤的原始 identity 不变。
+这些通道都缺失时才回落到请求 ContextVar 和 `default` 用户桶，最后一级
+主要用于内部调用、嵌入式 client 或无 HTTP 的本地执行路径。
+
+lead-agent 工厂使用同一身份边界：Agent Server 的保留 auth 字段优先于普通
+`user_id`，并将解析结果显式传给 custom agent、SOUL、skills、skill policy
+与静态 prompt 构建，避免 graph 构建阶段和 middleware 执行阶段落入不同用户桶。
 
 ### Memory
 
@@ -376,6 +390,13 @@ Gateway 内嵌 runtime 路径由 `AuthMiddleware` 和 `CSRFMiddleware` 保护。
 
 - `@auth.authenticate` 校验 JWT cookie、CSRF、用户存在性和 `token_version`。
 - `@auth.on` 在写入 metadata 时注入 `user_id`，并在读路径返回 `{"user_id": current_user}` 过滤条件。
+- LangGraph Server 将认证结果写入运行配置的保留
+  `langgraph_auth_user` / `langgraph_auth_user_id` 字段；harness 消费该身份，
+  让 uploads、thread data 与 memory 在直连模式下继续使用正确的 per-user
+  文件桶。
+- Gateway 内嵌 runtime 不接受这两个保留字段：run config 组装后会从
+  `context` 与 `configurable` 同时剥离客户端传入值，再注入 Gateway
+  自己认证得到的 `runtime.context.user_id`，避免伪装成 Agent Server 身份。
 
 这保证 Gateway 路由和 LangGraph-compatible 直连模式使用同一 JWT 语义。
 

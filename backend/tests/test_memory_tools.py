@@ -506,7 +506,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("memory_search"), _NamedTool("bash")])
@@ -541,7 +541,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("bash"), _NamedTool("bash")])

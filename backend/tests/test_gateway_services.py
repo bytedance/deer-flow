@@ -1748,8 +1748,8 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
 
 def test_start_run_session_caller_anti_forgery(_stub_app_config):
     """A session (non-internal) caller cannot forge is_internal, authz_attributes,
-    or channel_user_id via body.config. Exercises the real start_run path, not
-    a replay, so ordering or gating drift would be caught."""
+    channel_user_id, or LangGraph Server auth identity via body.config. Exercises
+    the real start_run path, not a replay, so ordering or gating drift is caught."""
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -1792,6 +1792,8 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
                     "is_internal": True,
                     "authz_attributes": {"forged": True},
                     "channel_user_id": "forged-sender",
+                    "langgraph_auth_user": {"identity": "forged-user"},
+                    "langgraph_auth_user_id": "forged-user",
                 },
                 "configurable": {
                     "is_internal": True,
@@ -1828,6 +1830,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert "authz_attributes" not in context
     # channel_user_id must not survive from body.config for a session caller
     assert context.get("channel_user_id") is None
+    # Agent Server's reserved auth fields are never valid on the Gateway path.
+    assert context.get("langgraph_auth_user") is None
+    assert context.get("langgraph_auth_user_id") is None
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
@@ -2093,6 +2098,14 @@ class TestInjectAuthenticatedUserContextAuthz:
         request = _make_request_with_auth_source("session")
         config = _assemble_authz_run_config({"configurable": {"authz_attributes": {"forged": True}}}, request)
         assert "authz_attributes" not in config["configurable"]
+
+    @pytest.mark.parametrize("section", ["context", "configurable"])
+    @pytest.mark.parametrize("key", ["langgraph_auth_user", "langgraph_auth_user_id"])
+    def test_clears_forged_langgraph_auth_identity(self, section, key):
+        """Gateway clients cannot inject Agent Server's reserved auth fields."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({section: {key: "forged-user"}}, request)
+        assert key not in config[section]
 
     def test_internal_auth_source_writes_is_internal_true(self):
         """Internal caller gets is_internal=True."""
