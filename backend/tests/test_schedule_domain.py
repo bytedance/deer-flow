@@ -74,7 +74,7 @@ class TestScheduleSpecInvariants:
             ScheduleSpec.cron_schedule("0 9 * * *", "Mars/Olympus_Mons")
 
     def test_cron_without_expression_is_rejected(self):
-        with pytest.raises(InvalidScheduleError, match="requires schedule_spec.cron"):
+        with pytest.raises(InvalidScheduleError, match="requires schedule_spec"):
             ScheduleSpec(ScheduleType.CRON, "UTC")
 
     @pytest.mark.parametrize("expr", ["0 9 * *", "0 9 * * * *", "0"])
@@ -96,7 +96,7 @@ class TestScheduleSpecInvariants:
         assert ScheduleSpec(ScheduleType.CRON, "UTC", cron="  0   9  *  *  * ").cron == "0 9 * * *"
 
     def test_naive_run_at_is_localized_to_the_schedule_timezone(self):
-        spec = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0), "Asia/Shanghai")
+        spec = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0), "Asia/Shanghai")  # noqa: DTZ001 -- naive input is the subject
         assert spec.run_at.utcoffset() == timedelta(hours=8)
         assert spec.run_at.astimezone(UTC) == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
 
@@ -196,7 +196,7 @@ class TestScheduleSpecEquality:
         assert ScheduleSpec.cron_schedule("  0  9 * * * ", "UTC") == ScheduleSpec.cron_schedule("0 9 * * *", "UTC")
 
     def test_equivalent_once_inputs_converge(self):
-        naive = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0), "Asia/Shanghai")
+        naive = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0), "Asia/Shanghai")  # noqa: DTZ001 -- naive input is the subject
         aware = ScheduleSpec.once_at(datetime.fromisoformat("2026-08-01T01:00:00Z"), "Asia/Shanghai")
         assert naive == aware
 

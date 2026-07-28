@@ -14,14 +14,13 @@ tests that must keep passing unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Any, Literal
 
 from deerflow.domain.schedule.model import (
     ActiveRunConflictError,
     ContextMode,
+    DispatchOutcome,
     LaunchFailedError,
     RunStatus,
     ScheduledRun,
@@ -48,8 +47,20 @@ from deerflow.domain.schedule.ports import (
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _SKIP_ACTIVE_RUN_ERROR = "skipped: a previous run of this task is still active"
 
-_UNSET: Any = object()
-"""Distinguishes "field omitted" from "field set to None" in update_task."""
+
+@dataclass(frozen=True)
+class ContextChange:
+    """A requested change of execution context.
+
+    The mode and the thread always move together -- `with_context` takes
+    both, and clearing the thread is what switching to a fresh-thread mode
+    means. Packaging them removes the one place where `None` was ambiguous
+    ("unbind the thread" versus "leave it alone") and lets every other
+    update field use plain `None` for "not supplied".
+    """
+
+    context_mode: str | ContextMode
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,11 +68,11 @@ class DispatchResult:
     """What one dispatch attempt produced.
 
     `outcome` drives the caller's protocol mapping -- a manual trigger turns
-    `conflict` into 409 and `failed` into 502 -- so the four values are part of
-    the contract, not an implementation detail.
+    CONFLICT into 409 and FAILED into 502 -- so it is domain vocabulary
+    rather than a bare string.
     """
 
-    outcome: Literal["launched", "skipped", "conflict", "failed"]
+    outcome: DispatchOutcome
     record_id: str | None
     run_id: str | None
     thread_id: str
@@ -77,16 +88,12 @@ class ScheduleService:
         launcher: RunLauncher,
         threads: ThreadLookup,
         policy: SchedulePolicy,
-        lease_owner: str,
     ) -> None:
         self._tasks = tasks
         self._runs = runs
         self._launcher = launcher
         self._threads = threads
         self._policy = policy
-        # Identity of the claiming process. Recorded for diagnostics only --
-        # the repository never reads it back.
-        self._lease_owner = lease_owner
 
     # ------------------------------------------------------------------ reads
 
@@ -152,13 +159,16 @@ class ScheduleService:
         *,
         user_id: str,
         now: datetime,
-        title: str = _UNSET,
-        prompt: str = _UNSET,
-        schedule: ScheduleSpec = _UNSET,
-        context_mode: str | ContextMode = _UNSET,
-        thread_id: str | None = _UNSET,
+        title: str | None = None,
+        prompt: str | None = None,
+        schedule: ScheduleSpec | None = None,
+        context: ContextChange | None = None,
     ) -> ScheduledTask:
-        """Partially update a task; omitted fields are left alone.
+        """Partially update a task; `None` means "not supplied".
+
+        No sentinel is needed because nothing here has `None` as a meaningful
+        value -- the one field that does, `thread_id`, travels inside
+        `ContextChange` where it is unambiguous.
 
         Context and schedule are applied through the aggregate's own
         transitions, so the re-arm rule and the running-task gate cannot be
@@ -167,30 +177,25 @@ class ScheduleService:
         task = await self.get_task(task_id, user_id=user_id)
         task.ensure_mutable()
 
-        if context_mode is not _UNSET or thread_id is not _UNSET:
-            effective_mode = task.context_mode if context_mode is _UNSET else context_mode
-            effective_thread = task.thread_id if thread_id is _UNSET else thread_id
-            task = task.with_context(effective_mode, effective_thread)
+        if context is not None:
+            task = task.with_context(context.context_mode, context.thread_id)
             await self._require_thread(task)
-
-        if schedule is not _UNSET:
+        if schedule is not None:
             task = task.with_schedule(schedule, now=now, policy=self._policy)
-
-        if title is not _UNSET:
+        if title is not None:
             task = replace(task, title=title)
-        if prompt is not _UNSET:
+        if prompt is not None:
             task = replace(task, prompt=prompt)
 
-        saved = await self._tasks.save(task)
-        if saved is None:
-            raise TaskNotFoundError("Scheduled task not found")
-        return saved
+        return await self._save(task)
 
     async def pause_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
-        return await self._transition(task_id, user_id=user_id, transition=ScheduledTask.paused)
+        task = await self.get_task(task_id, user_id=user_id)
+        return await self._save(task.paused())
 
     async def resume_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
-        return await self._transition(task_id, user_id=user_id, transition=ScheduledTask.resumed)
+        task = await self.get_task(task_id, user_id=user_id)
+        return await self._save(task.resumed())
 
     async def delete_task(self, task_id: str, *, user_id: str) -> None:
         """Deleting is deliberately not gated on the task being idle: the
@@ -217,12 +222,7 @@ class ScheduleService:
         budget = self._policy.max_concurrent_runs - active
         if budget <= 0:
             return []
-        claimed = await self._tasks.claim_due(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._policy.lease_seconds,
-            limit=budget,
-        )
+        claimed = await self._tasks.claim_due(now=now, lease_seconds=self._policy.lease_seconds, limit=budget)
         return [await self.dispatch_task(task, now=now, trigger=TriggerKind.SCHEDULED) for task in claimed]
 
     async def dispatch_task(self, task: ScheduledTask, *, now: datetime, trigger: TriggerKind) -> DispatchResult:
@@ -289,9 +289,9 @@ class ScheduleService:
             # reported as a conflict the caller has to deal with.
             if trigger is TriggerKind.SCHEDULED and task.skips_on_overlap:
                 return await self._finalize_skip(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, error=str(exc))
-            return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome="conflict")
+            return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome=DispatchOutcome.CONFLICT)
         except LaunchFailedError as exc:
-            return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome="failed")
+            return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome=DispatchOutcome.FAILED)
 
         await self._runs.update_status(
             record.record_id,
@@ -314,7 +314,7 @@ class ScheduleService:
             # Same race as the record write above.
             protect_terminal=True,
         )
-        return DispatchResult("launched", record.record_id, launched.run_id, launched.thread_id, None)
+        return DispatchResult(DispatchOutcome.LAUNCHED, record.record_id, launched.run_id, launched.thread_id, None)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -368,9 +368,16 @@ class ScheduleService:
         if not task.thread_id or not await self._threads.exists_for_user(task.thread_id, task.user_id):
             raise ThreadNotFoundError("Thread not found")
 
-    async def _transition(self, task_id: str, *, user_id: str, transition: Callable[[ScheduledTask], ScheduledTask]) -> ScheduledTask:
-        task = await self.get_task(task_id, user_id=user_id)
-        saved = await self._tasks.save(transition(task))
+    async def _save(self, task: ScheduledTask) -> ScheduledTask:
+        """Persist an already-validated aggregate.
+
+        Read-modify-write rather than a conditional UPDATE: pushing the
+        "not while running" rule into a storage predicate would put it beyond
+        the reach of a zero-IO test and give it a second home. The pre-existing
+        code had the same shape, and closing the window properly needs
+        optimistic locking, which needs a schema change.
+        """
+        saved = await self._tasks.save(task)
         if saved is None:
             raise TaskNotFoundError("Scheduled task not found")
         return saved
@@ -381,7 +388,7 @@ class ScheduleService:
         No history record is written: nothing was scheduled to happen, so there
         is no occurrence to account for.
         """
-        return DispatchResult("conflict", None, None, thread_id, _ACTIVE_RUN_CONFLICT_ERROR)
+        return DispatchResult(DispatchOutcome.CONFLICT, None, None, thread_id, _ACTIVE_RUN_CONFLICT_ERROR)
 
     async def _record_scheduled_skip(self, task: ScheduledTask, *, thread_id: str, now: datetime, trigger: TriggerKind) -> DispatchResult:
         """Account for a scheduled occurrence dropped because of an overlap.
@@ -423,7 +430,7 @@ class ScheduleService:
             last_error=error if task.schedule.schedule_type is ScheduleType.ONCE else None,
             increment_run_count=False,
         )
-        return DispatchResult("skipped", record_id, None, thread_id, error)
+        return DispatchResult(DispatchOutcome.SKIPPED, record_id, None, thread_id, error)
 
     async def _fail(
         self,
@@ -434,7 +441,7 @@ class ScheduleService:
         now: datetime,
         trigger: TriggerKind,
         error: str,
-        outcome: Literal["conflict", "failed"],
+        outcome: DispatchOutcome,
     ) -> DispatchResult:
         await self._runs.update_status(
             record_id,

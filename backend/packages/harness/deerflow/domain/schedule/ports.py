@@ -104,7 +104,7 @@ class ScheduledTaskRepository(Protocol):
         """Remove the task. False when it was absent or owned by someone else."""
         ...
 
-    async def claim_due(self, *, now: datetime, lease_owner: str, lease_seconds: int, limit: int) -> list[ScheduledTask]:
+    async def claim_due(self, *, now: datetime, lease_seconds: int, limit: int) -> list[ScheduledTask]:
         """Atomically take ownership of up to `limit` tasks that are due.
 
         A task is due when its next fire time has passed AND either it is
@@ -116,9 +116,10 @@ class ScheduledTaskRepository(Protocol):
         concurrent claimer cannot take the same ones. Returns them in the state
         they were left in *after* the claim.
 
-        `lease_owner` is recorded for diagnostics only and is never read back:
-        expiry alone decides whether a claim can be taken over. Do not build
-        ownership enforcement on it without also adding the read side.
+        Which process is claiming is deliberately absent: it is an identity,
+        not a rule. The implementation may record one for diagnostics, but
+        nothing reads it back -- expiry alone decides whether a claim can be
+        taken over -- so the domain has no reason to carry it.
 
         Atomicity is the implementation's responsibility. An in-memory double
         can satisfy every rule above under single-threaded use while providing

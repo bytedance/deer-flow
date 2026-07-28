@@ -31,6 +31,21 @@ class RunStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+class DispatchOutcome(StrEnum):
+    """What one dispatch attempt produced.
+
+    A domain vocabulary rather than a set of strings: the caller branches on
+    all four, and the distinction between SKIPPED and CONFLICT is itself a
+    business rule -- a dropped scheduled occurrence is accounted for, while a
+    rejected on-demand trigger is reported and leaves no trace.
+    """
+
+    LAUNCHED = "launched"
+    SKIPPED = "skipped"
+    CONFLICT = "conflict"
+    FAILED = "failed"
+
+
 class TriggerKind(StrEnum):
     """What caused a dispatch.
 

@@ -97,7 +97,7 @@ class InMemoryScheduledTaskRepository:
         del self._rows[task_id]
         return True
 
-    async def claim_due(self, *, now: datetime, lease_owner: str, lease_seconds: int, limit: int) -> list[ScheduledTask]:
+    async def claim_due(self, *, now: datetime, lease_seconds: int, limit: int) -> list[ScheduledTask]:
         def claimable(row: _TaskRow) -> bool:
             task = row.task
             if task.next_run_at is None or task.next_run_at > now:
@@ -115,7 +115,8 @@ class InMemoryScheduledTaskRepository:
 
         claimed = []
         for row in due:
-            row.lease_owner = lease_owner
+            # Stands in for whatever identity a real adapter records.
+            row.lease_owner = "fake-worker"
             row.lease_expires_at = now + timedelta(seconds=lease_seconds)
             row.task = replace(row.task, status=TaskStatus.RUNNING)
             claimed.append(row.task)

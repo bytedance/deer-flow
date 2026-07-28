@@ -21,6 +21,7 @@ breaks it. Keep it that way.
 
 from deerflow.domain.schedule.model.enums import (
     ContextMode,
+    DispatchOutcome,
     RunStatus,
     ScheduleType,
     TaskStatus,
@@ -48,6 +49,7 @@ __all__ = [
     "TERMINAL_TASK_STATUSES",
     "ActiveRunConflictError",
     "ContextMode",
+    "DispatchOutcome",
     "InvalidContextModeError",
     "InvalidScheduleError",
     "LaunchFailedError",

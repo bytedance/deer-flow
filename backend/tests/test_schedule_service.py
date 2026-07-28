@@ -25,6 +25,7 @@ from schedule_fakes import (
 
 from deerflow.domain.schedule.model import (
     ContextMode,
+    DispatchOutcome,
     InvalidScheduleError,
     LaunchFailedError,
     RunStatus,
@@ -38,7 +39,7 @@ from deerflow.domain.schedule.model import (
     TriggerKind,
 )
 from deerflow.domain.schedule.ports import RunOutcome
-from deerflow.domain.schedule.service import ScheduleService
+from deerflow.domain.schedule.service import ContextChange, ScheduleService
 
 pytestmark = pytest.mark.asyncio
 
@@ -59,7 +60,7 @@ class _BlindRunRepo(InMemoryScheduledRunRepository):
     rejection on `add` is then the only thing standing in the way.
     """
 
-    async def has_active(self, task_id: str) -> bool:
+    async def has_active(self, _task_id: str) -> bool:
         return False
 
 
@@ -77,7 +78,6 @@ def make_service(
         launcher=launcher if launcher is not None else FakeRunLauncher(),
         threads=threads if threads is not None else FakeThreadLookup(),
         policy=policy,
-        lease_owner="test-worker",
     )
 
 
@@ -116,7 +116,7 @@ class TestFullLifecycle:
         # -- become due, get claimed and dispatched --------------------------
         due_at = task.next_run_at + timedelta(seconds=1)
         results = await service.run_once(now=due_at)
-        assert [r.outcome for r in results] == ["launched"]
+        assert [r.outcome for r in results] == [DispatchOutcome.LAUNCHED]
         assert len(launcher.calls) == 1
         launch = launcher.calls[0]
         assert launch["prompt"] == "summarize"
@@ -133,7 +133,7 @@ class TestFullLifecycle:
         # -- next occurrence overlaps the still-running one ------------------
         overlap_at = after_launch.next_run_at + timedelta(seconds=1)
         overlapped = await service.run_once(now=overlap_at)
-        assert [r.outcome for r in overlapped] == ["skipped"]
+        assert [r.outcome for r in overlapped] == [DispatchOutcome.SKIPPED]
         assert len(launcher.calls) == 1, "the overlapping occurrence must not launch"
 
         after_skip = await service.get_task(task.task_id, user_id="user-1")
@@ -184,7 +184,7 @@ class TestDispatchOutcomes:
 
         result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
 
-        assert result.outcome == "launched"
+        assert result.outcome is DispatchOutcome.LAUNCHED
         assert result.run_id == "run-1"
         assert result.error is None
         stored = runs.all_runs()[0]
@@ -203,7 +203,7 @@ class TestDispatchOutcomes:
 
         result = await service.trigger_task(task.task_id, user_id="user-1", now=NOW)
 
-        assert result.outcome == "conflict"
+        assert result.outcome is DispatchOutcome.CONFLICT
         assert result.record_id is None
         assert result.error == "task already has an active run"
         assert len(runs.all_runs()) == before, "no history row for a rejected manual trigger"
@@ -216,7 +216,7 @@ class TestDispatchOutcomes:
 
         result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
 
-        assert result.outcome == "skipped"
+        assert result.outcome is DispatchOutcome.SKIPPED
         assert result.error == "skipped: a previous run of this task is still active"
         tombstone = next(r for r in runs.all_runs() if r.status is RunStatus.SKIPPED)
         assert tombstone.is_active is False, "a queued tombstone would collide with the live run"
@@ -230,7 +230,7 @@ class TestDispatchOutcomes:
 
         result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
 
-        assert result.outcome == "failed"
+        assert result.outcome is DispatchOutcome.FAILED
         assert result.run_id is None
         assert "provider exploded" in result.error
         assert runs.all_runs()[0].status is RunStatus.FAILED
@@ -242,7 +242,7 @@ class TestDispatchOutcomes:
 
         result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
 
-        assert result.outcome == "skipped"
+        assert result.outcome is DispatchOutcome.SKIPPED
 
     async def test_busy_thread_on_a_manual_trigger_stays_a_conflict(self):
         """Not a skip: the user asked for this one, so it is reported rather
@@ -253,7 +253,7 @@ class TestDispatchOutcomes:
 
         result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.MANUAL)
 
-        assert result.outcome == "conflict"
+        assert result.outcome is DispatchOutcome.CONFLICT
         assert result.record_id is not None, "the attempt itself is still recorded"
 
 
@@ -293,13 +293,13 @@ class TestConflictCollapse:
     async def test_the_losing_scheduled_dispatch_still_leaves_a_tombstone(self):
         runs = _BlindRunRepo()
         result = await self._dispatch_second(runs, TriggerKind.SCHEDULED)
-        assert result.outcome == "skipped"
+        assert result.outcome is DispatchOutcome.SKIPPED
         assert any(r.status is RunStatus.SKIPPED for r in runs.all_runs())
 
     async def test_the_losing_manual_dispatch_leaves_nothing(self):
         runs = _BlindRunRepo()
         result = await self._dispatch_second(runs, TriggerKind.MANUAL)
-        assert result.outcome == "conflict"
+        assert result.outcome is DispatchOutcome.CONFLICT
         assert not any(r.status is RunStatus.SKIPPED for r in runs.all_runs())
 
 
@@ -374,7 +374,7 @@ class TestRunOnceBudget:
         results = await service.run_once(now=due_at)
 
         assert len(results) == 2
-        assert all(r.outcome == "launched" for r in results)
+        assert all(r.outcome is DispatchOutcome.LAUNCHED for r in results)
 
     async def test_a_claimed_task_is_marked_running_before_dispatch(self):
         """Claiming is what makes the task uneditable while it is being
@@ -554,6 +554,42 @@ class TestTaskManagement:
         assert updated.title == "renamed"
         assert updated.prompt == task.prompt
         assert updated.schedule == task.schedule
+
+    async def test_context_is_changed_through_the_packaged_value(self):
+        """context_mode and thread_id move together, so they are supplied
+        together -- which is what lets every other update field use plain
+        `None` for "not supplied"."""
+        service = make_service(threads=FakeThreadLookup({"thread-1": "user-1"}))
+        task = await create_cron_task(service)
+
+        bound = await service.update_task(
+            task.task_id,
+            user_id="user-1",
+            now=NOW,
+            context=ContextChange(ContextMode.REUSE_THREAD, "thread-1"),
+        )
+        assert bound.context_mode is ContextMode.REUSE_THREAD
+        assert bound.thread_id == "thread-1"
+
+        unbound = await service.update_task(
+            task.task_id,
+            user_id="user-1",
+            now=NOW,
+            context=ContextChange(ContextMode.FRESH_THREAD_PER_RUN),
+        )
+        assert unbound.thread_id is None, "switching to a fresh thread clears the binding"
+
+    async def test_changing_context_to_an_inaccessible_thread_is_rejected(self):
+        service = make_service(threads=FakeThreadLookup({"thread-1": "someone-else"}))
+        task = await create_cron_task(service)
+
+        with pytest.raises(ThreadNotFoundError):
+            await service.update_task(
+                task.task_id,
+                user_id="user-1",
+                now=NOW,
+                context=ContextChange(ContextMode.REUSE_THREAD, "thread-1"),
+            )
 
     async def test_rescheduling_a_terminal_task_re_arms_it(self):
         tasks = InMemoryScheduledTaskRepository()
