@@ -1330,7 +1330,9 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
         return False
     if runtime.state is None:
         return False
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only classification: the id is only matched, so a fork-restored
+    # wrapper is safe to discard here (nothing gets released on this path).
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         return False
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1353,7 +1355,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only lookup: this only resolves the provider entry, and ownership
+    # (release) stays with after_agent's short-circuit on the wrapped state.
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")

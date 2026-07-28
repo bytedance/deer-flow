@@ -164,3 +164,37 @@ def test_ensure_sandbox_initialized_acquires_fresh_when_parent_missing() -> None
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
+
+
+@pytest.mark.anyio
+async def test_ensure_sandbox_initialized_async_plain_state_unchanged() -> None:
+    provider = _RecordingProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert sandbox is provider.sandbox
+    assert runtime.context["sandbox_id"] == "parent-sandbox"
+
+
+@pytest.mark.anyio
+async def test_ensure_sandbox_initialized_async_acquires_fresh_when_parent_missing() -> None:
+    """Same fall-through as the sync path: the fork-restored id is gone from
+    the provider, so a fresh sandbox is acquired and the stale wrapped state
+    is replaced by the freshly acquired plain dict."""
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "t-1"
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.acquired == ["t-1"]
+    assert sandbox is provider.sandbox
+    assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
+    assert runtime.context["sandbox_id"] == "fresh-sandbox"
