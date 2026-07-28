@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import review_changed_public_skills as runner
 
@@ -109,6 +109,98 @@ def test_main_reviews_changed_public_skill_and_skips_deleted_skill_md(
     assert "Queued package: skills/public/alpha" in output
     assert "Skipping deleted SKILL.md: skills/public/deleted/SKILL.md" in output
     assert "All changed public skill packages passed review." in output
+
+
+def test_main_skips_fully_deleted_skill_package(tmp_path: Path, monkeypatch, capsys) -> None:
+    # Nothing is written to tmp_path for "removed": the whole package (SKILL.md and its
+    # other files) was deleted, so the package directory does not exist on disk anymore.
+    diff_output = b"\0".join(
+        [
+            b"D",
+            b"skills/public/removed/SKILL.md",
+            b"D",
+            b"skills/public/removed/scripts/helper.py",
+            b"D",
+            b"skills/public/removed/assets/logo.png",
+            b"",
+        ]
+    )
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    def fail_review(*args, **kwargs):
+        raise AssertionError("review should not run for a fully deleted skill package")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "run_review", fail_review)
+
+    exit_code = runner.main(
+        [
+            "--before",
+            "before",
+            "--after",
+            "after",
+            "--repo-root",
+            str(tmp_path),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Skipping deleted SKILL.md: skills/public/removed/SKILL.md" in output
+    assert "Skipping fully removed package: skills/public/removed" in output
+    assert "No changed public skill package files; skipping review." in output
+
+
+def test_main_reviews_package_when_skill_md_deleted_but_sibling_file_remains(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    # SKILL.md was deleted but a sibling package file still exists on disk: this is a
+    # broken/partial package, not a full removal, and must still be queued for review.
+    skill_dir = tmp_path / "skills" / "public" / "broken"
+    (skill_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    (skill_dir / "scripts" / "helper.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+
+    diff_output = b"\0".join(
+        [
+            b"D",
+            b"skills/public/broken/SKILL.md",
+            b"M",
+            b"skills/public/broken/scripts/helper.py",
+            b"",
+        ]
+    )
+    reviewed: list[str] = []
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    def fake_review(package: Path, repo_root: Path, python_executable: str) -> int:
+        reviewed.append(package.relative_to(repo_root).as_posix())
+        return 1
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "run_review", fake_review)
+
+    exit_code = runner.main(
+        [
+            "--before",
+            "before",
+            "--after",
+            "after",
+            "--repo-root",
+            str(tmp_path),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert reviewed == ["skills/public/broken"]
+    assert "Queued package: skills/public/broken" in output
+    assert "One or more skill reviews failed." in output
 
 
 def test_main_reviews_package_when_only_support_file_changed(
@@ -265,6 +357,22 @@ def test_main_falls_back_to_empty_tree_when_push_before_is_missing(tmp_path: Pat
     assert reviewed == ["skills/public/alpha"]
     assert calls[1][4:6] == [runner.EMPTY_TREE_SHA, "a" * 40]
     assert "Fallback diff:" in output
+
+
+def test_is_fully_removed_package_true_when_all_deletions_and_directory_missing(tmp_path: Path) -> None:
+    package_rel = PurePosixPath("skills/public/removed")
+    assert runner.is_fully_removed_package(package_rel, ["D", "D"], tmp_path) is True
+
+
+def test_is_fully_removed_package_false_when_directory_still_exists(tmp_path: Path) -> None:
+    package_rel = PurePosixPath("skills/public/broken")
+    (tmp_path / package_rel).mkdir(parents=True)
+    assert runner.is_fully_removed_package(package_rel, ["D", "D"], tmp_path) is False
+
+
+def test_is_fully_removed_package_false_when_any_status_is_not_a_deletion(tmp_path: Path) -> None:
+    package_rel = PurePosixPath("skills/public/partial")
+    assert runner.is_fully_removed_package(package_rel, ["D", "M"], tmp_path) is False
 
 
 def test_is_zero_sha_requires_full_sha_length() -> None:

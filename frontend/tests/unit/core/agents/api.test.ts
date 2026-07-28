@@ -26,7 +26,11 @@ rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
 
-import { AgentsApiDisabledError, checkAgentName } from "@/core/agents/api";
+import {
+  AgentsApiDisabledError,
+  checkAgentName,
+  updateAgent,
+} from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 
 const mockedFetch = rs.mocked(fetcher);
@@ -145,5 +149,39 @@ describe("checkAgentName", () => {
     await expect(checkAgentName("deal.agent")).rejects.not.toBeInstanceOf(
       AgentsApiDisabledError,
     );
+  });
+});
+
+describe("updateAgent", () => {
+  test("serializes per-agent model settings into the request body (issue #4336)", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        name: "researcher",
+        description: "",
+        model: "agent-model",
+        tool_groups: null,
+        skills: null,
+        model_settings: { temperature: 0.2, max_tokens: 12000 },
+        thinking_enabled: true,
+        reasoning_effort: "high",
+      }),
+    );
+
+    await updateAgent("researcher", {
+      model: "agent-model",
+      model_settings: { temperature: 0.2, max_tokens: 12000 },
+      thinking_enabled: true,
+      reasoning_effort: "high",
+    });
+
+    const [, init] = mockedFetch.mock.calls[0]!;
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(init?.body as string);
+    expect(body).toMatchObject({
+      model: "agent-model",
+      model_settings: { temperature: 0.2, max_tokens: 12000 },
+      thinking_enabled: true,
+      reasoning_effort: "high",
+    });
   });
 });

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.sandbox.local import local_sandbox as local_sandbox_module
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
@@ -133,6 +134,61 @@ def test_reverse_resolve_translates_a_bare_root_at_end_of_output(tmp_path, prefi
 
     assert out == f"{prefix}/mnt/skills"
     assert skills_local not in out
+
+
+def test_reverse_resolve_path_matches_windows_backslash_containment(monkeypatch):
+    """Regression for the os.sep containment fix in ``_reverse_resolve_path``.
+
+    ``Path.resolve()`` always renders with the native separator (backslash on
+    Windows). The containment check used to hardcode a ``"/"`` suffix, so a
+    backslash-joined nested path could never satisfy
+    ``path_str.startswith(local_path_resolved + "/")`` on Windows and silently
+    fell through to the "no mapping found" branch, leaking the raw host path
+    (real username, full directory tree) instead of the virtual
+    ``/mnt/user-data/...`` path.
+
+    CI runs only on ``ubuntu-latest`` (``os.sep == "/"``), where the pre-fix and
+    post-fix code are observationally identical -- neither the hardcoded ``"/"``
+    nor ``os.sep`` behave any differently there, so a test that just calls
+    ``_reverse_resolve_path`` on real POSIX paths cannot discriminate. To force
+    the Windows code path independent of host OS, ``os.sep`` is monkeypatched to
+    ``"\\"`` and both the module's ``Path`` name and the sandbox's cached
+    ``_resolved_local_paths`` are stubbed to return backslash-joined strings --
+    exactly what real ``WindowsPath.resolve()`` produces -- without touching the
+    real filesystem or requiring an actual Windows host.
+    """
+    sb = LocalSandbox(
+        id="windows-sep-test",
+        path_mappings=[
+            PathMapping(container_path="/mnt/user-data/workspace", local_path="C:\\Users\\test\\workspace"),
+        ],
+    )
+    mapping = sb.path_mappings[0]
+
+    monkeypatch.setattr(local_sandbox_module.os, "sep", "\\")
+    # Bypass the real (POSIX) filesystem resolution this cached_property would
+    # otherwise perform and pin it directly to the Windows-resolved root.
+    sb._resolved_local_paths = {mapping: "C:\\Users\\test\\workspace"}
+
+    class _FakeWindowsPath:
+        """Stand-in for ``Path`` inside ``_reverse_resolve_path``. Mimics
+        ``WindowsPath.resolve()`` -- a backslash-joined ``str()`` -- without
+        touching the real filesystem, so this runs identically on Linux CI."""
+
+        def __init__(self, raw: str) -> None:
+            self._raw = raw
+
+        def resolve(self) -> _FakeWindowsPath:
+            return _FakeWindowsPath(self._raw.replace("/", "\\"))
+
+        def __str__(self) -> str:
+            return self._raw
+
+    monkeypatch.setattr(local_sandbox_module, "Path", _FakeWindowsPath)
+
+    result = sb._reverse_resolve_path("C:\\Users\\test\\workspace\\sub\\f.txt")
+
+    assert result == "/mnt/user-data/workspace/sub/f.txt"
 
 
 def test_resolved_paths_and_sorted_views_are_cached(tmp_path):

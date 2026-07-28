@@ -19,12 +19,14 @@ class RunRow(Base):
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
+    operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    stop_reason: Mapped[str | None] = mapped_column(String(50))
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
@@ -47,6 +49,10 @@ class RunRow(Base):
     # Multi-worker run ownership
     owner_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A non-owning worker records cancellation here; the owner consumes it
+    # while renewing its lease. The first action wins.
+    cancel_action: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))

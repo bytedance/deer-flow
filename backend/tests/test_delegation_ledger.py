@@ -61,6 +61,14 @@ class TestMergeDelegations:
 
         assert out == [{**_entry("a", "completed"), "result_sha256": "x"}]
 
+    def test_same_id_preserves_original_run_id_when_update_omits_it(self):
+        existing = [{**_entry("a", "in_progress"), "run_id": "run-1"}]
+        new = [_entry("a", "completed")]
+
+        out = merge_delegations(existing, new)
+
+        assert out[0]["run_id"] == "run-1"
+
     def test_over_cap_keeps_most_recent_entries(self):
         from deerflow.agents import thread_state as thread_state_module
 

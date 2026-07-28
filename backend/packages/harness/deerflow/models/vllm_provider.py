@@ -15,6 +15,9 @@ This provider preserves ``reasoning`` on:
 from __future__ import annotations
 
 import json
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -30,10 +33,15 @@ from langchain_core.messages import (
     SystemMessageChunk,
     ToolMessageChunk,
 )
+from langchain_core.messages.ai import UsageMetadata, subtract_usage
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import _create_usage_metadata
+from pydantic import Field, PrivateAttr
+
+_CUMULATIVE_USAGE_TRACKER_CAPACITY = 1024
+_CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS = 60 * 60
 
 
 def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
@@ -156,14 +164,58 @@ def _restore_reasoning_field(payload_msg: dict[str, Any], orig_msg: AIMessage) -
         payload_msg["reasoning"] = reasoning
 
 
+def _get_completion_id(chunk: Mapping[str, Any]) -> str | None:
+    """Return a stable completion id when the provider supplied one."""
+    candidates = [chunk.get("id")]
+    nested_chunk = chunk.get("chunk")
+    if isinstance(nested_chunk, Mapping):
+        candidates.append(nested_chunk.get("id"))
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
 class VllmChatModel(ChatOpenAI):
     """ChatOpenAI variant that preserves vLLM reasoning fields across turns."""
 
     model_config = {"arbitrary_types_allowed": True}
 
+    cumulative_stream_usage: bool = Field(
+        default=False,
+        description=("Treat streaming usage snapshots from vLLM as cumulative per completion and convert them to per-chunk deltas."),
+    )
+    _cumulative_usage_by_completion: OrderedDict[str, tuple[UsageMetadata, float]] = PrivateAttr(default_factory=OrderedDict)
+    _cumulative_usage_lock: Any = PrivateAttr(default_factory=threading.Lock)
+
     @property
     def _llm_type(self) -> str:
         return "vllm-openai-compatible"
+
+    def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
+        """Convert a completion's cumulative usage snapshot into a delta."""
+        with self._cumulative_usage_lock:
+            previous_snapshot = self._cumulative_usage_by_completion.get(completion_id)
+            previous = previous_snapshot[0] if previous_snapshot is not None else None
+            delta = subtract_usage(usage, previous)
+            if terminal:
+                self._cumulative_usage_by_completion.pop(completion_id, None)
+            else:
+                now = time.monotonic()
+                self._cumulative_usage_by_completion[completion_id] = (usage, now)
+                self._cumulative_usage_by_completion.move_to_end(completion_id)
+                while len(self._cumulative_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
+                    oldest_completion_id, (_, updated_at) = next(iter(self._cumulative_usage_by_completion.items()))
+                    if now - updated_at < _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS:
+                        break
+                    self._cumulative_usage_by_completion.pop(oldest_completion_id, None)
+            return delta
+
+    def _clear_usage_snapshot(self, completion_id: str) -> None:
+        """Forget a completed stream even when its terminal frame has no usage."""
+        with self._cumulative_usage_lock:
+            self._cumulative_usage_by_completion.pop(completion_id, None)
 
     def _get_request_payload(
         self,
@@ -224,9 +276,15 @@ class VllmChatModel(ChatOpenAI):
         token_usage = chunk.get("usage")
         choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
         usage_metadata = _create_usage_metadata(token_usage, chunk.get("service_tier")) if token_usage else None
+        completion_id = _get_completion_id(chunk) if self.cumulative_stream_usage else None
 
         if len(choices) == 0:
             generation_chunk = ChatGenerationChunk(message=default_chunk_class(content="", usage_metadata=usage_metadata), generation_info=base_generation_info)
+            if completion_id is not None:
+                if usage_metadata is not None and isinstance(generation_chunk.message, AIMessageChunk):
+                    generation_chunk.message.usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=True)
+                else:
+                    self._clear_usage_snapshot(completion_id)
             if self.output_version == "v1":
                 generation_chunk.message.content = []
                 generation_chunk.message.response_metadata["output_version"] = "v1"
@@ -252,6 +310,8 @@ class VllmChatModel(ChatOpenAI):
             generation_info["logprobs"] = logprobs
 
         if usage_metadata and isinstance(message_chunk, AIMessageChunk):
+            if completion_id is not None:
+                usage_metadata = self._usage_delta(completion_id, usage_metadata, terminal=False)
             message_chunk.usage_metadata = usage_metadata
 
         message_chunk.response_metadata["model_provider"] = "openai"

@@ -10,6 +10,7 @@ from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
     _compiled_mask_patterns,
+    _extract_skill_name_from_skills_path,
     _get_custom_mount_for_path,
     _get_custom_mounts,
     _is_acp_workspace_path,
@@ -258,6 +259,26 @@ def test_mask_local_paths_no_thread_data_still_masks_skills() -> None:
         assert "/mnt/skills/a/b.md" in masked
 
 
+def test_mask_local_paths_hides_global_integration_skill_paths(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    integration_dir = tmp_path / "integrations" / "skills" / "lark-cli" / "lark-doc"
+    integration_dir.mkdir(parents=True)
+    output = f"Reading: {integration_dir / 'SKILL.md'}"
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+    assert str(integration_dir) not in masked
+    assert "/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md" in masked
+
+
 # ---------- _reject_path_traversal ----------
 
 
@@ -372,6 +393,42 @@ def test_resolve_skills_path_resolves_root() -> None:
         assert resolved == "/home/user/deer-flow/skills"
 
 
+def test_extract_skill_name_from_integration_skill_path() -> None:
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md") == "lark-doc"
+        assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli") is None
+
+
+def test_resolve_skills_path_resolves_global_integration_skills(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    expected = tmp_path / "integrations" / "skills" / "lark-cli" / "lark-doc" / "SKILL.md"
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        resolved = _resolve_skills_path("/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md")
+
+    assert resolved == str(expected)
+
+
+def test_resolve_skills_path_blocks_integration_traversal(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        with pytest.raises(PermissionError, match="path traversal detected"):
+            _resolve_skills_path("/mnt/skills/integrations/../../etc/passwd")
+
+
 def test_resolve_skills_path_raises_when_not_configured() -> None:
     """Should raise FileNotFoundError when skills directory is not available."""
     with (
@@ -449,6 +506,53 @@ def test_replace_virtual_paths_in_command_replaces_user_data_only() -> None:
         # User-data paths should still be resolved
         assert "/mnt/user-data" not in result
         assert "/tmp/deer-flow/threads/t1/user-data/workspace/out.txt" in result
+
+
+@pytest.mark.parametrize(
+    "sibling",
+    [
+        "/mnt/user-data-backup/secret.txt",
+        "/mnt/user-data2/report.txt",
+        "/mnt/user-data.bak",
+        "/mnt/user-data_old/x",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibling: str) -> None:
+    """A path that merely starts with the virtual root is not a virtual path.
+
+    The matcher's trailing group needs a ``/`` to consume anything, so when the
+    character after ``/mnt/user-data`` is ``-``, ``.``, ``_``, a digit or a
+    letter, the group matches empty and the bare root still matches. The
+    substitution then rewrites it to the thread's host directory, and the rest of
+    the sibling name rides along — handing the command a real host path outside
+    the mount contract (``.../user-data-backup``), which the agent then reads or
+    writes.
+
+    Same defect as #4035 (reverse patterns) and #4053 (masking patterns),
+    mirrored into the virtual→host command direction.
+    """
+    result = replace_virtual_paths_in_command(f"cat {sibling}", _THREAD_DATA)
+
+    assert result == f"cat {sibling}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # The bare root, at end of string and before shell/text punctuation, must
+        # keep translating — these guard the boundary from being narrowed too far.
+        ("ls /mnt/user-data", "ls /tmp/deer-flow/threads/t1/user-data"),
+        ("ls /mnt/user-data && pwd", "ls /tmp/deer-flow/threads/t1/user-data && pwd"),
+        ("PYTHONPATH=/mnt/user-data:/opt x", "PYTHONPATH=/tmp/deer-flow/threads/t1/user-data:/opt x"),
+        ("echo '/mnt/user-data, done'", "echo '/tmp/deer-flow/threads/t1/user-data, done'"),
+        # Real children still translate.
+        ("cat /mnt/user-data/workspace/a.txt", "cat /tmp/deer-flow/threads/t1/user-data/workspace/a.txt"),
+    ],
+)
+def test_replace_virtual_paths_in_command_still_translates_genuine_paths(command: str, expected: str) -> None:
+    """The narrowing must not stop translating paths that translate today."""
+    assert replace_virtual_paths_in_command(command, _THREAD_DATA) == expected
 
 
 # ---------- validate_local_bash_command_paths ----------

@@ -100,29 +100,34 @@ def test_read_file_tool_passes_line_range_into_sandbox(monkeypatch) -> None:
     }
 
 
-def test_read_file_tool_requires_complete_range(monkeypatch) -> None:
-    class FailingSandbox:
+def test_read_file_tool_passes_open_ended_ranges_into_sandbox(monkeypatch) -> None:
+    calls: list[tuple[int | None, int | None]] = []
+
+    class RangeAwareSandbox:
         def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-            raise AssertionError("should never be called for incomplete range")
+            calls.append((start_line, end_line))
+            return "line 1\nline 2"
 
     runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio:test"}}, context={"thread_id": "t1"})
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: FailingSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: RangeAwareSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
 
     start_only = read_file_tool.func(
         runtime=runtime,
-        description="bad call",
+        description="read tail",
         path="/mnt/user-data/workspace/huge.log",
         start_line=1,
     )
     end_only = read_file_tool.func(
         runtime=runtime,
-        description="bad call",
+        description="read head",
         path="/mnt/user-data/workspace/huge.log",
         end_line=10,
     )
 
-    assert "start_line and end_line" in start_only
-    assert "start_line and end_line" in end_only
+    assert start_only == "line 1\nline 2"
+    assert end_only == "line 1\nline 2"
+    assert calls == [(1, None), (None, 10)]
 
 
 def test_read_file_tool_validates_range_order(monkeypatch) -> None:
@@ -137,4 +142,4 @@ def test_read_file_tool_validates_range_order(monkeypatch) -> None:
         end_line=10,
     )
 
-    assert "greater than or equal to start_line" in result
+    assert "start_line > end_line" in result

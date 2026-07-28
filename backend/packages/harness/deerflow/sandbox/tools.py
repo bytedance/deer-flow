@@ -23,6 +23,7 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -162,6 +163,7 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
     /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
     /mnt/skills/legacy/my-skill/references/... → "my-skill"
+    /mnt/skills/integrations/lark-cli/lark-doc/SKILL.md → "lark-doc"
     /mnt/skills/public/bootstrap/ → "bootstrap"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
@@ -172,13 +174,21 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     relative = path[len(skills_prefix) :].lstrip("/")
     if not relative:
         return None
-    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
-    # or "<name>/..." (direct skill access)
-    parts = relative.split("/")
+    # Expected patterns: "public/<name>/...", "custom/<name>/...",
+    # "legacy/<name>/...", "integrations/<provider>/<name>/..."
+    # or "<name>/..." (direct skill access). Empty segments are dropped so a
+    # directory entry ("public/", as `ls` emits for dirs) is still recognized as
+    # a category root rather than yielding an empty skill name.
+    parts = [part for part in relative.split("/") if part]
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
-    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+    if len(parts) >= 3 and parts[0] == "integrations":
+        return parts[2]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy", "integrations"):
         # Category root like /mnt/skills/custom — not a skill path.
+        return None
+    if len(parts) == 2 and parts[0] == "integrations":
+        # Provider root like /mnt/skills/integrations/lark-cli.
         return None
     if len(parts) >= 1:
         # Direct path like /mnt/skills/my-skill/SKILL.md
@@ -212,6 +222,8 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
             category = "custom"
         elif relative.startswith("legacy/"):
             category = "legacy"
+        elif relative.startswith("integrations/"):
+            category = "integrations"
         else:
             # Try to infer from storage
             effective_uid = user_id or get_effective_user_id()
@@ -239,6 +251,39 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
         # skill's files. See review feedback on PR #3889.
         logger.warning("Failed to determine enabled state, denying access: %s", exc)
         return True
+
+
+def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) -> list[str]:
+    """Filter out paths that belong to a disabled skill.
+
+    ``_is_disabled_skill_path`` gates the *requested* path, which is enough for
+    ``read_file`` but not for the tools that descend: ``ls``, ``glob`` and
+    ``grep`` return paths other than the one they were given, so a root anywhere
+    above a disabled skill still surfaces its files.  This applies the same check
+    to the results.
+
+    The enabled-state lookup re-reads ``extensions_config.json`` (or the per-user
+    skill state) on every call, so the verdict is memoized per skill — a 100-match
+    grep must not become 100 config reads.
+    """
+    skills_prefix = _get_skills_container_path()
+    verdicts: dict[tuple[str, str], bool] = {}
+    kept: list[str] = []
+    for path in paths:
+        skill_name = _extract_skill_name_from_skills_path(path)
+        if skill_name is None:
+            kept.append(path)
+            continue
+        # Leading segment (the category, or the skill itself in the direct
+        # layout) plus the name identifies the skill the same way
+        # _is_disabled_skill_path does, so paths sharing a key share a verdict.
+        category = path[len(skills_prefix) :].lstrip("/").split("/")[0]
+        key = (category, skill_name)
+        if key not in verdicts:
+            verdicts[key] = _is_disabled_skill_path(path, user_id=user_id)
+        if not verdicts[key]:
+            kept.append(path)
+    return kept
 
 
 def _resolve_skills_path(path: str) -> str:
@@ -271,7 +316,7 @@ def _resolve_skills_path(path: str) -> str:
 
     relative = path[len(skills_container) :].lstrip("/")
 
-    # Per-user custom skills: resolve to user-specific directory.
+    # Per-user custom and globally managed integration skills.
     # ``skill_manage_tool`` writes custom skills to the per-user directory,
     # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
     # ``/mnt/skills/custom`` to that same per-user dir.  Without this
@@ -290,6 +335,22 @@ def _resolve_skills_path(path: str) -> str:
         if custom_relative:
             return str(user_custom_dir / custom_relative)
         return str(user_custom_dir)
+
+    if relative == "integrations" or relative.startswith("integrations/"):
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        integrations_dir = paths.integration_skills_dir()
+        integrations_relative = relative[len("integrations") :].lstrip("/")
+        if not integrations_relative:
+            return str(integrations_dir)
+        # Defense-in-depth: even though _reject_path_traversal runs upstream for
+        # sandbox callers, confirm the resolved path stays within the global
+        # integration dir so a lexical ``../`` cannot escape it here.
+        resolved = (integrations_dir / integrations_relative).resolve()
+        if not resolved.is_relative_to(integrations_dir.resolve()):
+            raise PermissionError("Access denied: path traversal detected")
+        return str(integrations_dir / integrations_relative)
 
     return _join_path_preserving_style(skills_host, relative)
 
@@ -692,20 +753,16 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
     glob/grep match, so without this the same patterns are recompiled per
     match.
     """
-    # Same segment-boundary lookahead as ``LocalSandbox._reverse_output_patterns``
-    # (#4035), so a host base does not match inside a sibling that merely shares
-    # its prefix (``.../skills`` inside ``.../skills-extra``). Without it the
-    # regex yields the bare base, which then *equals* ``base`` in
-    # ``replace_match`` and so the sibling is rewritten to a container path that
-    # forward resolution refuses to map back.
+    # The segment boundary and path tail are shared with
+    # ``LocalSandbox._reverse_output_patterns`` — see
+    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
+    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
+    # other).
     #
-    # The class mirrors ``_content_pattern``'s: this runs over arbitrary command
-    # output, where a base can legitimately be followed by ``,`` ``:`` or ``\``.
-    # ``$`` is load-bearing — output ending exactly at a base would otherwise
-    # fail the lookahead and be emitted as the raw host path.
-    boundary = r"(?=/|$|[^\w./-])"
-    tail = r"(?:[/\\][^\s\"';&|<>()]*)?"
-
+    # ``separator_agnostic=True`` is the one thing this site does differently:
+    # its bases come from ``_path_variants``, which yields Windows-style
+    # spellings, and they are matched against output whose separators this layer
+    # does not control.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
@@ -718,8 +775,7 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                 if variant in seen:
                     continue
                 seen.add(variant)
-                escaped = re.escape(variant).replace(r"\\", r"[/\\]")
-                compiled.append((re.compile(escaped + boundary + tail), variant, virtual_base))
+                compiled.append((build_output_mask_pattern(variant, separator_agnostic=True), variant, virtual_base))
     return tuple(compiled)
 
 
@@ -727,11 +783,11 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths (global + per-user
-    custom), and ACP workspace paths (per-thread).
+    custom + managed integrations), and ACP workspace paths (per-thread).
     """
     # Build the ordered (host_base, virtual_base) source list. Order is
     # preserved from the original implementation: skills, then per-user
-    # custom skills, then ACP workspace, then user-data mappings (longest
+    # custom/integration skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
     sources: list[tuple[str, str]] = []
@@ -751,9 +807,13 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
         user_id = get_effective_user_id()
         user_custom_dir = get_paths().user_custom_skills_dir(user_id)
+        integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
             sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+        if integrations_dir.exists():
+            skills_container = _get_skills_container_path()
+            sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
@@ -1209,7 +1269,21 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
 
     # Replace user-data paths
     if VIRTUAL_PATH_PREFIX in result and thread_data is not None:
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(/[^\s\"';&|<>()]*)?")
+        # The segment-boundary lookahead is what keeps the virtual root from
+        # matching inside a sibling that merely shares its prefix
+        # (``/mnt/user-data`` inside ``/mnt/user-data-backup``). The trailing
+        # group needs a ``/`` to consume anything, so without the lookahead the
+        # bare root still matches and the sibling is rewritten into the thread's
+        # host directory — a real path outside the mount contract. Same defect as
+        # #4035 (reverse patterns) and #4053 (masking patterns), mirrored into
+        # this direction.
+        #
+        # The class mirrors ``LocalSandbox._content_pattern``'s rather than
+        # ``_command_pattern``'s: a virtual root can legitimately be followed by
+        # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
+        # class rejects — narrowing to it would stop translating paths that
+        # translate today. ``$`` covers a command ending exactly at the root.
+        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -1565,9 +1639,10 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
+# Gateway accepts this identity only from internally authenticated channel
+# requests, but embedded runtimes can still construct context directly. Bound
+# the value defensively: real platform ids are tens of chars; anything past
+# this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
 
@@ -1651,6 +1726,35 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
+_LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
+
+
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+    """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
+
+    Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
+    config/data directories. Agent conversations invoke ``lark-cli`` through the
+    sandbox, so lark commands must receive those same directories or they see an
+    unrelated unauthenticated profile. Keep this scoped to commands that
+    actually call ``lark-cli`` so ordinary bash calls do not switch AIO into the
+    env-bearing execution path.
+
+    In broker mode (Pattern B, issue #4338) a sidecar owns the credentials, so
+    the overlay carries only the broker URL + runtime PATH — the config/data
+    directories are never injected into the sandbox.
+    """
+    if not _LARK_CLI_COMMAND_RE.search(command):
+        return None
+    try:
+        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+
+        broker = sandbox_paths and sandbox_lark_broker_active()
+        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
+    except Exception:
+        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
+        return None
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1677,8 +1781,11 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
+        if lark_cli_env:
+            injected_env = {**(injected_env or {}), **lark_cli_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1706,6 +1813,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
+        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         if identity_prefix:
             command = identity_prefix + command
         try:
@@ -1740,8 +1848,9 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         path: The **absolute** path to the directory to list.
     """
     try:
+        user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
-        if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
+        if _is_disabled_skill_path(path, user_id=user_id):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
@@ -1767,6 +1876,12 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         output = "\n".join(children)
         if thread_data is not None:
             output = mask_local_paths_in_output(output, thread_data)
+        # The gate above only covers `path` itself; the listing descends into
+        # children, so a root above a disabled skill still exposes its files.
+        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=user_id)
+        if not entries:
+            return "(empty)"
+        output = "\n".join(entries)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -1811,6 +1926,11 @@ def glob_tool(
         max_results: Maximum number of paths to return. Default is 200.
     """
     try:
+        user_id = resolve_runtime_user_id(runtime)
+        # Block access to disabled skill directories
+        if _is_disabled_skill_path(path, user_id=user_id):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1829,6 +1949,9 @@ def glob_tool(
         matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
         if thread_data is not None:
             matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
+        # The gate above only covers `path` itself; the search descends into it,
+        # so a root above a disabled skill still surfaces its files.
+        matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -1875,18 +1998,23 @@ def grep_tool(
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside text files under a root directory.
+    """Search for matching lines inside a text file or files under a root directory.
 
     Args:
         description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
-        path: The **absolute** root directory to search under.
+        path: The **absolute** file or root directory to search.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.
         max_results: Maximum number of matching lines to return. Default is 100.
     """
     try:
+        user_id = resolve_runtime_user_id(runtime)
+        # Block access to disabled skill directories
+        if _is_disabled_skill_path(path, user_id=user_id):
+            skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
+            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
@@ -1919,6 +2047,10 @@ def grep_tool(
                 )
                 for match in matches
             ]
+        # The gate above only covers `path` itself; the search descends into it,
+        # so a root above a disabled skill still surfaces its file contents.
+        allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
+        matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
     except SandboxError as e:
         return f"Error: {e}"
@@ -1996,26 +2128,25 @@ def read_file_tool(
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
-        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
+        start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
+        end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
     try:
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
-        if (start_line is None) != (end_line is None):
-            return "Error: start_line and end_line must be provided together."
-        if start_line is not None and start_line <= 0:
-            return "Error: start_line must be a positive integer."
-        if end_line is not None and end_line < start_line:
-            return "Error: end_line must be greater than or equal to start_line."
+        effective_start = max(start_line or 1, 1)
+        if end_line is not None and end_line < 1:
+            return "(end_line must be >= 1)"
+        if end_line is not None and effective_start > end_line:
+            return "(start_line > end_line — no lines in range)"
 
         requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        use_bounded_line_read = start_line is not None and end_line is not None
-        if use_bounded_line_read:
+        use_line_range = start_line is not None or end_line is not None
+        if use_line_range:
             if is_local_sandbox(runtime):
                 thread_data = get_thread_data(runtime)
                 validate_local_tool_path(path, thread_data, read_only=True)
@@ -2030,18 +2161,9 @@ def read_file_tool(
         else:
             content = read_current_file_content(runtime, path)
         if not content:
-            return "(empty)"
-        if start_line is not None or end_line is not None:
-            lines = content.splitlines()
-            s = max(start_line, 1) if start_line is not None else 1
-            e = end_line if end_line is not None else len(lines)
-            if e < 1:
-                return "(end_line must be >= 1)"
-            if s > len(lines):
+            if start_line is not None and start_line > 1:
                 return "(start_line exceeds file length)"
-            if s > e:
-                return "(start_line > end_line — no lines in range)"
-            content = "\n".join(lines[s - 1 : e])
+            return "(empty)"
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2231,9 +2353,11 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
+            if not old_str:
+                # A no-op edit. str.replace("", new_str) would insert new_str at
+                # every character boundary, so this cannot fall through.
                 return "OK"
-            if old_str not in content:
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)

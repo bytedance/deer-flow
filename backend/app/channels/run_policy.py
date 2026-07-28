@@ -84,6 +84,21 @@ class ChannelRunPolicy:
             unrelated DeerFlow threads continue concurrently. Defaults
             to False so existing channels keep the runtime's native
             multitask behavior unless they opt in explicitly.
+        buffer_followups_on_busy: When True, a ``ConflictError`` on the
+            ``fire_and_forget`` dispatch path (see
+            :meth:`ChannelManager._handle_chat_on_thread`) does more than
+            log + reply with the generic busy message: the triggering
+            message is appended to a per-thread follow-up buffer, and a
+            background watcher subscribes to the active run's
+            ``StreamBridge`` stream so it can coalesce the buffer into a
+            follow-up run as soon as that run ends. This targets
+            ``fire_and_forget`` channels whose ``send`` is otherwise the
+            only feedback a busy sender gets (e.g. GitHub, where ``send``
+            is log-only) — without it, a concurrent comment is silently
+            dropped from the sender's point of view. Defaults to False so
+            channels that have not opted in keep the exact old
+            silent-drop-with-log behavior; see
+            ``app.gateway.github.run_policy`` for GitHub's opt-in.
     """
 
     is_interactive: bool = True
@@ -92,6 +107,7 @@ class ChannelRunPolicy:
     requires_bound_identity: bool = True
     fire_and_forget: bool = False
     serialize_thread_runs: bool = False
+    buffer_followups_on_busy: bool = False
 
 
 # Channel name → policy. Channels absent from this map fall through to

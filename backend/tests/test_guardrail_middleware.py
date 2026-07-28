@@ -431,17 +431,19 @@ class TestGuardrailMiddleware:
         assert journal.calls == []
 
     # Journal: a recording failure must not alter the guardrail denial outcome.
-    def test_guardrail_event_recording_failure_does_not_change_denial(self):
+    def test_guardrail_event_recording_failure_warns_without_changing_denial(self, caplog):
         journal = _FakeJournal(fail=True)
         mw = GuardrailMiddleware(_DenyAllProvider())
         req = _make_tool_call_request("bash", context={"__run_journal": journal})
         handler = MagicMock()
 
-        result = mw.wrap_tool_call(req, handler)
+        with caplog.at_level("WARNING"):
+            result = mw.wrap_tool_call(req, handler)
 
         handler.assert_not_called()
         assert result.status == "error"
         assert "oap.denied" in result.content
+        assert "Failed to record middleware:guardrail event" in caplog.text
 
     # Journal: the async denial path records the same guardrail audit event.
     def test_async_denied_tool_records_guardrail_event(self):
@@ -544,6 +546,9 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.oauth_id is None
         assert guardrail_request.run_id is None
         assert guardrail_request.tool_call_id is None
+        assert guardrail_request.channel_user_id is None
+        assert guardrail_request.is_internal is False
+        assert guardrail_request.authz_attributes == {}
 
     def test_only_user_id_present(self):
         runtime = self._make_runtime_mock(context={"user_id": "user_abc"})
@@ -559,12 +564,16 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.tool_call_id is None
 
     def test_authenticated_user_context_present(self):
+        attributes = {"department": "engineering"}
         runtime = self._make_runtime_mock(
             context={
                 "user_id": "user_abc",
                 "user_role": "admin",
                 "oauth_provider": "github",
                 "oauth_id": "gh_123",
+                "channel_user_id": "channel_123",
+                "is_internal": True,
+                "authz_attributes": attributes,
             }
         )
         req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
@@ -575,6 +584,19 @@ class TestGuardrailRequestAttribution:
         assert guardrail_request.user_role == "admin"
         assert guardrail_request.oauth_provider == "github"
         assert guardrail_request.oauth_id == "gh_123"
+        assert guardrail_request.channel_user_id == "channel_123"
+        assert guardrail_request.is_internal is True
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+        attributes["department"] = "changed"
+        assert guardrail_request.authz_attributes == {"department": "engineering"}
+
+    def test_non_mapping_authz_attributes_raise_type_error(self):
+        runtime = self._make_runtime_mock(context={"authz_attributes": ["not", "a", "mapping"]})
+        req = self._make_request(runtime=runtime, tool_call={"name": "bash", "args": {}})
+
+        with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+            self._capture_guardrail_request(req)
 
     def test_only_run_id_present(self):
         runtime = self._make_runtime_mock(context={"run_id": "run_xyz"})

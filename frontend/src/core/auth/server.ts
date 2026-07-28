@@ -3,11 +3,10 @@ import { cookies } from "next/headers";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { AUTH_DISABLED_USER, isAuthDisabledMode } from "./auth-disabled-user";
+import { AUTH_REQUEST_TIMEOUT_MS } from "./constants";
 import { getGatewayConfig } from "./gateway-config";
 import { STATIC_WEBSITE_USER } from "./static-user";
 import { type AuthResult, userSchema } from "./types";
-
-const SSR_AUTH_TIMEOUT_MS = 5_000;
 
 /**
  * Fetch the authenticated user from the gateway using the request's cookies.
@@ -43,7 +42,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
     const setupController = new AbortController();
     const setupTimeout = setTimeout(
       () => setupController.abort(),
-      SSR_AUTH_TIMEOUT_MS,
+      AUTH_REQUEST_TIMEOUT_MS,
     );
     try {
       const setupRes = await fetch(
@@ -68,7 +67,7 @@ export async function getServerSideUser(): Promise<AuthResult> {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SSR_AUTH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
 
   try {
     const res = await fetch(`${internalGatewayUrl}/api/v1/auth/me`, {

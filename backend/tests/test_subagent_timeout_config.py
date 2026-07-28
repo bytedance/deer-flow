@@ -12,6 +12,7 @@ Covers:
 import pytest
 
 from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     SubagentOverrideConfig,
     SubagentsAppConfig,
     default_subagent_token_budget,
@@ -104,26 +105,39 @@ class TestSubagentsAppConfigDefaults:
         config = SubagentsAppConfig()
         assert config.max_turns is None
 
+    def test_default_max_total_per_run(self):
+        config = SubagentsAppConfig()
+        assert config.max_total_per_run == DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+
     def test_default_agents_empty(self):
         config = SubagentsAppConfig()
         assert config.agents == {}
 
     def test_custom_global_runtime_overrides(self):
-        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120)
+        config = SubagentsAppConfig(timeout_seconds=1800, max_turns=120, max_total_per_run=8)
         assert config.timeout_seconds == 1800
         assert config.max_turns == 120
+        assert config.max_total_per_run == 8
 
     def test_rejects_zero_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=0)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=0)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=0)
 
     def test_rejects_negative_timeout(self):
         with pytest.raises(ValueError):
             SubagentsAppConfig(timeout_seconds=-60)
         with pytest.raises(ValueError):
             SubagentsAppConfig(max_turns=-60)
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=-1)
+
+    def test_rejects_above_max_total_per_run(self):
+        with pytest.raises(ValueError):
+            SubagentsAppConfig(max_total_per_run=51)
 
     def test_default_token_budget_coupled_to_summarization_switch(self):
         """The token-budget backstop engages by default (#3857 point 4). Its

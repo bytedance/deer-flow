@@ -1,5 +1,6 @@
 """Built-in tool for invoking external ACP-compatible agents."""
 
+import asyncio
 import logging
 import os
 import shutil
@@ -237,10 +238,25 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 if agent_config.model:
                     session_kwargs["model"] = agent_config.model
                 session = await conn.new_session(**session_kwargs)
-                await conn.prompt(
-                    session_id=session.session_id,
-                    prompt=[text_block(prompt)],
-                )
+                try:
+                    await asyncio.wait_for(
+                        conn.prompt(
+                            session_id=session.session_id,
+                            prompt=[text_block(prompt)],
+                        ),
+                        timeout=agent_config.timeout_seconds,
+                    )
+                except TimeoutError:
+                    logger.error(
+                        "ACP agent '%s' timed out after %s seconds without responding to prompt; terminating subprocess",
+                        agent,
+                        agent_config.timeout_seconds,
+                    )
+                    return (
+                        f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
+                        "without responding. The agent subprocess has been terminated. If this agent handles "
+                        f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                    )
             result = client.collected_text
             logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))

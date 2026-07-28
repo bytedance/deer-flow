@@ -1,4 +1,5 @@
 import pytest
+from langchain_core.tools import StructuredTool
 from langchain_core.tools import tool as as_tool
 
 from deerflow.tools.builtins.tool_search import MAX_RESULTS, DeferredToolCatalog
@@ -123,3 +124,13 @@ def test_hash_changes_with_membership():
     c1 = DeferredToolCatalog((alpha_search, beta_translate))
     c2 = DeferredToolCatalog((alpha_search,))
     assert c1.hash != c2.hash
+
+
+def test_search_select_not_capped_at_max_results():
+    """select: must return ALL requested tools, even when >MAX_RESULTS."""
+    tools = tuple(StructuredTool.from_function(func=lambda q="": q, name=f"tool_{i:02d}", description=f"Tool {i}") for i in range(8))
+    cat = DeferredToolCatalog(tools)
+    names_csv = ",".join(f"tool_{i:02d}" for i in range(8))
+    got = cat.search(f"select:{names_csv}")
+    assert len(got) == 8
+    assert [t.name for t in got] == [f"tool_{i:02d}" for i in range(8)]

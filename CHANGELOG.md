@@ -5,6 +5,523 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This section accumulates work toward the **2.1.0** milestone
+([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
+
+### ⚠ Breaking changes
+
+- **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
+  limit. The default `wait` policy waits for `acquire_timeout`, then fails the
+  agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
+  `burst_limit` to permit bounded extra VMs. The `reject` policy can remove one
+  warm VM before it returns a capacity error. ([#4391])
+- **skills:** A directory containing `SKILL.md` is now a runtime package
+  boundary. Nested `SKILL.md` files inside that package are supporting data and
+  are no longer registered as independent skills; unusual custom layouts must
+  move independently loadable skills under a namespace directory without its
+  own `SKILL.md`. ([#4098])
+- **memory:** The memory system is now pluggable (`memory.manager_class` selects
+  a backend; default `deermem` is self-contained). DeerMem-private settings moved
+  from the top level of `memory:` into `memory.backend_config`, and the
+  `/memory/config` response (and `client.get_memory_config()`) changed shape.
+  ([#4122])
+- **memory:** `/memory/config` and `client.get_memory_config()` no longer return
+  flat DeerMem fields (`storage_path`, `max_facts`, `debounce_seconds`,
+  `token_counting`, `guaranteed_*`, `staleness_*`, ...). They return
+  `{enabled, mode, injection_enabled, manager_class, backend_config}` where
+  `backend_config` is an opaque dict the active backend self-interprets. Memory
+  *data* responses (`/memory`, `/memory/status` data) are unchanged. External
+  API/SDK clients reading the old flat fields must read `backend_config` instead.
+  ([#4122])
+- **memory:** Custom `memory.storage_class` moved: the old default path
+  `deerflow.agents.memory.storage.FileMemoryStorage` no longer exists (now
+  `deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage`).
+  Custom `MemoryStorage` subclasses must accept `config` in `__init__` (was
+  no-arg). A broken/old `storage_class` logs an error and falls back to
+  `FileMemoryStorage` (won't crash) -- update the path + signature to restore it.
+  ([#4122])
+- **memory:** `storage_path` semantics changed from a FILE path to a root
+  DIRECTORY. Pre-abstraction, an absolute `storage_path` was the shared memory
+  file (opting out of per-user isolation) and a relative value was the global
+  file under the data base_dir. Now `storage_path` (absolute or relative) is the
+  root directory; per-user memory lives at `{storage_path}/users/{uid}/memory.json`.
+  An upgrade keeping the old default `storage_path: memory.json` (a relative file
+  name) would orphan per-user memory or hit `NotADirectoryError` on save, so the
+  legacy migration **drops file-style `storage_path` values (ending in `.json`)
+  with a warning** and the factory **raises** if `storage_path` resolves to an
+  existing file. Set `memory.backend_config.storage_path` to a directory for a
+  custom root. ([#4122])
+- **memory:** `memory.mode: tool` with a backend that does not implement
+  `search()` now fails fast at Gateway startup with a `ValueError` from the
+  `MemoryManager` invariant, instead of starting successfully and silently
+  returning empty results on every `memory_search` call. Both shipping backends
+  implement `search()` (DeerMem retrieves; `noop` returns `[]`), so this only
+  affects a custom backend that onboards without overriding `search()`. It is
+  intentional -- silent empties are worse than a loud startup error. Fix: switch
+  to `mode: middleware` or override `search()` (and set `supports_search=True`).
+  ([#4324])
+- **config:** `database.checkpoint_delta_snapshot_frequency` moved to
+  `database.checkpoint_delta.snapshot_frequency` and its default changed from
+  `1000` to `10`. A legacy top-level value is still honored with a deprecation
+  warning and mapped onto the nested key (an explicitly set nested key wins).
+  Deployments that relied on the old default now snapshot 100x more often in
+  delta mode -- set `database.checkpoint_delta.snapshot_frequency: 1000`
+  explicitly to keep the previous cadence. ([#4516])
+
+### Added
+
+#### Agents & runtime
+
+- **middleware:** New `TokenBudgetMiddleware` enforces a per-run token budget,
+  shared additively across the lead agent and subagents. ([#3412])
+- **middleware:** Structured tool-result metadata and a tool-progress state
+  machine give the runtime first-class visibility into multi-step tool flows.
+  ([#3601])
+- **context:** Record the effective memory identity per run and persist durable
+  context (system messages, memory, and tool state) across summarization,
+  emitting it as structured runtime metadata so compaction no longer drops it.
+  ([#3556], [#3887], [#3906])
+- **runtime:** Goal continuations let a run resume toward a goal across multiple
+  agent turns, with `continuation_count` tracked and capped. ([#3858])
+- **subagents:** A system-maintained delegation ledger prevents redundant
+  re-delegation of an in-flight task, and a total delegation cap bounds fan-out
+  per run. ([#3877], [#4115])
+- **subagents:** Persist and display subagent step history in the thread.
+  ([#3845])
+- **tools:** Structured synopses replace raw oversized tool output in previews.
+  ([#3377])
+- **files:** Deterministic read-before-write version gate for file tools
+  prevents clobbering concurrent edits. ([#3912])
+- **gateway:** Cache-aware cost accounting attributes token costs to cached vs.
+  uncached paths; a Redis stream bridge enables distributed event streaming; and
+  manual context compaction is exposed to the user. ([#3920], [#3191], [#3969])
+- **runtime:** Dual-mode checkpoint storage with LangGraph `DeltaChannel` cuts
+  thread storage from O(N²) to near-linear for long research/coding runs.
+  ([#4292])
+- **agent:** Config-declared lead-agent middlewares let deployments add custom
+  `AgentMiddleware` classes without patching the runtime chain. ([#3964])
+- **agents:** Per-agent model and generation settings (`temperature`,
+  `max_tokens`, `thinking_enabled`, `reasoning_effort`) override the shared
+  model profile. ([#4347])
+- **runtime:** Record terminal artifact-delivery receipts so runs expected to
+  `present_files` no longer report success when delivery fails. ([#4365])
+- **uploads:** Lazy-load historical files via a `list_uploaded_files` tool
+  instead of injecting the full manifest. ([#4174])
+
+#### Memory
+
+- **memory:** Memory consolidation synthesizes fragmented facts, and a staleness
+  review prunes silently-outdated facts using LLM-assigned per-fact
+  `expected_valid_days` / `staleFactsToExtend`. ([#3996], [#3860], [#4143])
+- **memory:** Guaranteed injection of correction facts (with graceful fallback)
+  so user corrections always reach the model. ([#3592])
+- **memory:** Slim the pluggable `MemoryManager` interface for backend
+  onboarding - new backends no longer implement unused abstract methods, and
+  DeerMem-specific hook injection moves out of the shared factory. ([#4326])
+- **memory:** Incremental agent-scoped Markdown fact storage isolates per-agent
+  facts and updates a single fact without rewriting or reindexing the whole
+  collection. ([#4279])
+- **memory:** Memory message processing adds a conversation watermark,
+  trivial-turn filtering, and a durable queue so extraction no longer re-feeds
+  the full conversation every turn. ([#4447])
+
+#### Skills
+
+- **skills:** Native SkillScan (phase 1) statically analyzes skill packages at
+  load, and `describe_skill` enables deferred discovery so the model fetches a
+  skill's schema on demand instead of loading all skills up front. ([#3033],
+  [#3775])
+- **skills:** Per-user custom skill isolation with sandbox mounting. ([#3889])
+
+#### Models & integrations
+
+- **community:** New web search/fetch engines - GroundRoute, Crawl4AI
+  (`web_fetch`), and a fastCRW provider - plus a Browserless `web_capture`
+  screenshot tool and Brave `image_search`. ([#3675], [#3821], [#3585], [#3881],
+  [#3866])
+- **mcp:** Per-server `tool_call_timeout` for MCP tool calls, and routing hints
+  that guide the model to the right server. ([#3843], [#4004])
+- **community:** Agentic browser control as a first-class thread capability -
+  Playwright-backed browser sessions the agent operates while the user observes
+  or takes over from the workspace. ([#4187])
+- **community:** Lark/Feishu CLI integration bundles the runtime install, the
+  official `lark-*` skill pack, and an interactive auth flow so the integration
+  is no longer environment-dependent. ([#3971])
+
+#### Channels
+
+- **channels:** Expose the IM `channel_user_id` to sandbox commands as
+  `DEERFLOW_CHANNEL_USER_ID`. ([#3926])
+- **channels:** Queue rapid same-thread messages and preserve topic-card
+  previews across batches. ([#3988])
+
+#### Auth & guardrails
+
+- **auth:** Generic OIDC/SSO authentication with Keycloak support. ([#3506])
+- **guardrails:** Authenticated runtime context is exposed in `GuardrailRequest`,
+  and security interventions are persisted as run events. ([#3665], [#3837])
+- **auth:** "Keep me signed in" login option with a centralized session-cookie
+  policy (persistent `Secure` cookies on HTTPS, session cookies on public HTTP).
+  ([#4255])
+- **auth:** Deployments can close local self-registration to restrict new
+  accounts to SSO/OIDC provisioning. ([#4311])
+- **authz:** Built-in RBAC authorization provider with a unified factory, plus
+  tool-authorization enforcement at both assembly (tools removed before the
+  model sees them) and runtime (denied calls blocked). ([#4260], [#4370])
+
+#### Sandbox & provisioner
+
+- **sandbox:** New E2B and BoxLite (micro-VM) sandbox providers; BoxLite ships
+  with a warm pool. ([#3883], [#3940], [#3951])
+- **provisioner:** ClusterIP Services and scoped per-skill PVC mounts, plus a
+  configurable sandbox container port. ([#4016], [#3928])
+
+#### Frontend
+
+- **frontend:** Branching support for assistant turns and side conversations for
+  quoted follow-ups. ([#3950], [#3934])
+- **frontend:** Regenerate the latest answer. ([#3637])
+- **frontend:** Citation-sources evidence panel, workspace change review for
+  agent runs, and a visualized `ask_clarification` card. ([#3907], [#3945],
+  [#3956])
+- **frontend:** Voice dictation, prompt-history recall with arrow keys, composer
+  input polishing, and a "(thought for N seconds)" thinking-duration chip.
+  ([#4036], [#3718], [#3986], [#3627])
+- **frontend:** Feature-gate the agents UI behind the `agents_api` flag, and
+  persist AI turn duration in backend and UI. ([#3769], [#3663])
+- **frontend:** Render slash-skill activations as inline chips. ([#3981])
+- **frontend:** Localized AI-assistance disclaimer. ([#4374])
+- **frontend:** Pin recent chats. ([#4442])
+- **frontend:** Validate `/goal` objective length in the composer. ([#4337])
+
+#### Observability & tooling
+
+- **observability:** Trace-id correlation with enhanced logging and agent
+  observability via Monocle. ([#3902], [#4024])
+- **tooling:** A Hermes-like terminal workbench (`deerflow` CLI) backed by
+  `DeerFlowClient`, plus a redacted community support-bundle generator. ([#3760],
+  [#3886])
+- **setup:** The setup wizard now asks whether OpenAI-compatible gateway models
+  support thinking, and a Volcengine Coding Plan quick-setup path was added.
+  ([#3428], [#4141])
+- **tui:** `clear` command. ([#4306])
+
+### Changed
+
+- **sandbox:** The Helm chart now defaults per-sandbox Services to `ClusterIP`
+  instead of `NodePort`, so the code-execution sandbox is reachable only inside
+  the cluster via Service DNS (`http://sandbox-<id>-svc.<ns>.svc.cluster.local`)
+  and is no longer bound on every node's interfaces - including the
+  externally-reachable ones on GKE/EKS/AKS. Existing chart installs flip
+  NodePort -> ClusterIP on upgrade. To preserve the old reachability (an
+  external probe hitting the 30xxx port, or the Docker-Compose/hybrid path
+  where the gateway is not in K8s), set `provisioner.sandboxServiceType: NodePort`
+  (with `provisioner.nodeHost` if needed). The provisioner itself is unchanged
+  (mode-aware since #4016). ([#4190])
+- **skills:** An active restrictive skill must explicitly list `task` in
+  `allowed-tools` to delegate to a subagent. Read-only discovery infrastructure
+  (`tool_search` and `describe_skill`) remains available, but cannot grant schema
+  visibility or execution for a denied business tool. ([#4098])
+- **memory:** Pre-abstraction top-level `memory.*` DeerMem fields
+  (`storage_path`, `max_facts`, `debounce_seconds`, `model_name`,
+  `token_counting`, `staleness_*`, `consolidation_*`, ...) are **auto-migrated
+  into `backend_config`** on load with a warning, so an upgrade does NOT silently
+  revert customized settings to defaults (`model_name` ->
+  `backend_config.model.model`). Move them under `memory.backend_config` in
+  `config.yaml` to silence the warning. ([#4122])
+- **memory:** Added `memory.mode` (`middleware` | `tool`); `tool` mode registers
+  memory tools (`memory_search`/`add`/`update`/`delete`) the model calls directly
+  instead of passive per-turn summarization. `manager_class` resolution is now
+  fail-fast (raises `ValueError` on an unknown backend instead of silently
+  falling back). ([#4023])
+- **middleware:** Declarative layered middleware builder; `ThreadData` now runs
+  before `Uploads`. ([#3809])
+- **sandbox:** The host->virtual output-masking regex now has a single owner,
+  eliminating duplicated pattern compilation. ([#4108])
+- **docs:** `AGENTS.md` is now the source of truth for agent guidance, imported
+  by `CLAUDE.md` via `@AGENTS.md`; module guides refreshed. ([#3770])
+
+### Fixed
+
+- **runtime:** Thread metadata now switches to `running` only after the run passes
+  the startup barrier, so pending-cancelled runs no longer briefly project
+  `running`; clients may observe the prior thread status during worker startup.
+  ([#4450])
+- **runtime:** Re-check orphan candidates through an atomic, lease-aware takeover
+  claim so a successful heartbeat after the scan keeps the run active and only
+  one reconciler reports recovery. ([#4424], [#4434])
+- **skills:** Apply `allowed-tools` only to slash-activated or actually loaded
+  lead-agent skills, preventing passive enabled skills and evaluation fixtures
+  from removing MCP, web, file, and delegation tools from every run. ([#4095],
+  [#4098], [#4192])
+- **models:** Honor `api_base` on every `BaseChatOpenAI` subclass (`VllmChatModel`,
+  `MindIEChatModel`, `PatchedChatMiMo`, `PatchedChatStepFun`, `PatchedChatMiniMax`),
+  not just `ChatOpenAI` / `PatchedChatOpenAI`. Those five previously dropped the
+  configured endpoint silently and then failed every request with an opaque
+  `unexpected keyword argument 'api_base'`; the unknown-config-key warning was
+  disabled for them as well. Both now gate on `issubclass(BaseChatOpenAI)`.
+  ([#4146])
+- **agents:** Coalesce `SystemMessage`s before the LLM request; ensure a visible
+  response after tool runs; avoid a default LLM title call before stream end;
+  reserve ellipsis room so the local title respects `max_chars`; and snap the
+  tool-output tail forward so fallback truncation respects `max_chars`. ([#3711],
+  [#4033], [#3885], [#4052], [#4017])
+- **agents:** Skip dateless reminders in the dynamic-context date scan; load
+  `SOUL.md` from agent dirs without `config.yaml`; require `config.yaml` in
+  `update_agent`'s legacy-agent guard; and refuse empty `SOUL.md` updates.
+  ([#3685], [#4136], [#4166], [#4219])
+- **middleware:** Window the loop-detection tool-frequency counter so long runs
+  no longer false-trip; prevent the title middleware from streaming tokens;
+  fix positional fallback consuming an unrelated todo when the same-content list
+  is exhausted; acquire the token-budget lock across `_apply`, `before_agent`,
+  `_clear_run_state`, and `_drain_pending_warnings`; drop orphan `ToolMessage`s
+  so strict providers don't 400; sanitize invalid tool-call arguments; and
+  recover from empty tool-call names and malformed tool-call ids in dangling
+  repair. ([#4072], [#3566], [#3709], [#3714], [#4080], [#4193], [#4008],
+  [#4246])
+- **subagents:** Inherit `LoopDetectionMiddleware` and summarization middleware
+  so tool loops break and steps are captured; surface the turn-budget cap as
+  `MAX_TURNS_REACHED` with a partial result; unify guardrail caps on the additive
+  `stop_reason` + `token_budget`; inject durable context before compaction;
+  preserve the parent checkpoint namespace; prohibit the `task` tool in the
+  general-purpose system prompt; re-buffer subagent events on flush failure to
+  avoid losing steps; and fix the lost `loop_capped` stop reason when a
+  subagent's `run_id` is `None`. ([#3931], [#4009], [#3949], [#3980], [#4040],
+  [#4215], [#4161], [#4082], [#4059])
+- **memory:** Harden against null/empty edge cases - skip whitespace-only facts;
+  coerce null `confidence` / `source.confidence` in updates, searches, and the
+  three remaining raw reads; treat explicit `null` `backend_config` values as
+  omitted; fix `KeyError` / `UnboundLocalError` when a fact has no id or the
+  facts list is empty; stop the busy-spin in the debounced update queue; and
+  flush the memory queue on graceful shutdown to prevent loss. ([#3719], [#4074],
+  [#4076], [#4034], [#4217], [#3993], [#3992], [#4073], [#4181])
+- **runs:** Close multi-worker ownership gaps in run atomicity; fail-stop local
+  execution when lease renewal cannot be confirmed before its deadline and
+  fence late completion writes after peer takeover; degrade cancel to lease
+  takeover for multi-worker; keep `create_thread` idempotent when the insert
+  loses a race; read `stop_reason` from runtime context; and persist run duration
+  in checkpoints for history reads. ([#4003], [#4064], [#4414], [#3800], [#4188],
+  [#4118], [#4431])
+- **runtime:** Serialize SQLite event-store writes to prevent per-thread
+  sequence collisions; skip hidden human messages in the journal; and drop the
+  silent delta-discard in `_merge_stream_text`. ([#4077], [#3698], [#4085])
+- **gateway:** Attach thread-message feedback by real `event_type`; offload
+  blocking filesystem IO in artifact serving, gateway uploads, and the Discord
+  channel; limit the uploaded-file context manifest; and live-tail malformed
+  Redis reconnect ids. ([#3651], [#3551], [#3935], [#3927], [#3917], [#4012])
+- **uploads:** Claim the converted-Markdown companion filename before writing
+  it, so two convertible uploads sharing a stem (or a convertible plus a
+  same-stem `.md` upload) no longer silently clobber each other within one
+  request. When `uploads.auto_convert_documents` is on, the companion `.md` now
+  gets a unique name (e.g. `a_1.md`); `POST /threads/{id}/uploads` and
+  `DeerFlowClient.upload_files` both report the actual name in `markdown_file`.
+  ([#4288])
+- **config:** Coerce null object config sections to their defaults; honor the
+  unified database configuration in the store and sync checkpointer; and have
+  legacy DB backfill create missing `Index` objects on existing tables. ([#3573],
+  [#3904], [#3994], [#4090])
+- **models:** Apply the `stream_chunk_timeout` default to all `BaseChatOpenAI`
+  subclasses; and normalize `api_base` -> `base_url` for `ChatOpenAI` with a
+  warning on unknown config keys. ([#4102], [#3790])
+- **mcp:** Isolate tool-discovery failures per server; synchronize the
+  session-pool singleton lifecycle; invalidate the tools cache on config content
+  + path (not just newer mtime); validate MCP tool names at load so deferred
+  prompts stay inert; and route tools by source server, not name prefix. ([#3772],
+  [#3797], [#4124], [#4154], [#3812])
+- **skills:** Activate a slash skill once per run, not per model call; close the
+  skill-install security-scan coverage gap; recognize fully deleted skill
+  packages in review CI and remaining `requests` / `httpx` methods as network
+  sinks in SkillScan; reuse the resolved app config in the no-arg skills prompt
+  section; and reload mounted skills without restarting the Gateway. ([#4103],
+  [#3924], [#4169], [#4130], [#4160], [#4264])
+- **sandbox:** Guard the reverse path-translation and output-masking regexes
+  with segment boundaries; handle one-sided line ranges and empty files in
+  `read_file` / `str_replace`; align the AIO bash working directory; use
+  `os.sep` in the reverse-resolve containment check on Windows; normalize
+  Windows backslash paths in bash commands; stop `glob` / `grep` / `ls` from
+  surfacing disabled skills' files; and allow valid heredoc commands in the
+  sandbox audit. ([#4035], [#4053], [#4078], [#4079], [#4051], [#4058], [#3869],
+  [#4096], [#3786])
+- **sandbox:** Synchronize the sandbox provider singleton lifecycle (with
+  concurrency regression tests) and keep k8s calls off the event loop in the
+  provisioner. ([#3730], [#3941])
+- **sandbox:** Align sandbox artifact mounts with the channel user; fix
+  local-dev (`make dev`) on non-root / NFS hosts; reap macOS nginx processes on
+  stop; and fix production Postgres UV-extras detection in Docker. ([#3729],
+  [#3590], [#3828], [#3897])
+- **channels:** Validate the channel provider before resolving its config;
+  dedupe GitHub webhook redeliveries and drop redundant GitHub review-comment
+  webhook fan-out; scope the slash-skill whitelist check to the run's owner;
+  batch Feishu file messages into one thread and dispatch Feishu group commands
+  prefixed with a bot @mention; accept leading @mentions before `/connect` bind
+  codes and don't treat a bare "connect" as a bind command; stop Feishu from
+  creating thread topics and throttle card updates; let the UI runtime channel
+  config win over `config.yaml`; fix `require_mention` gating on
+  whitespace-only `bot_login` / `mention_login`; guard null quote fields in
+  WeCom; and key inbound dedupe on chat-scoped workspaces so Telegram, Feishu,
+  WeChat and DingTalk redeliveries stop re-running the agent on a default
+  (unbound) configuration, releasing the dedupe key on transient failures so a
+  redelivery can still recover. ([#4100], [#4104], [#4131], [#4129], [#3753],
+  [#4229], [#4222], [#4251], [#3810], [#3674], [#4055], [#4069], [#4287])
+- **frontend:** Preserve messages and durable context across summarization;
+  preserve artifacts and stabilize artifact paths during streaming; resolve
+  relative artifact image paths; retain presented artifacts in the header
+  dropdown; keep orphan tool messages visible; show assistant text during tool
+  steps; reset new chat on client-side navigation; prevent stream cancellation
+  on concurrent submit; fix stale-run reconnect and cancel handling; fix chat
+  math rendering, single-tilde markdown, double reasoning rendering, UTF-16
+  markdown binary classification, and `<memory>` tags in Streamdown; make
+  recent-chat rows fully clickable; validate attachment limits before upload and
+  fix uploaded-file metadata in message copy; fix mobile workspace and
+  accessibility blockers, the card tool-message bug, and side-chat toolbar /
+  panel-button behavior; block unresolved suggestion-template placeholders;
+  refresh notification permissions; show the branch action only for completed
+  turns; enable regenerate in custom agent chats; and generate a fallback title
+  for interrupted first-turn runs. ([#3826], [#3791], [#4094], [#4038], [#3854],
+  [#3880], [#4114], [#3673], [#3878], [#3908], [#3557], [#4245], [#3870], [#3966],
+  [#4209], [#3733], [#3900], [#3944], [#3740], [#3976], [#3959], [#3961], [#3764],
+  [#3768], [#4147], [#3967], [#3874], [#3644])
+- **tui:** Interrupt an active run before `/quit` exits. ([#4235])
+- **harness:** Don't flag the outline as truncated at exactly `MAX_OUTLINE_ENTRIES`
+  headings. ([#3856])
+- **tracing:** Attach Langfuse trace metadata to the goal evaluator. ([#4202])
+- **context:** Resolve the context-compress bug. ([#4065])
+- **threaddata:** Fix `AttributeError` when `runtime.context` is `None`. ([#3989])
+- **goal:** Stop `continuation_count` double-bump during stand-down. ([#4199])
+- **circuit-breaker:** Stop wedging after a non-retriable half-open probe. ([#3991])
+- **github:** Match `allow_authors` logins case-insensitively. ([#4218])
+- **community:** `image_search` now returns the full-resolution image URL. ([#3990])
+- **skills:** Offload blocking filesystem IO in the skill-history endpoint.
+  ([#3563])
+- **skills:** Don't treat a lazily evaluated PEP 695 type alias as a network
+  sink in SkillScan. ([#4315])
+- **tracing:** Resolve the Langfuse trace user from runtime context. ([#3794])
+- **guardrails:** Propagate internal owner attribution into the guardrail
+  context. ([#3839])
+- **subagents:** Clamp the subagent limit consistently with
+  `MIN_SUBAGENT_LIMIT`. ([#4081])
+- **subagents:** Load user-scoped skills. ([#4356])
+- **mcp:** Per-server fail-soft OAuth priming, and persist rotated refresh
+  tokens. ([#4084])
+- **mcp:** Ignore malformed path-like text. ([#4456])
+- **auth:** Resolve email accounts case-insensitively. ([#4101])
+- **auth:** Recover from setup-status timeouts. ([#4371])
+- **scheduler:** Close a dispatch race that could launch two runs for one
+  scheduled task. ([#4105])
+- **channels:** Buffer and drain GitHub comments queued during a busy run.
+  ([#4133])
+- **channels:** Escape Slack reserved characters before mrkdwn conversion.
+  ([#4197])
+- **channels:** Check `response.success()` on Feishu card/reaction SDK calls.
+  ([#4234])
+- **channels:** Drop inbound DingTalk messages that carry no conversation
+  identity. ([#4316])
+- **channels:** Receive inbound Telegram attachments. ([#4392])
+- **memory:** Consolidated facts inherit `expected_valid_days` from their
+  sources. ([#4225])
+- **config:** Sync `_memory_config` with AppConfig auto-reload. ([#4208])
+- **postgres:** Harden the async engine with `pool_recycle` and
+  `command_timeout` to stop stale-connection 504s. ([#4230])
+- **harness:** Add a timeout to `invoke_acp_agent` to prevent indefinite hangs.
+  ([#4238])
+- **community:** Surface the target-page error status in `web_fetch`
+  (Browserless). ([#4239])
+- **sandbox:** Widen the BoxLite/AIO tenant hash and verify identity on reclaim.
+  ([#4171])
+- **sandbox:** Make an empty `old_str` a no-op in `str_replace` on any file.
+  ([#4256])
+- **sandbox:** Serialize E2B release transitions. ([#4355])
+- **sandbox:** Bound E2B output-synchronization resources. ([#4364])
+- **sandbox:** Unwrap `Overwrite`-wrapped sandbox state in `after_agent`.
+  ([#4381])
+- **sandbox:** Bypass proxies for local AIO traffic. ([#4444])
+- **models:** Surface length-capped model responses instead of dropping them.
+  ([#4309])
+- **streaming:** Keep large file generation responsive. ([#4354])
+- **streaming:** Expose custom events to `astream_events`. ([#4403])
+- **streaming:** Signal replay history gaps. ([#4426])
+- **summarization:** Summarize with the run model and fall back on
+  summary-provider failure. ([#4361])
+- **runtime:** Remove transient image context after model calls. ([#4267])
+- **runtime:** Stop subgraph stream frames from impersonating root frames.
+  ([#4407])
+- **runtime:** Reject unsupported run options and stream modes. ([#4430])
+- **runtime:** Serialize checkpoint writes with active runs, linearize
+  delta-mode checkpoint resume, and accept the SDK's default
+  `stream_resumable=false` to avoid resume races. ([#4437], [#4460], [#4468])
+- **checkpoint:** Unwrap `Overwrite` first writes into empty channels. ([#4383])
+- **nginx:** Allow long chat prompts through `/api/langgraph/` without a raw
+  500. ([#4277])
+- **gateway:** Prefer `X-Trace-Id` over `metadata.deerflow_trace_id` when the
+  header is set. ([#4283])
+- **gateway:** Seed branch run-events so inherited history survives forking.
+  ([#4385])
+- **gateway:** Scope branch-history seed run ids per inherited turn. ([#4459])
+- **frontend:** Harden artifact and markdown rendering. ([#4117])
+- **frontend:** Classify a symlink replacing a file distinctly from deleted in
+  workspace-change review. ([#4170])
+- **frontend:** Offload blocking filesystem IO in the workspace-change
+  text-cache lifecycle. ([#4268])
+- **frontend:** Encode artifact URL path segments. ([#4278])
+- **frontend:** Clarify run-duration display. ([#4348])
+- **frontend:** Preserve regenerate state in branched threads. ([#4358])
+- **frontend:** Default the reasoning-effort label to Medium when unset.
+  ([#4373])
+- **frontend:** Strip and parse the `<current_uploads>` upload-context tag.
+  ([#4402])
+- **frontend:** Keep leading orphan tool messages visible. ([#4408])
+- **frontend:** Keep completed subtask cards stable after reload. ([#4432])
+- **frontend:** Apply message-image `maxWidth` via inline style. ([#4446])
+- **frontend:** Restore resizing for the artifacts and sidecar panels. ([#4469])
+- **frontend:** Allow dev-server access from non-localhost hosts. ([#4471])
+- **safety:** Backfill empty content-filter responses so they don't poison the
+  thread. ([#4394])
+- **tools:** Exclude injected runtime from the `list_uploaded_files` schema.
+  ([#4376])
+
+### Performance
+
+- **runtime:** Index `MemoryRunStore` by `thread_id` and `MemoryRunEventStore`
+  events by `run_id` to avoid O(n) scans. ([#3562], [#3686])
+- **subagents:** Deduplicate streamed AI messages via a seen-id set (O(n²) ->
+  O(n)). ([#3687])
+- **sandbox:** Cache `LocalSandbox` path-rewrite regexes and local-path masking
+  patterns per instance instead of recompiling per search match. ([#3648],
+  [#3713])
+- **messages:** Index tool-call results per group. ([#4411])
+- **frontend:** Coalesce streaming renders to a frame budget instead of per
+  chunk. ([#4425])
+- **frontend:** Stop re-deriving message content on every stream chunk.
+  ([#4441])
+
+### Security
+
+- **prompt-injection:** New input-sanitization middleware defends against
+  prompt-injection, forged framework tags in the input guardrail are blocked,
+  and system context is injected as a `SystemMessage` for role isolation. ([#3662],
+  [#4155], [#3661])
+- **prompt-injection:** HTML-escape untrusted content rendered into model prompts
+  - memory facts and summaries, `SOUL.md`, subagent descriptions, skill metadata,
+  and the conversation block in the memory-update prompt - and neutralize
+  prompt-injection tags in `web_capture` tool results. ([#4028], [#4119], [#4137],
+  [#4157], [#4162], [#4099], [#4060], [#4097], [#4128])
+- **secrets:** Scrub inherited secret environment variables (`MYSQL_PWD`,
+  `REDISCLI_AUTH`, abbreviated `*_PASS`, and Postgres `PGPASSFILE`) from the
+  skill environment; request-scoped secrets are bound for both slash-activated
+  and autonomously-invoked skills. ([#4018], [#4026], [#3871], [#3938])
+- **web_fetch:** SSRF guard for self-hosted providers. ([#3942])
+- **guardrails:** An empty allowlist now denies all tools instead of failing
+  open. ([#4067])
+- **authz:** Global skills-management endpoints now require admin; the legacy
+  skills mount is gated by user visibility; artifacts honor a trusted
+  `owner-user-id` header; and the trusted authorization principal is propagated
+  through the runtime. ([#3855], [#3985], [#3982], [#4203])
+- **auth:** Persist the `csrf_token` cookie for the access-token lifetime.
+  ([#3872])
+- **storage:** Stop persisting base64 image data in checkpoint state. ([#4140])
+
 ## [2.0.0] — 2026-06-15
 
 DeerFlow 2.0 is a ground-up rewrite around a "super agent" harness with
@@ -333,6 +850,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
   label thrash. ([#3455])
 
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
+
 [#2329]: https://github.com/bytedance/deer-flow/pull/2329
 [#2556]: https://github.com/bytedance/deer-flow/pull/2556
 [#2582]: https://github.com/bytedance/deer-flow/pull/2582
@@ -401,6 +919,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#2989]: https://github.com/bytedance/deer-flow/pull/2989
 [#3002]: https://github.com/bytedance/deer-flow/pull/3002
 [#3005]: https://github.com/bytedance/deer-flow/pull/3005
+[#3033]: https://github.com/bytedance/deer-flow/pull/3033
 [#3058]: https://github.com/bytedance/deer-flow/pull/3058
 [#3069]: https://github.com/bytedance/deer-flow/pull/3069
 [#3074]: https://github.com/bytedance/deer-flow/pull/3074
@@ -412,6 +931,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3153]: https://github.com/bytedance/deer-flow/pull/3153
 [#3174]: https://github.com/bytedance/deer-flow/pull/3174
 [#3176]: https://github.com/bytedance/deer-flow/pull/3176
+[#3191]: https://github.com/bytedance/deer-flow/pull/3191
 [#3200]: https://github.com/bytedance/deer-flow/pull/3200
 [#3228]: https://github.com/bytedance/deer-flow/pull/3228
 [#3233]: https://github.com/bytedance/deer-flow/pull/3233
@@ -427,18 +947,21 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3313]: https://github.com/bytedance/deer-flow/pull/3313
 [#3335]: https://github.com/bytedance/deer-flow/pull/3335
 [#3342]: https://github.com/bytedance/deer-flow/pull/3342
+[#3377]: https://github.com/bytedance/deer-flow/pull/3377
 [#3393]: https://github.com/bytedance/deer-flow/pull/3393
 [#3397]: https://github.com/bytedance/deer-flow/pull/3397
 [#3398]: https://github.com/bytedance/deer-flow/pull/3398
 [#3408]: https://github.com/bytedance/deer-flow/pull/3408
 [#3410]: https://github.com/bytedance/deer-flow/pull/3410
 [#3411]: https://github.com/bytedance/deer-flow/pull/3411
+[#3412]: https://github.com/bytedance/deer-flow/pull/3412
 [#3413]: https://github.com/bytedance/deer-flow/pull/3413
 [#3417]: https://github.com/bytedance/deer-flow/pull/3417
 [#3421]: https://github.com/bytedance/deer-flow/pull/3421
 [#3423]: https://github.com/bytedance/deer-flow/pull/3423
 [#3425]: https://github.com/bytedance/deer-flow/pull/3425
 [#3426]: https://github.com/bytedance/deer-flow/pull/3426
+[#3428]: https://github.com/bytedance/deer-flow/pull/3428
 [#3430]: https://github.com/bytedance/deer-flow/pull/3430
 [#3433]: https://github.com/bytedance/deer-flow/pull/3433
 [#3434]: https://github.com/bytedance/deer-flow/pull/3434
@@ -470,6 +993,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3502]: https://github.com/bytedance/deer-flow/pull/3502
 [#3503]: https://github.com/bytedance/deer-flow/pull/3503
 [#3505]: https://github.com/bytedance/deer-flow/pull/3505
+[#3506]: https://github.com/bytedance/deer-flow/pull/3506
 [#3508]: https://github.com/bytedance/deer-flow/pull/3508
 [#3512]: https://github.com/bytedance/deer-flow/pull/3512
 [#3514]: https://github.com/bytedance/deer-flow/pull/3514
@@ -485,12 +1009,19 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3534]: https://github.com/bytedance/deer-flow/pull/3534
 [#3535]: https://github.com/bytedance/deer-flow/pull/3535
 [#3548]: https://github.com/bytedance/deer-flow/pull/3548
+[#3551]: https://github.com/bytedance/deer-flow/pull/3551
 [#3553]: https://github.com/bytedance/deer-flow/pull/3553
 [#3554]: https://github.com/bytedance/deer-flow/pull/3554
+[#3556]: https://github.com/bytedance/deer-flow/pull/3556
+[#3557]: https://github.com/bytedance/deer-flow/pull/3557
 [#3559]: https://github.com/bytedance/deer-flow/pull/3559
 [#3561]: https://github.com/bytedance/deer-flow/pull/3561
+[#3562]: https://github.com/bytedance/deer-flow/pull/3562
+[#3563]: https://github.com/bytedance/deer-flow/pull/3563
+[#3566]: https://github.com/bytedance/deer-flow/pull/3566
 [#3569]: https://github.com/bytedance/deer-flow/pull/3569
 [#3570]: https://github.com/bytedance/deer-flow/pull/3570
+[#3573]: https://github.com/bytedance/deer-flow/pull/3573
 [#3575]: https://github.com/bytedance/deer-flow/pull/3575
 [#3577]: https://github.com/bytedance/deer-flow/pull/3577
 [#3578]: https://github.com/bytedance/deer-flow/pull/3578
@@ -500,9 +1031,13 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3582]: https://github.com/bytedance/deer-flow/pull/3582
 [#3583]: https://github.com/bytedance/deer-flow/pull/3583
 [#3584]: https://github.com/bytedance/deer-flow/pull/3584
+[#3585]: https://github.com/bytedance/deer-flow/pull/3585
+[#3590]: https://github.com/bytedance/deer-flow/pull/3590
 [#3591]: https://github.com/bytedance/deer-flow/pull/3591
+[#3592]: https://github.com/bytedance/deer-flow/pull/3592
 [#3599]: https://github.com/bytedance/deer-flow/pull/3599
 [#3600]: https://github.com/bytedance/deer-flow/pull/3600
+[#3601]: https://github.com/bytedance/deer-flow/pull/3601
 [#3602]: https://github.com/bytedance/deer-flow/pull/3602
 [#3605]: https://github.com/bytedance/deer-flow/pull/3605
 [#3606]: https://github.com/bytedance/deer-flow/pull/3606
@@ -511,10 +1046,308 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3611]: https://github.com/bytedance/deer-flow/pull/3611
 [#3623]: https://github.com/bytedance/deer-flow/pull/3623
 [#3624]: https://github.com/bytedance/deer-flow/pull/3624
+[#3627]: https://github.com/bytedance/deer-flow/pull/3627
 [#3629]: https://github.com/bytedance/deer-flow/pull/3629
 [#3631]: https://github.com/bytedance/deer-flow/pull/3631
+[#3637]: https://github.com/bytedance/deer-flow/pull/3637
+[#3644]: https://github.com/bytedance/deer-flow/pull/3644
 [#3646]: https://github.com/bytedance/deer-flow/pull/3646
+[#3648]: https://github.com/bytedance/deer-flow/pull/3648
 [#3649]: https://github.com/bytedance/deer-flow/pull/3649
+[#3651]: https://github.com/bytedance/deer-flow/pull/3651
 [#3654]: https://github.com/bytedance/deer-flow/pull/3654
 [#3657]: https://github.com/bytedance/deer-flow/pull/3657
 [#3658]: https://github.com/bytedance/deer-flow/pull/3658
+[#3661]: https://github.com/bytedance/deer-flow/pull/3661
+[#3662]: https://github.com/bytedance/deer-flow/pull/3662
+[#3663]: https://github.com/bytedance/deer-flow/pull/3663
+[#3665]: https://github.com/bytedance/deer-flow/pull/3665
+[#3673]: https://github.com/bytedance/deer-flow/pull/3673
+[#3674]: https://github.com/bytedance/deer-flow/pull/3674
+[#3675]: https://github.com/bytedance/deer-flow/pull/3675
+[#3685]: https://github.com/bytedance/deer-flow/pull/3685
+[#3686]: https://github.com/bytedance/deer-flow/pull/3686
+[#3687]: https://github.com/bytedance/deer-flow/pull/3687
+[#3698]: https://github.com/bytedance/deer-flow/pull/3698
+[#3709]: https://github.com/bytedance/deer-flow/pull/3709
+[#3711]: https://github.com/bytedance/deer-flow/pull/3711
+[#3713]: https://github.com/bytedance/deer-flow/pull/3713
+[#3714]: https://github.com/bytedance/deer-flow/pull/3714
+[#3718]: https://github.com/bytedance/deer-flow/pull/3718
+[#3719]: https://github.com/bytedance/deer-flow/pull/3719
+[#3729]: https://github.com/bytedance/deer-flow/pull/3729
+[#3730]: https://github.com/bytedance/deer-flow/pull/3730
+[#3733]: https://github.com/bytedance/deer-flow/pull/3733
+[#3740]: https://github.com/bytedance/deer-flow/pull/3740
+[#3753]: https://github.com/bytedance/deer-flow/pull/3753
+[#3760]: https://github.com/bytedance/deer-flow/pull/3760
+[#3764]: https://github.com/bytedance/deer-flow/pull/3764
+[#3768]: https://github.com/bytedance/deer-flow/pull/3768
+[#3769]: https://github.com/bytedance/deer-flow/pull/3769
+[#3770]: https://github.com/bytedance/deer-flow/pull/3770
+[#3772]: https://github.com/bytedance/deer-flow/pull/3772
+[#3775]: https://github.com/bytedance/deer-flow/pull/3775
+[#3786]: https://github.com/bytedance/deer-flow/pull/3786
+[#3790]: https://github.com/bytedance/deer-flow/pull/3790
+[#3791]: https://github.com/bytedance/deer-flow/pull/3791
+[#3794]: https://github.com/bytedance/deer-flow/pull/3794
+[#3797]: https://github.com/bytedance/deer-flow/pull/3797
+[#3800]: https://github.com/bytedance/deer-flow/pull/3800
+[#3809]: https://github.com/bytedance/deer-flow/pull/3809
+[#3810]: https://github.com/bytedance/deer-flow/pull/3810
+[#3812]: https://github.com/bytedance/deer-flow/pull/3812
+[#3821]: https://github.com/bytedance/deer-flow/pull/3821
+[#3826]: https://github.com/bytedance/deer-flow/pull/3826
+[#3828]: https://github.com/bytedance/deer-flow/pull/3828
+[#3837]: https://github.com/bytedance/deer-flow/pull/3837
+[#3839]: https://github.com/bytedance/deer-flow/pull/3839
+[#3843]: https://github.com/bytedance/deer-flow/pull/3843
+[#3845]: https://github.com/bytedance/deer-flow/pull/3845
+[#3854]: https://github.com/bytedance/deer-flow/pull/3854
+[#3855]: https://github.com/bytedance/deer-flow/pull/3855
+[#3856]: https://github.com/bytedance/deer-flow/pull/3856
+[#3858]: https://github.com/bytedance/deer-flow/pull/3858
+[#3860]: https://github.com/bytedance/deer-flow/pull/3860
+[#3866]: https://github.com/bytedance/deer-flow/pull/3866
+[#3869]: https://github.com/bytedance/deer-flow/pull/3869
+[#3870]: https://github.com/bytedance/deer-flow/pull/3870
+[#3871]: https://github.com/bytedance/deer-flow/pull/3871
+[#3872]: https://github.com/bytedance/deer-flow/pull/3872
+[#3874]: https://github.com/bytedance/deer-flow/pull/3874
+[#3877]: https://github.com/bytedance/deer-flow/pull/3877
+[#3878]: https://github.com/bytedance/deer-flow/pull/3878
+[#3880]: https://github.com/bytedance/deer-flow/pull/3880
+[#3881]: https://github.com/bytedance/deer-flow/pull/3881
+[#3883]: https://github.com/bytedance/deer-flow/pull/3883
+[#3885]: https://github.com/bytedance/deer-flow/pull/3885
+[#3886]: https://github.com/bytedance/deer-flow/pull/3886
+[#3887]: https://github.com/bytedance/deer-flow/pull/3887
+[#3889]: https://github.com/bytedance/deer-flow/pull/3889
+[#3897]: https://github.com/bytedance/deer-flow/pull/3897
+[#3900]: https://github.com/bytedance/deer-flow/pull/3900
+[#3902]: https://github.com/bytedance/deer-flow/pull/3902
+[#3904]: https://github.com/bytedance/deer-flow/pull/3904
+[#3906]: https://github.com/bytedance/deer-flow/pull/3906
+[#3907]: https://github.com/bytedance/deer-flow/pull/3907
+[#3908]: https://github.com/bytedance/deer-flow/pull/3908
+[#3912]: https://github.com/bytedance/deer-flow/pull/3912
+[#3917]: https://github.com/bytedance/deer-flow/pull/3917
+[#3920]: https://github.com/bytedance/deer-flow/pull/3920
+[#3924]: https://github.com/bytedance/deer-flow/pull/3924
+[#3926]: https://github.com/bytedance/deer-flow/pull/3926
+[#3927]: https://github.com/bytedance/deer-flow/pull/3927
+[#3928]: https://github.com/bytedance/deer-flow/pull/3928
+[#3931]: https://github.com/bytedance/deer-flow/pull/3931
+[#3934]: https://github.com/bytedance/deer-flow/pull/3934
+[#3935]: https://github.com/bytedance/deer-flow/pull/3935
+[#3938]: https://github.com/bytedance/deer-flow/pull/3938
+[#3940]: https://github.com/bytedance/deer-flow/pull/3940
+[#3941]: https://github.com/bytedance/deer-flow/pull/3941
+[#3942]: https://github.com/bytedance/deer-flow/pull/3942
+[#3944]: https://github.com/bytedance/deer-flow/pull/3944
+[#3945]: https://github.com/bytedance/deer-flow/pull/3945
+[#3949]: https://github.com/bytedance/deer-flow/pull/3949
+[#3950]: https://github.com/bytedance/deer-flow/pull/3950
+[#3951]: https://github.com/bytedance/deer-flow/pull/3951
+[#3956]: https://github.com/bytedance/deer-flow/pull/3956
+[#3959]: https://github.com/bytedance/deer-flow/pull/3959
+[#3961]: https://github.com/bytedance/deer-flow/pull/3961
+[#3964]: https://github.com/bytedance/deer-flow/pull/3964
+[#3966]: https://github.com/bytedance/deer-flow/pull/3966
+[#3967]: https://github.com/bytedance/deer-flow/pull/3967
+[#3969]: https://github.com/bytedance/deer-flow/pull/3969
+[#3971]: https://github.com/bytedance/deer-flow/pull/3971
+[#3976]: https://github.com/bytedance/deer-flow/pull/3976
+[#3980]: https://github.com/bytedance/deer-flow/pull/3980
+[#3981]: https://github.com/bytedance/deer-flow/pull/3981
+[#3982]: https://github.com/bytedance/deer-flow/pull/3982
+[#3985]: https://github.com/bytedance/deer-flow/pull/3985
+[#3986]: https://github.com/bytedance/deer-flow/pull/3986
+[#3988]: https://github.com/bytedance/deer-flow/pull/3988
+[#3989]: https://github.com/bytedance/deer-flow/pull/3989
+[#3990]: https://github.com/bytedance/deer-flow/pull/3990
+[#3991]: https://github.com/bytedance/deer-flow/pull/3991
+[#3992]: https://github.com/bytedance/deer-flow/pull/3992
+[#3993]: https://github.com/bytedance/deer-flow/pull/3993
+[#3994]: https://github.com/bytedance/deer-flow/pull/3994
+[#3996]: https://github.com/bytedance/deer-flow/pull/3996
+[#4003]: https://github.com/bytedance/deer-flow/pull/4003
+[#4004]: https://github.com/bytedance/deer-flow/pull/4004
+[#4008]: https://github.com/bytedance/deer-flow/pull/4008
+[#4009]: https://github.com/bytedance/deer-flow/pull/4009
+[#4012]: https://github.com/bytedance/deer-flow/pull/4012
+[#4016]: https://github.com/bytedance/deer-flow/pull/4016
+[#4017]: https://github.com/bytedance/deer-flow/pull/4017
+[#4018]: https://github.com/bytedance/deer-flow/pull/4018
+[#4023]: https://github.com/bytedance/deer-flow/pull/4023
+[#4024]: https://github.com/bytedance/deer-flow/pull/4024
+[#4026]: https://github.com/bytedance/deer-flow/pull/4026
+[#4028]: https://github.com/bytedance/deer-flow/pull/4028
+[#4033]: https://github.com/bytedance/deer-flow/pull/4033
+[#4034]: https://github.com/bytedance/deer-flow/pull/4034
+[#4035]: https://github.com/bytedance/deer-flow/pull/4035
+[#4036]: https://github.com/bytedance/deer-flow/pull/4036
+[#4038]: https://github.com/bytedance/deer-flow/pull/4038
+[#4040]: https://github.com/bytedance/deer-flow/pull/4040
+[#4051]: https://github.com/bytedance/deer-flow/pull/4051
+[#4052]: https://github.com/bytedance/deer-flow/pull/4052
+[#4053]: https://github.com/bytedance/deer-flow/pull/4053
+[#4055]: https://github.com/bytedance/deer-flow/pull/4055
+[#4058]: https://github.com/bytedance/deer-flow/pull/4058
+[#4059]: https://github.com/bytedance/deer-flow/pull/4059
+[#4060]: https://github.com/bytedance/deer-flow/pull/4060
+[#4064]: https://github.com/bytedance/deer-flow/pull/4064
+[#4065]: https://github.com/bytedance/deer-flow/pull/4065
+[#4067]: https://github.com/bytedance/deer-flow/pull/4067
+[#4069]: https://github.com/bytedance/deer-flow/pull/4069
+[#4072]: https://github.com/bytedance/deer-flow/pull/4072
+[#4073]: https://github.com/bytedance/deer-flow/pull/4073
+[#4074]: https://github.com/bytedance/deer-flow/pull/4074
+[#4076]: https://github.com/bytedance/deer-flow/pull/4076
+[#4077]: https://github.com/bytedance/deer-flow/pull/4077
+[#4078]: https://github.com/bytedance/deer-flow/pull/4078
+[#4079]: https://github.com/bytedance/deer-flow/pull/4079
+[#4080]: https://github.com/bytedance/deer-flow/pull/4080
+[#4081]: https://github.com/bytedance/deer-flow/pull/4081
+[#4082]: https://github.com/bytedance/deer-flow/pull/4082
+[#4084]: https://github.com/bytedance/deer-flow/pull/4084
+[#4085]: https://github.com/bytedance/deer-flow/pull/4085
+[#4090]: https://github.com/bytedance/deer-flow/pull/4090
+[#4094]: https://github.com/bytedance/deer-flow/pull/4094
+[#4095]: https://github.com/bytedance/deer-flow/issues/4095
+[#4096]: https://github.com/bytedance/deer-flow/pull/4096
+[#4097]: https://github.com/bytedance/deer-flow/pull/4097
+[#4098]: https://github.com/bytedance/deer-flow/pull/4098
+[#4099]: https://github.com/bytedance/deer-flow/pull/4099
+[#4100]: https://github.com/bytedance/deer-flow/pull/4100
+[#4101]: https://github.com/bytedance/deer-flow/pull/4101
+[#4102]: https://github.com/bytedance/deer-flow/pull/4102
+[#4103]: https://github.com/bytedance/deer-flow/pull/4103
+[#4104]: https://github.com/bytedance/deer-flow/pull/4104
+[#4105]: https://github.com/bytedance/deer-flow/pull/4105
+[#4108]: https://github.com/bytedance/deer-flow/pull/4108
+[#4114]: https://github.com/bytedance/deer-flow/pull/4114
+[#4115]: https://github.com/bytedance/deer-flow/pull/4115
+[#4117]: https://github.com/bytedance/deer-flow/pull/4117
+[#4118]: https://github.com/bytedance/deer-flow/pull/4118
+[#4119]: https://github.com/bytedance/deer-flow/pull/4119
+[#4122]: https://github.com/bytedance/deer-flow/pull/4122
+[#4124]: https://github.com/bytedance/deer-flow/pull/4124
+[#4128]: https://github.com/bytedance/deer-flow/pull/4128
+[#4129]: https://github.com/bytedance/deer-flow/pull/4129
+[#4130]: https://github.com/bytedance/deer-flow/pull/4130
+[#4131]: https://github.com/bytedance/deer-flow/pull/4131
+[#4133]: https://github.com/bytedance/deer-flow/pull/4133
+[#4136]: https://github.com/bytedance/deer-flow/pull/4136
+[#4137]: https://github.com/bytedance/deer-flow/pull/4137
+[#4140]: https://github.com/bytedance/deer-flow/pull/4140
+[#4141]: https://github.com/bytedance/deer-flow/pull/4141
+[#4143]: https://github.com/bytedance/deer-flow/pull/4143
+[#4146]: https://github.com/bytedance/deer-flow/pull/4146
+[#4147]: https://github.com/bytedance/deer-flow/pull/4147
+[#4154]: https://github.com/bytedance/deer-flow/pull/4154
+[#4155]: https://github.com/bytedance/deer-flow/pull/4155
+[#4157]: https://github.com/bytedance/deer-flow/pull/4157
+[#4160]: https://github.com/bytedance/deer-flow/pull/4160
+[#4161]: https://github.com/bytedance/deer-flow/pull/4161
+[#4162]: https://github.com/bytedance/deer-flow/pull/4162
+[#4166]: https://github.com/bytedance/deer-flow/pull/4166
+[#4169]: https://github.com/bytedance/deer-flow/pull/4169
+[#4170]: https://github.com/bytedance/deer-flow/pull/4170
+[#4171]: https://github.com/bytedance/deer-flow/pull/4171
+[#4174]: https://github.com/bytedance/deer-flow/pull/4174
+[#4181]: https://github.com/bytedance/deer-flow/pull/4181
+[#4187]: https://github.com/bytedance/deer-flow/pull/4187
+[#4188]: https://github.com/bytedance/deer-flow/pull/4188
+[#4190]: https://github.com/bytedance/deer-flow/pull/4190
+[#4192]: https://github.com/bytedance/deer-flow/issues/4192
+[#4193]: https://github.com/bytedance/deer-flow/pull/4193
+[#4197]: https://github.com/bytedance/deer-flow/pull/4197
+[#4199]: https://github.com/bytedance/deer-flow/pull/4199
+[#4202]: https://github.com/bytedance/deer-flow/pull/4202
+[#4203]: https://github.com/bytedance/deer-flow/pull/4203
+[#4208]: https://github.com/bytedance/deer-flow/pull/4208
+[#4209]: https://github.com/bytedance/deer-flow/pull/4209
+[#4215]: https://github.com/bytedance/deer-flow/pull/4215
+[#4217]: https://github.com/bytedance/deer-flow/pull/4217
+[#4218]: https://github.com/bytedance/deer-flow/pull/4218
+[#4219]: https://github.com/bytedance/deer-flow/pull/4219
+[#4222]: https://github.com/bytedance/deer-flow/pull/4222
+[#4225]: https://github.com/bytedance/deer-flow/pull/4225
+[#4229]: https://github.com/bytedance/deer-flow/pull/4229
+[#4230]: https://github.com/bytedance/deer-flow/pull/4230
+[#4234]: https://github.com/bytedance/deer-flow/pull/4234
+[#4235]: https://github.com/bytedance/deer-flow/pull/4235
+[#4238]: https://github.com/bytedance/deer-flow/pull/4238
+[#4239]: https://github.com/bytedance/deer-flow/pull/4239
+[#4245]: https://github.com/bytedance/deer-flow/pull/4245
+[#4246]: https://github.com/bytedance/deer-flow/pull/4246
+[#4251]: https://github.com/bytedance/deer-flow/pull/4251
+[#4255]: https://github.com/bytedance/deer-flow/pull/4255
+[#4256]: https://github.com/bytedance/deer-flow/pull/4256
+[#4260]: https://github.com/bytedance/deer-flow/pull/4260
+[#4264]: https://github.com/bytedance/deer-flow/pull/4264
+[#4267]: https://github.com/bytedance/deer-flow/pull/4267
+[#4268]: https://github.com/bytedance/deer-flow/pull/4268
+[#4277]: https://github.com/bytedance/deer-flow/pull/4277
+[#4278]: https://github.com/bytedance/deer-flow/pull/4278
+[#4279]: https://github.com/bytedance/deer-flow/pull/4279
+[#4283]: https://github.com/bytedance/deer-flow/pull/4283
+[#4287]: https://github.com/bytedance/deer-flow/pull/4287
+[#4288]: https://github.com/bytedance/deer-flow/pull/4288
+[#4292]: https://github.com/bytedance/deer-flow/pull/4292
+[#4306]: https://github.com/bytedance/deer-flow/pull/4306
+[#4309]: https://github.com/bytedance/deer-flow/pull/4309
+[#4311]: https://github.com/bytedance/deer-flow/pull/4311
+[#4315]: https://github.com/bytedance/deer-flow/pull/4315
+[#4316]: https://github.com/bytedance/deer-flow/pull/4316
+[#4324]: https://github.com/bytedance/deer-flow/issues/4324
+[#4326]: https://github.com/bytedance/deer-flow/pull/4326
+[#4337]: https://github.com/bytedance/deer-flow/pull/4337
+[#4347]: https://github.com/bytedance/deer-flow/pull/4347
+[#4348]: https://github.com/bytedance/deer-flow/pull/4348
+[#4354]: https://github.com/bytedance/deer-flow/pull/4354
+[#4355]: https://github.com/bytedance/deer-flow/pull/4355
+[#4356]: https://github.com/bytedance/deer-flow/pull/4356
+[#4358]: https://github.com/bytedance/deer-flow/pull/4358
+[#4361]: https://github.com/bytedance/deer-flow/pull/4361
+[#4364]: https://github.com/bytedance/deer-flow/pull/4364
+[#4365]: https://github.com/bytedance/deer-flow/pull/4365
+[#4370]: https://github.com/bytedance/deer-flow/pull/4370
+[#4371]: https://github.com/bytedance/deer-flow/pull/4371
+[#4373]: https://github.com/bytedance/deer-flow/pull/4373
+[#4374]: https://github.com/bytedance/deer-flow/pull/4374
+[#4376]: https://github.com/bytedance/deer-flow/pull/4376
+[#4381]: https://github.com/bytedance/deer-flow/pull/4381
+[#4383]: https://github.com/bytedance/deer-flow/pull/4383
+[#4385]: https://github.com/bytedance/deer-flow/pull/4385
+[#4391]: https://github.com/bytedance/deer-flow/pull/4391
+[#4392]: https://github.com/bytedance/deer-flow/pull/4392
+[#4394]: https://github.com/bytedance/deer-flow/pull/4394
+[#4402]: https://github.com/bytedance/deer-flow/pull/4402
+[#4403]: https://github.com/bytedance/deer-flow/pull/4403
+[#4407]: https://github.com/bytedance/deer-flow/pull/4407
+[#4408]: https://github.com/bytedance/deer-flow/pull/4408
+[#4411]: https://github.com/bytedance/deer-flow/pull/4411
+[#4414]: https://github.com/bytedance/deer-flow/issues/4414
+[#4424]: https://github.com/bytedance/deer-flow/issues/4424
+[#4425]: https://github.com/bytedance/deer-flow/pull/4425
+[#4426]: https://github.com/bytedance/deer-flow/pull/4426
+[#4430]: https://github.com/bytedance/deer-flow/pull/4430
+[#4431]: https://github.com/bytedance/deer-flow/pull/4431
+[#4432]: https://github.com/bytedance/deer-flow/pull/4432
+[#4434]: https://github.com/bytedance/deer-flow/pull/4434
+[#4437]: https://github.com/bytedance/deer-flow/pull/4437
+[#4441]: https://github.com/bytedance/deer-flow/pull/4441
+[#4442]: https://github.com/bytedance/deer-flow/pull/4442
+[#4444]: https://github.com/bytedance/deer-flow/pull/4444
+[#4446]: https://github.com/bytedance/deer-flow/pull/4446
+[#4447]: https://github.com/bytedance/deer-flow/pull/4447
+[#4450]: https://github.com/bytedance/deer-flow/pull/4450
+[#4456]: https://github.com/bytedance/deer-flow/pull/4456
+[#4459]: https://github.com/bytedance/deer-flow/pull/4459
+[#4460]: https://github.com/bytedance/deer-flow/pull/4460
+[#4468]: https://github.com/bytedance/deer-flow/pull/4468
+[#4469]: https://github.com/bytedance/deer-flow/pull/4469
+[#4471]: https://github.com/bytedance/deer-flow/pull/4471
+[#4516]: https://github.com/bytedance/deer-flow/pull/4516
