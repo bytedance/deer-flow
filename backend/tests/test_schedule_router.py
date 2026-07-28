@@ -303,6 +303,30 @@ class TestUpdate:
         assert updated.timezone == "Asia/Shanghai"
 
     @pytest.mark.asyncio
+    async def test_a_timezone_change_on_a_once_task_keeps_the_same_instant(self, service, as_user):
+        """The `once` half of the fallback above.
+
+        The omitted `run_at` is read straight off the current value object, and
+        the stored instant is already offset-aware, so re-zoning the schedule
+        must relabel it without moving it.
+        """
+        created = await _create(
+            service,
+            schedule_type="once",
+            schedule_spec={"run_at": "2026-08-01T09:00:00+00:00"},
+            timezone="UTC",
+        )
+        updated = await _call(
+            router_module.update_scheduled_task,
+            task_id=created.id,
+            body=_update_body(timezone="Asia/Shanghai"),
+            service=service,
+        )
+        assert updated.schedule_spec == created.schedule_spec
+        assert updated.timezone == "Asia/Shanghai"
+        assert updated.next_run_at == created.next_run_at
+
+    @pytest.mark.asyncio
     async def test_a_running_task_cannot_be_updated(self, service, tasks, as_user):
         """Red line: the mutability gate lives in the aggregate now, and the
         router only maps it onto 409."""

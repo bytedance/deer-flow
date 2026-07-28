@@ -5,9 +5,10 @@ This context owns the `scheduled_tasks` table and writes its own queries, so
 SQL/ORM vocabulary stops at this file: methods exchange domain objects and
 normalize SQLite's tz-naive reads.
 
-Sibling of `scheduled_run_repository.py`. The stored `schedule_spec` JSON
-column is translated by `spec_column.py`, which belongs to this side of the
-boundary only -- the HTTP shape has its own translation next to the router.
+Sibling of `scheduled_run_repository.py`. Translating the row is this class's
+own private business, `_to_domain` / `_apply` and the two `schedule_spec`
+helpers beside them -- the HTTP shape has its own translation next to the
+router, and neither side imports the other.
 
 **The queries are migrated unchanged from the legacy repository.** The claim
 statement's `FOR UPDATE SKIP LOCKED` and the `protect_terminal` conditional
@@ -25,12 +26,13 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.adapters.schedule.spec_column import column_to_spec, spec_to_column
 from deerflow.domain.schedule.model import (
     TERMINAL_TASK_STATUSES,
     ContextMode,
     InvalidScheduleError,
     ScheduledTask,
+    ScheduleSpec,
+    ScheduleType,
     TaskStatus,
 )
 from deerflow.domain.schedule.ports import ScheduledTaskRepository
@@ -64,6 +66,36 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
     # ------------------------------------------------------------ conversion
 
     @staticmethod
+    def _spec_from_row(row: ScheduledTaskRow) -> ScheduleSpec:
+        """The stored triple -> the value object.
+
+        All this side owns is which two keys this table's JSON uses; the rule
+        for turning them into a schedule belongs to the domain, which is why
+        the router's own mapping can state the same thing without either
+        importing the other.
+        """
+        stored = row.schedule_spec or {}
+        return ScheduleSpec.from_primitives(
+            row.schedule_type,
+            cron=stored.get("cron"),
+            run_at=stored.get("run_at"),
+            timezone=row.timezone,
+        )
+
+    @staticmethod
+    def _spec_to_column(spec: ScheduleSpec) -> dict[str, str]:
+        """The value object -> the stored JSON.
+
+        Emits the normalized value rather than echoing the caller's bytes: a
+        trailing-Z input is stored as "+00:00". Both forms parse back, so this
+        is deliberate -- preferable to carrying the raw dict on the value
+        object just to preserve the exact input spelling.
+        """
+        if spec.schedule_type is ScheduleType.CRON:
+            return {"cron": spec.cron or ""}
+        return {"run_at": spec.run_at.isoformat() if spec.run_at else ""}
+
+    @staticmethod
     def _to_domain(row: ScheduledTaskRow) -> ScheduledTask:
         """ORM row -> aggregate.
 
@@ -78,7 +110,7 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
             user_id=row.user_id,
             title=row.title,
             prompt=row.prompt,
-            schedule=column_to_spec(row.schedule_type, row.schedule_spec, row.timezone),
+            schedule=SqlScheduledTaskRepository._spec_from_row(row),
             context_mode=ContextMode(row.context_mode),
             thread_id=row.thread_id,
             assistant_id=row.assistant_id,
@@ -110,7 +142,7 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
         row.title = task.title
         row.prompt = task.prompt
         row.schedule_type = str(task.schedule.schedule_type)
-        row.schedule_spec = spec_to_column(task.schedule)
+        row.schedule_spec = SqlScheduledTaskRepository._spec_to_column(task.schedule)
         row.timezone = task.schedule.timezone
         row.context_mode = str(task.context_mode)
         row.thread_id = task.thread_id

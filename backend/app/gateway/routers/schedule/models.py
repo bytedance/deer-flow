@@ -29,8 +29,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, PlainSerializer
 
-from app.gateway.routers.schedule.spec_wire import spec_to_wire
-from deerflow.domain.schedule.model import ScheduledRun, ScheduledTask
+from deerflow.domain.schedule.model import ScheduledRun, ScheduledTask, ScheduleSpec, ScheduleType
 
 UtcTimestamp = Annotated[datetime, PlainSerializer(lambda value: value.isoformat(), return_type=str)]
 
@@ -42,6 +41,25 @@ def _utc(value: datetime | None) -> datetime | None:
     return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _spec_to_wire(spec: ScheduleSpec) -> dict[str, str]:
+    """The value object -> the `schedule_spec` body field.
+
+    Emits the normalized value rather than echoing the caller's bytes: the
+    frontend submits an already-UTC-aware ISO value (`zonedLocalToUtcIso`), so
+    a trailing-Z input comes back as "+00:00". Both forms parse on either side,
+    so the normalization is deliberate.
+
+    All this side owns is which two keys the body uses. Its counterpart is
+    `SqlScheduledTaskRepository._spec_to_column`; the two are near-identical
+    today by coincidence, and are kept apart because a primary adapter must not
+    import a secondary one and because the day the API grows a field the column
+    does not have, they diverge without either having to be untangled.
+    """
+    if spec.schedule_type is ScheduleType.CRON:
+        return {"cron": spec.cron or ""}
+    return {"run_at": spec.run_at.isoformat() if spec.run_at else ""}
+
+
 class ScheduledTaskCreateRequest(BaseModel):
     thread_id: str | None = None
     context_mode: str = "fresh_thread_per_run"
@@ -51,6 +69,22 @@ class ScheduledTaskCreateRequest(BaseModel):
     schedule_spec: dict[str, Any]
     timezone: str
 
+    def to_schedule(self) -> ScheduleSpec:
+        """Parse the submitted triple into the value object.
+
+        Raises `InvalidScheduleError` -- a *domain* error out of a primary
+        adapter, on purpose: it is the vocabulary the outer ring uses to say
+        "this violates a domain rule", and the router maps that one family onto
+        422. Structural problems (key missing, wrong type) and value problems
+        (5-field cron, resolvable timezone) both arrive as it.
+        """
+        return ScheduleSpec.from_primitives(
+            self.schedule_type,
+            cron=self.schedule_spec.get("cron"),
+            run_at=self.schedule_spec.get("run_at"),
+            timezone=self.timezone,
+        )
+
 
 class ScheduledTaskUpdateRequest(BaseModel):
     context_mode: str | None = None
@@ -59,6 +93,30 @@ class ScheduledTaskUpdateRequest(BaseModel):
     prompt: str | None = Field(default=None, min_length=1)
     schedule_spec: dict[str, Any] | None = None
     timezone: str | None = None
+
+    def to_schedule(self, current: ScheduleSpec) -> ScheduleSpec:
+        """Build the replacement spec, taking what was omitted from `current`.
+
+        The schedule *type* is not patchable; only its spec and its zone are.
+        Omitted parts are read straight off the current value object rather
+        than round-tripped through the wire shape and back.
+
+        `None` means "not supplied" on this endpoint -- an explicit `null` has
+        always meant that here, and unbinding is expressed by switching
+        `context_mode`, not by nulling a field.
+        """
+        if self.schedule_spec is not None:
+            cron = self.schedule_spec.get("cron")
+            run_at = self.schedule_spec.get("run_at")
+        else:
+            cron = current.cron
+            run_at = current.run_at.isoformat() if current.run_at else None
+        return ScheduleSpec.from_primitives(
+            str(current.schedule_type),
+            cron=cron,
+            run_at=run_at,
+            timezone=self.timezone if self.timezone is not None else current.timezone,
+        )
 
 
 class ScheduledTaskResponse(BaseModel):
@@ -94,7 +152,7 @@ class ScheduledTaskResponse(BaseModel):
             title=task.title,
             prompt=task.prompt,
             schedule_type=str(task.schedule.schedule_type),
-            schedule_spec=spec_to_wire(task.schedule),
+            schedule_spec=_spec_to_wire(task.schedule),
             timezone=task.schedule.timezone,
             status=str(task.status),
             next_run_at=_utc(task.next_run_at),

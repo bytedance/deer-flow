@@ -96,6 +96,50 @@ class ScheduleSpec:
         """Readability sugar — all validation lives in __post_init__."""
         return cls(ScheduleType.ONCE, timezone, run_at=run_at)
 
+    @classmethod
+    def from_primitives(cls, schedule_type: str, *, cron: str | None, run_at: str | None, timezone: str) -> ScheduleSpec:
+        """Build from the loose strings both boundaries arrive as.
+
+        The HTTP body and the stored JSON column both carry a schedule type
+        plus a mapping, so the rule for turning that into a value object lives
+        here instead of being written out once per adapter. Each adapter keeps
+        only what is genuinely its own — which keys its own format uses — and
+        the errors below stay one family the router maps uniformly.
+
+        Four strings rather than a `Mapping[str, Any]` on purpose: a mapping in
+        this signature would mean the domain is handling a transport or storage
+        format, which is the thing this class exists to avoid.
+
+        `cron` and `run_at` are annotated as the contract expects them but
+        checked rather than trusted — both callers read from data a client can
+        influence, so a non-string must be rejected here instead of reaching
+        `fromisoformat` or the cron parser. The field the given type does not
+        use is ignored: a boundary that carries both keys is not an error.
+
+        Raises:
+            InvalidScheduleError: unknown schedule type, the type's field
+                missing or not a string, or an unparseable `run_at`. Value
+                rules — 5-field cron, resolvable timezone — are left to
+                __post_init__ and surface as the same error.
+        """
+        try:
+            kind = ScheduleType(schedule_type)
+        except ValueError as exc:
+            raise InvalidScheduleError(f"Unsupported schedule_type: {schedule_type}") from exc
+
+        if kind is ScheduleType.CRON:
+            if not isinstance(cron, str):
+                raise InvalidScheduleError("cron schedule requires schedule_spec.cron")
+            return cls.cron_schedule(cron, timezone)
+
+        if not isinstance(run_at, str):
+            raise InvalidScheduleError("once schedule requires run_at")
+        try:
+            parsed = datetime.fromisoformat(run_at)
+        except ValueError as exc:
+            raise InvalidScheduleError(f"once schedule has an unparseable run_at: {run_at!r}") from exc
+        return cls.once_at(parsed, timezone)
+
     def next_after(self, now: datetime) -> datetime | None:
         """Next fire time in UTC, or None when there is no future occurrence.
 

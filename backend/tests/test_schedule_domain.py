@@ -112,6 +112,75 @@ class TestScheduleSpecInvariants:
         assert spec.run_at == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
 
 
+# ---------------------------------------------------------------- A2. from_primitives
+
+
+class TestFromPrimitives:
+    """The one construction path that starts from untrusted strings.
+
+    Both boundaries -- the HTTP body and the stored JSON column -- arrive as a
+    schedule type plus a loose mapping, so the rule for turning that into a
+    value object lives here rather than being written out once per adapter.
+    Each adapter is left with the part that is genuinely its own: which keys
+    its format uses.
+
+    Values are type-checked rather than assumed. The signature says `str |
+    None` because that is the contract, but both callers read from data a
+    client can influence, so a non-string has to be rejected here rather than
+    reaching `datetime.fromisoformat` or the cron parser.
+    """
+
+    def test_builds_a_cron_schedule(self):
+        spec = ScheduleSpec.from_primitives("cron", cron="0 9 * * *", run_at=None, timezone="Asia/Shanghai")
+        assert spec.schedule_type is ScheduleType.CRON
+        assert spec.cron == "0 9 * * *"
+        assert spec.timezone == "Asia/Shanghai"
+
+    def test_builds_a_once_schedule_from_an_iso_string(self):
+        spec = ScheduleSpec.from_primitives("once", cron=None, run_at="2026-08-01T09:00:00", timezone="Asia/Shanghai")
+        assert spec.schedule_type is ScheduleType.ONCE
+        assert spec.run_at == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
+
+    def test_a_trailing_z_run_at_is_the_same_instant(self):
+        """The shape the frontend submits (`zonedLocalToUtcIso`)."""
+        spec = ScheduleSpec.from_primitives("once", cron=None, run_at="2026-08-01T01:00:00Z", timezone="Asia/Shanghai")
+        assert spec.run_at == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
+
+    def test_unknown_schedule_type_is_rejected(self):
+        with pytest.raises(InvalidScheduleError, match="Unsupported schedule_type"):
+            ScheduleSpec.from_primitives("teleport", cron="0 9 * * *", run_at=None, timezone="UTC")
+
+    @pytest.mark.parametrize("cron", [None, 5, ""])
+    def test_cron_without_a_usable_expression_is_rejected(self, cron):
+        with pytest.raises(InvalidScheduleError, match="requires schedule_spec"):
+            ScheduleSpec.from_primitives("cron", cron=cron, run_at=None, timezone="UTC")
+
+    @pytest.mark.parametrize("run_at", [None, 5])
+    def test_once_without_a_string_run_at_is_rejected(self, run_at):
+        with pytest.raises(InvalidScheduleError, match="requires run_at"):
+            ScheduleSpec.from_primitives("once", cron=None, run_at=run_at, timezone="UTC")
+
+    def test_an_unparseable_run_at_is_rejected(self):
+        with pytest.raises(InvalidScheduleError, match="unparseable run_at"):
+            ScheduleSpec.from_primitives("once", cron=None, run_at="next tuesday", timezone="UTC")
+
+    def test_the_irrelevant_field_is_ignored(self):
+        """A boundary that carries both keys must not be rejected for it."""
+        spec = ScheduleSpec.from_primitives("cron", cron="0 9 * * *", run_at="2026-08-01T09:00:00", timezone="UTC")
+        assert spec.run_at is None
+
+    def test_value_rules_still_come_from_post_init(self):
+        """Not re-implemented here -- this is why each adapter stays thin."""
+        with pytest.raises(InvalidScheduleError, match="exactly 5 fields"):
+            ScheduleSpec.from_primitives("cron", cron="0 9 * *", run_at=None, timezone="UTC")
+        with pytest.raises(InvalidScheduleError, match="Unknown timezone"):
+            ScheduleSpec.from_primitives("cron", cron="0 9 * * *", run_at=None, timezone="Mars/Olympus_Mons")
+
+    def test_whitespace_in_a_cron_expression_is_normalized(self):
+        spec = ScheduleSpec.from_primitives("cron", cron="  0  9 * * * ", run_at=None, timezone="UTC")
+        assert spec.cron == "0 9 * * *"
+
+
 # ---------------------------------------------------------------- B. next_after
 
 

@@ -55,11 +55,11 @@ flowchart LR
         SV --> M
     end
     subgraph PRIM["✅ 主适配器 · app"]
-        R["gateway/routers/schedule/<br/>router · models · spec_wire"]
+        R["gateway/routers/schedule/<br/>router · models"]
         PL["scheduler/poller.py<br/>轮询时钟"]
     end
     subgraph SEC["✅ 从适配器 · app"]
-        AD["adapters/schedule/<br/>两个仓储 · run_launcher · thread_lookup<br/>spec_column · run_outcome_mapping"]
+        AD["adapters/schedule/<br/>两个仓储 · run_launcher · thread_lookup<br/>run_outcome_mapping"]
     end
     subgraph CR["✅ 组合根"]
         CO["composition.py<br/>build_domain_services()"]
@@ -239,7 +239,8 @@ America/New_York 的 "0 9 * * *"
 {"cron": "0 9 * * *"}  ←──→  ScheduleSpec(CRON, "Asia/Shanghai", cron="0 9 * * *")
         （JSON 列 / HTTP 字段）        （值对象）
                     ↑
-     app/adapters/schedule/spec_mapping.py
+     ScheduleSpec.from_primitives()（领域，一份）
+     + 每个适配器自己那几行「本格式用哪两个键」
 ```
 
 这不是洁癖，是一条可执行的判据：**一旦领域方法的签名里出现 `Mapping[str, Any]`，就说明领域在处理持久化/传输格式了**。解析这件事天然可以切成两半——结构校验（键在不在？值是不是字符串？）属于边界，值校验（cron 是不是 5 段、时区认不认识、`run_at` 有没有）属于 `__post_init__`。切开之后领域完全不需要看见 dict，签名全部强类型。
@@ -522,7 +523,7 @@ await service.update_task(
 
 1. `model/enums.py` 的 `ScheduleType` 加成员
 2. `model/spec.py`：加承载参数的字段（如 `interval_seconds`）、在 `__post_init__` 加校验、在 `next_after` 加一个分支
-3. 适配器的 `spec_mapping`（见 §4.5）：进出两个方向各加一个分支
+3. `ScheduleSpec.from_primitives`（见 §4.5）加一个分支；两个适配器各自的 `_spec_to_column` / `_spec_to_wire` 也各加一个
 4. **逐个检查 `task.py` 里四个 `status_after_*`**——它们目前都在问"是不是 ONCE"，新类型会落进 else 分支。确认那是你要的语义（大概率是：interval 与 cron 同属周期性）
 5. 域测试：新类型在 §5.4 四张表里各补一行
 
@@ -627,8 +628,7 @@ await service.update_task(
 | 文件 | 内容 |
 |---|---|
 | [`gateway/routers/schedule/router.py`](../app/gateway/routers/schedule/router.py) | 10 个 HTTP 端点，只做协议转换 + 领域错误→状态码 |
-| [`gateway/routers/schedule/models.py`](../app/gateway/routers/schedule/models.py) | 请求/响应模型；响应是白名单，不是 ORM 转储 |
-| [`gateway/routers/schedule/spec_wire.py`](../app/gateway/routers/schedule/spec_wire.py) | HTTP body ↔ `ScheduleSpec` |
+| [`gateway/routers/schedule/models.py`](../app/gateway/routers/schedule/models.py) | 请求/响应模型；响应是白名单，不是 ORM 转储；`schedule_spec` 的进出转换是模型自己的方法 |
 | [`app/scheduler/poller.py`](../app/scheduler/poller.py) | 轮询时钟 + 启动恢复 |
 
 **从适配器**
@@ -639,7 +639,6 @@ await service.update_task(
 | [`adapters/schedule/scheduled_run_repository.py`](../app/adapters/schedule/scheduled_run_repository.py) | 自有持久化；`IntegrityError → ActiveRunConflictError` 的翻译点 |
 | [`adapters/schedule/run_launcher.py`](../app/adapters/schedule/run_launcher.py) | 防腐层；`ConflictError` / `HTTPException(409)` → `ThreadBusyError` |
 | [`adapters/schedule/thread_lookup.py`](../app/adapters/schedule/thread_lookup.py) | 防腐层；`check_access(require_existing=True)` |
-| [`adapters/schedule/spec_column.py`](../app/adapters/schedule/spec_column.py) | JSON 列 ↔ `ScheduleSpec`（与 `spec_wire` 成对，见其 docstring） |
 | [`adapters/schedule/run_outcome_mapping.py`](../app/adapters/schedule/run_outcome_mapping.py) | `RunRecord → RunOutcome \| None`，承接旧完成钩子的内联过滤 |
 
 **组合根**

@@ -30,7 +30,6 @@ from app.gateway.routers.schedule.models import (
     ScheduledTaskUpdateRequest,
     TriggerResponse,
 )
-from app.gateway.routers.schedule.spec_wire import spec_to_wire, wire_to_spec
 from deerflow.domain.schedule.model import (
     DispatchOutcome,
     InvalidContextModeError,
@@ -104,7 +103,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
         user_id=user_id,
         title=body.title,
         prompt=body.prompt,
-        schedule=wire_to_spec(body.schedule_type, body.schedule_spec, body.timezone),
+        schedule=body.to_schedule(),
         context_mode=body.context_mode,
         thread_id=body.thread_id,
         now=datetime.now(UTC),
@@ -145,14 +144,7 @@ async def update_scheduled_task(
     # of a patch of loose fields.
     current = await service.get_task(task_id, user_id=user_id) if changes_schedule or changes_context else None
 
-    schedule = None
-    if current is not None and changes_schedule:
-        schedule = wire_to_spec(
-            # The schedule *type* is not patchable; only its spec and zone are.
-            str(current.schedule.schedule_type),
-            supplied.get("schedule_spec", spec_to_wire(current.schedule)),
-            supplied.get("timezone", current.schedule.timezone),
-        )
+    schedule = body.to_schedule(current.schedule) if current is not None and changes_schedule else None
 
     context = None
     if current is not None and changes_context:
