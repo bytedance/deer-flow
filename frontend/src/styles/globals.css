@@ -72,6 +72,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@keyframes streaming-list-marker-fade-in {
+  from {
+    color: transparent;
+  }
+}
+
+[data-streaming-list-item]::marker {
+  animation: streaming-list-marker-fade-in 200ms ease both;
+}
+
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
