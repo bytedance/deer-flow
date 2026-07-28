@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from hashlib import sha256
 from typing import Any, override
@@ -56,6 +57,8 @@ MAX_FIELD_TEXT_CHARS = 200
 # leaving headroom for question/context.
 MAX_FORM_SERIALIZED_BYTES = 16_384
 
+_XML_TAG_RE = re.compile(r"</?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\s*/?>")
+
 
 class ClarificationMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -85,32 +88,6 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         digest = sha256(formatted_message.encode("utf-8")).hexdigest()[:16]
         return f"clarification:{digest}"
 
-    def _extract_scalar_values(self, obj: Any) -> list[str]:
-        """Recursively extract scalar leaf values from an XML-to-dict structure.
-
-        When models emit XML-style options (e.g. ``<item>A</item><item>B</item>``),
-        upstream parsers convert them to nested dicts (e.g. ``{"item": [{"$text": "A"}, {"$text": "B"}]}``).
-        This method flattens those structures into a clean list of displayable strings.
-        """
-        result: list[str] = []
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key == "$text":
-                    if isinstance(value, (str, int, float)):
-                        text = str(value).strip()
-                        if text:
-                            result.append(text)
-                else:
-                    result.extend(self._extract_scalar_values(value))
-        elif isinstance(obj, list):
-            for item in obj:
-                result.extend(self._extract_scalar_values(item))
-        elif isinstance(obj, (str, int, float)):
-            text = str(obj).strip()
-            if text:
-                result.append(text)
-        return result
-
     def _normalize_options(self, raw_options: Any) -> list[str]:
         """Normalize tool-provided options into displayable string values."""
         options = raw_options
@@ -131,7 +108,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # option tags get parsed into nested dict structures that would
         # otherwise render as raw Python dict syntax in the UI.
         if isinstance(options, dict):
-            options = self._extract_scalar_values(options)
+            options = self._flatten_dict_option_values(options)
 
         if not isinstance(options, list):
             options = [options]
@@ -142,12 +119,45 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         normalized: list[str] = []
         seen: set[str] = set()
         for option in options:
-            text = str(option).strip()
+            text = _XML_TAG_RE.sub("", str(option)).strip()
             if not text or text in seen:
                 continue
             seen.add(text)
             normalized.append(text)
         return normalized
+
+    @staticmethod
+    def _flatten_dict_option_values(value: dict[str, Any]) -> list[str | int | float]:
+        """Flatten scalar leaves from XML-to-dict option payloads in source order.
+
+        When models emit XML-style options (e.g. ``<item>A</item><item>B</item>``),
+        upstream parsers convert them to nested dicts (e.g.
+        ``{"item": [{"$text": "A"}, {"$text": "B"}]}``). This method flattens those
+        structures into a clean list of displayable scalars, extracting ``$text``
+        leaf values and skipping structural wrapper keys.
+        """
+        flattened: list[str | int | float] = []
+
+        def collect(nested: Any) -> None:
+            if isinstance(nested, dict):
+                for key, item in nested.items():
+                    if key == "$text":
+                        if isinstance(item, (str, int, float)):
+                            text = str(item).strip()
+                            if text:
+                                flattened.append(text)
+                    else:
+                        collect(item)
+            elif isinstance(nested, list):
+                for item in nested:
+                    collect(item)
+            elif isinstance(nested, (str, int, float)):
+                text = str(nested).strip()
+                if text:
+                    flattened.append(nested)
+
+        collect(value)
+        return flattened
 
     @staticmethod
     def _normalize_bool(raw: Any) -> bool:
