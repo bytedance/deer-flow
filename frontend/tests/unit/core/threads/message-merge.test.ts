@@ -11,10 +11,13 @@ import {
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
   getVisibleOptimisticMessages,
+  mergeRenderedMessageLedger,
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
+  reconcileThreadHistoryRows,
   removeSetItems,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
@@ -22,10 +25,10 @@ import {
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
-function runMessage(seq?: number): RunMessage {
+function runMessage(seq: number): RunMessage {
   return {
     run_id: "run-1",
-    ...(seq === undefined ? {} : { seq }),
+    seq,
     content: {} as Message,
     metadata: { caller: "" },
     created_at: "2026-05-22T00:00:00Z",
@@ -108,6 +111,7 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
     [
       {
         run_id: "run-1",
+        seq: 1,
         content: persistedAi,
         metadata: { caller: "lead_agent" },
         created_at: "2026-07-21T00:00:00Z",
@@ -496,6 +500,54 @@ test("buildThreadMessagesPageUrl returns a relative URL behind nginx", () => {
   );
 });
 
+test("parseThreadMessagesPageResponse accepts a valid history page", () => {
+  const response = {
+    data: [runMessage(1), runMessage(2)],
+    has_more: true,
+    next_before_seq: 1,
+  };
+
+  expect(parseThreadMessagesPageResponse(response)).toBe(response);
+});
+
+test.each([
+  ["missing", undefined],
+  ["non-numeric", "2"],
+  ["fractional", 2.5],
+  ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+])(
+  "parseThreadMessagesPageResponse rejects a %s row seq",
+  (_description, seq) => {
+    expect(() =>
+      parseThreadMessagesPageResponse({
+        data: [{ ...runMessage(1), seq }],
+        has_more: false,
+        next_before_seq: null,
+      }),
+    ).toThrow("invalid seq");
+  },
+);
+
+test("parseThreadMessagesPageResponse rejects duplicate row seq values", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1), runMessage(1)],
+      has_more: false,
+      next_before_seq: null,
+    }),
+  ).toThrow("duplicate seq");
+});
+
+test("parseThreadMessagesPageResponse rejects an invalid pagination cursor", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1)],
+      has_more: true,
+      next_before_seq: null,
+    }),
+  ).toThrow("invalid next_before_seq");
+});
+
 test("flattenThreadHistoryPages prepends backward pages in global seq order", () => {
   expect(
     flattenThreadHistoryPages([
@@ -535,6 +587,96 @@ test("flattenThreadHistoryPages retains backward pages when the latest page refr
       olderPage,
     ]).map((message) => message.seq),
   ).toEqual([1, 2, 3, 4, 5]);
+});
+
+test("reconcileThreadHistoryRows retains rows displaced from a moving latest page", () => {
+  const previousRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 1),
+  );
+  const currentRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 51),
+  );
+
+  expect(
+    reconcileThreadHistoryRows(previousRows, currentRows, false).map(
+      (message) => message.seq,
+    ),
+  ).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
+});
+
+test("reconcileThreadHistoryRows refreshes overlapping rows without moving them", () => {
+  const stale = runMessage(50);
+  const refreshed = {
+    ...runMessage(50),
+    content: {
+      id: "message-50",
+      type: "ai",
+      content: "final response",
+      additional_kwargs: { turn_duration: 704 },
+    } as Message,
+  };
+
+  const reconciled = reconcileThreadHistoryRows(
+    [runMessage(49), stale],
+    [refreshed, runMessage(51)],
+    false,
+  );
+
+  expect(reconciled.map((message) => message.seq)).toEqual([49, 50, 51]);
+  expect(reconciled[1]).toBe(refreshed);
+});
+
+test("reconcileThreadHistoryRows trusts a complete snapshot and prunes missing rows", () => {
+  const currentRows = [runMessage(2), runMessage(3)];
+
+  expect(
+    reconcileThreadHistoryRows(
+      [runMessage(1), ...currentRows],
+      currentRows,
+      true,
+    ),
+  ).toEqual(currentRows);
+});
+
+test("reconcileThreadHistoryRows preserves existing history when a row seq is invalid", () => {
+  const previousRows = [runMessage(1), runMessage(2)];
+  const invalidRow = {
+    ...runMessage(3),
+    seq: undefined,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  expect(reconcileThreadHistoryRows(previousRows, [invalidRow], false)).toBe(
+    previousRows,
+  );
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
+});
+
+test("reconcileThreadHistoryRows keeps insertion order on an invalid initial snapshot", () => {
+  const first = {
+    ...runMessage(1),
+    seq: undefined,
+    content: { id: "first", type: "human", content: "first" } as Message,
+  } as unknown as RunMessage;
+  const second = {
+    ...runMessage(2),
+    seq: undefined,
+    content: { id: "second", type: "ai", content: "second" } as Message,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const currentRows = [first, second];
+
+  expect(reconcileThreadHistoryRows([], currentRows, false)).toBe(currentRows);
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
 });
 
 test("infinite history refetch recalculates older-page cursors from the refreshed newest page", async () => {
@@ -651,24 +793,28 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   const rows: RunMessage[] = [
     {
       run_id: "run-old",
+      seq: 1,
       content: oldHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:00Z",
     },
     {
       run_id: "run-old",
+      seq: 2,
       content: oldAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:01Z",
     },
     {
       run_id: "run-new",
+      seq: 3,
       content: newHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:02Z",
     },
     {
       run_id: "run-new",
+      seq: 4,
       content: newAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:03Z",
@@ -687,6 +833,7 @@ test("buildVisibleHistoryMessages attaches run_id to each content message (#3779
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
+      seq: 1,
       content: { id: "ai-1", type: "ai", content: "answer" } as Message,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-26T00:00:00Z",
@@ -819,6 +966,53 @@ test("resolveTransientHistoryBridge does not collapse an unloaded gap before its
       bridgeOrder,
     ).map((message) => message.id),
   ).toEqual(["event-seq-35", "event-seq-88"]);
+});
+
+test("resolveTransientHistoryBridge restores a prefix that was already rendered", () => {
+  const protectedPrompt = {
+    id: "protected-prompt",
+    type: "human",
+    content: "/ppt-master 帮我做个ppt",
+  } as Message;
+  const intermediateReply = {
+    id: "intermediate-reply",
+    type: "ai",
+    content: "正在生成页面",
+  } as Message;
+  const pageAnchor = {
+    id: "page-anchor",
+    type: "ai",
+    content: "继续导出 SVG",
+  } as Message;
+  const latestAnswer = {
+    id: "latest-answer",
+    type: "ai",
+    content: "任务仍在执行",
+  } as Message;
+  const captured = [protectedPrompt, intermediateReply, pageAnchor];
+  const bridgeOrder = mergeTransientHistoryBridgeOrder([], captured);
+  const previouslyRenderedOrder = [
+    protectedPrompt,
+    intermediateReply,
+    pageAnchor,
+    latestAnswer,
+  ]
+    .map((message) => `message:${message.id}`)
+    .filter((identity): identity is string => Boolean(identity));
+
+  expect(
+    resolveTransientHistoryBridge(
+      [pageAnchor, latestAnswer],
+      captured,
+      bridgeOrder,
+      previouslyRenderedOrder,
+    ).map((message) => message.id),
+  ).toEqual([
+    "protected-prompt",
+    "intermediate-reply",
+    "page-anchor",
+    "latest-answer",
+  ]);
 });
 
 test("resolveTransientHistoryBridge does not duplicate once canonical history catches up", () => {
@@ -1091,6 +1285,189 @@ test("computeSummarizationTransientMessages captures live turns dropped before t
       new Set([hiddenSummary.id!]),
     ),
   ).toEqual([summarizationHuman1, summarizationAi1, summarizationHuman2]);
+});
+
+test("computeSummarizationTransientMessages rescues rendered processing steps missing from a stale live snapshot", () => {
+  const processingMessages = Array.from({ length: 10 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  // The SDK has already advanced to the 10-message post-compaction window,
+  // while the UI's previous committed frame still contains steps 1..10.
+  const staleLiveSnapshot = processingMessages.slice(4);
+  const summarizationMessages = [
+    {
+      id: "__remove_all__",
+      type: "remove",
+      content: "",
+    } as Message,
+    ...staleLiveSnapshot,
+  ];
+
+  expect(
+    computeSummarizationTransientMessages(
+      staleLiveSnapshot,
+      summarizationMessages,
+      new Set(),
+      processingMessages,
+    ),
+  ).toEqual(processingMessages.slice(0, 4));
+});
+
+test("computeSummarizationTransientMessages rescues steps between a protected input and retained tail", () => {
+  const protectedInput = {
+    id: "protected-input",
+    type: "human",
+    content: "Run a long sequential research task",
+  } as Message;
+  const removedSteps = Array.from({ length: 4 }, (_, index) => ({
+    id: `protected-window-step-${index + 1}`,
+    type: "ai",
+    content: `completed ${index + 1}`,
+  })) as Message[];
+  const retainedTail = {
+    id: "retained-tail",
+    type: "tool",
+    tool_call_id: "retained-call",
+    content: "latest search result",
+  } as Message;
+  const renderedMessages = [protectedInput, ...removedSteps, retainedTail];
+  const retainedWindow = [protectedInput, retainedTail];
+
+  expect(
+    computeSummarizationTransientMessages(
+      retainedWindow,
+      [
+        {
+          id: "__remove_all__",
+          type: "remove",
+          content: "",
+        } as Message,
+        ...retainedWindow,
+      ],
+      new Set(),
+      renderedMessages,
+    ),
+  ).toEqual(removedSteps);
+});
+
+test("repeated compaction keeps every previously rendered processing step in order", () => {
+  const processingMessages = Array.from({ length: 12 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `repeat-processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `repeat-call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+
+  const firstTail = processingMessages.slice(4, 10);
+  const firstMoved = computeSummarizationTransientMessages(
+    firstTail,
+    [removeAll, ...firstTail],
+    new Set(),
+    processingMessages.slice(0, 10),
+  );
+  const firstBridge = mergeTransientHistoryBridge([], firstMoved);
+  const firstMerged = mergeMessages(firstBridge, firstTail, []);
+
+  const secondTail = processingMessages.slice(6);
+  const secondMoved = computeSummarizationTransientMessages(
+    secondTail,
+    [removeAll, ...secondTail],
+    new Set(),
+    processingMessages,
+  );
+  const secondBridge = mergeTransientHistoryBridge(firstBridge, secondMoved);
+  const secondMerged = mergeMessages(secondBridge, secondTail, []);
+
+  expect(firstMerged.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 10).map((message) => message.id),
+  );
+  expect(secondMerged.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+});
+
+test("rendered message ledger survives rolling live windows before repeated compaction", () => {
+  const processingMessages = Array.from({ length: 23 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `rolling-processing-${step}`,
+      type: "ai",
+      content: `completed ${step}/26`,
+    } as Message;
+  });
+  const firstVisibleWindow = processingMessages.slice(0, 13);
+  const secondVisibleWindow = processingMessages.slice(8, 18);
+  const thirdVisibleWindow = processingMessages.slice(13);
+
+  const firstLedger = mergeRenderedMessageLedger([], firstVisibleWindow);
+  const secondLedger = mergeRenderedMessageLedger(
+    firstLedger,
+    secondVisibleWindow,
+  );
+  const thirdLedger = mergeRenderedMessageLedger(
+    secondLedger,
+    thirdVisibleWindow,
+  );
+
+  expect(thirdLedger.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+
+  // A later compaction retains only 19..23. The accumulated display ledger
+  // must still supply 14..18 (and every older displayed step) to the bridge.
+  const retainedTail = processingMessages.slice(18);
+  const moved = computeSummarizationTransientMessages(
+    retainedTail,
+    [
+      {
+        id: "__remove_all__",
+        type: "remove",
+        content: "",
+      } as Message,
+      ...retainedTail,
+    ],
+    new Set(),
+    thirdLedger,
+  );
+
+  expect(moved.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 18).map((message) => message.id),
+  );
+});
+
+test("rendered message ledger does not retain explicitly superseded messages", () => {
+  const retained = {
+    id: "retained-answer",
+    type: "ai",
+    content: "keep me",
+  } as Message;
+  const superseded = {
+    id: "superseded-answer",
+    type: "ai",
+    content: "replace me",
+  } as Message;
+
+  expect(
+    mergeRenderedMessageLedger(
+      [retained, superseded],
+      [retained],
+      new Set([superseded.id!]),
+    ),
+  ).toEqual([retained]);
 });
 
 test("computeSummarizationTransientMessages excludes already-summarized control messages", () => {
