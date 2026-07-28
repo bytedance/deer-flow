@@ -34,11 +34,9 @@ import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
-  hasOpenHumanInputRequest,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
@@ -224,14 +222,6 @@ export default function AgentChatPage() {
     threadId,
     thread.values.goal,
   );
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -319,8 +309,7 @@ export default function AgentChatPage() {
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                     !isUploading &&
                     !thread.isLoading &&
-                    !hasGoal &&
-                    !hasOpenHumanInputCard
+                    !hasGoal
                   }
                   onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={
@@ -401,7 +390,6 @@ export default function AgentChatPage() {
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading ||
-                      hasOpenHumanInputCard ||
                       (!isNewThread && isHistoryLoading)
                     }
                     onContextChange={(context) =>
