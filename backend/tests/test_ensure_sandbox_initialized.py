@@ -67,6 +67,30 @@ class _RecordingProvider(SandboxProvider):
         return None
 
 
+class _FallthroughProvider(SandboxProvider):
+    """Provider whose parent id has expired, forcing a fresh acquire."""
+
+    def __init__(self) -> None:
+        self.sandbox = _StubSandbox("fresh")
+        self.acquired: list[str | None] = []
+
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self.acquired.append(thread_id)
+        return "fresh-sandbox"
+
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self.acquired.append(thread_id)
+        return "fresh-sandbox"
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        if sandbox_id == "fresh-sandbox":
+            return self.sandbox
+        return None
+
+    def release(self, sandbox_id: str) -> None:
+        return None
+
+
 def _make_runtime(state: dict) -> ToolRuntime:
     return ToolRuntime(
         state=state,
@@ -91,6 +115,9 @@ def test_ensure_sandbox_initialized_unwraps_overwrite_state() -> None:
 
     assert sandbox is provider.sandbox
     assert runtime.context["sandbox_id"] == "parent-sandbox"
+    # The reuse path must not take ownership: the wrapped state is left
+    # untouched, so after_agent still sees fork_restored and skips release.
+    assert isinstance(runtime.state["sandbox"], Overwrite)
 
 
 @pytest.mark.anyio
@@ -118,3 +145,22 @@ def test_ensure_sandbox_initialized_plain_state_unchanged() -> None:
 
     assert sandbox is provider.sandbox
     assert runtime.context["sandbox_id"] == "parent-sandbox"
+
+
+def test_ensure_sandbox_initialized_acquires_fresh_when_parent_missing() -> None:
+    """Acquire fall-through: the fork-restored id is gone from the provider,
+    so a fresh sandbox is acquired and the stale wrapped state is replaced
+    by the freshly acquired plain dict."""
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "t-1"
+        sandbox = ensure_sandbox_initialized(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.acquired == ["t-1"]
+    assert sandbox is provider.sandbox
+    assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
+    assert runtime.context["sandbox_id"] == "fresh-sandbox"
