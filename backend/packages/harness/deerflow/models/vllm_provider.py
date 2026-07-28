@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any, cast
@@ -40,6 +41,7 @@ from langchain_openai.chat_models.base import _create_usage_metadata
 from pydantic import Field, PrivateAttr
 
 _CUMULATIVE_USAGE_TRACKER_CAPACITY = 1024
+_CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS = 60 * 60
 
 
 def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
@@ -184,7 +186,7 @@ class VllmChatModel(ChatOpenAI):
         default=False,
         description=("Treat streaming usage snapshots from vLLM as cumulative per completion and convert them to per-chunk deltas."),
     )
-    _cumulative_usage_by_completion: OrderedDict[str, UsageMetadata] = PrivateAttr(default_factory=OrderedDict)
+    _cumulative_usage_by_completion: OrderedDict[str, tuple[UsageMetadata, float]] = PrivateAttr(default_factory=OrderedDict)
     _cumulative_usage_lock: Any = PrivateAttr(default_factory=threading.Lock)
 
     @property
@@ -194,15 +196,20 @@ class VllmChatModel(ChatOpenAI):
     def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
         """Convert a completion's cumulative usage snapshot into a delta."""
         with self._cumulative_usage_lock:
-            previous = self._cumulative_usage_by_completion.get(completion_id)
+            previous_snapshot = self._cumulative_usage_by_completion.get(completion_id)
+            previous = previous_snapshot[0] if previous_snapshot is not None else None
             delta = subtract_usage(usage, previous)
             if terminal:
                 self._cumulative_usage_by_completion.pop(completion_id, None)
             else:
-                self._cumulative_usage_by_completion[completion_id] = usage
+                now = time.monotonic()
+                self._cumulative_usage_by_completion[completion_id] = (usage, now)
                 self._cumulative_usage_by_completion.move_to_end(completion_id)
                 while len(self._cumulative_usage_by_completion) > _CUMULATIVE_USAGE_TRACKER_CAPACITY:
-                    self._cumulative_usage_by_completion.popitem(last=False)
+                    oldest_completion_id, (_, updated_at) = next(iter(self._cumulative_usage_by_completion.items()))
+                    if now - updated_at < _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS:
+                        break
+                    self._cumulative_usage_by_completion.pop(oldest_completion_id, None)
             return delta
 
     def _clear_usage_snapshot(self, completion_id: str) -> None:

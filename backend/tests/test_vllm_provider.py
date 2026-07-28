@@ -431,11 +431,13 @@ def test_vllm_provider_leaves_usage_unchanged_without_stable_completion_id():
     assert not model._cumulative_usage_by_completion
 
 
-def test_vllm_provider_bounds_cumulative_usage_tracker(monkeypatch):
+def test_vllm_provider_does_not_evict_active_streams_at_soft_capacity(monkeypatch):
     monkeypatch.setattr(
         "deerflow.models.vllm_provider._CUMULATIVE_USAGE_TRACKER_CAPACITY",
         2,
     )
+    now = [0.0]
+    monkeypatch.setattr("deerflow.models.vllm_provider.time.monotonic", lambda: now[0])
     model = _make_model(cumulative_stream_usage=True)
 
     for index in range(3):
@@ -449,6 +451,59 @@ def test_vllm_provider_bounds_cumulative_usage_tracker(monkeypatch):
         )
 
     assert list(model._cumulative_usage_by_completion) == [
+        "chatcmpl-0",
         "chatcmpl-1",
         "chatcmpl-2",
+    ]
+
+    now[0] = 1.0
+    next_chunk = _convert_stream_chunk(
+        model,
+        _stream_chunk(
+            completion_id="chatcmpl-0",
+            prompt_tokens=10,
+            completion_tokens=5,
+        ),
+    )
+
+    assert next_chunk is not None
+    _assert_usage(next_chunk.message, input_tokens=0, output_tokens=4, total_tokens=4)
+
+
+def test_vllm_provider_evicts_only_idle_streams_above_soft_capacity(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.models.vllm_provider._CUMULATIVE_USAGE_TRACKER_CAPACITY",
+        2,
+    )
+    monkeypatch.setattr(
+        "deerflow.models.vllm_provider._CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS",
+        10,
+    )
+    now = [0.0]
+    monkeypatch.setattr("deerflow.models.vllm_provider.time.monotonic", lambda: now[0])
+    model = _make_model(cumulative_stream_usage=True)
+
+    for index in range(3):
+        _convert_stream_chunk(
+            model,
+            _stream_chunk(
+                completion_id=f"chatcmpl-{index}",
+                prompt_tokens=10,
+                completion_tokens=1,
+            ),
+        )
+
+    now[0] = 11.0
+    _convert_stream_chunk(
+        model,
+        _stream_chunk(
+            completion_id="chatcmpl-3",
+            prompt_tokens=10,
+            completion_tokens=1,
+        ),
+    )
+
+    assert list(model._cumulative_usage_by_completion) == [
+        "chatcmpl-2",
+        "chatcmpl-3",
     ]

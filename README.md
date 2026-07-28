@@ -170,7 +170,6 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
        model: Qwen/Qwen3-32B
        api_key: $VLLM_API_KEY
        base_url: http://localhost:8000/v1
-       cumulative_stream_usage: true
        supports_thinking: true
        when_thinking_enabled:
          extra_body:
