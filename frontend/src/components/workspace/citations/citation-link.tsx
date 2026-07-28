@@ -37,9 +37,7 @@ export function CitationLink({
 
   // Priority: children > domain
   const childrenText =
-    typeof children === "string"
-      ? children.replace(/^citation:\s*/i, "")
-      : null;
+    extractReactNodeText(children)?.replace(/^citation:\s*/i, "") ?? null;
   const isGenericText = childrenText === "Source" || childrenText === "来源";
   const displayText = (!isGenericText && childrenText) ?? domain;
 
