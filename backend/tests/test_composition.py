@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.composition import DomainServices, build_domain_services, build_schedule_policy
+from app.composition import DomainServices, build_domain_services, build_run_completion_hook, build_schedule_policy
 from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.domain.schedule.model import SchedulePolicy
 
@@ -139,3 +139,30 @@ class TestEveryPortGetsTheRightAdapter:
     def test_the_policy_reaches_the_service(self):
         service = _build(object(), SchedulerConfig(max_concurrent_runs=9)).schedule
         assert service._policy.max_concurrent_runs == 9
+
+
+class TestRunCompletionHook:
+    """The inbound half of the wiring.
+
+    What the hook *does* with a run is asserted in
+    `test_schedule_run_completion.py`; all that is left here is the assembly
+    decision, which is this module's whole job.
+    """
+
+    def test_no_service_installs_no_hook(self):
+        """`None` rather than a hook that always declines: with no service
+        there is nothing for the runtime to call, and saying so lets it skip
+        the callback entirely."""
+        assert build_run_completion_hook(None) is None
+
+    def test_a_service_is_wrapped_in_the_inbound_adapter(self):
+        from app.adapters.schedule.run_completion import ScheduleRunCompletionListener
+
+        hook = build_run_completion_hook(_build(object()).schedule)
+        assert isinstance(hook, ScheduleRunCompletionListener)
+
+    def test_the_hook_is_bound_to_the_service_it_was_given(self):
+        """Deliberately white-box, for the same reason as the port assertions
+        above: a hook wired to the wrong service type-checks cleanly."""
+        service = _build(object()).schedule
+        assert build_run_completion_hook(service)._service is service

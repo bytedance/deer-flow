@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from deerflow.domain.feedback.service import FeedbackService
@@ -98,11 +97,10 @@ def build_run_completion_hook(
 ) -> Callable[[Any], Awaitable[None]] | None:
     """Install the schedule context on the run runtime's completion callback.
 
-    This is the inbound half of the wiring: the run runtime hands every
-    finished run to one callback, and `run_outcome_from_record` decides which
-    of them the schedule context has any business with. Runs that are not
-    scheduled executions produce no outcome and the service is never called,
-    which is why it carries no guard clauses of its own.
+    The inbound half of the wiring, and nothing more: which runs the context
+    cares about and what it does with them belongs to the adapter, not here.
+    This function's only decision is the same one the rest of this module
+    makes -- what to assemble, and what to leave unassembled.
 
     Returns ``None`` when there is no service, so the runtime installs no hook
     at all rather than one that always declines.
@@ -110,14 +108,9 @@ def build_run_completion_hook(
     if schedule_service is None:
         return None
 
-    from app.adapters.schedule.run_outcome_mapping import run_outcome_from_record
+    from app.adapters.schedule.run_completion import ScheduleRunCompletionListener
 
-    async def on_run_completed(record: Any) -> None:
-        outcome = run_outcome_from_record(record)
-        if outcome is not None:
-            await schedule_service.handle_run_completion(outcome, now=datetime.now(UTC))
-
-    return on_run_completed
+    return ScheduleRunCompletionListener(schedule_service)
 
 
 def build_schedule_policy(scheduler_config: SchedulerConfig) -> SchedulePolicy:

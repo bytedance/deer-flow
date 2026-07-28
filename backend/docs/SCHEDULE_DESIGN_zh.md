@@ -57,9 +57,10 @@ flowchart LR
     subgraph PRIM["✅ 主适配器 · app"]
         R["gateway/routers/schedule/<br/>router · models"]
         PL["scheduler/poller.py<br/>轮询时钟"]
+        RC["adapters/schedule/run_completion.py<br/>运行完成回调"]
     end
     subgraph SEC["✅ 从适配器 · app"]
-        AD["adapters/schedule/<br/>两个仓储 · run_launcher · thread_lookup<br/>run_outcome_mapping"]
+        AD["adapters/schedule/<br/>两个仓储 · run_launcher · thread_lookup"]
     end
     subgraph CR["✅ 组合根"]
         CO["composition.py<br/>build_domain_services()"]
@@ -630,6 +631,7 @@ await service.update_task(
 | [`gateway/routers/schedule/router.py`](../app/gateway/routers/schedule/router.py) | 10 个 HTTP 端点，只做协议转换 + 领域错误→状态码 |
 | [`gateway/routers/schedule/models.py`](../app/gateway/routers/schedule/models.py) | 请求/响应模型；响应是白名单，不是 ORM 转储；`schedule_spec` 的进出转换是模型自己的方法 |
 | [`app/scheduler/poller.py`](../app/scheduler/poller.py) | 轮询时钟 + 启动恢复 |
+| [`adapters/schedule/run_completion.py`](../app/adapters/schedule/run_completion.py) | 运行完成回调；过滤掉非本上下文的运行，其余转成 `RunOutcome` 并调用用例。与上面两个同为入站，只是留在上下文包内 |
 
 **从适配器**
 
@@ -639,7 +641,6 @@ await service.update_task(
 | [`adapters/schedule/scheduled_run_repository.py`](../app/adapters/schedule/scheduled_run_repository.py) | 自有持久化；`IntegrityError → ActiveRunConflictError` 的翻译点 |
 | [`adapters/schedule/run_launcher.py`](../app/adapters/schedule/run_launcher.py) | 防腐层；`ConflictError` / `HTTPException(409)` → `ThreadBusyError` |
 | [`adapters/schedule/thread_lookup.py`](../app/adapters/schedule/thread_lookup.py) | 防腐层；`check_access(require_existing=True)` |
-| [`adapters/schedule/run_outcome_mapping.py`](../app/adapters/schedule/run_outcome_mapping.py) | `RunRecord → RunOutcome \| None`，承接旧完成钩子的内联过滤 |
 
 **组合根**
 
