@@ -541,3 +541,62 @@ async def test_launch_bookkeeping_passes_protect_terminal():
     await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
 
     assert task_repo.updated[1]["protect_terminal"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_launch_bookkeeping_failure_keeps_active_slot():
+    launches = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-live", "thread_id": kwargs["thread_id"]}
+
+    class FailOnceRunRepo(DummyRunRepo):
+        def __init__(self):
+            super().__init__()
+            self.statuses = {}
+            self.fail_next_update = True
+
+        async def create(self, **kwargs):
+            result = await super().create(**kwargs)
+            self.statuses[kwargs["run_record_id"]] = kwargs["status"]
+            return result
+
+        async def update_status(self, run_record_id, **kwargs):
+            if self.fail_next_update:
+                self.fail_next_update = False
+                raise RuntimeError("transient status write failure")
+            await super().update_status(run_record_id, **kwargs)
+            self.statuses[run_record_id] = kwargs["status"]
+
+        async def has_active_runs(self, task_id):
+            return any(status in {"queued", "running"} for status in self.statuses.values())
+
+    row = _once_task_row(task_id="task-bookkeeping", status="enabled")
+    row.update(
+        {
+            "schedule_type": "cron",
+            "schedule_spec": {"cron": "* * * * *"},
+            "overlap_policy": "skip",
+        }
+    )
+    task_repo = DummyTaskRepo([row])
+    run_repo = FailOnceRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+    now = datetime.now(UTC)
+
+    first = await service.dispatch_task(row, now=now, trigger="scheduled")
+    second = await service.dispatch_task(row, now=now, trigger="scheduled")
+
+    assert first["outcome"] == "launched"
+    assert first["run_id"] == "run-live"
+    assert second["outcome"] == "skipped"
+    assert len(launches) == 1
+    assert any(run_record_id == first["task_run_id"] and update["status"] == "running" and update["run_id"] == "run-live" for run_record_id, update in run_repo.updated)

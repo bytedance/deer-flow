@@ -131,18 +131,8 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+        launched_result: dict[str, Any] | None = None
         try:
-            result = await self._launch_run(
-                thread_id=execution_thread_id,
-                assistant_id=task.get("assistant_id"),
-                prompt=task["prompt"],
-                owner_user_id=task.get("user_id"),
-                metadata={
-                    "scheduled_task_id": task["id"],
-                    "scheduled_task_run_id": task_run_id,
-                    "scheduled_trigger": trigger,
-                },
-            )
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
@@ -159,10 +149,22 @@ class ScheduledTaskService:
                 task_status = "paused"
             else:
                 task_status = "enabled"
+
+            launched_result = await self._launch_run(
+                thread_id=execution_thread_id,
+                assistant_id=task.get("assistant_id"),
+                prompt=task["prompt"],
+                owner_user_id=task.get("user_id"),
+                metadata={
+                    "scheduled_task_id": task["id"],
+                    "scheduled_task_run_id": task_run_id,
+                    "scheduled_trigger": trigger,
+                },
+            )
             await self._task_run_repo.update_status(
                 task_run_id,
                 status="running",
-                run_id=result["run_id"],
+                run_id=launched_result["run_id"],
                 started_at=now,
                 # A fast-failing run can reach handle_run_completion before this
                 # write resumes; never clobber its terminal status.
@@ -173,8 +175,8 @@ class ScheduledTaskService:
                 status=task_status,
                 next_run_at=next_at,
                 last_run_at=now,
-                last_run_id=result["run_id"],
-                last_thread_id=result["thread_id"],
+                last_run_id=launched_result["run_id"],
+                last_thread_id=launched_result["thread_id"],
                 last_error=None,
                 increment_run_count=True,
                 # Same race as the run-row write above: a fast-failing run's
@@ -184,17 +186,26 @@ class ScheduledTaskService:
             return {
                 "outcome": "launched",
                 "task_run_id": task_run_id,
-                "run_id": result["run_id"],
-                "thread_id": result["thread_id"],
+                "run_id": launched_result["run_id"],
+                "thread_id": launched_result["thread_id"],
                 "error": None,
             }
         except Exception as exc:
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            if launched_result is not None:
+                logger.exception(
+                    "Scheduled run %s launched but bookkeeping failed; retrying idempotent updates",
+                    launched_result["run_id"],
+                )
+                return await self._recover_launched_dispatch(
+                    task,
+                    task_run_id=task_run_id,
+                    result=launched_result,
+                    task_status=task_status,
+                    next_at=next_at,
+                    now=now,
+                )
+
+            next_at = next_run_at(task["schedule_type"], task["schedule_spec"], task["timezone"], now=now)
             if self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
                 return await self._finalize_skip(task, task_run_id=task_run_id, thread_id=execution_thread_id, now=now, error=str(exc))
 
@@ -223,6 +234,53 @@ class ScheduledTaskService:
                 "thread_id": execution_thread_id,
                 "error": str(exc),
             }
+
+    async def _recover_launched_dispatch(
+        self,
+        task: dict[str, Any],
+        *,
+        task_run_id: str,
+        result: dict[str, Any],
+        task_status: str,
+        next_at: datetime | None,
+        now: datetime,
+    ) -> dict[str, Any]:
+        recovery_errors = []
+        try:
+            await self._task_run_repo.update_status(
+                task_run_id,
+                status="running",
+                run_id=result["run_id"],
+                started_at=now,
+                protect_terminal=True,
+            )
+        except Exception as exc:
+            logger.exception("Failed to recover scheduled run-row bookkeeping for %s", result["run_id"])
+            recovery_errors.append(str(exc))
+
+        try:
+            await self._task_repo.update_after_launch(
+                task["id"],
+                status=task_status,
+                next_run_at=next_at,
+                last_run_at=now,
+                last_run_id=result["run_id"],
+                last_thread_id=result["thread_id"],
+                last_error=None,
+                increment_run_count=True,
+                protect_terminal=True,
+            )
+        except Exception as exc:
+            logger.exception("Failed to recover scheduled task bookkeeping for %s", result["run_id"])
+            recovery_errors.append(str(exc))
+
+        return {
+            "outcome": "launched",
+            "task_run_id": task_run_id,
+            "run_id": result["run_id"],
+            "thread_id": result["thread_id"],
+            "error": "; ".join(recovery_errors) or None,
+        }
 
     def _active_run_conflict_result(self, thread_id: str) -> dict[str, Any]:
         """Manual-trigger response when the task already has an active run.

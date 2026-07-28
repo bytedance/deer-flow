@@ -181,11 +181,12 @@ class ScheduledTaskRepository:
             else:
                 row.status = status
                 row.last_error = last_error
+            is_new_launch = last_run_id is None or row.last_run_id != last_run_id
             row.next_run_at = next_run_at
             row.last_run_at = last_run_at
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
-            if increment_run_count:
+            if increment_run_count and is_new_launch:
                 row.run_count += 1
             row.lease_owner = None
             row.lease_expires_at = None

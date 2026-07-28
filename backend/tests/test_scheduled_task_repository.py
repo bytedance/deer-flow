@@ -269,6 +269,47 @@ async def test_update_after_launch_protect_terminal_keeps_hook_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_update_after_launch_is_idempotent_for_same_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+
+    repo = ScheduledTaskRepository(sf)
+    await repo.create(
+        task_id="task-retry",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="task-retry",
+        prompt="p",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
+    )
+    kwargs = {
+        "status": "enabled",
+        "next_run_at": datetime(2026, 7, 3, 1, 0, tzinfo=UTC),
+        "last_run_at": datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
+        "last_run_id": "run-1",
+        "last_thread_id": "thread-1",
+        "last_error": None,
+        "increment_run_count": True,
+    }
+
+    await repo.update_after_launch("task-retry", **kwargs)
+    await repo.update_after_launch("task-retry", **kwargs)
+
+    task = await repo.get("task-retry", user_id="user-1")
+    assert task is not None
+    assert task["last_run_id"] == "run-1"
+    assert task["run_count"] == 1
+
+    await close_engine()
+
+
+@pytest.mark.asyncio
 async def test_list_by_task_paginates(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     sf = get_session_factory()

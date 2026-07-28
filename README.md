@@ -1015,6 +1015,7 @@ Current MVP capabilities:
 - Support `once` and `cron` schedules
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Use `skip` overlap behavior for due cron executions that collide with an active run on the same reused thread
+- Keep a launched run's overlap slot and identifier recoverable if a post-launch database write must be retried
 - Pause, resume, trigger, inspect history, and delete tasks
 - Execute scheduled work through the normal DeerFlow run lifecycle
 
