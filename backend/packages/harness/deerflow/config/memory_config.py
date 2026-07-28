@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
-_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
+_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config", "allow_lazy_installs"})
 
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
@@ -107,6 +107,18 @@ class MemoryConfig(BaseModel):
             "self-interprets it (DeerMem parses it into `DeerMemConfig`). Values "
             "live in the host config file (`config.yaml` `memory.backend_config`); "
             "they do not belong on the shared `MemoryConfig` schema."
+        ),
+    )
+    allow_lazy_installs: bool = Field(
+        default=False,
+        description=(
+            "Opt-in: when true, a memory backend whose `plugin.yaml` declares "
+            "external pip dependencies will auto-install them (via `uv pip install "
+            "--target <runtime_home>/memory_deps/<name>/`) on first selection, so "
+            "`manager_class: openviking` works without a manual `uv sync --extra`. "
+            "Default false (supply-chain safety: backend folders can declare "
+            "arbitrary PyPI packages). When false and a dep is missing, the "
+            "factory raises a `MemoryManagerError` with the exact install command."
         ),
     )
 

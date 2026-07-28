@@ -17,6 +17,14 @@ Writing a new backend:
   3. ``<yourname>_manager.py``: rename the class; declare your deps as
      ``PrivateAttr``; ``model_post_init`` parses ``self.backend_config`` into
      your config; implement the ABC methods against your memory system.
+     **If your backend has external pip deps, import them lazily** -- inside
+     ``model_post_init`` / ``_ensure_ready``, NEVER at module top-level
+     (otherwise ``_scan_backends`` fails because the dep is not installed yet).
+  3b. ``plugin.yaml``: (Optional) if your backend needs external pip packages
+     from PyPI, list them here (see the ``plugin.yaml`` next to this file).
+     Set ``memory.allow_lazy_installs: true`` in config.yaml and the factory
+     auto-installs deps on first use -- no ``uv sync --extra``, no pyproject
+     edit needed. If your backend has zero external deps, skip this file.
   4. (Optional) override the tier-3 hooks at the bottom (``create_fact`` /
      ``delete_fact`` / ``update_fact`` / ``reload_memory`` / ``warm``) -- they
      have base defaults (``warm``=True, the rest raise ``NotImplementedError``)
@@ -39,7 +47,7 @@ disabling memory without touching ``enabled``, and as a baseline.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 from pydantic import PrivateAttr
 
@@ -56,8 +64,19 @@ def _empty_memory() -> dict[str, Any]:
     Minimal shape; the host gateway fills ``version`` / ``lastUpdated`` /
     ``user`` / ``history`` with defaults. A real backend returns the full
     DeerMem-shape doc (see the return-shape note in the module docstring).
+
+    ``display`` is the backend-driven display contract. Set it to
+    ``{"sections": [{"id": "...", "title": "...", "type": "list", "items": [...], "order": 1}]}``
+    and the frontend renders those sections instead of the fixed 6-slot
+    DeerMem summary layout. Each section has:
+      - ``id``: unique string (e.g. "prefs", "profile")
+      - ``title``: human-readable title
+      - ``type``: "content" (markdown), "list", "cards", or "table"
+      - ``items``: list of dicts for list/cards/table; unused for content
+      - ``content``: raw markdown string for type="content"
+      - ``order``: integer sort weight (lower = earlier)
     """
-    return {"facts": []}
+    return {"facts": [], "display": {"sections": []}}
 
 
 class NoopMemoryManager(MemoryManager):
@@ -76,8 +95,7 @@ class NoopMemoryManager(MemoryManager):
 
     # noop overrides search() to return [] (its "store/recall nothing" design --
     # every read returns empty, never raises), so it is search-capable; the flag
-    # is True to match the override (the invariant requires flag == override).
-    supports_search: ClassVar[bool] = True
+    # supports_search is auto-derived by __init_subclass__ (search() is overridden)
 
     def model_post_init(self, __context: Any) -> None:
         self._config = NoopConfig.from_backend_config(self.backend_config)

@@ -99,6 +99,23 @@ class Fact(BaseModel):
         return "unknown"
 
 
+class MemoryDisplaySection(BaseModel):
+    """A single section in a backend-driven memory display."""
+
+    id: str = Field(..., description="Unique section identifier")
+    title: str = Field(..., description="Display title for the section")
+    type: Literal["content", "list", "cards", "table"] = Field(..., description="Rendering type for the frontend")
+    content: str | None = Field(default=None, description="Markdown content when type='content'")
+    items: list[dict[str, Any]] = Field(default_factory=list, description="Data rows for list/cards/table types")
+    order: int = Field(default=0, description="Sort weight (lower = earlier)")
+
+
+class MemoryDisplay(BaseModel):
+    """Backend-driven display instructions for the memory panel."""
+
+    sections: list[MemoryDisplaySection] = Field(default_factory=list)
+
+
 class MemoryResponse(BaseModel):
     """Response model for memory data."""
 
@@ -108,6 +125,8 @@ class MemoryResponse(BaseModel):
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
     facts: list[Fact] = Field(default_factory=list)
+    display: MemoryDisplay | None = Field(default=None, description="Backend-driven display instructions; when present the frontend renders these sections instead of the fixed summary layout")
+    data: dict[str, Any] | None = Field(default=None, description="Backend-native data for lossless export/import round-trip (only populated by export_memory)")
 
 
 def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
@@ -398,9 +417,20 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
     description="Export the current global memory data as JSON for backup or transfer.",
 )
 async def export_memory(http_request: Request) -> MemoryResponse:
-    """Export the current memory data."""
+    """Export the current memory data.
+
+    Prefers :meth:`~deerflow.agents.memory.manager.MemoryManager.export_memory`
+    (backend-native full export with ``data`` for lossless round-trip). Falls
+    back to :meth:`~deerflow.agents.memory.manager.MemoryManager.get_memory`
+    when the backend does not override ``export_memory`` (the default raises
+    ``NotImplementedError``).
+    """
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
+    user_id = _resolve_memory_user_id(http_request)
+    try:
+        memory_data = await asyncio.to_thread(manager.export_memory, user_id)
+    except NotImplementedError:
+        memory_data = await _get_memory_or_501(manager, user_id, "export memory")
     return MemoryResponse(**memory_data)
 
 

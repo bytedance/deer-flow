@@ -28,10 +28,11 @@ Copy `noop/` to `backends/<yourname>/` and edit three files in this folder plus 
 | `backends/<yourname>/config.py` | Declare your config fields + `from_backend_config` (parse `backend_config`; read `storage_path` from it - **do not import deer-flow path helpers**) |
 | `backends/<yourname>/<yourname>_manager.py` | Rename the class; parse config in `model_post_init`; implement `from_config` + the tier-1 abstracts (`add`/`get_context`); override tier-2/3 methods as needed (see [Backend Contract](#backend-contract)) |
 | `backends/<yourname>/__init__.py` | `MANAGER_CLASS = YourManager` (relative import) |
+| `backends/<yourname>/plugin.yaml` | **Only if the backend needs external libs**: declare dependencies (pip specs) + import names. Set `allow_lazy_installs: true` and the factory auto-installs deps on first use. (See [External dependencies (auto-install)](#external-dependencies-auto-install) and `noop/plugin.yaml` for an annotated example.) |
 | `config.yaml` (repo root, parent of `backend/`) | `memory.manager_class: <yourname>` + your knobs under `memory.backend_config` |
-| `packages/harness/pyproject.toml` | **Only if the backend needs external libs**: declare the dependency; add `[tool.uv.sources]` for vendored source. Otherwise `uv sync` purges it (see [Common Pitfalls](#common-pitfalls)) |
+| `packages/harness/pyproject.toml` | **Only if you prefer `uv sync --extra`** over `plugin.yaml`: declare the dependency as an optional extra (the manifest replaces the pyproject step for most backends) |
 
-See the docstring at the top of `noop/noop_manager.py` for the full 6-step walkthrough.
+See the docstring at the top of `noop/noop_manager.py` for the full 7-step walkthrough (incl. `plugin.yaml`).
 
 ## Switch the Active Backend
 
@@ -44,6 +45,41 @@ memory:
 ```
 
 Then **restart deer-flow** - the memory manager is a process-level singleton; a running process does not hot-reload config or backend code.
+
+## External dependencies (auto-install)
+
+Each backend may ship a `plugin.yaml` next to its `__init__.py` declaring its
+external pip dependencies. The factory auto-installs them on first selection
+(when `memory.allow_lazy_installs: true`), into
+`<runtime_home>/memory_deps/<name>/` (outside the venv, so `uv sync` never
+wipes it). **No pyproject edit, no `uv sync --extra`.**
+
+**Format** (`backends/<name>/plugin.yaml`):
+
+```yaml
+name: <backend-name>
+dependencies:          # pip specs (PEP 508) - what to download
+  - some-pkg
+  - another>=2.0
+import_names:          # module names for detection (defaults to deps stripped)
+  - some_pkg
+  - another_pkg
+```
+
+**How it works**:
+
+1. `_scan_backends` reads `plugin.yaml` (pure file parse, no backend import) and caches it alongside the backend class.
+2. `get_memory_manager` calls `ensure_backend_deps(manifest, allow_lazy, runtime_home)` between resolving and constructing the backend.
+3. If the deps are already importable (incl. from a prior `--target` install) -> no-op.
+4. If missing and `allow_lazy_installs: false` (default) -> clear `MemoryManagerError` with the install command.
+5. If missing and `allow_lazy_installs: true` -> `uv pip install --target <target>` -> prepend target to `sys.path` -> check again -> done.
+
+**Hard rule**: backends with external deps MUST import them lazily (in
+`model_post_init` / `_ensure_ready`, **never** at module top-level), otherwise
+`_scan_backends` fails because the dep is not installed yet.
+
+**`uv sync --extra` is still available** (declare the extra in pyproject), but
+`plugin.yaml` is the recommended, zero-configuration path for new backends.
 
 ## Backend Contract
 
@@ -119,7 +155,7 @@ These are backend-agnostic. Don't touch them when swapping backends (unless you'
 
 Lessons from integrating external backends:
 
-1. **External deps must be declared in `pyproject.toml`.** A bare `uv pip install` is purged on the next `uv sync` / `langgraph dev`. Declare the dep (and `[tool.uv.sources]` for vendored source).
+1. **External deps need either `plugin.yaml` or `pyproject.toml`.** A bare `uv pip install` is purged on the next `uv sync` / `langgraph dev`. The recommended path is a `plugin.yaml` in the backend folder (auto-install -- see [External dependencies (auto-install)](#external-dependencies-auto-install)); alternatively declare the optional extra in pyproject.
 2. **Return the DeerMem shape.** Otherwise the frontend crashes with `Invalid time value` and your data is silently dropped. Build a small adapter helper to map your native records into it.
 3. **Fact CRUD returns 501 if not implemented.** The frontend's delete-fact button reports `Operation 'delete fact' not supported`. Implement `delete_fact` (and friends) to fix it.
 4. **Don't import `runtime_home`.** Read `storage_path` from `backend_config`. (The `noop` template shows the correct pattern; importing deer-flow path helpers breaks portability - contract #4.)

@@ -27,6 +27,11 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deerflow.agents.memory.backends._plugin_loader import (
+    BackendManifest,
+    ensure_backend_deps,
+    read_manifest,
+)
 from deerflow.config.memory_config import get_memory_config
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,14 @@ _MANAGER_CLASS_ATTR = "MANAGER_CLASS"
 # _manager_lock guards get_memory_manager()'s double-checked init (multi-threaded).
 _memory_manager: MemoryManager | None = None
 _backends_cache: dict[str, type[MemoryManager]] | None = None
+# Per-backend ``plugin.yaml`` manifests (external deps to auto-install on select).
+# ``None`` = not scanned yet; populated alongside ``_backends_cache`` by
+# :func:`_scan_backends`. Pure file parse -- does not import the backend.
+_BACKEND_MANIFESTS: dict[str, BackendManifest] | None = None
+# Backends whose folder exists but import failed (code bug / missing transitive dep /
+# top-level import of heavy lib). ``None`` = not scanned yet. Used by
+# :func:`_resolve_manager_class` to give a clear error with the original traceback.
+_BACKEND_IMPORT_ERRORS: dict[str, Exception] | None = None
 _manager_lock = threading.Lock()
 
 
@@ -135,46 +148,28 @@ class MemoryManager(BaseModel):
         """Accept None (zero-config) as an empty dict; leave dicts untouched."""
         return value or {}
 
-    # Search capability flag (ClassVar, not a field): set True iff the backend
-    # overrides search(). The invariant validator checks the flag MATCHES whether
-    # search() is actually overridden (type(self).search is not MemoryManager.search),
-    # so the two can't drift -- required for mode="tool" (the agent calls
-    # memory_search in tool mode, so a non-search backend is a misconfiguration
-    # that fails fast at instantiation rather than silently returning empty
-    # results). Default False: a new backend must explicitly opt in to tool mode.
+    # Search capability -- auto-derived via __init_subclass__: True iff the
+    # backend overrides search(). A backend only needs to override search();
+    # the flag is automatic -- no manual ClassVar needed. When mode="tool"
+    # the invariant validator requires search() to be overridden (fail-fast
+    # at instantiation rather than silently returning empty results).
     supports_search: ClassVar[bool] = False
     # Backends that rely on conversation-level extraction instead of fact CRUD
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Always recompute from the actual override status -- a manual
+        # ``supports_search = True`` without overriding search() would
+        # escape the mode="tool" validator.
+        cls.supports_search = cls.search is not MemoryManager.search
+
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
-        """Cross-field invariants every backend must satisfy at instantiation.
-
-        Fires on the factory path AND when a backend is constructed directly
-        (bypassing the factory), since it lives on the base model. DeerMem-private
-        invariants (e.g. storage_path is a directory) stay on ``DeerMemConfig``.
-
-        ``supports_search`` (ClassVar flag) must match whether ``search()`` is
-        actually overridden, so the declarative flag can't drift from the
-        implementation -- a backend that overrides ``search()`` but forgets
-        ``supports_search = True`` (or sets the flag without overriding) is a bug
-        caught at instantiation, not a misleading tool-mode rejection or a runtime
-        ``NotImplementedError`` on the first ``memory_search`` call.
-        """
-        search_overridden = type(self).search is not MemoryManager.search
-        if type(self).supports_search != search_overridden:
-            raise ValueError(
-                f"{type(self).__name__}.supports_search={type(self).supports_search} "
-                f"is inconsistent with search(): search() is "
-                f"{'overridden' if search_overridden else 'inherited (not implemented)'}. "
-                f"Set supports_search={search_overridden} on the backend to match."
-            )
-        if self.mode == "tool" and not search_overridden:
-            raise ValueError(
-                f"memory mode='tool' requires a backend that implements search(), but {type(self).__name__} does not override search(). Use mode='middleware' or a backend that overrides search() (and sets supports_search=True)."
-            )
+        if self.mode == "tool" and not type(self).supports_search:
+            raise ValueError(f"memory mode='tool' requires a backend that implements search(), but {type(self).__name__} does not override search(). Use mode='middleware' or a backend that overrides search().")
         return self
 
     # ── Tier 1: @abstractmethod ─────────────────────────────────────────
@@ -506,13 +501,17 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
     to import is logged and skipped so a broken optional backend never breaks
     the factory.
     """
-    global _backends_cache
+    global _backends_cache, _BACKEND_MANIFESTS, _BACKEND_IMPORT_ERRORS
     if _backends_cache is not None:
         return _backends_cache
 
     registry: dict[str, type[MemoryManager]] = {}
+    manifests: dict[str, BackendManifest] = {}
+    import_errors: dict[str, Exception] = {}
     if not _BACKENDS_DIR.is_dir():
         _backends_cache = registry
+        _BACKEND_MANIFESTS = manifests
+        _BACKEND_IMPORT_ERRORS = import_errors
         return registry
 
     for entry in sorted(_BACKENDS_DIR.iterdir()):
@@ -523,8 +522,9 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
         dotted = f"deerflow.agents.memory.backends.{entry.name}"
         try:
             module: ModuleType = importlib.import_module(dotted)
-        except Exception:  # noqa: BLE001 - a broken backend must not break the factory
+        except Exception as exc:  # noqa: BLE001 - record for resolve-time diagnostics
             logger.exception("Failed to import memory backend %r; skipping", entry.name)
+            import_errors[entry.name] = exc
             continue
         cls = getattr(module, _MANAGER_CLASS_ATTR, None)
         if cls is None:
@@ -537,9 +537,34 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
             )
             continue
         registry[entry.name] = cls
+        # Cache the backend's plugin.yaml manifest (if any) for the factory's
+        # auto-install step. Pure file parse -- does not import the backend.
+        manifest = read_manifest(entry)
+        if manifest is not None:
+            manifests[entry.name] = manifest
 
     _backends_cache = registry
+    _BACKEND_MANIFESTS = manifests
+    _BACKEND_IMPORT_ERRORS = import_errors
     return registry
+
+
+def _get_backend_manifest(name: str) -> BackendManifest | None:
+    """Return a backend's ``plugin.yaml`` manifest (cached), or ``None``.
+
+    Triggers a scan if needed. Falls back to reading the drop-in folder by name
+    for a ``manager_class`` that resolved but wasn't cached (defensive); returns
+    ``None`` for backends with no manifest (deermem/noop) -- they have no
+    external deps to install.
+    """
+    if _BACKEND_MANIFESTS is None:
+        _scan_backends()
+    if _BACKEND_MANIFESTS is not None and name in _BACKEND_MANIFESTS:
+        return _BACKEND_MANIFESTS[name]
+    folder = _BACKENDS_DIR / name
+    if folder.is_dir():
+        return read_manifest(folder)
+    return None
 
 
 def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
@@ -560,6 +585,15 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     registry = _scan_backends()
     if manager_class in registry:
         return registry[manager_class]
+
+    # The backend folder exists but its import failed (code bug / missing deps /
+    # top-level import of heavy lib). Chain the original exception so the
+    # operator can distinguish "typo in manager_class" from "backend code broken".
+    import_errors = _BACKEND_IMPORT_ERRORS or {}
+    if manager_class in import_errors:
+        raise ValueError(f"Memory backend {manager_class!r} was found (a `backends/{manager_class}/` folder exists) but its import failed. Check the backend code -- the original error details are chained below.") from import_errors[
+            manager_class
+        ]
 
     # Treat as a dotted path: support both "pkg.mod:Cls" and "pkg.mod.Cls".
     dotted_error: str | None = None
@@ -771,6 +805,16 @@ def get_memory_manager() -> MemoryManager:
         cfg = get_memory_config()
         manager_class = cfg.manager_class
         cls = _resolve_manager_class(manager_class)
+        # Auto-install the backend's declared external deps (plugin.yaml) before
+        # constructing it. No-op for backends with no manifest (deermem/noop).
+        from deerflow.config.runtime_paths import runtime_home
+
+        ensure_backend_deps(
+            manager_class,
+            _get_backend_manifest(manager_class),
+            allow_lazy=cfg.allow_lazy_installs,
+            runtime_home=Path(runtime_home()),
+        )
         backend_config = dict(cfg.backend_config or {})
         # Zero-config UX: default DeerMem storage to deer-flow's state dir
         # (absolute, CWD-independent) so memory lands at
@@ -809,7 +853,9 @@ def reset_memory_manager() -> None:
     The next :func:`get_memory_manager` call re-reads the config and re-scans
     backends. Use this in tests or when switching backends at runtime.
     """
-    global _memory_manager, _backends_cache
+    global _memory_manager, _backends_cache, _BACKEND_MANIFESTS, _BACKEND_IMPORT_ERRORS
     with _manager_lock:
         _memory_manager = None
         _backends_cache = None
+        _BACKEND_MANIFESTS = None
+        _BACKEND_IMPORT_ERRORS = None

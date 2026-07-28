@@ -159,15 +159,17 @@ class _ConsistentSearchBackend(_MinimalBackend):
         return []
 
 
-def test_invariant_supports_search_flag_must_match_override():
-    """supports_search (ClassVar) must match whether search() is overridden, so
-    the flag can't drift from the implementation -- caught at instantiation, not
-    as a misleading tool-mode rejection (override-but-forgot-flag) or a runtime
-    NotImplementedError on the first memory_search call (flag-without-override)."""
-    with pytest.raises(ValueError, match="inconsistent"):
-        _SearchOverrideForgotFlag(backend_config={})
-    with pytest.raises(ValueError, match="inconsistent"):
-        _FlagWithoutSearchOverride(backend_config={})
+def test_supports_search_auto_derived_by_init_subclass():
+    """supports_search is auto-derived (O1): True iff search() is overridden.
+
+    A backend that overrides search() automatically gets True; one that
+    doesn't stays False (even if it manually tries to set the flag)."""
+    # Overrides search() -> auto True (no manual ClassVar to remember)
+    assert _SearchOverrideForgotFlag.supports_search is True
+    # Manually set True but doesn't override -> auto-overridden to False
+    assert _FlagWithoutSearchOverride.supports_search is False
+    # Consistent: overrides + explicitly sets -> True
+    assert _ConsistentSearchBackend.supports_search is True
 
 
 def test_invariant_consistent_search_backend_runs_in_tool_mode():

@@ -25,7 +25,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 from pydantic import PrivateAttr
 
@@ -105,10 +105,7 @@ class DeerMem(MemoryManager):
     _trivial_patterns: Any = PrivateAttr(default=None)
 
     # DeerMem implements search() (case-insensitive substring over stored facts),
-    # so it is valid for mode="tool" (the base invariant validator requires this
-    # for tool mode). Backends without real search inherit the False default and
-    # cannot be used with mode="tool".
-    supports_search: ClassVar[bool] = True
+    # supports_search is auto-derived by __init_subclass__ (search() is overridden)
 
     def model_post_init(self, __context: Any) -> None:
         """Construct DeerMem's dependencies from ``self.backend_config``.

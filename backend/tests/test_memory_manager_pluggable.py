@@ -72,11 +72,11 @@ def test_noop_runs_with_empty_memory() -> None:
     manager = get_memory_manager()
     assert manager.get_context(user_id="u") == ""
     assert manager.search("anything") == []
-    assert manager.get_memory(user_id="u") == {"facts": []}
+    assert manager.get_memory(user_id="u") == {"facts": [], "display": {"sections": []}}
     # writes are no-ops; memory stays empty
     manager.add("t", [], agent_name=None, user_id="u")
     manager.add_nowait("t", [], agent_name=None, user_id="u")
-    assert manager.get_memory(user_id="u") == {"facts": []}
+    assert manager.get_memory(user_id="u") == {"facts": [], "display": {"sections": []}}
 
 
 def test_tier3_hooks_have_defaults_noop_inherits() -> None:

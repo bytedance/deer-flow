@@ -34,6 +34,7 @@ import {
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
 import type {
+  MemorySection,
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
@@ -48,15 +49,20 @@ import { SettingsSection } from "./settings-section";
 type MemoryViewFilter = "all" | "facts" | "summaries";
 type MemoryFact = UserMemory["facts"][number];
 
-type MemorySection = {
+/** A display item (from ``display.sections[].items[]``) with optional metadata. */
+type DisplayItem = Record<string, unknown> & { id?: string };
+type DisplayEditHandler = (item: DisplayItem) => void;
+type DisplayDeleteHandler = (item: DisplayItem) => void;
+
+type MemorySummarySection = {
   title: string;
   summary: string;
   updatedAt?: string;
 };
 
-type MemorySectionGroup = {
+type MemorySummaryGroup = {
   title: string;
-  sections: MemorySection[];
+  sections: MemorySummarySection[];
 };
 
 type PendingImport = {
@@ -145,7 +151,7 @@ function confidenceToLevelKey(confidence: unknown): {
 }
 
 function formatMemorySection(
-  section: MemorySection,
+  section: MemorySummarySection,
   t: ReturnType<typeof useI18n>["t"],
 ): string {
   const content =
@@ -165,7 +171,7 @@ function formatMemorySection(
 function buildMemorySectionGroups(
   memory: UserMemory,
   t: ReturnType<typeof useI18n>["t"],
-): MemorySectionGroup[] {
+): MemorySummaryGroup[] {
   return [
     {
       title: t.settings.memory.markdown.userContext,
@@ -212,7 +218,7 @@ function buildMemorySectionGroups(
 
 function summariesToMarkdown(
   memory: UserMemory,
-  sectionGroups: MemorySectionGroup[],
+  sectionGroups: MemorySummaryGroup[],
   t: ReturnType<typeof useI18n>["t"],
 ) {
   const parts: string[] = [];
@@ -273,6 +279,442 @@ function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+function _displayCellValue(value: unknown): string {
+  if (value == null) return "-";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "-";
+  }
+}
+
+// ── Display-driven rendering (backend returns what to show) ─────────────────
+
+function buildDisplaySections(
+  memory: UserMemory,
+): MemorySection[] | null {
+  // If the backend provides a `display` field (even with empty sections),
+  // use display mode -- only fall back when display is absent entirely
+  // (backend doesn't support the display contract).
+  if (!memory.display) return null;
+  const sections = memory.display.sections ?? [];
+  return [...sections].sort((a, b) => a.order - b.order);
+}
+
+function filterDisplaySections(
+  sections: MemorySection[] | null,
+  query: string,
+): MemorySection[] | null {
+  if (!sections) return null;
+  if (!query) return sections;
+  const normalized = query.toLowerCase();
+  const filtered = sections
+    .map((section) => {
+      if (
+        section.title.toLowerCase().includes(normalized) ||
+        (section.content ?? "").toLowerCase().includes(normalized)
+      ) {
+        return section;
+      }
+      if (section.items?.length) {
+        const matchedItems = section.items.filter((item) =>
+          Object.values(item).some(
+            (v) => typeof v === "string" && v.toLowerCase().includes(normalized),
+          ),
+        );
+        if (matchedItems.length > 0) {
+          return { ...section, items: matchedItems };
+        }
+      }
+      return null;
+    })
+    .filter(Boolean) as MemorySection[];
+  return filtered.length > 0 ? filtered : null;
+}
+
+function renderDisplaySection(
+  section: MemorySection,
+  t: ReturnType<typeof useI18n>["t"],
+  onEdit: DisplayEditHandler,
+  onDelete: DisplayDeleteHandler,
+) {
+  switch (section.type) {
+    case "content":
+      return renderContentSection(section, t);
+    case "list":
+      return renderListSection(section, t, onEdit, onDelete);
+    case "cards":
+      return renderCardsSection(section, t, onEdit, onDelete);
+    case "table":
+      return renderTableSection(section, t, onEdit, onDelete);
+  }
+}
+
+// Color rotation for section accents -- backend-agnostic (by order, not by id).
+// Any memory system gets distinguishable colored left borders without
+// hardcoding backend-specific type names.
+const SECTION_ACCENT_ROTATION = [
+  "border-l-blue-500",
+  "border-l-green-500",
+  "border-l-red-500",
+  "border-l-teal-500",
+  "border-l-purple-500",
+  "border-l-orange-500",
+  "border-l-violet-500",
+  "border-l-pink-500",
+  "border-l-amber-500",
+  "border-l-indigo-500",
+] as const;
+
+function SectionWrapper({
+  section,
+  children,
+}: {
+  section: MemorySection;
+  children: React.ReactNode;
+}) {
+  const accent =
+    SECTION_ACCENT_ROTATION[(section.order ?? 0) % SECTION_ACCENT_ROTATION.length];
+  return (
+    <div
+      key={section.id}
+      className={`rounded-md border border-l-2 ${accent} bg-card/50 p-3`}
+    >
+      <div className="mb-2 flex items-center gap-2">
+        <h3 className="text-sm font-semibold">{section.title}</h3>
+        <span className="text-muted-foreground bg-muted rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+          {section.type}
+        </span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function renderContentSection(
+  section: MemorySection,
+  _t: ReturnType<typeof useI18n>["t"],
+) {
+  const body = section.content?.trim();
+  return (
+    <SectionWrapper section={section}>
+      {body ? (
+        <SafeStreamdown
+          className="text-muted-foreground size-full min-w-0 text-sm [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+          {...streamdownPlugins}
+        >
+          {body}
+        </SafeStreamdown>
+      ) : (
+        <div className="text-muted-foreground text-xs italic">
+          (empty)
+        </div>
+      )}
+    </SectionWrapper>
+  );
+}
+
+function renderListSection(
+  section: MemorySection,
+  t: ReturnType<typeof useI18n>["t"],
+  onEdit: DisplayEditHandler,
+  onDelete: DisplayDeleteHandler,
+) {
+  const items = section.items ?? [];
+  return (
+    <SectionWrapper section={section}>
+      {items.length === 0 ? (
+        <div className="text-muted-foreground text-xs italic">
+          {t.settings.memory.noFacts ?? "No items."}
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {items.map((item, i) => {
+            const content =
+              typeof item.content === "string" ? item.content : "";
+            const itemId =
+              typeof item.id === "string" ? item.id : `item-${i}`;
+            const deletable = item.deletable === true;
+            const editable = item.editable === true;
+            return (
+              <li
+                key={itemId}
+                className="flex flex-col gap-1.5 rounded border border-border/60 p-2 sm:flex-row sm:items-start sm:justify-between"
+              >
+                <div className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
+                  <DisplayItemMeta item={item} t={t} />
+                  <SafeStreamdown
+                    className="size-full min-w-0 text-sm [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                    {...streamdownPlugins}
+                  >
+                    {content || "(empty)"}
+                  </SafeStreamdown>
+                </div>
+                <DisplayItemActions
+                  item={item}
+                  deletable={deletable}
+                  editable={editable}
+                  onEdit={onEdit}
+                  onDelete={onDelete}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </SectionWrapper>
+  );
+}
+
+function renderCardsSection(
+  section: MemorySection,
+  t: ReturnType<typeof useI18n>["t"],
+  onEdit: DisplayEditHandler,
+  onDelete: DisplayDeleteHandler,
+) {
+  const items = section.items ?? [];
+  return (
+    <SectionWrapper section={section}>
+      {items.length === 0 ? (
+        <div className="text-muted-foreground text-xs italic">
+          {t.settings.memory.noFacts ?? "No items."}
+        </div>
+      ) : (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {items.map((item, i) => {
+            const title =
+              typeof item.title === "string" ? item.title : undefined;
+            const body = typeof item.body === "string" ? item.body : "";
+            const tags: string[] = Array.isArray(item.tags)
+              ? item.tags.filter((t): t is string => typeof t === "string")
+              : [];
+            const itemId =
+              typeof item.id === "string" ? item.id : `card-${i}`;
+            const deletable = item.deletable === true;
+            const editable = item.editable === true;
+            return (
+              <div key={itemId} className="rounded border border-border/60 p-2">
+                <div className="mb-1 flex items-start justify-between gap-2">
+                  {title && (
+                    <h4 className="text-xs font-semibold">{title}</h4>
+                  )}
+                  <DisplayItemActions
+                    item={item}
+                    deletable={deletable}
+                    editable={editable}
+                    onEdit={onEdit}
+                    onDelete={onDelete}
+                  />
+                </div>
+                <DisplayItemMeta item={item} t={t} />
+                <SafeStreamdown
+                  className="text-muted-foreground size-full min-w-0 text-xs [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                  {...streamdownPlugins}
+                >
+                  {body || "(empty)"}
+                </SafeStreamdown>
+                {tags.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="bg-muted rounded px-1.5 py-0.5 text-[10px]"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </SectionWrapper>
+  );
+}
+
+function renderTableSection(
+  section: MemorySection,
+  _t: ReturnType<typeof useI18n>["t"],
+  onEdit: DisplayEditHandler,
+  onDelete: DisplayDeleteHandler,
+) {
+  const items = section.items ?? [];
+  if (items.length === 0) return null;
+  const internalKeys = new Set(["deletable", "editable", "id", "body"]);
+  const allKeys = new Set<string>();
+  for (const item of items) {
+    Object.keys(item).forEach((k) => {
+      if (!internalKeys.has(k)) allKeys.add(k);
+    });
+  }
+  const columns = Array.from(allKeys);
+  const hasActions = items.some(
+    (item) => item.deletable === true || item.editable === true,
+  );
+  if (hasActions) columns.push("_actions");
+  return (
+    <SectionWrapper section={section}>
+      <div className="overflow-x-auto rounded border border-border/60">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/60 border-b">
+            <tr>
+              {columns.map((col) => (
+                <th
+                  key={col}
+                  className="whitespace-nowrap px-2 py-1.5 text-left font-medium"
+                >
+                  {col === "_actions" ? "" : col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item, i) => {
+              const rid =
+                typeof item.id === "string" ? item.id : `row-${i}`;
+              const deletable = item.deletable === true;
+              const editable = item.editable === true;
+              return (
+                <tr key={rid} className="border-b last:border-0">
+                  {columns.map((col) =>
+                    col === "_actions" ? (
+                      <td key={col} className="px-2 py-1.5">
+                        <DisplayItemActions
+                          item={item}
+                          deletable={deletable}
+                          editable={editable}
+                          onEdit={onEdit}
+                          onDelete={onDelete}
+                        />
+                      </td>
+                    ) : (
+                      <td
+                        key={col}
+                        className="max-w-[280px] truncate px-2 py-1.5 [overflow-wrap:anywhere]"
+                      >
+                        {_displayCellValue(item[col])}
+                      </td>
+                    ),
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </SectionWrapper>
+  );
+}
+
+// ── Display item sub-components ──────────────────────────────────────────
+
+function DisplayItemMeta({
+  item,
+  t,
+}: {
+  item: DisplayItem;
+  t: ReturnType<typeof useI18n>["t"];
+}) {
+  const category =
+    typeof item.category === "string" ? item.category : undefined;
+  const confidence =
+    typeof item.confidence === "number" ? item.confidence : undefined;
+  const createdAt =
+    typeof item.createdAt === "string" ? item.createdAt : undefined;
+  const source =
+    typeof item.source === "string" ? item.source : undefined;
+
+  if (!category && confidence == null && !createdAt && !source) return null;
+
+  const { key: confidenceKey } = confidenceToLevelKey(confidence);
+  const confidenceText =
+    t.settings.memory.markdown.table.confidenceLevel[confidenceKey];
+
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      {category && (
+        <span>
+          {t.settings.memory.markdown.table.category}: {upperFirst(category)}
+        </span>
+      )}
+      {confidence != null && (
+        <span>
+          {t.settings.memory.markdown.table.confidence}: {confidenceText}
+        </span>
+      )}
+      {createdAt && (
+        <span>
+          {t.settings.memory.markdown.table.createdAt}:{" "}
+          {formatTimeAgo(createdAt)}
+        </span>
+      )}
+      {source && (
+        <span>
+          {t.settings.memory.markdown.table.source}:{" "}
+          {source === "manual" ? (
+            t.settings.memory.manualFactSource
+          ) : (
+            <Link
+              href={pathOfThread(source)}
+              className="text-primary underline-offset-4 hover:underline"
+            >
+              {t.settings.memory.markdown.table.view}
+            </Link>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function DisplayItemActions({
+  item,
+  deletable,
+  editable,
+  onEdit,
+  onDelete,
+}: {
+  item: DisplayItem;
+  deletable: boolean;
+  editable: boolean;
+  onEdit: DisplayEditHandler;
+  onDelete: DisplayDeleteHandler;
+}) {
+  if (!deletable && !editable) return null;
+  return (
+    <div className="flex shrink-0 items-center gap-1 self-start">
+      {editable && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="shrink-0"
+          onClick={() => onEdit(item)}
+          title="Edit"
+          aria-label="Edit"
+        >
+          <PenLineIcon className="h-4 w-4" />
+        </Button>
+      )}
+      {deletable && (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-destructive hover:text-destructive shrink-0"
+          onClick={() => onDelete(item)}
+          title="Delete"
+          aria-label="Delete"
+        >
+          <Trash2Icon className="h-4 w-4" />
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { memory, isLoading, error } = useMemory();
@@ -283,8 +725,12 @@ export function MemorySettingsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const updateMemoryFact = useUpdateMemoryFact();
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
-  const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
-  const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
+  const [factToDelete, setFactToDelete] = useState<
+    MemoryFact | DisplayItem | null
+  >(null);
+  const [factToEdit, setFactToEdit] = useState<
+    MemoryFact | DisplayItem | null
+  >(null);
   const [factEditorOpen, setFactEditorOpen] = useState(false);
   const [factForm, setFactForm] = useState<FactFormState>(
     DEFAULT_FACT_FORM_STATE,
@@ -350,18 +796,28 @@ export function MemorySettingsPage() {
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
-  const filteredSectionGroups = sectionGroups
-    .map((group) => ({
-      ...group,
-      sections: group.sections.filter((section) =>
-        normalizedQuery
-          ? `${section.title} ${section.summary}`
-              .toLowerCase()
-              .includes(normalizedQuery)
-          : true,
-      ),
-    }))
-    .filter((group) => group.sections.length > 0);
+  const displaySections = memory ? buildDisplaySections(memory) : null;
+  const usesDisplaySections = displaySections !== null;
+
+  const filteredSectionGroups = usesDisplaySections
+    ? []
+    : sectionGroups
+        .map((group) => ({
+          ...group,
+          sections: group.sections.filter((section) =>
+            normalizedQuery
+              ? `${section.title} ${section.summary}`
+                  .toLowerCase()
+                  .includes(normalizedQuery)
+              : true,
+          ),
+        }))
+        .filter((group) => group.sections.length > 0);
+
+  const filteredDisplaySections = filterDisplaySections(
+    displaySections,
+    normalizedQuery,
+  );
 
   const filteredFacts = memory
     ? memory.facts.filter((fact) =>
@@ -375,14 +831,26 @@ export function MemorySettingsPage() {
 
   const showSummaries = filter !== "facts";
   const showFacts = filter !== "summaries";
+  const hasFilteredDisplaySections =
+    usesDisplaySections &&
+    filteredDisplaySections !== null &&
+    filteredDisplaySections.length > 0;
   const shouldRenderSummariesBlock =
-    showSummaries && (filteredSectionGroups.length > 0 || !normalizedQuery);
+    showSummaries &&
+    (usesDisplaySections
+      ? filteredDisplaySections !== null &&
+        (filteredDisplaySections.length > 0 || !normalizedQuery)
+      : filteredSectionGroups.length > 0 || !normalizedQuery);
   const shouldRenderFactsBlock =
+    !usesDisplaySections &&
     showFacts &&
     (filteredFacts.length > 0 || !normalizedQuery || filter === "facts");
   const hasMatchingVisibleContent =
     !memory ||
-    (showSummaries && filteredSectionGroups.length > 0) ||
+    (showSummaries &&
+      (usesDisplaySections
+        ? hasFilteredDisplaySections
+        : filteredSectionGroups.length > 0)) ||
     (showFacts && filteredFacts.length > 0);
 
   async function handleExportMemory() {
@@ -457,11 +925,33 @@ export function MemorySettingsPage() {
     }
   }
 
+  function _itemId(item: MemoryFact | DisplayItem): string {
+    if (typeof item.id === "string") return item.id;
+    return "";
+  }
+
+  function _itemContent(item: MemoryFact | DisplayItem): string {
+    if (typeof item.content === "string") return item.content;
+    return "";
+  }
+
+  function _itemCategory(item: MemoryFact | DisplayItem): string {
+    if (typeof item.category === "string") return item.category;
+    return "context";
+  }
+
+  function _itemConfidence(item: MemoryFact | DisplayItem): number {
+    if (typeof item.confidence === "number") return item.confidence;
+    return 0.5;
+  }
+
   async function handleDeleteFact() {
     if (!factToDelete) return;
+    const factId = _itemId(factToDelete);
+    if (!factId) return;
 
     try {
-      await deleteMemoryFact.mutateAsync(factToDelete.id);
+      await deleteMemoryFact.mutateAsync(factId);
       toast.success(factDeleteSuccess);
       setFactToDelete(null);
     } catch (err) {
@@ -475,14 +965,22 @@ export function MemorySettingsPage() {
     setFactEditorOpen(true);
   }
 
-  function openEditFactDialog(fact: MemoryFact) {
-    setFactToEdit(fact);
+  function openEditFactDialog(item: MemoryFact | DisplayItem) {
+    setFactToEdit(item);
     setFactForm({
-      content: fact.content,
-      category: fact.category,
-      confidence: String(fact.confidence),
+      content: _itemContent(item),
+      category: _itemCategory(item),
+      confidence: String(_itemConfidence(item)),
     });
     setFactEditorOpen(true);
+  }
+
+  function handleEditDisplayItem(item: DisplayItem) {
+    openEditFactDialog(item);
+  }
+
+  function handleDeleteDisplayItem(item: DisplayItem) {
+    setFactToDelete(item);
   }
 
   async function handleSaveFact() {
@@ -506,13 +1004,18 @@ export function MemorySettingsPage() {
 
     try {
       if (factToEdit) {
+        const factId = _itemId(factToEdit);
+        if (!factId) {
+          toast.error(factValidationContent);
+          return;
+        }
         const patchInput: MemoryFactPatchInput = {
           content: input.content,
           category: input.category,
           confidence: input.confidence,
         };
         await updateMemoryFact.mutateAsync({
-          factId: factToEdit.id,
+          factId,
           input: patchInput,
         });
         toast.success(editFactSuccess);
@@ -549,7 +1052,7 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
+            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 && !usesDisplaySections ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
@@ -564,6 +1067,7 @@ export function MemorySettingsPage() {
                   placeholder={searchPlaceholder}
                   className="min-w-0 flex-1 sm:max-w-md"
                 />
+                {!usesDisplaySections && (
                 <ToggleGroup
                   type="single"
                   value={filter}
@@ -586,6 +1090,7 @@ export function MemorySettingsPage() {
                     {filterSummaries}
                   </ToggleGroupItem>
                 </ToggleGroup>
+                )}
               </div>
 
               {/* Row 2: actions — constructive group on the left, destructive separated to the right */}
@@ -636,15 +1141,38 @@ export function MemorySettingsPage() {
 
             {shouldRenderSummariesBlock ? (
               <div className="min-w-0 rounded-lg border p-4">
-                <div className="text-muted-foreground mb-4 text-sm">
-                  {summaryReadOnly}
-                </div>
-                <SafeStreamdown
-                  className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                  {...streamdownPlugins}
-                >
-                  {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </SafeStreamdown>
+                {usesDisplaySections ? (
+                  /* Display-driven sections (backend native format) */
+                  <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+                    {filteredDisplaySections && filteredDisplaySections.length > 0 ? (
+                      filteredDisplaySections.map((section) =>
+                        renderDisplaySection(
+                          section,
+                          t,
+                          handleEditDisplayItem,
+                          handleDeleteDisplayItem,
+                        ),
+                      )
+                    ) : (
+                      <div className="text-muted-foreground py-8 text-center text-sm">
+                        {memoryFullyEmpty}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Fallback: current hardcoded 6-slot DeerMem layout */
+                  <>
+                    <div className="text-muted-foreground mb-4 text-sm">
+                      {summaryReadOnly}
+                    </div>
+                    <SafeStreamdown
+                      className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+                      {...streamdownPlugins}
+                    >
+                      {summariesToMarkdown(memory, filteredSectionGroups, t)}
+                    </SafeStreamdown>
+                  </>
+                )}
               </div>
             ) : null}
 
@@ -907,7 +1435,7 @@ export function MemorySettingsPage() {
                 {factPreviewLabel}
               </div>
               <p className="break-words">
-                {truncateFactPreview(factToDelete.content)}
+                {truncateFactPreview(_itemContent(factToDelete))}
               </p>
             </div>
           ) : null}

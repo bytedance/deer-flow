@@ -39,6 +39,7 @@ def test_export_memory_route_returns_current_memory() -> None:
     exported_memory = _sample_memory(facts=[{"id": "fact_export", "content": "User prefers concise responses.", "category": "preference", "confidence": 0.9, "createdAt": "2026-03-20T00:00:00Z", "source": "thread-1"}])
 
     mock_mgr = MagicMock()
+    mock_mgr.export_memory.side_effect = NotImplementedError
     mock_mgr.get_memory.return_value = exported_memory
     with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
         with TestClient(app) as client:
@@ -86,6 +87,7 @@ def test_export_memory_route_preserves_source_error() -> None:
     )
 
     mock_mgr = MagicMock()
+    mock_mgr.export_memory.side_effect = NotImplementedError
     mock_mgr.get_memory.return_value = exported_memory
     with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
         with TestClient(app) as client:
@@ -501,6 +503,7 @@ def _unsupported_manager() -> MagicMock:
     """Mock a minimal backend: read/manage ops raise NotImplementedError."""
     mock_mgr = MagicMock()
     mock_mgr.get_memory.side_effect = NotImplementedError("get_memory not supported")
+    mock_mgr.export_memory.side_effect = NotImplementedError("export_memory not supported")
     mock_mgr.clear_memory.side_effect = NotImplementedError("clear_memory not supported")
     mock_mgr.import_memory.side_effect = NotImplementedError("import_memory not supported")
     mock_mgr.reload_memory.side_effect = NotImplementedError("reload_memory not supported")

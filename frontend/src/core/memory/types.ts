@@ -19,6 +19,19 @@ export interface MemoryFactPatchInput {
   confidence?: number;
 }
 
+export interface MemorySection {
+  id: string;
+  title: string;
+  type: "content" | "list" | "cards" | "table";
+  content?: string;
+  items?: Record<string, unknown>[];
+  order: number;
+}
+
+export interface MemoryDisplay {
+  sections: MemorySection[];
+}
+
 export interface UserMemory {
   version: string;
   lastUpdated: string;
@@ -51,4 +64,5 @@ export interface UserMemory {
     };
   };
   facts: MemoryFact[];
+  display?: MemoryDisplay;
 }

@@ -69,3 +69,4 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+memory_deps/

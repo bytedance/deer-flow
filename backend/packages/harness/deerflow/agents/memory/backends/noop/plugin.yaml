@@ -1,0 +1,23 @@
+# Plugin manifest for the noop memory backend.
+#
+# ## What this file does
+# Declares external pip dependencies so the memory factory can auto-install
+# them on first selection. The user only sets `memory.allow_lazy_installs: true`
+# in config.yaml -- no `uv sync --extra`, no `pip install`, no pyproject edit.
+#
+# ## When you need it
+# If your backend uses a third-party package (like `openviking` or `mem0`),
+# list it here. If your backend has zero external deps (like noop), this file
+# is optional but still useful as documentation.
+#
+# ## Golden rule: import heavy deps lazily
+# The factory scans ALL backends at startup. If your backend imports a heavy
+# dep at module top-level (before it is installed), the scan fails. Always
+# import external deps inside `model_post_init` or `_ensure_ready`, never at
+# module level.  See `noop_manager.py` (which imports nothing external) and
+# `openviking/openviking_manager.py` (which imports `openviking` lazily).
+
+name: noop
+description: "Do-nothing backend for tests and benchmarks; no external deps."
+dependencies: []           # pip specs (PEP 508) -- empty for noop
+import_names: []           # module names for detection (empty = no deps to check)

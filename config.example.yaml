@@ -1669,6 +1669,37 @@ memory:
   # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / mem0 / noop)
   # or a dotted import path to a MemoryManager subclass.
   manager_class: deermem
+  # Opt-in auto-install of a backend's external deps (declared in
+  # backends/<name>/plugin.yaml). When true, selecting a backend like
+  # `openviking` auto-installs its deps via `uv pip install --target
+  # <runtime_home>/memory_deps/<name>/` on first use -- no `uv sync --extra`
+  # needed, and `uv sync` never wipes it (installed outside the venv). Default
+  # false (supply-chain safety: backend folders can declare arbitrary PyPI
+  # packages). When false and a dep is missing, the factory raises a clear
+  # error with the install command.
+  # allow_lazy_installs: true
+  # Switching to the OpenViking backend (set allow_lazy_installs: true first):
+  #   manager_class: openviking
+  #   backend_config:
+  #     data_path: ""        # OpenViking store dir; empty = {runtime_home}/openviking
+  #     user_space: "default"
+  #     wait_on_write: false # add() fire-and-forget; add_nowait() blocks on extraction
+  #     # Providers are configured HERE (no separate ~/.openviking/ov.conf, no
+  #     # `openviking-server init`): the backend generates <data_path>/ov.conf
+  #     # from these. `embedding`/`vlm` are shortcuts; `ov_conf` is a raw dict
+  #     # for full control over every OpenViking field. $ENV refs are expanded
+  #     # by OpenViking at load time (deerflow's dotenv already set os.environ).
+  #     embedding:           # -> ov_conf.embedding.dense
+  #       provider: ollama
+  #       model: nomic-embed-text
+  #       api_base: http://localhost:11434/v1
+  #       dimension: 768
+  #       input: text
+  #     vlm:                  # -> ov_conf.vlm (any OpenAI-compatible chat model)
+  #       provider: openai
+  #       model: <chat-model>
+  #       api_base: <api-base>
+  #       api_key: $YOUR_LLM_API_KEY
   # Memory operation mode:
   #   middleware (default) - passive background extraction after each turn.
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
