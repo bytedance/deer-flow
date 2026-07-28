@@ -448,8 +448,8 @@ class TenkiSandbox(Sandbox):
                 # helper, same relative-to-root semantics as glob() above.
                 if file_path != root and not file_path.startswith(root_prefix):
                     continue
-                rel_path = file_path[len(root) :].lstrip("/")
-                if not rel_path or not path_matches(glob, rel_path):
+                rel_path = posixpath.basename(file_path) if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
                     continue
             matches.append(GrepMatch(path=self._virtual_path(file_path), line_number=line_number, line=truncate_line(line_text)))
             if len(matches) >= max_results:

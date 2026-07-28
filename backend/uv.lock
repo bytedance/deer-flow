@@ -952,7 +952,7 @@ tui = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.4.0" },
-    { name = "agent-sandbox", specifier = ">=0.0.19" },
+    { name = "agent-sandbox", specifier = ">=0.0.30" },
     { name = "aiosqlite", specifier = ">=0.19" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
