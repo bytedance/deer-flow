@@ -202,6 +202,51 @@ test("keeps unresolved streaming text in the processing group when tool calls ar
   );
 });
 
+test("keeps post-tool streaming text in the processing group until the turn settles", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Inspect and summarize" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will inspect the current implementation.",
+      tool_calls: [
+        { id: "call-1", name: "read_file", args: { path: "source.ts" } },
+      ],
+    },
+    {
+      id: "tool-1",
+      type: "tool",
+      name: "read_file",
+      tool_call_id: "call-1",
+      content: "file contents",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Here is the final streamed answer.",
+    },
+  ] as Message[];
+
+  const loadingGroups = getMessageGroups(messages, {
+    isCurrentTurnLoading: true,
+  });
+  expect(loadingGroups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(loadingGroups[1]?.messages.map((message) => message.id)).toEqual([
+    "ai-1",
+    "tool-1",
+    "ai-2",
+  ]);
+
+  expect(getMessageGroups(messages).map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+    "assistant",
+  ]);
+});
+
 test("keeps tool-call reasoning in the processing group while the final answer's reasoning rides its own bubble", () => {
   // Companion to #3868: only the message that also becomes an assistant bubble
   // (content, no tool calls) is pulled out of the processing group. Reasoning

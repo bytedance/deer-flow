@@ -109,6 +109,15 @@ function MessageGroupComponent({
     }
     return [];
   }, [lastToolCallStep, steps]);
+  const afterLastToolCallAssistantTextSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return [];
+    }
+    const index = steps.indexOf(lastToolCallStep);
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastToolCallStep, steps]);
   const collapsibleAboveLastToolCallSteps = useMemo(
     () =>
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
@@ -334,6 +343,7 @@ function MessageGroupComponent({
               <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
                 {renderToolCall(lastToolCallStep, { isLast: true })}
               </FlipDisplay>
+              {afterLastToolCallAssistantTextSteps.flatMap(renderStep)}
             </>
           )}
         </ChainOfThoughtContent>
