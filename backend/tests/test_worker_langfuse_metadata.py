@@ -57,6 +57,10 @@ class _FakeRunManager:
     async def set_status(self, *_args, **_kwargs) -> None:
         return None
 
+    async def set_status_if_not_cancelled(self, *_args, **_kwargs) -> None:
+        await self.set_status(*_args, **_kwargs)
+        return None
+
     async def update_model_name(self, *_args, **_kwargs) -> None:
         return None
 

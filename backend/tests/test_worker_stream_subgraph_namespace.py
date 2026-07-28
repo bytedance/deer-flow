@@ -326,6 +326,10 @@ class _IntegrationRunManager:
     async def set_status(self, _run_id, status, **_kwargs):
         self._record.status = status
 
+    async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+        await self.set_status(_run_id, status, **kwargs)
+        return None
+
     async def update_model_name(self, *_args, **_kwargs):
         return None
 
