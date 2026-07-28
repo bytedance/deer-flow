@@ -273,11 +273,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # valid equivalent.  "minimal" is sent by the frontend for flash mode and
     # was previously also hardcoded in the thinking-disabled path above, but
     # it is not a valid API value (OpenAI expects low/medium/high/xhigh/max).
-    _REASONING_EFFORT_NORMALIZE: dict[str, str] = {"minimal": "low"}
-    if (re := kwargs.get("reasoning_effort")) and re in _REASONING_EFFORT_NORMALIZE:
-        kwargs["reasoning_effort"] = _REASONING_EFFORT_NORMALIZE[re]
-    if (re := model_settings_from_config.get("reasoning_effort")) and re in _REASONING_EFFORT_NORMALIZE:
-        model_settings_from_config["reasoning_effort"] = _REASONING_EFFORT_NORMALIZE[re]
+    reasoning_effort_normalize: dict[str, str] = {"minimal": "low"}
+    if (effort := kwargs.get("reasoning_effort")) in reasoning_effort_normalize:
+        kwargs["reasoning_effort"] = reasoning_effort_normalize[effort]
+    if (effort := model_settings_from_config.get("reasoning_effort")) in reasoning_effort_normalize:
+        model_settings_from_config["reasoning_effort"] = reasoning_effort_normalize[effort]
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.

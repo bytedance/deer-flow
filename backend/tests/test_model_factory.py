@@ -1095,7 +1095,7 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=low
+    # thinking-disabled path overrides the configured reasoning_effort to "low"
     assert captured.get("reasoning_effort") == "low"
 
 
