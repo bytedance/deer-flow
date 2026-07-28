@@ -839,8 +839,8 @@ async def cancel_run(
     - wait=false: Return immediately with 202
 
     In multi-worker deployments, a cancel landing on a non-owning worker
-    can take over the run when the owner's lease has expired.  When the
-    lease is still valid a 409 + ``Retry-After`` header is returned.
+    durably notifies the owner when its lease is live, or takes over and
+    terminalizes the run when that lease has expired.
     """
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
@@ -849,15 +849,30 @@ async def cancel_run(
 
     outcome = await run_mgr.cancel(run_id, action=action)
 
-    # Success paths — the run was either cancelled locally or taken over
-    # from a dead worker.
-    if outcome in (CancelOutcome.cancelled, CancelOutcome.taken_over):
+    # Success paths — the run was cancelled locally, durably requested from
+    # a live owner, or taken over from a dead worker.
+    if outcome in (
+        CancelOutcome.cancelled,
+        CancelOutcome.requested,
+        CancelOutcome.taken_over,
+    ):
         if wait and record.task is not None:
             try:
                 await record.task
             except asyncio.CancelledError:
                 pass
             return Response(status_code=204)
+        if wait and outcome == CancelOutcome.requested:
+            bridge = get_stream_bridge(request)
+            if record.store_only and bridge.supports_cross_process:
+                completed = await wait_for_run_completion(
+                    bridge,
+                    record,
+                    request,
+                    run_mgr,
+                )
+                if completed:
+                    return Response(status_code=204)
         return Response(status_code=202)
 
     if outcome == CancelOutcome.lease_valid_elsewhere:
@@ -928,16 +943,29 @@ async def stream_existing_run(
             # the client doesn't hang on an SSE subscription this worker can
             # never serve.
             return Response(status_code=202)
-        if outcome != CancelOutcome.cancelled:
+        if outcome not in (CancelOutcome.cancelled, CancelOutcome.requested):
             if outcome == CancelOutcome.lease_valid_elsewhere:
                 await _raise_lease_valid_elsewhere(run_id, run_mgr, record)
             raise HTTPException(status_code=409, detail=_cancel_conflict_detail(run_id, record))
+        if outcome == CancelOutcome.requested and record.store_only and not bridge.supports_cross_process:
+            # The request is durable, but this bridge cannot observe the
+            # owner's stream. Returning 202 is safer than hanging forever on
+            # a process-local subscription.
+            return Response(status_code=202)
         if wait and record.task is not None:
             try:
                 await record.task
             except (asyncio.CancelledError, Exception):
                 pass
             return Response(status_code=204)
+        if wait and outcome == CancelOutcome.requested:
+            completed = await wait_for_run_completion(
+                bridge,
+                record,
+                request,
+                run_mgr,
+            )
+            return Response(status_code=204 if completed else 202)
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),

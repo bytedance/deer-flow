@@ -1283,10 +1283,10 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        # store_only records are cross-worker runs hydrated from the RunStore; this
-        # worker holds no in-memory task/abort state for them, so run_mgr.cancel()
-        # cannot stop the task (it would 409). Skip on_disconnect cancellation for
-        # those and only act on runs this worker actually owns.
+        # store_only records are cross-worker observation handles. An explicit
+        # cancel-then-stream action has already persisted its request before
+        # subscribing; a plain join disconnect must not invent a new
+        # cancellation request. Only apply on_disconnect to locally-owned runs.
         if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)

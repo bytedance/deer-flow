@@ -2258,10 +2258,17 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    set_status = AsyncMock()
+
+    async def set_status_if_not_cancelled(*args, **kwargs):
+        await set_status(*args, **kwargs)
+        return None
+
     run_manager = SimpleNamespace(
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
-        set_status=AsyncMock(),
+        set_status=set_status,
+        set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
     )
     record = RunRecord(
         run_id="run-checkpoint-mode",
@@ -2330,10 +2337,17 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    set_status = AsyncMock()
+
+    async def set_status_if_not_cancelled(*args, **kwargs):
+        await set_status(*args, **kwargs)
+        return None
+
     run_manager = SimpleNamespace(
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
-        set_status=AsyncMock(),
+        set_status=set_status,
+        set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
     )
     record = RunRecord(
         run_id="run-selected-checkpoint-mode",

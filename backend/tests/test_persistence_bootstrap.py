@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0009_webhook_dedupe"
+HEAD = "0010_run_cancel_request"
 BASELINE = "0001_baseline"
 
 
@@ -147,6 +147,8 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
         }:
             assert required in tables, f"missing table: {required}"
         assert "token_usage_by_model" in await _runs_columns(engine)
+        assert "cancel_action" in await _runs_columns(engine)
+        assert "cancel_requested_at" in await _runs_columns(engine)
         operation_kind = await _runs_column_meta(engine, "operation_kind")
         assert operation_kind["nullable"] is False
         assert await _alembic_version(engine) == HEAD
@@ -849,7 +851,7 @@ class TestDecideState:
 # ---------------------------------------------------------------------------
 
 
-def test_head_revision_is_token_usage_revision() -> None:
+def test_head_revision_is_expected() -> None:
     assert _get_head_revision() == HEAD
 
 
