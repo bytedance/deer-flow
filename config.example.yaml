@@ -1427,13 +1427,13 @@ sandbox:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
-#       # skills: []            # No skills for bash agent
+#       # skills: []            # No discoverable/activatable skills for bash agent
 #
 #   # Custom subagent types: define specialized agents with their own prompts,
 #   # tools, skills, and model configuration. Custom agents are available via
@@ -1450,7 +1450,7 @@ sandbox:
 #   #       - bash
 #   #       - read_file
 #   #       - write_file
-#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #     skills:                 # Skill discovery/activation allowlist (null = all, [] = none)
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
