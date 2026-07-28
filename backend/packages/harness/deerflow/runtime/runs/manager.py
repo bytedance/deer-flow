@@ -21,6 +21,7 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
+from .store.base import EditReplayVisibility
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -705,6 +706,67 @@ class RunManager:
             if record.status == RunStatus.success:
                 sources.add(source)
         return sources
+
+    @staticmethod
+    def _record_status_value(record: RunRecord) -> str:
+        status = record.status
+        return status.value if isinstance(status, RunStatus) else str(status)
+
+    @staticmethod
+    def _compute_edit_replay_visibility(records: list[RunRecord]) -> EditReplayVisibility:
+        latest_attempt_by_source: dict[str, tuple[str, str]] = {}
+        failed_attempts: set[str] = set()
+        for record in sorted(records, key=lambda item: item.created_at):
+            metadata = record.metadata or {}
+            if metadata.get("replay_kind") != "edit":
+                continue
+            source = metadata.get("regenerate_from_run_id")
+            if not isinstance(source, str) or not source:
+                continue
+            status = RunManager._record_status_value(record)
+            latest_attempt_by_source[source] = (record.run_id, status)
+            if status in {RunStatus.error.value, RunStatus.timeout.value, RunStatus.interrupted.value}:
+                failed_attempts.add(record.run_id)
+
+        hidden_sources: set[str] = set()
+        for source, (_, status) in latest_attempt_by_source.items():
+            if status in {RunStatus.pending.value, RunStatus.running.value, RunStatus.success.value}:
+                hidden_sources.add(source)
+        return EditReplayVisibility(
+            hidden_source_run_ids=hidden_sources,
+            hidden_attempt_run_ids=failed_attempts,
+        )
+
+    async def list_edit_replay_visibility(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> EditReplayVisibility:
+        """Return run-id visibility rules for edit-and-rerun attempts.
+
+        Store rows cover reload/multi-worker history. Current-process records
+        override the same run ids because they may have newer terminal status
+        than the persisted snapshot visible when this query started.
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_edit_replay_visibility")
+        records_by_id: dict[str, RunRecord] = {}
+        if self._store is not None:
+            rows = await self._store.list_edit_regenerate_runs(thread_id, user_id=resolved_user_id)
+            for row in rows:
+                try:
+                    record = self._record_from_store(row)
+                except Exception:
+                    logger.warning("Failed to map edit replay run row for %s", row.get("run_id"), exc_info=True)
+                    continue
+                records_by_id[record.run_id] = record
+
+        async with self._lock:
+            memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+        for record in memory_records:
+            records_by_id[record.run_id] = record
+
+        return self._compute_edit_replay_visibility(list(records_by_id.values()))
 
     async def try_start(self, run_id: str) -> RunStartOutcome:
         """Transition an uncancelled pending run to running before building the agent."""

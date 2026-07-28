@@ -319,6 +319,36 @@ class TestBrowserlessTools:
 
         assert client.token == "env-token"
 
+    def _client_with_config(self, cfg: dict):
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = cfg
+            with patch.dict("os.environ", {}, clear=True):
+                return tools._get_browserless_client("web_capture")
+
+    async def test_timeout_s_config_key_is_honored(self):
+        """The documented `timeout_s` key keeps working (back-compat)."""
+        assert self._client_with_config({"timeout_s": 45}).timeout_s == 45.0
+
+    async def test_timeout_config_key_is_honored(self):
+        """`timeout` is accepted too: it is what crawl4ai and jina_ai read.
+
+        Copying that spelling across providers previously produced a silently
+        ignored key and the 30s default.
+        """
+        assert self._client_with_config({"timeout": 45}).timeout_s == 45.0
+
+    async def test_timeout_s_wins_when_both_keys_are_present(self):
+        """`timeout_s` is this provider's documented key, so it takes precedence."""
+        assert self._client_with_config({"timeout_s": 45, "timeout": 10}).timeout_s == 45.0
+
+    async def test_invalid_timeout_falls_back_to_default(self):
+        """A non-numeric timeout must not crash tool construction."""
+        assert self._client_with_config({"timeout_s": "not-a-number"}).timeout_s == 30.0
+
+    async def test_boolean_timeout_falls_back_to_default(self):
+        """YAML `timeout_s: off` parses as False; 0.0 would time out every request."""
+        assert self._client_with_config({"timeout_s": False}).timeout_s == 30.0
+
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_success(self, mock_get_client):
         """web_fetch_tool successfully fetches and extracts content."""

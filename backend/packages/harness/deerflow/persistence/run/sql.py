@@ -191,6 +191,28 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {value for value in result.scalars() if isinstance(value, str) and value}
 
+    async def list_edit_regenerate_runs(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_edit_regenerate_runs")
+        replay_kind = RunRow.metadata_json["replay_kind"].as_string()
+        source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
+        stmt = select(RunRow).where(
+            RunRow.thread_id == thread_id,
+            replay_kind == "edit",
+            source.is_not(None),
+            source != "",
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(RunRow.created_at.asc())
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
     async def get_many_by_thread(
         self,
         thread_id,

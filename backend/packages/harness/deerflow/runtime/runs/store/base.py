@@ -11,7 +11,14 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass(frozen=True)
+class EditReplayVisibility:
+    hidden_source_run_ids: set[str] = field(default_factory=set)
+    hidden_attempt_run_ids: set[str] = field(default_factory=set)
 
 
 class RunStore(abc.ABC):
@@ -67,6 +74,15 @@ class RunStore(abc.ABC):
         Implementations must inspect the complete thread and must not apply the
         normal bounded run-list limit.
         """
+        raise NotImplementedError
+
+    async def list_edit_regenerate_runs(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all edit-regenerate attempt runs for one thread, oldest first."""
         raise NotImplementedError
 
     async def get_many_by_thread(

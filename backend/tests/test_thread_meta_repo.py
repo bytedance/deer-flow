@@ -1,5 +1,6 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
+import asyncio
 import logging
 
 import pytest
@@ -159,6 +160,20 @@ class TestThreadMetaRepository:
         record = await repo.get("t1")
         assert record["metadata"] == {"a": 1, THREAD_PINNED_METADATA_KEY: True}
         assert record["updated_at"] == original
+
+    @pytest.mark.anyio
+    async def test_concurrent_metadata_updates_preserve_disjoint_keys(self, repo):
+        for index in range(10):
+            thread_id = f"concurrent-{index}"
+            await repo.create(thread_id, metadata={"base": index}, user_id=None)
+
+            await asyncio.gather(
+                repo.update_metadata(thread_id, {"left": index}, user_id=None),
+                repo.update_metadata(thread_id, {"right": index}, user_id=None),
+            )
+
+            record = await repo.get(thread_id, user_id=None)
+            assert record["metadata"] == {"base": index, "left": index, "right": index}
 
     @pytest.mark.anyio
     async def test_search_orders_pinned_threads_before_newer_unpinned_threads(self, repo):

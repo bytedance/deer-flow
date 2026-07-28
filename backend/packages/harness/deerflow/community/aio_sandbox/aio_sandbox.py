@@ -422,41 +422,45 @@ class AioSandbox(Sandbox):
         # (caught by grep_tool's except re.error handler) rather than a
         # generic remote API error.
         _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
-        regex = regex_source if case_sensitive else f"(?i){regex_source}"
-
-        if glob is not None:
-            find_result = self._client.file.find_files(path=path, glob=glob)
-            candidate_paths = find_result.data.files if find_result.data and find_result.data.files else []
-        else:
-            list_result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
-            entries = list_result.data.files if list_result.data and list_result.data.files else []
-            candidate_paths = [entry.path for entry in entries if not entry.is_directory]
+        total_cap = max(max_results * 4, max_results + 50)
+        result = self._client.file.grep_files(
+            path=path,
+            pattern=pattern,
+            case_insensitive=not case_sensitive,
+            fixed_strings=literal,
+            max_results=total_cap,
+            max_file_size="1M",
+            recursive=True,
+        )
+        data = result.data
+        provider_matches = data.matches if data and data.matches else []
+        root = path.rstrip("/") or "/"
+        root_prefix = root if root == "/" else f"{root}/"
 
         matches: list[GrepMatch] = []
-        truncated = False
-
-        for file_path in candidate_paths:
+        truncated = bool(data and data.truncated)
+        for match in provider_matches:
+            file_path = match.file
             if should_ignore_path(file_path):
                 continue
-
-            search_result = self._client.file.search_in_file(file=file_path, regex=regex)
-            data = search_result.data
-            if data is None:
+            if file_path == root:
+                rel_path = file_path.rsplit("/", 1)[-1]
+            elif file_path.startswith(root_prefix):
+                rel_path = file_path[len(root_prefix) :]
+            else:
                 continue
-
-            line_numbers = data.line_numbers or []
-            matched_lines = data.matches or []
-            for line_number, line in zip(line_numbers, matched_lines):
-                matches.append(
-                    GrepMatch(
-                        path=file_path,
-                        line_number=line_number if isinstance(line_number, int) else 0,
-                        line=truncate_line(line),
-                    )
+            if glob is not None and not path_matches(glob, rel_path):
+                continue
+            matches.append(
+                GrepMatch(
+                    path=file_path,
+                    line_number=match.line_number,
+                    line=truncate_line(match.line_content),
                 )
-                if len(matches) >= max_results:
-                    truncated = True
-                    return matches, truncated
+            )
+            if len(matches) >= max_results:
+                truncated = True
+                break
 
         return matches, truncated
 
