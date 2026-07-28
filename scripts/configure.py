@@ -50,7 +50,7 @@ def main() -> int:
             )
         return 1
 
-    print("✓ Configuration files generated")
+    print("[OK] Configuration files generated")
     return 0
 
 
