@@ -12,10 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  exportThreadAsJSON,
-  exportThreadAsMarkdown,
-} from "@/core/threads/export";
+import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import type { AgentThread } from "@/core/threads/types";
 
 import { useThread } from "./messages/context";
@@ -28,23 +25,23 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
   const messages = thread.messages;
 
   const handleExport = useCallback(
-    (format: "markdown" | "json") => {
+    (format: ThreadExportFormat) => {
       if (messages.length === 0) {
         toast.error(t.conversation.noMessages);
         return;
       }
-      const agentThread = {
-        thread_id: threadId,
-        updated_at: new Date().toISOString(),
-        values: thread.values,
-      } as AgentThread;
+      try {
+        const agentThread = {
+          thread_id: threadId,
+          updated_at: new Date().toISOString(),
+          values: thread.values,
+        } as AgentThread;
 
-      if (format === "markdown") {
-        exportThreadAsMarkdown(agentThread, messages);
-      } else {
-        exportThreadAsJSON(agentThread, messages);
+        exportThread(agentThread, messages, format);
+        toast.success(t.common.exportSuccess);
+      } catch {
+        toast.error(t.common.exportFailed);
       }
-      toast.success(t.common.exportSuccess);
     },
     [messages, thread.values, threadId, t],
   );

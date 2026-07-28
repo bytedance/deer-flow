@@ -336,7 +336,7 @@ async def test_run_events_cross_user_delete_denied(tmp_path):
 async def test_feedback_cross_user_isolation(tmp_path):
     """Ownership is an explicit user_id filter on the new feedback port —
     the AUTO-sentinel context no longer applies (hexagonal slice)."""
-    from app.infra.persistence.feedback import SqlFeedbackRepository
+    from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
     from deerflow.domain.feedback import Feedback
     from deerflow.persistence.engine import get_session_factory
 
@@ -367,7 +367,7 @@ async def test_feedback_cross_user_isolation(tmp_path):
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
 async def test_feedback_cross_user_delete_denied(tmp_path):
-    from app.infra.persistence.feedback import SqlFeedbackRepository
+    from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
     from deerflow.domain.feedback import Feedback
     from deerflow.persistence.engine import get_session_factory
 

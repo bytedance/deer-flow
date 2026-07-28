@@ -30,6 +30,7 @@ redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
 monocle = ["deerflow-harness[monocle]"]
 browser = ["deerflow-harness[browser]"]
+memory-zh = ["deerflow-harness[memory-zh]"]
 
 [dependency-groups]
 dev = [

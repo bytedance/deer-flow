@@ -99,6 +99,7 @@ class ChannelService:
         *,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
         self.bus = MessageBus()
@@ -110,6 +111,8 @@ class ChannelService:
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
+        from app.channels.dedupe_store import make_inbound_dedupe_store
+
         self.manager = ChannelManager(
             bus=self.bus,
             store=self.store,
@@ -119,6 +122,7 @@ class ChannelService:
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
             require_bound_identity=require_bound_identity,
+            inbound_dedupe_store=make_inbound_dedupe_store(app_config),
             get_stream_bridge=get_stream_bridge,
         )
         self._channels: dict[str, Any] = {}  # name -> Channel instance
@@ -157,6 +161,7 @@ class ChannelService:
             channels_config=channels_config,
             connection_repo=_make_connection_repo(connection_config),
             require_bound_identity=require_bound_identity,
+            app_config=app_config,
             get_stream_bridge=get_stream_bridge,
         )
 

@@ -13,7 +13,7 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
 
 
 def _make_bridge():
@@ -23,6 +23,28 @@ def _make_bridge():
 async def _delivery_events(store: MemoryRunEventStore, thread_id: str, run_id: str) -> list[dict]:
     events = await store.list_events(thread_id, run_id)
     return [e for e in events if e["event_type"] == "run.delivery"]
+
+
+def test_delivery_verification_treats_presented_directory_as_covering_produced_files():
+    content = {
+        "presented": 1,
+        "paths": ["/mnt/user-data/outputs/site"],
+        "by_tool": {"present_files": ["/mnt/user-data/outputs/site"]},
+    }
+
+    delivery = _delivery_content_with_outputs(
+        content,
+        [
+            "/mnt/user-data/outputs/site/index.html",
+            "/mnt/user-data/outputs/site/assets/style.css",
+        ],
+    )
+
+    assert delivery["matched_paths"] == [
+        "/mnt/user-data/outputs/site/index.html",
+        "/mnt/user-data/outputs/site/assets/style.css",
+    ]
+    assert delivery["satisfied"] is True
 
 
 @pytest.mark.anyio
@@ -93,6 +115,201 @@ async def test_delivery_event_presented_zero_without_artifact_production():
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}])
+            journal._remember_current_run_tool_calls(ai, caller="lead_agent")
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"] == {
+        "presented": 1,
+        "paths": ["/mnt/user-data/outputs/report.md"],
+        "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+        "verification": {
+            "source": "outputs_changed",
+            "requirement": "present_files_matches_produced_output",
+        },
+        "produced_paths": ["/mnt/user-data/outputs/report.md"],
+        "presented_paths": ["/mnt/user-data/outputs/report.md"],
+        "matched_paths": ["/mnt/user-data/outputs/report.md"],
+        "stage": "presented",
+        "satisfied": True,
+    }
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"] == {
+        "presented": 0,
+        "paths": [],
+        "by_tool": {},
+        "verification": {
+            "source": "outputs_changed",
+            "requirement": "present_files_matches_produced_output",
+        },
+        "produced_paths": ["/mnt/user-data/outputs/report.md"],
+        "presented_paths": [],
+        "matched_paths": [],
+        "stage": "not_started",
+        "satisfied": False,
+    }
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+    assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_changed_outputs_succeed_when_one_of_multiple_outputs_is_presented(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(
+            return_value=[
+                "/mnt/user-data/outputs/report.md",
+                "/mnt/user-data/outputs/appendix.md",
+            ]
+        ),
+    )
+
+    class PartiallyPresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._remember_current_run_tool_calls(
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+                caller="lead_agent",
+            )
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: PartiallyPresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = (await _delivery_events(store, "thread-1", record.run_id))[0]["content"]
+    assert delivery["stage"] == "presented"
+    assert delivery["presented_paths"] == ["/mnt/user-data/outputs/report.md"]
+    assert delivery["matched_paths"] == ["/mnt/user-data/outputs/report.md"]
+    assert delivery["satisfied"] is True
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelated_file(monkeypatch):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    class UnrelatedPresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._remember_current_run_tool_calls(
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+                caller="lead_agent",
+            )
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/old-report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: UnrelatedPresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = (await _delivery_events(store, "thread-1", record.run_id))[0]["content"]
+    assert delivery["stage"] == "mismatched"
+    assert delivery["presented_paths"] == ["/mnt/user-data/outputs/old-report.md"]
+    assert delivery["matched_paths"] == []
+    assert delivery["satisfied"] is False
+    assert record.status == RunStatus.error
 
 
 @pytest.mark.anyio
@@ -335,6 +552,53 @@ async def test_delivery_write_failure_preserves_real_durable_terminal_status():
     assert event_store.attempts > 1
     assert record.status == RunStatus.success
     assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_persisted(monkeypatch):
+    class FailingReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    class PresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._remember_current_run_tool_calls(
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+                caller="lead_agent",
+            )
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=FailingReceiptStore()),
+        agent_factory=lambda *, config: PresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+    assert (await run_store.get(record.run_id))["status"] == "error"
 
 
 @pytest.mark.anyio

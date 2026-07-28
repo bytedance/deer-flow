@@ -481,6 +481,15 @@ class MemoryManager(BaseModel):
         ``cls(backend_config=backend_config, mode=mode)``.
         """
 
+    def close(self) -> None:
+        """Release backend resources during graceful process shutdown.
+
+        Backends that own external resources may override this hook. The
+        default is intentionally a no-op for lightweight or third-party
+        implementations.
+        """
+        return None
+
 
 # ── Backend discovery (drop-in) ───────────────────────────────────────────
 def _scan_backends() -> dict[str, type[MemoryManager]]:
