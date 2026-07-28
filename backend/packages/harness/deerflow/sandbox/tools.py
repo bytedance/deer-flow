@@ -1738,13 +1738,18 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     unrelated unauthenticated profile. Keep this scoped to commands that
     actually call ``lark-cli`` so ordinary bash calls do not switch AIO into the
     env-bearing execution path.
+
+    In broker mode (Pattern B, issue #4338) a sidecar owns the credentials, so
+    the overlay carries only the broker URL + runtime PATH — the config/data
+    directories are never injected into the sandbox.
     """
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
     try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay
+        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
 
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths)
+        broker = sandbox_paths and sandbox_lark_broker_active()
+        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
     except Exception:
         logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
         return None
@@ -1993,12 +1998,12 @@ def grep_tool(
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside text files under a root directory.
+    """Search for matching lines inside a text file or files under a root directory.
 
     Args:
         description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
-        path: The **absolute** root directory to search under.
+        path: The **absolute** file or root directory to search.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.

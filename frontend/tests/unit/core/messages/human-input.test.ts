@@ -502,23 +502,25 @@ test("a plain reply closes only the latest unanswered request", () => {
   expect(state.latestOpenRequestId).toBe("clarification:call-older");
 });
 
-test("a visible plain human reply closes an open request (legacy fallback)", () => {
-  // An old (v1-only) frontend renders a v2 request as plain text and the user
-  // answers through the normal composer — the reply has no response metadata.
-  // After upgrading, the request must not stay open and lock the composer.
-  const state = deriveHumanInputThreadState([
+test("a visible plain human reply bypasses and closes an open request", () => {
+  // The normal composer deliberately sends no structured response metadata.
+  // Treating its message as the answer lets users bypass the form and also
+  // preserves compatibility with old frontends that render v2 as plain text.
+  const messages = [
     toolMessage(formPayload),
     {
       type: "human",
       content: "金额 300，类别差旅",
     } as unknown as Message,
-  ]);
+  ];
+  const state = deriveHumanInputThreadState(messages);
 
   expect(state.latestOpenRequestId).toBeNull();
   const answered = state.answeredResponses.get("clarification:call-form");
   expect(answered?.response_kind).toBe("text");
   expect(answered?.value).toBe("金额 300，类别差旅");
   expect(hasOpenHumanInputRequest([toolMessage(formPayload)])).toBe(true);
+  expect(hasOpenHumanInputRequest(messages)).toBe(false);
 });
 
 test("a visible human message before the request does not close it", () => {

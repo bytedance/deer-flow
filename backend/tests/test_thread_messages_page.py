@@ -15,18 +15,28 @@ from app.gateway.routers import thread_runs
 from deerflow.runtime import RunRecord
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import build_branch_history_seed_events
+from deerflow.runtime.runs.manager import EditReplayVisibility
 
 
-def _make_app(event_store: MemoryRunEventStore, *, superseded: set[str] | None = None, records=None, feedback=None):
+def _make_app(
+    event_store: MemoryRunEventStore,
+    *,
+    superseded: set[str] | None = None,
+    edit_visibility: EditReplayVisibility | None = None,
+    records=None,
+    feedback=None,
+):
     app = make_authed_test_app()
     app.include_router(thread_runs.router)
     app.state.run_event_store = event_store
     run_manager = AsyncMock()
     run_manager.list_successful_regenerate_sources.return_value = superseded or set()
+    run_manager.list_edit_replay_visibility.return_value = edit_visibility or EditReplayVisibility()
     run_manager.get_many_by_thread.return_value = records or {}
     app.state.run_manager = run_manager
     feedback_repo = AsyncMock()
     feedback_repo.list_by_run_ids.return_value = feedback or {}
+    feedback_repo.list_by_thread_grouped.return_value = feedback or {}
     app.state.feedback_repo = feedback_repo
     return app
 
@@ -187,6 +197,76 @@ def test_thread_page_filters_all_successfully_superseded_runs_before_filling():
     assert body["next_before_seq"] is None
 
 
+def test_thread_page_applies_edit_replay_visibility_before_filling():
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "source-success", "ai", "source-success-answer")
+        await _put_message(store, "edit-success", "ai", "edit-success-answer")
+        await _put_message(store, "source-failed", "ai", "source-failed-answer")
+        await _put_message(store, "edit-failed", "ai", "edit-failed-answer")
+
+    asyncio.run(seed())
+    app = _make_app(
+        store,
+        edit_visibility=EditReplayVisibility(
+            hidden_source_run_ids={"source-success"},
+            hidden_attempt_run_ids={"edit-failed"},
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages/page?limit=4")
+
+    body = response.json()
+    assert [row["run_id"] for row in body["data"]] == ["edit-success", "source-failed"]
+    assert body["has_more"] is False
+    assert body["next_before_seq"] is None
+
+
+def test_legacy_thread_messages_apply_regenerate_and_edit_replay_visibility():
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "regen-source", "ai", "regen-source-answer")
+        await _put_message(store, "source-success", "ai", "source-success-answer")
+        await _put_message(store, "edit-success", "ai", "edit-success-answer")
+        await _put_message(store, "source-failed", "ai", "source-failed-answer")
+        await _put_message(store, "edit-failed", "ai", "edit-failed-answer")
+
+    asyncio.run(seed())
+    app = _make_app(
+        store,
+        superseded={"regen-source"},
+        edit_visibility=EditReplayVisibility(
+            hidden_source_run_ids={"source-success"},
+            hidden_attempt_run_ids={"edit-failed"},
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages?limit=5")
+
+    assert [row["run_id"] for row in response.json()] == ["edit-success", "source-failed"]
+
+
+def test_legacy_thread_messages_applies_limit_after_visibility_filtering(monkeypatch):
+    monkeypatch.setattr(thread_runs, "THREAD_MESSAGE_LEGACY_SCAN_BATCH", 2)
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "visible-old-1", "ai", "visible-old-1-answer")
+        await _put_message(store, "visible-old-2", "ai", "visible-old-2-answer")
+        await _put_message(store, "hidden-new-1", "ai", "hidden-new-1-answer")
+        await _put_message(store, "hidden-new-2", "ai", "hidden-new-2-answer")
+
+    asyncio.run(seed())
+    app = _make_app(store, superseded={"hidden-new-1", "hidden-new-2"})
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages?limit=2")
+
+    assert response.status_code == 200
+    assert [row["run_id"] for row in response.json()] == ["visible-old-1", "visible-old-2"]
+
+
 def test_thread_page_keeps_earlier_branch_turns_when_the_last_one_is_regenerated():
     """Regenerating a branch's inherited answer must not delete the turns before
     it (#4458).
@@ -253,7 +333,7 @@ def test_thread_page_logs_when_scan_cursor_does_not_advance(caplog):
     assert "Thread message scan cursor did not advance" in caplog.text
     assert "thread_id=thread-1" in caplog.text
     assert "scan_before=10" in caplog.text
-    assert "next_scan_before=10" in caplog.text
+    assert "next_cursor=10" in caplog.text
     assert "row_count=1" in caplog.text
 
 

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from hashlib import sha256
 from typing import Any, override
@@ -56,6 +57,8 @@ MAX_FIELD_TEXT_CHARS = 200
 # leaving headroom for question/context.
 MAX_FORM_SERIALIZED_BYTES = 16_384
 
+_XML_TAG_RE = re.compile(r"</?[A-Za-z_][\w:.-]*(?:\s[^<>]*?)?\s*/?>")
+
 
 class ClarificationMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
@@ -100,7 +103,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         if options is None:
             return []
-        if not isinstance(options, list):
+        if isinstance(options, dict):
+            options = self._flatten_dict_option_values(options)
+        elif not isinstance(options, list):
             options = [options]
 
         # Trim, drop blanks, and dedupe (order-preserving): the frontend parser
@@ -109,12 +114,30 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         normalized: list[str] = []
         seen: set[str] = set()
         for option in options:
-            text = str(option).strip()
+            text = _XML_TAG_RE.sub("", str(option)).strip()
             if not text or text in seen:
                 continue
             seen.add(text)
             normalized.append(text)
         return normalized
+
+    @staticmethod
+    def _flatten_dict_option_values(value: dict[str, Any]) -> list[str | int | float]:
+        """Flatten scalar leaves from XML-to-dict option payloads in source order."""
+        flattened: list[str | int | float] = []
+
+        def collect(nested: Any) -> None:
+            if isinstance(nested, dict):
+                for item in nested.values():
+                    collect(item)
+            elif isinstance(nested, list):
+                for item in nested:
+                    collect(item)
+            elif isinstance(nested, str | int | float):
+                flattened.append(nested)
+
+        collect(value)
+        return flattened
 
     @staticmethod
     def _normalize_bool(raw: Any) -> bool:

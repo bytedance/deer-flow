@@ -727,20 +727,27 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        user_id: Explicit user bucket. When omitted, resolves the current
+            Gateway or standalone LangGraph Server identity.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     try:
         from deerflow.agents.memory import get_memory_manager
-        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.runtime.user_context import resolve_runtime_user_id
 
         if app_config is None:
             from deerflow.config.memory_config import get_memory_config
@@ -753,7 +760,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_content = get_memory_manager().get_context(
-            user_id=get_effective_user_id(),
+            user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
         )
 
@@ -889,9 +896,9 @@ def get_skills_prompt_section(
     return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None) -> str:
+def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name)
+    soul = load_agent_soul(agent_name, user_id=user_id)
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1074,7 +1081,7 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
+        soul=get_agent_soul(agent_name, user_id=user_id),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

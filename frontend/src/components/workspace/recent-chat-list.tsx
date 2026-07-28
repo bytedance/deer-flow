@@ -48,10 +48,7 @@ import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thr
 import { getAPIClient } from "@/core/api";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  exportThreadAsJSON,
-  exportThreadAsMarkdown,
-} from "@/core/threads/export";
+import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import {
   useDeleteThread,
   useInfiniteThreads,
@@ -239,7 +236,7 @@ export function RecentChatList() {
   );
 
   const handleExport = useCallback(
-    async (thread: AgentThread, format: "markdown" | "json") => {
+    async (thread: AgentThread, format: ThreadExportFormat) => {
       try {
         const apiClient = getAPIClient();
         const state = await apiClient.threads.getState<AgentThreadState>(
@@ -250,14 +247,10 @@ export function RecentChatList() {
           toast.error(t.conversation.noMessages);
           return;
         }
-        if (format === "markdown") {
-          exportThreadAsMarkdown(thread, messages);
-        } else {
-          exportThreadAsJSON(thread, messages);
-        }
+        exportThread(thread, messages, format);
         toast.success(t.common.exportSuccess);
       } catch {
-        toast.error("Failed to export conversation");
+        toast.error(t.common.exportFailed);
       }
     },
     [t],

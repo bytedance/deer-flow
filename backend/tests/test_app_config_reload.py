@@ -119,6 +119,70 @@ def test_checkpoint_channel_mode_rejects_unknown_value() -> None:
         DatabaseConfig(checkpoint_channel_mode="auto")
 
 
+def test_checkpoint_delta_defaults_to_production_cadence() -> None:
+    assert DatabaseConfig().checkpoint_delta.snapshot_frequency == 10
+
+
+def test_checkpoint_delta_accepts_custom_snapshot_frequency() -> None:
+    assert DatabaseConfig(checkpoint_delta={"snapshot_frequency": 250}).checkpoint_delta.snapshot_frequency == 250
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_delta_rejects_non_positive_snapshot_frequency(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
+
+
+def test_legacy_snapshot_frequency_maps_to_nested_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(checkpoint_delta_snapshot_frequency=1000)
+    assert config.checkpoint_delta.snapshot_frequency == 1000
+    assert "checkpoint_delta_snapshot_frequency is deprecated" in caplog.text
+
+
+def test_nested_snapshot_frequency_wins_over_legacy_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(
+            checkpoint_delta_snapshot_frequency=1000,
+            checkpoint_delta={"snapshot_frequency": 250},
+        )
+    assert config.checkpoint_delta.snapshot_frequency == 250
+    assert "the nested key wins" in caplog.text
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_legacy_snapshot_frequency_rejects_non_positive_value(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
+
+
+def test_checkpoint_graph_cache_defaults() -> None:
+    assert DatabaseConfig().checkpoint_graph_cache.accessor_graph_max == 64
+
+
+def test_checkpoint_graph_cache_accepts_custom_cap() -> None:
+    assert DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": 8}).checkpoint_graph_cache.accessor_graph_max == 8
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_graph_cache_rejects_non_positive_cap(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": value})
+
+
+def test_resolve_checkpoint_graph_cache_max_tolerates_stub_configs() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+
+    assert resolve_checkpoint_graph_cache_max(None, "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(SimpleNamespace(), "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(MagicMock(), "accessor_graph_max", 64) == 64
+    stub = SimpleNamespace(checkpoint_graph_cache=SimpleNamespace(accessor_graph_max=3))
+    assert resolve_checkpoint_graph_cache_max(stub, "accessor_graph_max", 64) == 3
+
+
 def test_config_example_does_not_enable_empty_extensions_block_by_default():
     config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
 

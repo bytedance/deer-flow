@@ -51,7 +51,12 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    exportFailed: "Failed to export conversation.",
     regenerate: "Regenerate",
+    editAndRerun: "Edit and rerun",
+    updateAndRerun: "Update and rerun",
+    editRerunWarning:
+      "Rerunning restores conversation state only. Files, memory, and external actions are not undone.",
     branch: "Branch conversation",
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
@@ -850,6 +855,7 @@ export const enUS: Translations = {
         auth: "Auth",
         sandboxRuntime: "Sandbox runtime",
         sandboxRuntimeInitContainer: "Provisioned by init container",
+        sandboxRuntimeBroker: "Provisioned by broker sidecar",
         sandboxRuntimeGatewayDownload: "Provisioned by Gateway",
         sandboxRuntimeNotReady:
           "Not ready — lark-cli may be missing at chat time",

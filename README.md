@@ -181,7 +181,7 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
-   For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
+   For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
 
    CLI-backed provider examples:
 
@@ -256,9 +256,9 @@ honor environment proxy settings.
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 The checkpoint storage settings `database.checkpoint_channel_mode` and
-`database.checkpoint_delta_snapshot_frequency` are exceptions: both are frozen
-when the process first builds an agent (including through `DeerFlowClient`) and
-require a process restart to change safely.
+`database.checkpoint_delta.snapshot_frequency` (default `10`) are exceptions:
+both are frozen when the process first builds an agent (including through
+`DeerFlowClient`) and require a process restart to change safely.
 
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
@@ -285,6 +285,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 
 > [!IMPORTANT]
 > The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE and `/wait` consumers also refresh durable status on heartbeats as a fallback if terminal publication fails. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
+>
+> Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
 >
@@ -345,6 +347,19 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
+a direct LangGraph Server, DeerFlow consumes the authenticated identity
+published by that runtime and uses it for custom-agent configuration/SOUL, user
+skills and skill policy, uploads, thread data, and memory reads/writes. This
+keeps authenticated runs out of the shared `default` filesystem bucket, and the
+server-owned identity takes precedence over ordinary client-supplied `user_id`
+values. External identities such as email addresses are mapped to stable,
+collision-resistant directory-safe user IDs before accessing DeerFlow storage.
+The default DeerFlow service topology remains the Gateway-embedded runtime
+described above.
+
+Gateway runs automatically enforce native delivery for artifacts created or modified under `/mnt/user-data/outputs`: `present_files` must present at least one output produced by the current run, and the terminal `run.delivery` receipt must be durably recorded. Runs that do not produce output artifacts keep ordinary conversational behavior.
+
 DeerFlow's built-in custom events are available through both LangGraph streaming interfaces: native clients can continue subscribing to `stream_mode="custom"`, while callback-based integrations can consume the same payloads as `on_custom_event` records from `astream_events(version="v2")`. The callback event name matches the payload's `type` field.
 
 #### Docker Production Deployment
@@ -382,6 +397,12 @@ For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`,
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
+
+Security: pass per-request MCP credentials only through `config.context.secrets`;
+credentials must never be placed in either run metadata surface
+(`metadata.auth_token` or `config.metadata.auth_token`). See [MCP credential migration and cleanup](backend/docs/MCP_SERVER.md#migrating-legacy-mcp-credentials)
+for the supported interceptor flow and the required rotation and retained-copy
+cleanup when migrating from legacy metadata credentials.
 
 #### IM Channels
 
@@ -438,6 +459,8 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
+    # Optional: render final Markdown replies as Telegram Rich Messages.
+    rich_messages: false
     allowed_users: []               # empty = allow all
 
   wechat:
@@ -771,6 +794,8 @@ Gateway-generated follow-up suggestions now normalize both plain-string model ou
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
+When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input.
+
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include a selected slash skill when present, and are cleared once a send is accepted. Attachments and quoted conversation context are intentionally not persisted.
 
 The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending.
@@ -782,9 +807,11 @@ Interrupted first-turn runs still persist a fallback conversation title, so stop
 
 Streaming Markdown responses animate only newly arrived words; text that is already visible is not faded out and replayed when the next chunk extends the same block.
 
-In the Web UI, completed assistant turns can be branched into a new main conversation. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
+In the Web UI, completed assistant turns can be branched into a new main conversation. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. The latest response can also be regenerated after an interruption, even when its streamed partial text never reached a checkpoint. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
 
 The Web UI reports completed task time once per run. This is total wall-clock time—including model reasoning, tool calls, and waiting—not a per-step or model-only thinking duration. Reasoning content remains available through its own separate disclosure.
+
+In the Web UI, the latest completed user turn can also be edited and rerun from the message toolbar. DeerFlow restores the conversation checkpoint before that user message, submits the edited text as a new user message, and hides the superseded turn once the replay is in progress or succeeds. This is a conversation-state replay only: files, memory updates, and external tool side effects are not undone.
 
 Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
 
@@ -887,6 +914,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
+The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes. Large, binary, or sensitive-looking files are shown as metadata only.
@@ -944,7 +973,7 @@ Across sessions, DeerFlow builds a persistent memory of your profile, preference
 
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 
-File-backed memory now separates global user context from agent facts. Each user has one `memory.json` containing only the project-independent `user` and `history` summaries; every fact is a canonical Markdown file below `agents/{agent_name}/facts/`. Existing lead-agent middleware, API, Settings, import/export, and embedded-client calls that omit `agent_name` resolve inside DeerMem to the reserved `__default__` bucket. That bucket is outside the valid custom-agent name grammar, so a real custom agent named `lead-agent` has a separate fact repository and deleting a custom agent cannot delete a memory-only directory without `config.yaml`. Public agent identifiers are case-insensitive and canonicalized to lowercase. Runtime/API readers still receive a compatibility `facts` array for the selected/default agent, so the frontend does not read agent facts from `memory.json`; structured Markdown `source` metadata is projected to the historical string field at the MemoryManager boundary. An unscoped Clear All first migrates facts from unread legacy per-agent JSON without adopting its soon-to-be-cleared summaries, then removes shared summaries and facts from every agent bucket while preserving agent configuration files, so a later read cannot resurrect skipped legacy facts; an explicitly agent-scoped clear removes only that agent's facts. On first normal read, old facts embedded in the user JSON are migrated automatically to `__default__`; facts written to the earlier implicit `lead-agent` bucket are also moved when that directory is not a real custom agent. Migration and normal writes notify a configured retrieval adapter only after durable storage locks are released. Journaled writes, a shared user lock, and optimistic user-memory revisions prevent silent lost updates. Retrieval engines remain optional behind the memory retrieval-adapter contract, with an explicit local substring fallback when no adapter is configured.
+File-backed memory now separates global user context from agent facts. Each user has one `memory.json` containing only the project-independent `user` and `history` summaries; every fact is a canonical Markdown file below `agents/{agent_name}/facts/`. Existing lead-agent middleware, API, Settings, import/export, and embedded-client calls that omit `agent_name` resolve inside DeerMem to the reserved `__default__` bucket. That bucket is outside the valid custom-agent name grammar, so a real custom agent named `lead-agent` has a separate fact repository and deleting a custom agent cannot delete a memory-only directory without `config.yaml`. Public agent identifiers are case-insensitive and canonicalized to lowercase. Runtime/API readers still receive a compatibility `facts` array for the selected/default agent, so the frontend does not read agent facts from `memory.json`; structured Markdown `source` metadata is projected to the historical string field at the MemoryManager boundary. An unscoped Clear All first migrates facts from unread legacy per-agent JSON without adopting its soon-to-be-cleared summaries, then removes shared summaries and facts from every agent bucket while preserving agent configuration files, so a later read cannot resurrect skipped legacy facts; an explicitly agent-scoped clear removes only that agent's facts. On first normal read, old facts embedded in the user JSON are migrated automatically to `__default__`; facts written to the earlier implicit `lead-agent` bucket are also moved when that directory is not a real custom agent. Migration and normal writes notify the configured retrieval adapter only after durable storage locks are released. DeerMem uses a scope-aware SQLite FTS5/BM25 adapter by default, stores only rebuildable derived index data under `.retrieval/`, and rebuilds it in the background during Gateway startup or lazily on the first scoped search. A corrupt derived index is recreated automatically. Set `memory.backend_config.retrieval_adapter` to an empty string to disable it and use the local substring fallback. Chinese tokenization is optional; install the backend `memory-zh` extra (`uv sync --extra memory-zh`) for jieba-assisted sub-phrase search. Journaled writes, a shared user lock, and optimistic user-memory revisions prevent silent lost updates.
 
 Single-fact repository operations are genuinely incremental: an upsert/delete reads, journals, writes, and re-indexes only the addressed fact files, and returns an explicit incomplete delta rather than a cache-dependent fake full document. Summary change sets merge the supplied `user`/`history` child keys over the persisted sections so a partial update cannot erase omitted siblings; full imports normalize both sections to the complete compatibility schema before applying replacement values. Manager/API compatibility methods materialize a fresh full document only when their public response contract requires one. Fact-level point operations use separate expected user-memory and fact revisions and may explicitly rebase when every addressed fact precondition still holds. Snapshot-derived operations such as scoped clear, capped create, consolidation, and trimming never replay stale delete/trim sets: a manifest conflict reloads the complete document and recomputes the operation, with a bounded retry. Fact paths use the first two hexadecimal characters of `SHA-256(fact_id)` so generated `fact_*` IDs distribute across shards. The cache token combines the shared JSON's nanosecond mtime, size, and persisted revision; this prevents coarse-mtime same-size writes from returning stale data without scanning fact files. Direct out-of-band Markdown edits require an explicit reload. Storage-specific conflicts and corruption are translated at the MemoryManager boundary; the Gateway returns conflict as HTTP 409 and a stable, non-sensitive corruption error as HTTP 500. Full-document `save()` remains a compatibility API and computes a diff before writing; malformed or missing `facts` can no longer silently erase an agent's Markdown files. Legacy migration preserves non-empty `user`/`history` before deleting an agent `memory.json`; conflicting summaries keep the legacy file and fail loudly instead of choosing a winner.
 

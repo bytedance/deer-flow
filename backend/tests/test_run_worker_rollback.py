@@ -16,10 +16,13 @@ from langgraph.graph.message import add_messages
 from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
     RollbackPoint,
     RunContext,
@@ -85,6 +88,74 @@ async def test_pending_cancel_stops_waiting_for_prior_finalization():
     assert factory_called is False
     assert record.status == RunStatus.interrupted
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_remote_cancel_wins_when_graph_finishes_before_owner_heartbeat():
+    store = MemoryRunStore()
+    ownership = RunOwnershipConfig(
+        heartbeat_enabled=True,
+        lease_seconds=30,
+        grace_seconds=10,
+    )
+    owner = RunManager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await owner.create_or_reject("thread-cancel-race")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _FinishingAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, config, stream_mode, subgraphs
+            started.set()
+            await release.wait()
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(),
+            ),
+            agent_factory=lambda **_kwargs: _FinishingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "error"
+    assert stored["error"] == "Rolled back by user"
+    assert record.status == RunStatus.error
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
@@ -811,6 +882,150 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched is not None
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_rolls_back_failed_edit_replay_and_publishes_restored_values():
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    before_messages = [HumanMessage(id="h1", content="original"), AIMessage(id="a1", content="answer")]
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": before_messages},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise RuntimeError("edit replay failed")
+            if False:
+                yield  # pragma: no cover - keep this an async generator
+
+    error_status_finalizing_states: list[bool] = []
+    original_set_status = run_manager.set_status
+
+    async def _set_status(run_id, status, **kwargs):
+        if run_id == record.run_id and status == RunStatus.error:
+            error_status_finalizing_states.append(record.finalizing)
+        return await original_set_status(run_id, status, **kwargs)
+
+    run_manager.set_status = _set_status  # type: ignore[method-assign]
+    with patch(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        new_callable=AsyncMock,
+    ) as rollback:
+        rollback.return_value = True
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=DummyCheckpointer()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert error_status_finalizing_states == [True]
+    rollback.assert_awaited_once()
+    publish_events = [call_args.args[1] for call_args in bridge.publish.await_args_list]
+    assert "error" in publish_events
+    assert "values" in publish_events
+    assert publish_events.index("values") > publish_events.index("error")
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_failed_edit_replay_does_not_publish_restored_values_when_snapshot_capture_failed():
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            raise RuntimeError("snapshot capture failed")
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise RuntimeError("edit replay failed")
+            if False:
+                yield  # pragma: no cover - keep this an async generator
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=DummyCheckpointer()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    publish_events = [call_args.args[1] for call_args in bridge.publish.await_args_list]
+    assert "error" in publish_events
+    assert "values" not in publish_events
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

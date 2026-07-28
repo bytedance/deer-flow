@@ -162,6 +162,11 @@ services:
       # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision
       # the sandbox lark-cli runtime via an init container + emptyDir.
       - LARK_CLI_INIT_IMAGE=${LARK_CLI_INIT_IMAGE:-}
+      # Optional lark-cli broker image (Pattern B, issue #4338). When set, the
+      # sandbox gets a shim + broker sidecar that holds the credentials, so the
+      # plaintext config/data are never mounted into the sandbox. Supersedes
+      # LARK_CLI_INIT_IMAGE when both are set. Empty ⇒ broker off.
+      - LARK_CLI_BROKER_IMAGE=${LARK_CLI_BROKER_IMAGE:-}
       - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}

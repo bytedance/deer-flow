@@ -52,7 +52,7 @@ def mock_app_config():
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
     config.database.checkpoint_channel_mode = "full"
-    config.database.checkpoint_delta_snapshot_frequency = 1000
+    config.database.checkpoint_delta.snapshot_frequency = 10
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -154,7 +154,7 @@ class TestClientInit:
         from deerflow.agents import thread_state
 
         mock_app_config.database.checkpoint_channel_mode = "delta"
-        mock_app_config.database.checkpoint_delta_snapshot_frequency = 7
+        mock_app_config.database.checkpoint_delta.snapshot_frequency = 7
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             DeerFlowClient()
 
@@ -1334,7 +1334,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
