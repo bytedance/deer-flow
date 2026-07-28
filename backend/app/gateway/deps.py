@@ -22,14 +22,15 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, TypeVar, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.domain.feedback import FeedbackService
+from deerflow.domain.schedule.service import ScheduleService
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
@@ -400,27 +401,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
-            from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
-            from app.adapters.feedback.run_lookup import RunStoreRunLookup
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
-            # Hexagonal feedback slice: the service (input port) is wired with
-            # its SQL adapter here — the composition root is the only place
-            # adapters are instantiated.
-            app.state.feedback_service = FeedbackService(
-                repository=SqlFeedbackRepository(sf),
-                runs=RunStoreRunLookup(app.state.run_store),
-            )
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
-            app.state.feedback_service = None  # memory backend → 503, as before
 
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
+
         if sf is not None:
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
@@ -432,6 +424,27 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
+
+        # Hexagonal slices: every adapter is instantiated by the composition
+        # root and nowhere else. It is a pure function of the infrastructure
+        # built above, so what it decides — including "no SQL backend means no
+        # service, and the routes answer 503" — is covered by
+        # tests/test_composition.py rather than only by this call site.
+        from app.composition import build_domain_services, build_run_completion_hook
+        from app.gateway.services import launch_scheduled_thread_run
+
+        domain_services = build_domain_services(
+            session_factory=sf,
+            run_store=app.state.run_store,
+            thread_store=app.state.thread_store,
+            launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+            scheduler_config=config.scheduler,
+        )
+        app.state.feedback_service = domain_services.feedback
+        app.state.schedule_service = domain_services.schedule
+        # Built once here rather than per request: it closes over the service,
+        # and every RunContext needs the same one.
+        app.state.run_completion_hook = build_run_completion_hook(domain_services.schedule)
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -583,6 +596,25 @@ def get_scheduled_task_service(request: Request):
     return val
 
 
+def get_schedule_service(request: Request) -> ScheduleService:
+    """The schedule context's input port.
+
+    ``None`` here means the composition root refused to build it, which today
+    means a non-SQL backend -- see ``app/composition.py`` for why that is a
+    503 rather than a degraded in-memory implementation.
+    """
+    val = getattr(request.app.state, "schedule_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled tasks require a SQL database backend")
+    return val
+
+
+# Declared as an alias so routes take the service without a default argument
+# (leaving parameter order unconstrained) and so swapping the provider is a
+# one-line change here rather than an edit to every handler signature.
+ScheduleServiceDep = Annotated[ScheduleService, Depends(get_schedule_service)]
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -601,7 +633,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         thread_store=get_thread_store(request),
         app_config=get_config(),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=getattr(request.app.state, "run_completion_hook", None),
     )
 
 

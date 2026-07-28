@@ -30,6 +30,7 @@ from typing import Annotated, TypedDict
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.runtime import RunManager, RunStatus
 
 
@@ -196,7 +197,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
 
     app = FastAPI()
-    startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full"), run_events=None)
+    startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full"), run_events=None, scheduler=SchedulerConfig())
 
     async with langgraph_runtime(app, startup_config):
         pass

@@ -1,17 +1,15 @@
-"""Boundary mapping (not a port implementation) -- wire/storage <-> ScheduleSpec.
+"""Boundary mapping -- the schedule_spec HTTP body field.
 
-Unlike its siblings in this package, this module implements no port: it is the
-shared translation both of them need. `schedule_spec` is both an HTTP request
-field and a JSON column -- one shape, two boundaries -- so the mapping lives
-here once and both callers import it (`scheduled_task_repository` for the
-stored column, the scheduled-task router for the request body), rather than the
-domain growing a `Mapping[str, Any]` in its signatures.
+The primary adapter's own translation between the request/response shape and
+`ScheduleSpec`. Its counterpart is `app/adapters/schedule/spec_column.py`, which
+does the same job for the stored JSON column; see that module for why the two
+are kept apart rather than shared.
 
 The split is deliberate: **structural** checks (is the key present? is it a
-str?) belong to this boundary, **value** rules (5-field cron, resolvable
-timezone, run_at present) belong to `ScheduleSpec.__post_init__`. That is why
-this module can look thin -- most of what could go wrong is caught one layer
-in, and reported with the same domain error.
+str?) belong here, **value** rules (5-field cron, resolvable timezone, run_at
+present) belong to `ScheduleSpec.__post_init__`. That is why this module is
+thin -- most of what could go wrong is caught one layer in, and reported with
+the same domain error, so the router maps one family onto 422.
 """
 
 from __future__ import annotations
@@ -23,15 +21,15 @@ from typing import Any
 from deerflow.domain.schedule.model import InvalidScheduleError, ScheduleSpec, ScheduleType
 
 
-def spec_to_domain(schedule_type: str, spec: Mapping[str, Any] | None, timezone: str) -> ScheduleSpec:
-    """Parse the stored/submitted triple into the value object.
+def wire_to_spec(schedule_type: str, spec: Mapping[str, Any] | None, timezone: str) -> ScheduleSpec:
+    """Parse the submitted triple into the value object.
 
     Raises:
         InvalidScheduleError: unknown schedule type, or the type's required key
-            is missing or not a string. Raising a *domain* error from an
-            adapter is intentional -- domain errors are the vocabulary the
-            outer ring uses to say "this violates a domain rule", and the
-            router maps this one family uniformly.
+            is missing or not a string. Raising a *domain* error from a primary
+            adapter is intentional -- domain errors are the vocabulary the outer
+            ring uses to say "this violates a domain rule", and the router maps
+            that one family uniformly onto 422.
     """
     try:
         kind = ScheduleType(schedule_type)
@@ -56,12 +54,12 @@ def spec_to_domain(schedule_type: str, spec: Mapping[str, Any] | None, timezone:
 
 
 def spec_to_wire(spec: ScheduleSpec) -> dict[str, str]:
-    """Rebuild the persisted/wire JSON shape.
+    """Rebuild the response body shape.
 
-    Note this normalizes the stored string rather than echoing the caller's
+    Note this emits the normalized value rather than echoing the caller's
     bytes: the frontend submits an already-UTC-aware ISO value
-    (`zonedLocalToUtcIso`), so a trailing-Z input round-trips out as "+00:00".
-    Both forms parse on either side, so the normalization is deliberate --
+    (`zonedLocalToUtcIso`), so a trailing-Z input comes back as "+00:00". Both
+    forms parse on either side, so the normalization is deliberate --
     preferable to carrying the raw dict on the value object just to preserve
     the exact input spelling.
     """

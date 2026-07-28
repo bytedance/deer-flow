@@ -5,8 +5,9 @@ This context owns the `scheduled_tasks` table and writes its own queries, so
 SQL/ORM vocabulary stops at this file: methods exchange domain objects and
 normalize SQLite's tz-naive reads.
 
-Sibling of `scheduled_run_repository.py`; both consume `spec_mapping` for the
-stored JSON spec.
+Sibling of `scheduled_run_repository.py`. The stored `schedule_spec` JSON
+column is translated by `spec_column.py`, which belongs to this side of the
+boundary only -- the HTTP shape has its own translation next to the router.
 
 **The queries are migrated unchanged from the legacy repository.** The claim
 statement's `FOR UPDATE SKIP LOCKED` and the `protect_terminal` conditional
@@ -24,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.adapters.schedule.spec_mapping import spec_to_domain, spec_to_wire
+from app.adapters.schedule.spec_column import column_to_spec, spec_to_column
 from deerflow.domain.schedule.model import (
     TERMINAL_TASK_STATUSES,
     ContextMode,
@@ -77,7 +78,7 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
             user_id=row.user_id,
             title=row.title,
             prompt=row.prompt,
-            schedule=spec_to_domain(row.schedule_type, row.schedule_spec, row.timezone),
+            schedule=column_to_spec(row.schedule_type, row.schedule_spec, row.timezone),
             context_mode=ContextMode(row.context_mode),
             thread_id=row.thread_id,
             assistant_id=row.assistant_id,
@@ -109,7 +110,7 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
         row.title = task.title
         row.prompt = task.prompt
         row.schedule_type = str(task.schedule.schedule_type)
-        row.schedule_spec = spec_to_wire(task.schedule)
+        row.schedule_spec = spec_to_column(task.schedule)
         row.timezone = task.schedule.timezone
         row.context_mode = str(task.context_mode)
         row.thread_id = task.thread_id

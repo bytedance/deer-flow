@@ -38,15 +38,15 @@ run 结束后回写执行记录，并算出下一次的时间
 
 ---
 
-## 2. 当前状态：新旧并存
+## 2. 当前状态：生产已切换，旧代码待删
 
 **这一节请先读，否则你会在代码库里迷路。**
 
-模块正处于六边形重构的中途。**整个内圈已经落地**，但生产代码路径还没有切过来：
+生产路径**已经走新架构**。旧代码还留在仓库里，但已经没有任何东西装配它，下一个提交负责删除：
 
 ```mermaid
 flowchart LR
-    subgraph NEW["✅ 已落地 · 内圈"]
+    subgraph IN["✅ 内圈 · harness"]
         direction TB
         SV["service.py<br/>ScheduleService（用例编排）"]
         PO["ports.py<br/>4 个 Protocol + 2 个 DTO"]
@@ -54,29 +54,37 @@ flowchart LR
         SV --> PO
         SV --> M
     end
-    subgraph OLD["⏳ 仍是旧形态 · 生产路径"]
-        R["gateway/routers/scheduled_tasks.py<br/>入参校验 + 业务判断混在一起"]
-        S["app/scheduler/service.py<br/>轮询 + 派发编排 + 状态推导"]
-        P["persistence/scheduled_task*/sql.py<br/>仓储返回裸 dict"]
-        C["deerflow/scheduler/schedules.py<br/>时区 / cron 计算"]
+    subgraph PRIM["✅ 主适配器 · app"]
+        R["gateway/routers/schedule/<br/>router · models · spec_wire"]
+        PL["scheduler/poller.py<br/>轮询时钟"]
     end
-    subgraph TODO["🚧 待建 · 外圈"]
-        AD["app/adapters/schedule/<br/>app/scheduler/poller.py"]
+    subgraph SEC["✅ 从适配器 · app"]
+        AD["adapters/schedule/<br/>两个仓储 · run_launcher · thread_lookup<br/>spec_column · run_outcome_mapping"]
+    end
+    subgraph CR["✅ 组合根"]
+        CO["composition.py<br/>build_domain_services()"]
+    end
+    subgraph DEAD["🗑️ 已停用 · 待删除"]
+        S["app/scheduler/service.py"]
+        OR["gateway/routers/scheduled_tasks.py"]
+        P["persistence/scheduled_task*/sql.py"]
+        C["deerflow/scheduler/"]
     end
 
-    R -.->|尚未调用| SV
-    S -.->|尚未调用| SV
-    AD -.->|将实现| PO
+    R --> SV
+    PL --> SV
+    AD -.->|实现| PO
+    CO -->|装配| SV
 
-    style NEW fill:#eef6ff
-    style OLD fill:#f5f5f5
+    style IN fill:#eef6ff
+    style DEAD fill:#f5f5f5
 ```
 
 含义很具体：
 
-- **`domain/schedule/` 是唯一的真相声明处**，但目前只有测试在用它。运行中的定时任务走的仍是 `app/scheduler/service.py` 那套。
-- 两边**规则内容一致**（内圈是逐条从旧代码搬迁的，每个方法的 docstring 都标了来源行号），但**代码是重复的**。这是迁移中间态的正常代价。
-- 你现在改一条业务规则，要**两边都改**，直到迁移完成。旧位置见 §12 的索引。
+- **`domain/schedule/` 是唯一的真相声明处**，运行中的定时任务已经走它。改一条业务规则只改这一处。
+- `DEAD` 里的文件仍能编译、仍有测试，但**不再被任何装配路径引用**——`app.py` 启动的是 `SchedulePoller`，注册的是 `routers/schedule/`，完成回调走 `composition.py` 装的那个。留着只是为了让删除单独成为一个可审查的提交。
+- 旧的重复规则因此不再需要"两边都改"。如果你在 `DEAD` 里发现和内圈不一致的逻辑，以内圈为准。
 - 新增业务规则请**只写在内圈**，然后在旧位置调用它——不要再往 router / 旧 service 里加新的判断。
 
 **还差什么**：四个端口都没有真实实现。适配器落地后，`app/scheduler/service.py`、`deerflow/scheduler/` 整包、两个 `sql.py` 都会消失，router 瘦身成协议转换。
@@ -612,18 +620,43 @@ await service.update_task(
 | [`tests/test_schedule_domain.py`](../tests/test_schedule_domain.py) | 域测试，全同步零 IO；四张真值表逐格覆盖 |
 | [`tests/test_schedule_service.py`](../tests/test_schedule_service.py) | 用例测试；完整生命周期跑在 fake 上，是迁移的验收标准 |
 | [`tests/schedule_fakes.py`](../tests/schedule_fakes.py) | 四个端口的内存实现 |
-| [`tests/test_schedule_fakes.py`](../tests/test_schedule_fakes.py) | 端口语义；适配器落地后升级成契约测试 |
+| [`tests/test_schedule_fakes.py`](../tests/test_schedule_fakes.py) | 契约测试：31 用例 × 内存 fake + 真 sqlite 两套实现 |
 
-**尚未迁移（生产路径，见 §2）**
+**主适配器（入口）**
 
 | 文件 | 内容 |
 |---|---|
-| [`app/gateway/routers/scheduled_tasks.py`](../app/gateway/routers/scheduled_tasks.py) | 10 个 HTTP 端点，含入参校验与业务判断 |
-| [`app/scheduler/service.py`](../app/scheduler/service.py) | 轮询循环、派发编排、状态推导、完成回调、启动清扫 |
-| [`deerflow/scheduler/schedules.py`](../packages/harness/deerflow/scheduler/schedules.py) | 时区 / cron / 下次时间计算 |
-| [`persistence/scheduled_tasks/`](../packages/harness/deerflow/persistence/scheduled_tasks/) | 任务表 ORM + 仓储 |
-| [`persistence/scheduled_task_runs/`](../packages/harness/deerflow/persistence/scheduled_task_runs/) | 执行表 ORM + 仓储，含唯一索引定义 |
+| [`gateway/routers/schedule/router.py`](../app/gateway/routers/schedule/router.py) | 10 个 HTTP 端点，只做协议转换 + 领域错误→状态码 |
+| [`gateway/routers/schedule/models.py`](../app/gateway/routers/schedule/models.py) | 请求/响应模型；响应是白名单，不是 ORM 转储 |
+| [`gateway/routers/schedule/spec_wire.py`](../app/gateway/routers/schedule/spec_wire.py) | HTTP body ↔ `ScheduleSpec` |
+| [`app/scheduler/poller.py`](../app/scheduler/poller.py) | 轮询时钟 + 启动恢复 |
+
+**从适配器**
+
+| 文件 | 内容 |
+|---|---|
+| [`adapters/schedule/scheduled_task_repository.py`](../app/adapters/schedule/scheduled_task_repository.py) | 自有持久化；`FOR UPDATE SKIP LOCKED` 与 `protect_terminal` CAS |
+| [`adapters/schedule/scheduled_run_repository.py`](../app/adapters/schedule/scheduled_run_repository.py) | 自有持久化；`IntegrityError → ActiveRunConflictError` 的翻译点 |
+| [`adapters/schedule/run_launcher.py`](../app/adapters/schedule/run_launcher.py) | 防腐层；`ConflictError` / `HTTPException(409)` → `ThreadBusyError` |
+| [`adapters/schedule/thread_lookup.py`](../app/adapters/schedule/thread_lookup.py) | 防腐层；`check_access(require_existing=True)` |
+| [`adapters/schedule/spec_column.py`](../app/adapters/schedule/spec_column.py) | JSON 列 ↔ `ScheduleSpec`（与 `spec_wire` 成对，见其 docstring） |
+| [`adapters/schedule/run_outcome_mapping.py`](../app/adapters/schedule/run_outcome_mapping.py) | `RunRecord → RunOutcome \| None`，承接旧完成钩子的内联过滤 |
+
+**组合根**
+
+| 文件 | 内容 |
+|---|---|
+| [`app/composition.py`](../app/composition.py) | `build_domain_services()` · `build_run_completion_hook()` · `build_schedule_policy()` |
 | [`config/scheduler_config.py`](../packages/harness/deerflow/config/scheduler_config.py) | `enabled` `poll_interval_seconds` `lease_seconds` `max_concurrent_runs` `min_once_delay_seconds` |
+
+**已停用，待删除（见 §2）**
+
+| 文件 | 内容 |
+|---|---|
+| [`app/gateway/routers/scheduled_tasks.py`](../app/gateway/routers/scheduled_tasks.py) | 旧端点，已不注册 |
+| [`app/scheduler/service.py`](../app/scheduler/service.py) | 旧轮询 + 派发编排，已不装配 |
+| [`deerflow/scheduler/schedules.py`](../packages/harness/deerflow/scheduler/schedules.py) | 时区 / cron 计算，规则已进 `ScheduleSpec` |
+| [`persistence/scheduled_task*/sql.py`](../packages/harness/deerflow/persistence/scheduled_tasks/) | 旧仓储（返回裸 dict）。**ORM 行与唯一索引定义仍在用，不要一起删** |
 
 **前端**
 

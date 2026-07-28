@@ -30,13 +30,13 @@ from app.gateway.routers import (
     memory,
     models,
     runs,
-    scheduled_tasks,
     skills,
     suggestions,
     thread_runs,
     threads,
     uploads,
 )
+from app.gateway.routers.schedule import router as schedule_router
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
@@ -305,23 +305,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("No IM channels configured or channel service failed to start")
 
         try:
-            from app.gateway.services import launch_scheduled_thread_run
-            from app.scheduler import ScheduledTaskService
+            # The service itself was assembled by the composition root inside
+            # `langgraph_runtime`; all that is left here is the clock that
+            # drives it. It is None when the configured backend cannot support
+            # scheduling, in which case there is nothing to poll.
+            from app.scheduler.poller import SchedulePoller
 
-            if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
-                scheduled_task_service = ScheduledTaskService(
-                    task_repo=app.state.scheduled_task_repo,
-                    task_run_repo=app.state.scheduled_task_run_repo,
-                    launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+            schedule_service = getattr(app.state, "schedule_service", None)
+            if schedule_service is not None:
+                schedule_poller = SchedulePoller(
+                    schedule_service,
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
-                    lease_seconds=startup_config.scheduler.lease_seconds,
-                    max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
                 )
-                app.state.scheduled_task_service = scheduled_task_service
+                app.state.schedule_poller = schedule_poller
                 if startup_config.scheduler.enabled:
-                    await scheduled_task_service.start()
+                    await schedule_poller.start()
         except Exception:
-            logger.exception("Failed to initialize scheduled task service")
+            logger.exception("Failed to start the scheduled task poller")
 
         yield
 
@@ -346,11 +346,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to stop channel service")
 
-        if getattr(app.state, "scheduled_task_service", None) is not None:
+        if getattr(app.state, "schedule_poller", None) is not None:
             try:
-                await app.state.scheduled_task_service.stop()
+                await app.state.schedule_poller.stop()
             except Exception:
-                logger.exception("Failed to stop scheduled task service")
+                logger.exception("Failed to stop the scheduled task poller")
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -593,7 +593,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(threads.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
-    app.include_router(scheduled_tasks.router)
+    app.include_router(schedule_router.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
