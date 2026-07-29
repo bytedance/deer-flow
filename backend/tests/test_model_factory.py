@@ -319,7 +319,10 @@ def test_when_thinking_disabled_takes_precedence_over_hardcoded_disable(monkeypa
     factory_module.create_chat_model(name="custom-disable", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    # User overrode the hardcoded "minimal" with "low"
+    # User provided reasoning_effort directly in when_thinking_disabled
+    # (previously the factory hardcoded "minimal" here, which caused a 400 for
+    # DeepSeek vendors; now the hardcoded default is "low" AND a further
+    # DeepSeek-only normalization guards the kwargs path).
     assert captured.get("reasoning_effort") == "low"
 
 
@@ -1104,26 +1107,52 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 # ---------------------------------------------------------------------------
 
 
-def test_reasoning_effort_minimal_normalized_to_low(monkeypatch):
-    """When frontend sends reasoning_effort='minimal' (flash mode), it must be
-    normalized to 'low' because 'minimal' is not a valid OpenAI API value."""
-    factory_module = monkeypatch.ModuleType("deerflow.models.factory")
-    monkeypatch.setattr(factory_module, "get_app_config", lambda: None)
-    monkeypatch.setattr(factory_module, "_create_model", lambda *a, **kw: None)
+def test_reasoning_effort_minimal_normalized_for_deepseek_vendor_only(monkeypatch):
+    """willem-bd review fix: `minimal -> low` must be gated on DeepSeek-compatible
+    profiles (Class MRO / endpoint URL / model-name prefix).  For every other
+    vendor (notably OpenAI gpt-5 / o-series) `minimal` is a legitimate effort
+    value and must pass through unchanged."""
+    from deerflow.models.factory import _normalize_reasoning_effort, _is_deepseek_vendor
 
-    from deerflow.models.factory import _normalize_reasoning_effort
+    # --- _is_deepseek_vendor signals ---
+    class _FakePatchedChatDeepSeek:
+        __name__ = "PatchedChatDeepSeek"
 
-    target = {"reasoning_effort": "minimal"}
-    _normalize_reasoning_effort(target)
-    assert target["reasoning_effort"] == "low"
+    # (1) Class MRO signal
+    assert _is_deepseek_vendor(_FakePatchedChatDeepSeek, {}, {}) is True
+    # (2) Endpoint signal - deepseek.com host
+    assert _is_deepseek_vendor(type, {"base_url": "https://api.deepseek.com/v1"}, {}) is True
+    # (3) Endpoint signal - volcengine.com host
+    assert _is_deepseek_vendor(type, {"openai_api_base": "https://ark.cn-beijing.volcengine.com/api/v3/"}, {}) is True
+    # (4) Model-name prefix signal - hitting a generic proxy with a deepseek model
+    assert _is_deepseek_vendor(type, {"model": "deepseek-chat"}, {"base_url": "https://my-gateway.local/v1"}) is True
+    # (5) Plain OpenAI-compatible client → not deepseek → False
+    assert _is_deepseek_vendor(type, {"model": "gpt-5"}, {"base_url": "https://api.openai.com/v1"}) is False
 
-    target = {"reasoning_effort": "high"}
-    _normalize_reasoning_effort(target)
-    assert target["reasoning_effort"] == "high"
+    # --- _normalize_reasoning_effort gate ---
+    # DeepSeek vendor: minimal → low, other values untouched
+    ds = {"reasoning_effort": "minimal"}
+    _normalize_reasoning_effort(ds, deepseek_vendor=True)
+    assert ds["reasoning_effort"] == "low"
 
-    target = {}
-    _normalize_reasoning_effort(target)
-    assert "reasoning_effort" not in target
+    ds_high = {"reasoning_effort": "high"}
+    _normalize_reasoning_effort(ds_high, deepseek_vendor=True)
+    assert ds_high["reasoning_effort"] == "high"
+
+    # Non-DeepSeek vendor (OpenAI, Anthropic, vLLM...): all values pass untouched
+    oai = {"reasoning_effort": "minimal"}
+    _normalize_reasoning_effort(oai, deepseek_vendor=False)
+    assert oai["reasoning_effort"] == "minimal"
+
+    oai_high = {"reasoning_effort": "high"}
+    _normalize_reasoning_effort(oai_high, deepseek_vendor=False)
+    assert oai_high["reasoning_effort"] == "high"
+
+    empty = {}
+    _normalize_reasoning_effort(empty, deepseek_vendor=True)
+    assert "reasoning_effort" not in empty
+    _normalize_reasoning_effort(empty, deepseek_vendor=False)
+    assert "reasoning_effort" not in empty
 
 
 # ---------------------------------------------------------------------------

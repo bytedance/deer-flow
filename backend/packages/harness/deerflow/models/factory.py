@@ -35,13 +35,60 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
 _REASONING_EFFORT_NORMALIZE: dict[str, str] = {"minimal": "low"}
 
 
-def _normalize_reasoning_effort(target: dict) -> None:
-    """Normalize known-but-invalid reasoning_effort values to their closest valid equivalent.
+def _is_deepseek_vendor(
+    model_class: type,
+    model_settings_from_config: dict,
+    kwargs: dict,
+) -> bool:
+    """Return True when the profile targets a DeepSeek-compatible endpoint.
 
-    ``"minimal"`` is sent by the frontend for flash mode and was previously also
-    hardcoded in the thinking-disabled path, but it is not a valid OpenAI API
-    value (valid: low/medium/high/xhigh/max). Map it to ``"low"`` silently.
+    DeepSeek (and certain self-hosted gateways routing to DeepSeek) only accept
+    the ``reasoning_effort`` enum {low, medium, high, max, xhigh} — ``minimal``
+    raises a 400.  OpenAI's own models (gpt-5, o-series, etc.) legitimately
+    accept ``minimal`` alongside a larger union, so we must NOT globally
+    normalize ``minimal`` away.  Mirrors the approach in PR #4515 (Void615).
+
+    Three signals are OR-ed together so a profile that arrives through any of
+    them still gets the compatibility fix:
+    1. **Class MRO** — ``ChatDeepSeek`` / ``PatchedChatDeepSeek``.
+    2. **Endpoint URL** — ``base_url`` / ``openai_api_base`` / ``api_base``
+       string matches ``*.deepseek.com`` OR ``*.volcengine.com`` (or the
+       legacy host).  Volcengine's reasoning endpoint maps to the same
+       {low,medium,high,max,xhigh} enum.
+    3. **Model-name prefix** — the configured ``model`` field starts with
+       ``deepseek`` (case-insensitive).  Catches users who route through a
+       generic OpenAI-compatible proxy with the actual DeepSeek model name.
     """
+    # 1) Class signal
+    class_name = getattr(model_class, "__name__", "") or ""
+    if "DeepSeek" in class_name:
+        return True
+    # 2) Endpoint signal — search across all common aliases and kwargs + settings.
+    endpoint_keys = ("base_url", "openai_api_base", "api_base", "base", "endpoint")
+    for source in (model_settings_from_config, kwargs):
+        for key in endpoint_keys:
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                lowered = value.lower()
+                if "deepseek." in lowered or "volcengine." in lowered:
+                    return True
+    # 3) Model-name signal
+    model_name = model_settings_from_config.get("model") or kwargs.get("model") or ""
+    if isinstance(model_name, str) and model_name.lower().startswith("deepseek"):
+        return True
+    return False
+
+
+def _normalize_reasoning_effort(target: dict, *, deepseek_vendor: bool) -> None:
+    """Normalize known provider-incompatible reasoning_effort values.
+
+    Only performs the normalization when ``deepseek_vendor`` is True (see
+    :func:`_is_deepseek_vendor`).  For every other profile the value is passed
+    through untouched — ``minimal`` is a legitimate value for OpenAI's gpt-5 /
+    o-series endpoints and for many self-hosted gateways.
+    """
+    if not deepseek_vendor:
+        return
     for key, value in _REASONING_EFFORT_NORMALIZE.items():
         for dict_key in ("reasoning_effort",):
             if target.get(dict_key) == key:
@@ -271,6 +318,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
+            # "minimal" is only a valid effort for a subset of providers
+            # (OpenAI o-series / gpt-5).  Default to "low" here as a safe
+            # cross-vendor default; profile-level override can be applied by
+            # setting when_thinking_disabled.reasoning_effort explicitly.
             model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
@@ -285,8 +336,12 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
     else:
-        _normalize_reasoning_effort(kwargs)
-        _normalize_reasoning_effort(model_settings_from_config)
+        # Minimal→low normalization is applied only for DeepSeek-compatible
+        # vendors (see comment block on _normalize_reasoning_effort). OpenAI's
+        # larger enum (including "minimal") passes through unchanged.
+        deepseek_vendor = _is_deepseek_vendor(model_class, model_settings_from_config, kwargs)
+        _normalize_reasoning_effort(kwargs, deepseek_vendor=deepseek_vendor)
+        _normalize_reasoning_effort(model_settings_from_config, deepseek_vendor=deepseek_vendor)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
