@@ -561,3 +561,146 @@ class TestLarkCliInitContainer:
         assert runtime_mounts[0].name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME
         mount_paths = {m.mount_path for m in pod.spec.containers[0].volume_mounts}
         assert "/mnt/integrations/lark-cli/config" in mount_paths
+
+
+class TestLarkCliBrokerSidecar:
+    """Broker sidecar provisioning of the sandbox lark-cli runtime (Pattern B)."""
+
+    @staticmethod
+    def _credential_mounts(provisioner_module):
+        return [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=True,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/data",
+                container_path="/mnt/integrations/lark-cli/data",
+                read_only=False,
+            ),
+        ]
+
+    def test_no_sidecar_when_broker_image_unset(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_BROKER_IMAGE = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_broker=True,
+        )
+        container_names = {c.name for c in pod.spec.containers}
+        assert "lark-cli-broker" not in container_names
+
+    def test_no_sidecar_when_flag_disabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_broker=False,
+        )
+        container_names = {c.name for c in pod.spec.containers}
+        assert "lark-cli-broker" not in container_names
+
+    def test_broker_sidecar_and_shim_when_enabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_broker=True,
+        )
+
+        # Shim init container from the broker image.
+        assert pod.spec.init_containers is not None
+        assert len(pod.spec.init_containers) == 1
+        init = pod.spec.init_containers[0]
+        assert init.name == "lark-cli-shim-init"
+        assert init.image == "deer-flow/lark-cli-broker:v1.0.65"
+        assert init.args == ["install-shim", provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH]
+
+        # Broker sidecar alongside the sandbox container.
+        sidecars = [c for c in pod.spec.containers if c.name == "lark-cli-broker"]
+        assert len(sidecars) == 1
+        sidecar = sidecars[0]
+        assert sidecar.image == "deer-flow/lark-cli-broker:v1.0.65"
+        assert sidecar.args == ["serve"]
+        # Credentials mounted into the sidecar only.
+        sidecar_paths = {m.mount_path for m in sidecar.volume_mounts}
+        assert provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH in sidecar_paths
+        assert provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH in sidecar_paths
+
+        # Sandbox container: runtime shim mount + broker URL env, NO config/data.
+        sandbox = pod.spec.containers[0]
+        sandbox_paths = {m.mount_path for m in sandbox.volume_mounts}
+        assert provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH in sandbox_paths
+        assert "/mnt/integrations/lark-cli/config" not in sandbox_paths
+        assert "/mnt/integrations/lark-cli/data" not in sandbox_paths
+        env = {e.name: e.value for e in (sandbox.env or [])}
+        assert env.get("DEERFLOW_LARK_BROKER_URL") == provisioner_module.LARK_BROKER_URL
+
+    def test_broker_supersedes_init_container(self, provisioner_module):
+        """Both images set + both flags on → broker wins (shim init, sidecar)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_INIT_IMAGE = "deer-flow/lark-cli-init:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_runtime=True,
+            provision_lark_cli_broker=True,
+        )
+        assert pod.spec.init_containers[0].name == "lark-cli-shim-init"
+        assert any(c.name == "lark-cli-broker" for c in pod.spec.containers)
+
+    def test_broker_sidecar_forwards_subcommand_denylist_when_configured(self, provisioner_module):
+        """When DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS is set on the provisioner,
+        it is forwarded to the broker sidecar so it can refuse secret-dump
+        subcommands (issue #4338 hardening)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = "config show, auth token"
+        try:
+            pod = provisioner_module._build_pod(
+                "sandbox-1",
+                "thread-1",
+                user_id="alice",
+                extra_mounts=self._credential_mounts(provisioner_module),
+                provision_lark_cli_broker=True,
+            )
+            sidecar = next(c for c in pod.spec.containers if c.name == "lark-cli-broker")
+            env = {e.name: e.value for e in (sidecar.env or [])}
+            assert env.get("DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS") == "config show, auth token"
+        finally:
+            provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = ""
+
+    def test_broker_sidecar_omits_denylist_env_when_unset(self, provisioner_module):
+        """Empty denylist ⇒ no env var (nothing blocked, no behavior change)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_broker=True,
+        )
+        sidecar = next(c for c in pod.spec.containers if c.name == "lark-cli-broker")
+        env = {e.name for e in (sidecar.env or [])}
+        assert "DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS" not in env

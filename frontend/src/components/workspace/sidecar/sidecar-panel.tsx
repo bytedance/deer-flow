@@ -51,11 +51,9 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
-  hasOpenHumanInputRequest,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
@@ -209,14 +207,6 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const hasPendingReferences = sidecar.activeReferences.length > 0;
   const hasSidecarThread = Boolean(sidecar.sidecarThreadId);
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
@@ -226,7 +216,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     creatingThread ||
     Boolean(queuedSubmit) ||
     isUploading ||
-    hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";

@@ -78,7 +78,7 @@ class LarkIntegrationStatusResponse(BaseModel):
     install_path: str = Field(..., description="Host path of the managed Lark skill pack")
     cli: LarkCliProbeResponse
     auth: LarkAuthProbeResponse
-    sandbox_runtime_mode: str = Field("none", description="How lark-cli is provisioned into the sandbox: none, gateway-download, or init-container")
+    sandbox_runtime_mode: str = Field("none", description="How lark-cli is provisioned into the sandbox: none, gateway-download, init-container, or broker")
     sandbox_runtime_ready: bool = Field(False, description="Whether the sandbox lark-cli runtime is provisioned and usable at chat time")
     sandbox_runtime_detail: str | None = Field(None, description="Human-readable reason when the sandbox runtime is not ready")
 

@@ -133,6 +133,46 @@ def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
     assert dm.get_memory(user_id="u")["facts"][0]["content"] == "x"
 
 
+def test_get_context_injects_facts_only_in_middleware_mode(deermem_data_dir):
+    backend_config = {
+        "storage_path": str(deermem_data_dir),
+        "retrieval_adapter": "",
+        "token_counting": "char",
+    }
+    middleware = DeerMem(backend_config=backend_config, mode="middleware")
+    middleware.import_memory(
+        {
+            "user": {
+                "workContext": {"summary": "Works on DeerFlow memory."},
+            },
+            "history": {
+                "recentMonths": {"summary": "Recently redesigned storage."},
+            },
+            "facts": [
+                {
+                    "id": "fact_tool_only",
+                    "content": "Use FTS5 for active fact recall.",
+                    "category": "constraint",
+                    "confidence": 0.9,
+                    "source": "manual",
+                }
+            ],
+        },
+        user_id="u",
+    )
+
+    middleware_context = middleware.get_context(user_id="u")
+    tool_context = DeerMem(backend_config=backend_config, mode="tool").get_context(user_id="u")
+
+    assert "Works on DeerFlow memory." in middleware_context
+    assert "Recently redesigned storage." in middleware_context
+    assert "Use FTS5 for active fact recall." in middleware_context
+    assert "Works on DeerFlow memory." in tool_context
+    assert "Recently redesigned storage." in tool_context
+    assert "Use FTS5 for active fact recall." not in tool_context
+    assert "Facts:" not in tool_context
+
+
 def test_import_without_agent_name_persists_facts_in_default_markdown_bucket(deermem_data_dir):
     dm = DeerMem(backend_config=None)
     dm.import_memory(

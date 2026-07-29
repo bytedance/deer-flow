@@ -109,6 +109,15 @@ function MessageGroupComponent({
     }
     return [];
   }, [lastToolCallStep, steps]);
+  const afterLastToolCallAssistantTextSteps = useMemo(() => {
+    if (!lastToolCallStep) {
+      return [];
+    }
+    const index = steps.indexOf(lastToolCallStep);
+    return steps
+      .slice(index + 1)
+      .filter((step) => step.type === "assistantText");
+  }, [lastToolCallStep, steps]);
   const collapsibleAboveLastToolCallSteps = useMemo(
     () =>
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
@@ -314,22 +323,28 @@ function MessageGroupComponent({
           ></ChainOfThoughtStep>
         </Button>
       )}
-      {lastToolCallStep && (
+      {(lastToolCallStep ??
+        steps.some((step) => step.type === "assistantText")) && (
         <ChainOfThoughtContent className="px-4 pb-2">
-          {(showAbove
-            ? aboveLastToolCallSteps
-            : aboveLastToolCallSteps.filter(
-                (step) => step.type === "assistantText",
-              )
+          {(lastToolCallStep
+            ? showAbove
+              ? aboveLastToolCallSteps
+              : aboveLastToolCallSteps.filter(
+                  (step) => step.type === "assistantText",
+                )
+            : steps.filter((step) => step.type === "assistantText")
           ).flatMap(renderStep)}
-          {renderDebugSummary(
-            lastToolCallStep.messageId,
-            steps.indexOf(lastToolCallStep),
-          )}
           {lastToolCallStep && (
-            <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderToolCall(lastToolCallStep, { isLast: true })}
-            </FlipDisplay>
+            <>
+              {renderDebugSummary(
+                lastToolCallStep.messageId,
+                steps.indexOf(lastToolCallStep),
+              )}
+              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+                {renderToolCall(lastToolCallStep, { isLast: true })}
+              </FlipDisplay>
+              {afterLastToolCallAssistantTextSteps.flatMap(renderStep)}
+            </>
           )}
         </ChainOfThoughtContent>
       )}
@@ -933,7 +948,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       const content = extractContentFromMessage(message);
-      if (content && message.tool_calls?.length) {
+      if (content) {
         steps.push({
           id: `${message.id ?? `ai-${messageIndex}`}-content`,
           messageId: message.id,

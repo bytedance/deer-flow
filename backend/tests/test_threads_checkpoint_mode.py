@@ -145,3 +145,42 @@ async def test_delta_thread_avoids_per_step_full_message_blobs(tmp_path) -> None
     # message-writing checkpoint does.
     assert delta_blobs <= 1, f"delta checkpoints re-serialized messages: {delta_blobs}/{delta_total}"
     assert full_blobs >= 4, f"full mode should blob messages per step: {full_blobs}/{full_total}"
+
+
+async def test_delta_snapshot_frequency_controls_snapshot_cadence(tmp_path) -> None:
+    """``checkpoint_delta.snapshot_frequency`` must reach the compiled channel
+    table: a low cadence snapshots the message list far more often than the
+    default, while materialized state stays identical."""
+
+    async def _run(snapshot_frequency: int, db_name: str) -> tuple[int, list[tuple[str, str, str]]]:
+        async with AsyncSqliteSaver.from_conn_string(str(tmp_path / db_name)) as saver:
+            await saver.setup()
+
+            async def _reply(state: dict[str, Any]) -> dict[str, Any]:
+                n = len(state.get("messages") or [])
+                return {"messages": [AIMessage(content=f"answer-{n}", id=f"a{n}")]}
+
+            builder = StateGraph(get_thread_state_schema("delta", snapshot_frequency))
+            builder.add_node("reply", _reply)
+            builder.set_entry_point("reply")
+            builder.set_finish_point("reply")
+            graph = builder.compile(checkpointer=saver)
+            accessor = CheckpointStateAccessor.bind(graph, saver, mode="delta")
+            config: dict[str, Any] = {"configurable": {"thread_id": "thread-cadence"}}
+            inject_checkpoint_mode(config, "delta")
+            for i in range(6):
+                await graph.ainvoke({"messages": [HumanMessage(content=f"q{i}", id=f"h{i}")]}, config)
+
+            blobs = 0
+            async for checkpoint_tuple in saver.alist(config):
+                if "messages" in checkpoint_tuple.checkpoint.get("channel_values", {}):
+                    blobs += 1
+            latest = await accessor.aget(config)
+            return blobs, _normalize_messages(latest.values)
+
+    low_cadence_blobs, low_cadence_messages = await _run(2, "low-cadence.sqlite3")
+    default_blobs, default_messages = await _run(10, "default-cadence.sqlite3")
+
+    assert low_cadence_blobs >= 4, f"frequency=2 should snapshot repeatedly: {low_cadence_blobs}"
+    assert default_blobs < low_cadence_blobs
+    assert low_cadence_messages == default_messages

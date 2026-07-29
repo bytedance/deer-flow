@@ -471,3 +471,72 @@ def test_authorize_model_name_custom_provider_list_vs_use_divergence(monkeypatch
     result = _authorize_model_name("gpt-4", context=_rbac_context(), app_config=app_config)
     assert result != "gpt-4"
     assert result == "claude-3"
+
+
+def test_authorize_model_name_custom_provider_no_usable_fallback_fail_closed(monkeypatch):
+    """All visible models denied for use + fail_closed → ValueError.
+
+    Regression for willem-bd's edge-case note: when ``filter_resources``
+    returns only models that are themselves denied for ``use``, the fallback
+    must NOT silently reselect a denied model. With ``fail_closed=True`` it
+    must raise; with ``fail_closed=False`` it returns the original name.
+    """
+
+    class _AllListNoneUseProvider:
+        """Lists all models but denies use for every one of them."""
+
+        name = "all-list-none-use"
+
+        def authorize(self, request):
+            if request.resource == "model" and request.action == "use":
+                return AuthzDecision(allow=False, reasons=[AuthzReason(code="authz.denied")])
+            return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
+
+        async def aauthorize(self, request):
+            return self.authorize(request)
+
+        def filter_resources(self, principal, resource_type, candidates):
+            return list(candidates)  # all visible
+
+    app_config = _make_app_config(["gpt-4", "claude-3"])
+    app_config.authorization = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.resolve_authorization_provider",
+        lambda config: _AllListNoneUseProvider(),
+    )
+
+    from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+    # gpt-4 denied for use; fallback candidates also denied → ValueError
+    with pytest.raises(ValueError, match="No models are authorized"):
+        _authorize_model_name("gpt-4", context=_rbac_context(), app_config=app_config)
+
+
+def test_authorize_model_name_custom_provider_no_usable_fallback_fail_open(monkeypatch):
+    """All visible models denied for use + fail_open → returns original name."""
+
+    class _AllListNoneUseProvider:
+        name = "all-list-none-use"
+
+        def authorize(self, request):
+            if request.resource == "model" and request.action == "use":
+                return AuthzDecision(allow=False, reasons=[AuthzReason(code="authz.denied")])
+            return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
+
+        async def aauthorize(self, request):
+            return self.authorize(request)
+
+        def filter_resources(self, principal, resource_type, candidates):
+            return list(candidates)
+
+    app_config = _make_app_config(["gpt-4", "claude-3"])
+    app_config.authorization = AuthorizationConfig(enabled=True, fail_closed=False, default_role="user")
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.resolve_authorization_provider",
+        lambda config: _AllListNoneUseProvider(),
+    )
+
+    from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+    result = _authorize_model_name("gpt-4", context=_rbac_context(), app_config=app_config)
+    assert result == "gpt-4"

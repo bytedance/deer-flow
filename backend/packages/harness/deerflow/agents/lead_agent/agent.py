@@ -48,7 +48,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-from deerflow.agents.thread_state import freeze_delta_snapshot_frequency, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.authz.runtime import resolve_authorization_provider
@@ -61,6 +61,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
@@ -193,7 +194,10 @@ def _authorize_model_name(
         return model_name
 
     # Denied — graceful fallback: pick the first model that ``filter_resources``
-    # says is visible, then verify it also passes ``model:use``.
+    # says is visible AND that also passes ``authorize("model", "use")``. For the
+    # built-in RBAC provider (which ignores ``action``) this is equivalent to
+    # picking the first visible name; for a custom provider that distinguishes
+    # ``list`` from ``use``, it ensures the fallback is actually usable.
     try:
         allowed_names = provider.filter_resources(principal, "model", all_names)
         if not isinstance(allowed_names, list) or any(not isinstance(n, str) for n in allowed_names):
@@ -204,17 +208,27 @@ def _authorize_model_name(
             raise ValueError("No models are authorized for the current role (authorization provider error).")
         return model_name
 
-    if allowed_names:
-        # Pick the first visible model that isn't the one just denied for use.
-        fallback = next((n for n in allowed_names if n != model_name), None)
-        if fallback is None:
-            fallback = allowed_names[0]
-        logger.warning(
-            "Model '%s' is not authorized for the current role; fallback to '%s'.",
-            model_name,
-            fallback,
-        )
-        return fallback
+    for candidate in allowed_names:
+        if candidate == model_name:
+            continue  # already denied above
+        try:
+            cb_decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=candidate))
+            if isinstance(cb_decision, AuthzDecision) and cb_decision.allow:
+                logger.warning(
+                    "Model '%s' is not authorized for the current role; fallback to '%s'.",
+                    model_name,
+                    candidate,
+                )
+                return candidate
+        except Exception:
+            logger.warning(
+                "Authorization provider failed while checking model:use fallback for '%s'",
+                candidate,
+                exc_info=True,
+            )
+            if authz_config.fail_closed:
+                raise ValueError("No models are authorized for the current role (authorization provider error).")
+            return model_name
     if authz_config.fail_closed:
         raise ValueError("No models are authorized for the current role.")
     logger.warning("No models are authorized for the current role; fail_open allows '%s'.", model_name)
@@ -470,9 +484,13 @@ def build_middlewares(
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
-    # Add MemoryMiddleware (after TitleMiddleware) — skipped in enabled tool mode
+    # Add MemoryMiddleware after TitleMiddleware. Tool mode normally skips it;
+    # conversation-extraction backends may explicitly retain passive writes.
     if should_use_memory_tools(resolved_app_config.memory):
-        pass
+        from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
+
+        if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
+            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
     else:
         if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
@@ -605,7 +623,10 @@ def make_lead_agent(config: RunnableConfig):
             runtime_app_config.database.checkpoint_channel_mode,
         )
     mode = freeze_checkpoint_channel_mode(requested_mode)
-    freeze_delta_snapshot_frequency(runtime_app_config.database.checkpoint_delta_snapshot_frequency)
+    # The snapshot cadence travels with the mode: restart-required, frozen
+    # from the app config, and deliberately not client-injectable (a forged
+    # configurable key must not recompile the channel table either).
+    freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
     return _make_lead_agent(config, app_config=runtime_app_config)
 
@@ -623,13 +644,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         resolved_app_config.database.checkpoint_channel_mode,
     )
 
-    # Extract user_id for user-scoped skill loading.
-    # LangGraph gateway injects user_id into config["configurable"];
-    # fall back to the runtime contextvar when not present.
-    from deerflow.runtime.user_context import get_effective_user_id
+    # Resolve one authoritative identity for every user-scoped factory input.
+    # Agent Server's reserved auth fields win over ordinary client-supplied
+    # context/configurable values; the embedded Gateway path uses context.user_id.
+    from deerflow.runtime.user_context import resolve_config_user_id
 
-    runtime_user_id = cfg.get("user_id")
-    resolved_user_id = str(runtime_user_id) if runtime_user_id else get_effective_user_id()
+    resolved_user_id = resolve_config_user_id(config)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -640,7 +660,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None

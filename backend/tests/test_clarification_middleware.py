@@ -173,6 +173,38 @@ class TestHumanInputPayload:
             {"id": "option-4", "label": "None", "value": "None"},
         ]
 
+    def test_payload_flattens_xml_parsed_dict_options(self, middleware):
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "How should the document structure change?",
+                "clarification_type": "approach_choice",
+                "options": {
+                    "item": {
+                        "item": "Move the system section earlier</item>",
+                        "$text": "Merge it into the shared patterns section</item>",
+                    },
+                    "$text": "Add a standalone section</item>",
+                },
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+
+        assert payload["options"] == [
+            {"id": "option-1", "label": "Move the system section earlier", "value": "Move the system section earlier"},
+            {
+                "id": "option-2",
+                "label": "Merge it into the shared patterns section",
+                "value": "Merge it into the shared patterns section",
+            },
+            {"id": "option-3", "label": "Add a standalone section", "value": "Add a standalone section"},
+        ]
+
+    def test_dict_options_recursively_flatten_string_and_number_values(self, middleware):
+        options = {"item": [["First</item>"], {"$text": 2}], "$text": None}
+
+        assert middleware._normalize_options(options) == ["First", "2"]
+
     def test_payload_with_plain_string_option(self, middleware):
         payload = middleware._build_human_input_payload(
             {

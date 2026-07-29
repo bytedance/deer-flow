@@ -49,11 +49,11 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
     # event-loop blocking visible to the Blockbuster gate.
     original_build = mw._build_full_reminder
 
-    def slow_build_reminder():
+    def slow_build_reminder(runtime=None):
         import time
 
         time.sleep(0.05)  # 50ms sync sleep — blocks the thread it runs on
-        return original_build()
+        return original_build(runtime)
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
@@ -114,7 +114,7 @@ async def test_abefore_agent_returns_none_on_timeout() -> None:
     finished = threading.Event()
     journal = mock.MagicMock()
 
-    def blocking_inject(state):
+    def blocking_inject(state, runtime=None):
         started.set()
         release.wait(timeout=2)
         try:
@@ -159,7 +159,7 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
     journal = mock.MagicMock()
     memory_content = "<memory>checkpoint context</memory>"
 
-    def blocking_inject(state):
+    def blocking_inject(state, runtime=None):
         started.set()
         release.wait(timeout=2)
         try:

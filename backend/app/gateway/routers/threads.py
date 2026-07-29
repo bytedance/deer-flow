@@ -65,6 +65,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import valid_duration_entry
+from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
@@ -349,7 +350,14 @@ class ThreadDeleteResponse(BaseModel):
     message: str
 
 
-class ThreadResponse(BaseModel):
+class _MetadataRedactingResponse(BaseModel):
+    @field_validator("metadata", mode="before", check_fields=False)
+    @classmethod
+    def _redact_legacy_metadata_secret(cls, value: Any) -> Any:
+        return redact_metadata_secrets(value)
+
+
+class ThreadResponse(_MetadataRedactingResponse):
     """Response model for a single thread."""
 
     thread_id: str = Field(description="Unique thread identifier")
@@ -402,7 +410,7 @@ class ThreadSearchRequest(BaseModel):
         return v
 
 
-class ThreadStateResponse(BaseModel):
+class ThreadStateResponse(_MetadataRedactingResponse):
     """Response model for thread state."""
 
     values: dict[str, Any] = Field(default_factory=dict, description="Current channel values")
@@ -472,7 +480,7 @@ class ThreadCompactResponse(BaseModel):
     total_tokens: int = 0
 
 
-class HistoryEntry(BaseModel):
+class HistoryEntry(_MetadataRedactingResponse):
     """Single checkpoint history entry."""
 
     checkpoint_id: str

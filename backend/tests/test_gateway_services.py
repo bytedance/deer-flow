@@ -726,6 +726,62 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
 
 
+def test_state_accessor_graph_cache_keys_on_snapshot_frequency():
+    """The accessor-graph cache must not serve a graph compiled at a different
+    delta snapshot cadence."""
+    from app.gateway import services as gateway_services
+
+    builds = []
+
+    def fake_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        return graph
+
+    gateway_services._state_accessor_graph_cache.clear()
+    try:
+        first = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        again = gateway_services._state_accessor_graph(fake_factory, None, "delta", 1000, {})
+        assert again is first
+        assert len(builds) == 1
+
+        other_cadence = gateway_services._state_accessor_graph(fake_factory, None, "delta", 250, {})
+        assert other_cadence is not first
+        assert len(builds) == 2
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
+def test_state_accessor_graph_cache_honors_configured_cap():
+    """database.checkpoint_graph_cache.accessor_graph_max bounds the cache;
+    it is re-read per eviction check (hot-reloadable)."""
+    from types import SimpleNamespace
+
+    from app.gateway import services as gateway_services
+
+    builds = []
+
+    def fake_factory(*, config):
+        graph = object()
+        builds.append(graph)
+        return graph
+
+    app_config = SimpleNamespace(database=SimpleNamespace(checkpoint_graph_cache=SimpleNamespace(accessor_graph_max=2)))
+    config = {"context": {"app_config": app_config}}
+
+    gateway_services._state_accessor_graph_cache.clear()
+    try:
+        gateway_services._state_accessor_graph(fake_factory, "a", "full", None, config)
+        gateway_services._state_accessor_graph(fake_factory, "b", "full", None, config)
+        assert len(builds) == 2
+        # Third distinct key exceeds the configured cap of 2: wholesale clear.
+        gateway_services._state_accessor_graph(fake_factory, "c", "full", None, config)
+        assert len(gateway_services._state_accessor_graph_cache) == 1
+        assert len(builds) == 3
+    finally:
+        gateway_services._state_accessor_graph_cache.clear()
+
+
 def test_build_run_config_configurable_custom_agent_dual_writes_agent_name():
     """Regression for issue #3549: even when the caller uses the legacy
     ``configurable`` path, ``agent_name`` must also land in
@@ -1330,6 +1386,155 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
     return captured["graph_input"]
 
 
+def _make_start_run_persistence_context():
+    from types import SimpleNamespace
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_store = MemoryRunStore()
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    state = SimpleNamespace(
+        stream_bridge=SimpleNamespace(),
+        run_manager=RunManager(store=run_store),
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        run_event_store=SimpleNamespace(),
+        run_events_config=None,
+        thread_store=thread_store,
+        checkpoint_channel_mode="full",
+        scheduled_task_service=None,
+    )
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        app=SimpleNamespace(state=state),
+    )
+    return request, run_store, thread_store
+
+
+def test_start_run_rejects_legacy_auth_token_before_persistence():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        request, run_store, thread_store = _make_start_run_persistence_context()
+        body = RunCreateRequest(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            metadata={"auth_token": "legacy-secret", "token_usage": 7},
+        )
+
+        with patch("app.gateway.services.run_agent", new_callable=AsyncMock) as run_agent:
+            with pytest.raises(HTTPException) as exc_info:
+                await start_run(body, "thread-secret-admission", request)
+
+        assert exc_info.value.status_code == 422
+        assert "config.context.secrets" in str(exc_info.value.detail)
+        assert await run_store.list_by_thread("thread-secret-admission") == []
+        assert await thread_store.get("thread-secret-admission") is None
+        run_agent.assert_not_called()
+
+    asyncio.run(_scenario())
+
+
+def test_start_run_rejects_legacy_auth_token_in_config_metadata_before_persistence(
+    _stub_app_config,
+):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        request, run_store, thread_store = _make_start_run_persistence_context()
+        body = RunCreateRequest(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "user", "content": "hi"}]},
+            metadata={"token_usage": 7},
+            config={
+                "metadata": {
+                    "auth_token": "legacy-secret",
+                    "nested": {"auth_token": "ordinary-nested-metadata"},
+                }
+            },
+        )
+        create_or_reject = AsyncMock(side_effect=AssertionError("run persistence was reached"))
+
+        with patch.object(
+            request.app.state.run_manager,
+            "create_or_reject",
+            new=create_or_reject,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await start_run(body, "thread-config-secret-admission", request)
+
+        assert exc_info.value.status_code == 422
+        assert "config.context.secrets" in str(exc_info.value.detail)
+        create_or_reject.assert_not_awaited()
+        assert await run_store.list_by_thread("thread-config-secret-admission") == []
+        assert await thread_store.get("thread-config-secret-admission") is None
+
+    asyncio.run(_scenario())
+
+
+def test_start_run_preserves_ordinary_metadata(_stub_app_config):
+    import asyncio
+    from typing import Any
+    from unittest.mock import patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        thread_id = "thread-ordinary-metadata"
+        metadata = {"token_usage": 7, "source": "regression"}
+        request, _run_store, thread_store = _make_start_run_persistence_context()
+        captured: dict[str, Any] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        with (
+            patch(
+                "app.gateway.services.resolve_agent_factory",
+                return_value=object(),
+            ),
+            patch(
+                "app.gateway.services.run_agent",
+                side_effect=fake_run_agent,
+            ),
+        ):
+            record = await start_run(
+                RunCreateRequest(
+                    assistant_id="lead_agent",
+                    input={"messages": [{"role": "user", "content": "hi"}]},
+                    metadata=metadata,
+                ),
+                thread_id,
+                request,
+            )
+            await record.task
+
+        assert record.metadata == metadata
+        assert (await thread_store.get(thread_id))["metadata"] == metadata
+        assert captured["config"]["metadata"] == metadata
+
+    asyncio.run(_scenario())
+
+
 def test_start_run_translates_resume_command_to_langgraph_command(_stub_app_config):
     import asyncio
 
@@ -1599,8 +1804,8 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
 
 def test_start_run_session_caller_anti_forgery(_stub_app_config):
     """A session (non-internal) caller cannot forge is_internal, authz_attributes,
-    or channel_user_id via body.config. Exercises the real start_run path, not
-    a replay, so ordering or gating drift would be caught."""
+    channel_user_id, or LangGraph Server auth identity via body.config. Exercises
+    the real start_run path, not a replay, so ordering or gating drift is caught."""
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -1643,6 +1848,8 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
                     "is_internal": True,
                     "authz_attributes": {"forged": True},
                     "channel_user_id": "forged-sender",
+                    "langgraph_auth_user": {"identity": "forged-user"},
+                    "langgraph_auth_user_id": "forged-user",
                 },
                 "configurable": {
                     "is_internal": True,
@@ -1679,6 +1886,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert "authz_attributes" not in context
     # channel_user_id must not survive from body.config for a session caller
     assert context.get("channel_user_id") is None
+    # Agent Server's reserved auth fields are never valid on the Gateway path.
+    assert context.get("langgraph_auth_user") is None
+    assert context.get("langgraph_auth_user_id") is None
 
 
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
@@ -1721,6 +1931,31 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["if_not_exists"] == "create"
     assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+
+
+def test_launch_scheduled_thread_run_rejects_legacy_auth_token():
+    """The internal launcher shares run admission; task API/model state has no metadata field."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario():
+        with pytest.raises(HTTPException) as exc_info:
+            await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                metadata={"auth_token": "legacy-secret"},
+            )
+
+        assert exc_info.value.status_code == 422
+        assert "config.context.secrets" in str(exc_info.value.detail)
+
+    asyncio.run(_scenario())
 
 
 # ---------------------------------------------------------------------------
@@ -1920,6 +2155,14 @@ class TestInjectAuthenticatedUserContextAuthz:
         config = _assemble_authz_run_config({"configurable": {"authz_attributes": {"forged": True}}}, request)
         assert "authz_attributes" not in config["configurable"]
 
+    @pytest.mark.parametrize("section", ["context", "configurable"])
+    @pytest.mark.parametrize("key", ["langgraph_auth_user", "langgraph_auth_user_id"])
+    def test_clears_forged_langgraph_auth_identity(self, section, key):
+        """Gateway clients cannot inject Agent Server's reserved auth fields."""
+        request = _make_request_with_auth_source("session")
+        config = _assemble_authz_run_config({section: {key: "forged-user"}}, request)
+        assert key not in config[section]
+
     def test_internal_auth_source_writes_is_internal_true(self):
         """Internal caller gets is_internal=True."""
         from app.gateway.services import inject_authenticated_user_context
@@ -2084,10 +2327,17 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    set_status = AsyncMock()
+
+    async def set_status_if_not_cancelled(*args, **kwargs):
+        await set_status(*args, **kwargs)
+        return None
+
     run_manager = SimpleNamespace(
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
-        set_status=AsyncMock(),
+        set_status=set_status,
+        set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
     )
     record = RunRecord(
         run_id="run-checkpoint-mode",
@@ -2156,10 +2406,17 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+    set_status = AsyncMock()
+
+    async def set_status_if_not_cancelled(*args, **kwargs):
+        await set_status(*args, **kwargs)
+        return None
+
     run_manager = SimpleNamespace(
         try_start=AsyncMock(return_value=RunStartOutcome.started),
         wait_for_prior_finalizing=AsyncMock(),
-        set_status=AsyncMock(),
+        set_status=set_status,
+        set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
     )
     record = RunRecord(
         run_id="run-selected-checkpoint-mode",

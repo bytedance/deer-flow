@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import anyio
+import pytest
 
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.app_config import AppConfig
@@ -96,7 +97,7 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template()
 
@@ -110,7 +111,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
         skill_evolution=SimpleNamespace(enabled=False),
         tool_search=SimpleNamespace(enabled=False),
-        memory=SimpleNamespace(enabled=True, mode="tool"),
+        memory=SimpleNamespace(enabled=True, mode="tool", injection_enabled=False),
         acp_agents={},
     )
     middleware_config = SimpleNamespace(
@@ -125,7 +126,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
@@ -133,6 +134,8 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "<memory_tool_system>" in tool_prompt
     assert "memory_search" in tool_prompt
     assert "memory_add" in tool_prompt
+    assert "agent facts are not injected automatically" in tool_prompt
+    assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
@@ -157,7 +160,7 @@ def test_apply_prompt_template_threads_explicit_app_config_without_global_config
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
     monkeypatch.setattr(prompt_module, "get_or_new_user_skill_storage", lambda user_id, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=explicit_config)
 
@@ -196,7 +199,7 @@ def test_apply_prompt_template_threads_explicit_app_config_to_subagents_without_
     monkeypatch.setattr("deerflow.config.get_app_config", fail_get_app_config)
     monkeypatch.setattr("deerflow.config.subagents_config.get_subagents_app_config", fail_get_subagents_app_config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(subagent_enabled=True, app_config=explicit_config)
 
@@ -220,7 +223,7 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         subagent_enabled=True,
@@ -249,7 +252,7 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         subagent_enabled=True,
@@ -288,7 +291,7 @@ def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypa
     )
 
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     enforced = SubagentLimitMiddleware(max_concurrent=1).max_concurrent
     assert enforced == 1  # 1 must pass through, not be bumped to 2
@@ -334,7 +337,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
 
     manager = SimpleNamespace(get_context=fake_get_context)
     monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", fail_get_memory_config)
-    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+    monkeypatch.setattr("deerflow.runtime.user_context.resolve_runtime_user_id", lambda runtime: "user-1")
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
 
     context = prompt_module._get_memory_context("agent-a", app_config=explicit_config)
@@ -344,6 +347,70 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     assert captured == {
         "agent_name": "agent-a",
         "user_id": "user-1",
+    }
+
+
+def test_get_memory_context_propagates_fail_closed_manager_error(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_closed"}},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+
+    with pytest.raises(MemoryManagerError, match="down"):
+        prompt_module._get_memory_context("agent-a", app_config=explicit_config)
+
+
+def test_get_memory_context_swallows_manager_error_without_fail_closed(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True, backend_config={}),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
+
+    assert prompt_module._get_memory_context("agent-a", app_config=explicit_config) == ""
+
+
+def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True),
+    )
+    captured: dict[str, object] = {}
+
+    def fail_resolve_runtime_user_id(runtime):
+        raise AssertionError("explicit user_id must bypass ambient identity resolution")
+
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+        captured["agent_name"] = agent_name
+        captured["user_id"] = user_id
+        return "remember this"
+
+    monkeypatch.setattr("deerflow.runtime.user_context.resolve_runtime_user_id", fail_resolve_runtime_user_id)
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: SimpleNamespace(get_context=fake_get_context),
+    )
+
+    context = prompt_module._get_memory_context(
+        "agent-a",
+        app_config=explicit_config,
+        user_id="runtime-user",
+    )
+
+    assert "<memory>" in context
+    assert captured == {
+        "agent_name": "agent-a",
+        "user_id": "runtime-user",
     }
 
 
@@ -564,7 +631,7 @@ def test_apply_prompt_template_legacy_path_does_not_mention_describe_skill(monke
     config = _make_minimal_app_config()
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(app_config=config)
 
@@ -580,7 +647,7 @@ def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch
     config = _make_minimal_app_config()
     monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
     monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = prompt_module.apply_prompt_template(
         app_config=config,

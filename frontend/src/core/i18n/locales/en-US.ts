@@ -855,6 +855,7 @@ export const enUS: Translations = {
         auth: "Auth",
         sandboxRuntime: "Sandbox runtime",
         sandboxRuntimeInitContainer: "Provisioned by init container",
+        sandboxRuntimeBroker: "Provisioned by broker sidecar",
         sandboxRuntimeGatewayDownload: "Provisioned by Gateway",
         sandboxRuntimeNotReady:
           "Not ready — lark-cli may be missing at chat time",

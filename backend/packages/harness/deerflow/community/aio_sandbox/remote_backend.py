@@ -39,28 +39,41 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
 }
 
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
+_LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
+_LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 
 
 def _provisioner_extra_mounts_payload(
     extra_mounts: list[tuple[str, str, bool]] | None,
     *,
     provision_lark_cli_runtime: bool = False,
+    provision_lark_cli_broker: bool = False,
 ) -> list[dict[str, object]]:
     """Return only extra mounts the provisioner knows how to recreate safely.
 
     When ``provision_lark_cli_runtime`` is set, the provisioner supplies the
     lark-cli runtime via an init container + emptyDir, so the runtime extra mount
     is dropped here to avoid a colliding hostPath/PVC mount at the same path. The
-    per-user config/data credential mounts are always forwarded.
+    per-user config/data credential mounts are still forwarded (they are mounted
+    into the sandbox in Pattern A).
+
+    When ``provision_lark_cli_broker`` is set (Pattern B, issue #4338), the
+    provisioner runs a broker sidecar that holds the credentials, so the
+    config/data mounts are **forwarded** (the provisioner wires them into the
+    sidecar, not the sandbox) while the runtime mount is dropped. Nothing changes
+    in this payload beyond keeping config/data available for the provisioner to
+    place; the runtime entry is dropped in both modes.
     """
     if not extra_mounts:
         return []
+
+    drop_runtime = provision_lark_cli_runtime or provision_lark_cli_broker
 
     payload: list[dict[str, object]] = []
     for host_path, container_path, read_only in extra_mounts:
         if container_path not in _PROVISIONER_EXTRA_MOUNT_PATHS:
             continue
-        if provision_lark_cli_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
+        if drop_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
             continue
         payload.append(
             {
@@ -115,6 +128,7 @@ class RemoteSandboxBackend(SandboxBackend):
         *,
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
@@ -127,6 +141,7 @@ class RemoteSandboxBackend(SandboxBackend):
             extra_mounts,
             user_id=user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
         )
 
     def destroy(self, info: SandboxInfo) -> None:
@@ -199,6 +214,7 @@ class RemoteSandboxBackend(SandboxBackend):
         *,
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
         effective_user_id = user_id or get_effective_user_id()
@@ -209,10 +225,12 @@ class RemoteSandboxBackend(SandboxBackend):
             "user_id": effective_user_id,
             "include_legacy_skills": include_legacy_skills,
             "provision_lark_cli_runtime": provision_lark_cli_runtime,
+            "provision_lark_cli_broker": provision_lark_cli_broker,
         }
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
         )
         if provisioner_extra_mounts:
             payload["extra_mounts"] = provisioner_extra_mounts
