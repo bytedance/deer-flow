@@ -701,8 +701,7 @@ export const zhCN: Translations = {
     },
     models: {
       title: "模型配置",
-      description:
-        "管理 AI 模型提供商及其连接设置。更改将在下一条消息中生效。",
+      description: "管理 AI 模型提供商及其连接设置。更改将在下一条消息中生效。",
       empty: "尚未配置模型。添加一个模型以开始使用。",
       countSingular: "个模型已配置",
       countPlural: "个模型已配置",
@@ -748,6 +747,7 @@ export const zhCN: Translations = {
       temperature: "温度",
       whenThinkingEnabled: "启用思考时",
       whenThinkingDisabled: "禁用思考时",
+      invalidJson: "无效的 JSON",
       advanced: "高级",
       advancedHide: "隐藏高级",
     },

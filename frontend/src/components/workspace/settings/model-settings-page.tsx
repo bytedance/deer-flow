@@ -32,9 +32,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
-import {
-  ModelsAdminRequestError,
-} from "@/core/models/api";
+import { ModelsAdminRequestError } from "@/core/models/api";
 import {
   useAdminModels,
   useDeleteModel,
@@ -56,7 +54,10 @@ function getProviderOptions(
   t: ReturnType<typeof useI18n>["t"],
 ): ProviderOption[] {
   return [
-    { value: "langchain_openai:ChatOpenAI", label: t.settings.models.providers.openai },
+    {
+      value: "langchain_openai:ChatOpenAI",
+      label: t.settings.models.providers.openai,
+    },
     {
       value: "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
       label: t.settings.models.providers.deepseek,
@@ -147,7 +148,9 @@ export function ModelSettingsPage() {
   const { mutate: updateModels, isPending: isSaving } = useUpdateModels();
   const { mutate: deleteModel, isPending: isDeleting } = useDeleteModel();
 
-  const [editingModel, setEditingModel] = useState<FullModelConfig | null>(null);
+  const [editingModel, setEditingModel] = useState<FullModelConfig | null>(
+    null,
+  );
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
@@ -280,7 +283,7 @@ export function ModelSettingsPage() {
                       disabled={isDeleting}
                       aria-label={t.settings.models.deleteModel}
                     >
-                      <Trash2Icon className="size-4 text-destructive" />
+                      <Trash2Icon className="text-destructive size-4" />
                     </Button>
                   </ItemActions>
                 </Item>
@@ -355,11 +358,33 @@ function ModelFormDialog({
   const [draft, setDraft] = useState<FullModelConfig>(emptyModelConfig());
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Raw textarea content for the thinking JSON fields, tracked separately
+  // so that a JSON parse error does not silently revert to the last valid value.
+  const [whenThinkingEnabledText, setWhenThinkingEnabledText] = useState("");
+  const [whenThinkingEnabledError, setWhenThinkingEnabledError] =
+    useState(false);
+  const [whenThinkingDisabledText, setWhenThinkingDisabledText] = useState("");
+  const [whenThinkingDisabledError, setWhenThinkingDisabledError] =
+    useState(false);
+
   // Sync draft when dialog opens with new initial data.
   useEffect(() => {
     if (open) {
-      setDraft(initial ?? emptyModelConfig());
+      const next = initial ?? emptyModelConfig();
+      setDraft(next);
       setShowAdvanced(false);
+      setWhenThinkingEnabledText(
+        next.when_thinking_enabled
+          ? JSON.stringify(next.when_thinking_enabled, null, 2)
+          : "",
+      );
+      setWhenThinkingEnabledError(false);
+      setWhenThinkingDisabledText(
+        next.when_thinking_disabled
+          ? JSON.stringify(next.when_thinking_disabled, null, 2)
+          : "",
+      );
+      setWhenThinkingDisabledError(false);
     }
   }, [open, initial]);
 
@@ -381,13 +406,13 @@ function ModelFormDialog({
       "display_name",
       "description",
     ] as const) {
-      if (cleaned[k] === "") (cleaned as Record<string, unknown>)[k] = undefined;
+      if (cleaned[k] === "")
+        (cleaned as Record<string, unknown>)[k] = undefined;
     }
     onSave(cleaned);
   };
 
-  const inputClass =
-    "col-span-3" as const;
+  const inputClass = "col-span-3" as const;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -406,7 +431,9 @@ function ModelFormDialog({
         <ScrollArea className="max-h-[60vh]">
           <div className="grid grid-cols-[120px_1fr] items-center gap-x-4 gap-y-4 pr-4">
             {/* Name */}
-            <label className="text-right text-sm font-medium">{t.settings.models.name} *</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.name} *
+            </label>
             <Input
               className={inputClass}
               value={draft.name}
@@ -416,7 +443,9 @@ function ModelFormDialog({
             />
 
             {/* Display name */}
-            <label className="text-right text-sm font-medium">{t.settings.models.displayName}</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.displayName}
+            </label>
             <Input
               className={inputClass}
               value={draft.display_name ?? ""}
@@ -425,7 +454,9 @@ function ModelFormDialog({
             />
 
             {/* Description */}
-            <label className="text-right text-sm font-medium">{t.settings.models.description}</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.description}
+            </label>
             <Input
               className={inputClass}
               value={draft.description ?? ""}
@@ -434,7 +465,9 @@ function ModelFormDialog({
             />
 
             {/* Provider class */}
-            <label className="text-right text-sm font-medium">{t.settings.models.providerClass} *</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.providerClass} *
+            </label>
             <div className="col-span-3 space-y-2">
               <Select
                 value={resolveProviderValue(draft.use)}
@@ -447,7 +480,9 @@ function ModelFormDialog({
                 }}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder={t.settings.models.providers.placeholder} />
+                  <SelectValue
+                    placeholder={t.settings.models.providers.placeholder}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {getProviderOptions(t).map((opt) => (
@@ -467,7 +502,9 @@ function ModelFormDialog({
             </div>
 
             {/* Model ID */}
-            <label className="text-right text-sm font-medium">{t.settings.models.modelId} *</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.modelId} *
+            </label>
             <Input
               className={inputClass}
               value={draft.model}
@@ -476,11 +513,13 @@ function ModelFormDialog({
             />
 
             {/* API Key */}
-            <label className="text-right text-sm font-medium">{t.settings.models.apiKey}</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.apiKey}
+            </label>
             <Input
               className={inputClass}
               type="password"
-              value={(draft.api_key as string) ?? ""}
+              value={draft.api_key! ?? ""}
               onChange={(e) => set("api_key", e.target.value || undefined)}
               placeholder={
                 isEditing
@@ -490,7 +529,9 @@ function ModelFormDialog({
             />
 
             {/* API Base */}
-            <label className="text-right text-sm font-medium">{t.settings.models.apiBase}</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.apiBase}
+            </label>
             <Input
               className={inputClass}
               value={draft.api_base ?? draft.base_url ?? ""}
@@ -503,7 +544,9 @@ function ModelFormDialog({
             />
 
             {/* Capability toggles */}
-            <label className="text-right text-sm font-medium">{t.settings.models.capabilities}</label>
+            <label className="text-right text-sm font-medium">
+              {t.settings.models.capabilities}
+            </label>
             <div className="col-span-3 flex flex-wrap gap-x-6 gap-y-2">
               <ToggleField
                 label={t.settings.models.supportsThinking}
@@ -538,13 +581,17 @@ function ModelFormDialog({
             {showAdvanced && (
               <>
                 {/* Timeout */}
-                <label className="text-right text-sm font-medium">{t.settings.models.timeout}</label>
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.timeout}
+                </label>
                 <Input
                   className={inputClass}
                   type="number"
                   value={draft.timeout ?? draft.request_timeout ?? ""}
                   onChange={(e) => {
-                    const v = e.target.value ? parseFloat(e.target.value) : undefined;
+                    const v = e.target.value
+                      ? parseFloat(e.target.value)
+                      : undefined;
                     set("timeout", v);
                     set("request_timeout", v);
                   }}
@@ -552,31 +599,43 @@ function ModelFormDialog({
                 />
 
                 {/* Max retries */}
-                <label className="text-right text-sm font-medium">{t.settings.models.maxRetries}</label>
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.maxRetries}
+                </label>
                 <Input
                   className={inputClass}
                   type="number"
                   value={draft.max_retries ?? ""}
                   onChange={(e) =>
-                    set("max_retries", e.target.value ? parseInt(e.target.value) : undefined)
+                    set(
+                      "max_retries",
+                      e.target.value ? parseInt(e.target.value) : undefined,
+                    )
                   }
                   placeholder="2"
                 />
 
                 {/* Max tokens */}
-                <label className="text-right text-sm font-medium">{t.settings.models.maxTokens}</label>
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.maxTokens}
+                </label>
                 <Input
                   className={inputClass}
                   type="number"
                   value={draft.max_tokens ?? ""}
                   onChange={(e) =>
-                    set("max_tokens", e.target.value ? parseInt(e.target.value) : undefined)
+                    set(
+                      "max_tokens",
+                      e.target.value ? parseInt(e.target.value) : undefined,
+                    )
                   }
                   placeholder="8192"
                 />
 
                 {/* Temperature */}
-                <label className="text-right text-sm font-medium">{t.settings.models.temperature}</label>
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.temperature}
+                </label>
                 <Input
                   className={inputClass}
                   type="number"
@@ -585,56 +644,75 @@ function ModelFormDialog({
                   max="2"
                   value={draft.temperature ?? ""}
                   onChange={(e) =>
-                    set("temperature", e.target.value ? parseFloat(e.target.value) : undefined)
+                    set(
+                      "temperature",
+                      e.target.value ? parseFloat(e.target.value) : undefined,
+                    )
                   }
                   placeholder="0.7"
                 />
 
                 {/* when_thinking_enabled */}
-                <label className="text-right text-sm font-medium">{t.settings.models.whenThinkingEnabled}</label>
-                <Textarea
-                  className={inputClass}
-                  rows={3}
-                  value={
-                    draft.when_thinking_enabled
-                      ? JSON.stringify(draft.when_thinking_enabled, null, 2)
-                      : ""
-                  }
-                  onChange={(e) => {
-                    try {
-                      const v = e.target.value.trim()
-                        ? JSON.parse(e.target.value)
-                        : undefined;
-                      set("when_thinking_enabled", v);
-                    } catch {
-                      // let user finish typing
-                    }
-                  }}
-                  placeholder='{"extra_body": {"thinking": {"type": "enabled"}}}'
-                />
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.whenThinkingEnabled}
+                </label>
+                <div className="col-span-3 space-y-1">
+                  <Textarea
+                    className={inputClass}
+                    rows={3}
+                    value={whenThinkingEnabledText}
+                    onChange={(e) => {
+                      const rawText = e.target.value;
+                      setWhenThinkingEnabledText(rawText);
+                      try {
+                        const v = rawText.trim()
+                          ? JSON.parse(rawText)
+                          : undefined;
+                        set("when_thinking_enabled", v);
+                        setWhenThinkingEnabledError(false);
+                      } catch {
+                        setWhenThinkingEnabledError(true);
+                      }
+                    }}
+                    placeholder='{"extra_body": {"thinking": {"type": "enabled"}}}'
+                  />
+                  {whenThinkingEnabledError && (
+                    <p className="text-destructive text-xs">
+                      {t.settings.models.invalidJson}
+                    </p>
+                  )}
+                </div>
 
                 {/* when_thinking_disabled */}
-                <label className="text-right text-sm font-medium">{t.settings.models.whenThinkingDisabled}</label>
-                <Textarea
-                  className={inputClass}
-                  rows={3}
-                  value={
-                    draft.when_thinking_disabled
-                      ? JSON.stringify(draft.when_thinking_disabled, null, 2)
-                      : ""
-                  }
-                  onChange={(e) => {
-                    try {
-                      const v = e.target.value.trim()
-                        ? JSON.parse(e.target.value)
-                        : undefined;
-                      set("when_thinking_disabled", v);
-                    } catch {
-                      // let user finish typing
-                    }
-                  }}
-                  placeholder='{"extra_body": {"thinking": {"type": "disabled"}}}'
-                />
+                <label className="text-right text-sm font-medium">
+                  {t.settings.models.whenThinkingDisabled}
+                </label>
+                <div className="col-span-3 space-y-1">
+                  <Textarea
+                    className={inputClass}
+                    rows={3}
+                    value={whenThinkingDisabledText}
+                    onChange={(e) => {
+                      const rawText = e.target.value;
+                      setWhenThinkingDisabledText(rawText);
+                      try {
+                        const v = rawText.trim()
+                          ? JSON.parse(rawText)
+                          : undefined;
+                        set("when_thinking_disabled", v);
+                        setWhenThinkingDisabledError(false);
+                      } catch {
+                        setWhenThinkingDisabledError(true);
+                      }
+                    }}
+                    placeholder='{"extra_body": {"thinking": {"type": "disabled"}}}'
+                  />
+                  {whenThinkingDisabledError && (
+                    <p className="text-destructive text-xs">
+                      {t.settings.models.invalidJson}
+                    </p>
+                  )}
+                </div>
               </>
             )}
           </div>
@@ -650,7 +728,9 @@ function ModelFormDialog({
               isSaving ||
               !draft.name.trim() ||
               !draft.use.trim() ||
-              !draft.model.trim()
+              !draft.model.trim() ||
+              whenThinkingEnabledError ||
+              whenThinkingDisabledError
             }
           >
             {t.common.save}

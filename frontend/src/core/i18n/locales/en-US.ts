@@ -741,7 +741,8 @@ export const enUS: Translations = {
         "Are you sure you want to delete this model? This cannot be undone.",
       saved: "Model configurations saved.",
       deleted: "Model deleted.",
-      adminRequired: "Admin privileges required to manage model configurations.",
+      adminRequired:
+        "Admin privileges required to manage model configurations.",
       name: "Name",
       displayName: "Display name",
       description: "Description",
@@ -777,6 +778,7 @@ export const enUS: Translations = {
       temperature: "Temperature",
       whenThinkingEnabled: "When thinking enabled",
       whenThinkingDisabled: "When thinking disabled",
+      invalidJson: "Invalid JSON",
       advanced: "Advanced",
       advancedHide: "Hide advanced",
     },

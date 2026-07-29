@@ -657,6 +657,7 @@ export interface Translations {
       temperature: string;
       whenThinkingEnabled: string;
       whenThinkingDisabled: string;
+      invalidJson: string;
       advanced: string;
       advancedHide: string;
     };
