@@ -1180,9 +1180,7 @@ def test_reconcile_does_not_adopt_a_container_whose_unready_teardown_is_reserved
         # not written yet — exactly the shape reconcile would have adopted
         # before the reservation wrapped this path.
         provider._reconcile_orphans()
-        assert "unready-race" not in provider._warm_pool, (
-            "reconcile adopted a container this instance is tearing down"
-        )
+        assert "unready-race" not in provider._warm_pool, "reconcile adopted a container this instance is tearing down"
     finally:
         let_claim.set()
         reaper.join(timeout=5)

@@ -1932,9 +1932,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         if not self._reserve_local_teardown(
             sandbox_id,
-            lambda: sandbox_id not in self._sandboxes
-            and sandbox_id not in self._sandbox_infos
-            and sandbox_id not in self._warm_pool,
+            lambda: sandbox_id not in self._sandboxes and sandbox_id not in self._sandbox_infos and sandbox_id not in self._warm_pool,
         ):
             logger.warning(
                 "Not destroying unready sandbox %s: adopted or being torn down by this instance",
