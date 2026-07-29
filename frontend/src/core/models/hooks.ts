@@ -1,6 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { loadModels } from "./api";
+import {
+  deleteAdminModel,
+  loadAdminModels,
+  loadModels,
+  ModelsAdminRequestError,
+  updateAdminModels,
+} from "./api";
+import type { FullModelConfig } from "./types";
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   const { data, isLoading, error } = useQuery({
@@ -21,4 +28,47 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     isLoading,
     error,
   };
+}
+
+export function useAdminModels({ enabled = true }: { enabled?: boolean } = {}) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["adminModels"],
+    queryFn: () => loadAdminModels(),
+    enabled,
+    refetchOnWindowFocus: false,
+    retry: (count, err) =>
+      !(err instanceof ModelsAdminRequestError) && count < 3,
+  });
+  return {
+    models: data?.models ?? [],
+    tokenUsageEnabled: data?.token_usage.enabled ?? false,
+    isLoading,
+    error,
+  };
+}
+
+export function useUpdateModels() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (models: FullModelConfig[]) => {
+      return updateAdminModels(models);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["adminModels"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}
+
+export function useDeleteModel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string) => {
+      await deleteAdminModel(name);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["adminModels"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
 }
