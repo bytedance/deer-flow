@@ -89,7 +89,10 @@ class TestPathRedirection:
         assert user_storage.get_skills_root_path() == skills_root
 
     def test_managed_integration_skill_paths_use_global_root(self, user_storage: UserScopedSkillStorage, base_dir: Path):
-        assert user_storage.get_user_integrations_root() == base_dir / "integrations" / "skills"
+        assert user_storage.get_integrations_root() == base_dir / "integrations" / "skills"
+
+    def test_user_integrations_root_is_compatibility_alias(self, user_storage: UserScopedSkillStorage):
+        assert user_storage.get_user_integrations_root() == user_storage.get_integrations_root()
 
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"

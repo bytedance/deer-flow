@@ -385,9 +385,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         """Host path to this user's custom skills root directory."""
         return self._user_custom_root
 
-    def get_user_integrations_root(self) -> Path:
+    def get_integrations_root(self) -> Path:
         """Host path to the global managed integration skills root directory."""
         return self._integrations_root
+
+    def get_user_integrations_root(self) -> Path:
+        """Compatibility alias for :meth:`get_integrations_root`."""
+        return self.get_integrations_root()
 
     # ------------------------------------------------------------------
     # Path validation — accept public, per-user custom, and integration roots
