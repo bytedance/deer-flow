@@ -159,8 +159,9 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
     # ------------------------------------------------------------------ port
 
     async def add(self, task: ScheduledTask) -> ScheduledTask:
-        now = datetime.now(UTC)
-        row = ScheduledTaskRow(id=task.task_id, created_at=now, updated_at=now)
+        # The aggregate's construction instant is the one truth for both
+        # bookkeeping stamps on insert; the later write paths own updated_at.
+        row = ScheduledTaskRow(id=task.task_id, created_at=task.created_at, updated_at=task.updated_at)
         self._apply(row, task)
         async with self._sf() as session:
             session.add(row)

@@ -346,6 +346,24 @@ class TestScheduledTaskInvariants:
         assert task.assistant_id == "lead_agent"
         assert task.next_run_at == datetime(2026, 7, 28, 9, 0, tzinfo=UTC)
 
+    def test_create_stamps_the_bookkeeping_timestamps_from_now(self):
+        """The factory already receives the clock as a rule input; reading it
+        a second time through the field defaults would give the aggregate two
+        slightly different construction instants -- and the stored row a third
+        if the adapter minted its own. One explicit `now`, one truth."""
+        task = ScheduledTask.create(
+            user_id="user-1",
+            title="t",
+            prompt="p",
+            schedule=cron_spec("0 9 * * *", "UTC"),
+            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+            thread_id=None,
+            now=NOW,
+            policy=NO_DELAY,
+        )
+        assert task.created_at == NOW
+        assert task.updated_at == NOW
+
     def test_create_rejects_a_once_schedule_inside_the_delay_floor(self):
         with pytest.raises(InvalidScheduleError, match="at least 60 seconds"):
             ScheduledTask.create(

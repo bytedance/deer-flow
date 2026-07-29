@@ -51,10 +51,16 @@ class ScheduledTask:
     router/service pair scattered across three files; nothing here knows about
     HTTP, SQL, or the run runtime.
 
-    The `with_*` / `paused` / `resumed` transitions return a new aggregate and
-    deliberately leave `updated_at` alone: the repository stamps it on write
-    (scheduled_tasks/sql.py:97), and a second clock read here would make the
-    domain both impure and a competing source of truth for the same column.
+    The two bookkeeping timestamps have one owner each. `created_at` is the
+    aggregate's construction instant -- `create` stamps it from its explicit
+    `now` input and the adapter persists it verbatim, never minting its own.
+    `updated_at` belongs to the *storage* write path: the CAS methods
+    (`record_launch` / `record_completion`) update the row without ever
+    holding an aggregate, so only the adapter can stamp "last written" -- the
+    `with_*` / `paused` / `resumed` transitions therefore deliberately leave
+    `updated_at` alone, and the field's value on a read-back is the adapter's
+    stamp, seeded at construction time. Neither timestamp is a rule input;
+    the clock the rules see is always an explicit `now=` parameter.
     """
 
     task_id: str
@@ -116,6 +122,11 @@ class ScheduledTask:
             context_mode=mode,
             thread_id=effective_thread,
             next_run_at=schedule.ensure_launchable(now, policy),
+            # The clock is already an explicit rule input here; reading it a
+            # second time through the field defaults would give one
+            # construction two instants.
+            created_at=now,
+            updated_at=now,
         )
 
     @property

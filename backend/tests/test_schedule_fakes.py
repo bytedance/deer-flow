@@ -191,6 +191,17 @@ class TestRoundTrip:
         assert stored.next_run_at.tzinfo is not None
         assert stored.created_at.tzinfo is not None
 
+    async def test_add_persists_the_aggregates_construction_instant(self, tasks):
+        """`created_at` has one source of truth: the aggregate's construction
+        instant. An adapter that mints its own timestamp on insert gives the
+        same fact two values -- domain tests and listings would disagree with
+        the stored row by however long the insert took."""
+        task = make_task()
+        await tasks.add(task)
+        stored = await tasks.get(task.task_id, user_id="user-1")
+        assert stored.created_at == task.created_at
+        assert stored.updated_at == task.updated_at
+
     async def test_save_replaces_the_whole_aggregate(self, tasks):
         from dataclasses import replace
 
