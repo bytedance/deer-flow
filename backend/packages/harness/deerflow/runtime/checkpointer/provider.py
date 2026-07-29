@@ -148,24 +148,6 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
     raise ValueError(f"Unknown checkpointer type: {config.type!r}")
 
 
-@contextlib.contextmanager
-def _sync_checkpointer_from_database(db_config) -> Iterator[Checkpointer]:
-    """Context manager that creates a sync checkpointer from DatabaseConfig."""
-
-    if db_config.backend == "memory":
-        config = CheckpointerConfig(type="memory")
-    elif db_config.backend == "sqlite":
-        config = CheckpointerConfig(type="sqlite", connection_string=db_config.checkpointer_sqlite_path)
-    elif db_config.backend == "postgres":
-        if not db_config.postgres_url:
-            raise ValueError("database.postgres_url is required for the postgres backend")
-        config = CheckpointerConfig(type="postgres", connection_string=db_config.postgres_url, postgres_schema=db_config.postgres_schema)
-    else:
-        raise ValueError(f"Unknown database backend: {db_config.backend!r}")
-    with _sync_checkpointer_cm(config) as saver:
-        yield saver
-
-
 # ---------------------------------------------------------------------------
 # Sync singleton
 # ---------------------------------------------------------------------------
