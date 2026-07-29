@@ -739,7 +739,7 @@ class TestTaskManagement:
             )
         assert await service.list_tasks("user-1") == []
 
-    def test_commands_are_dumb_data(self):
+    async def test_commands_are_dumb_data(self):
         # A command carries intent without validating it: business rules stay
         # on the aggregate, so error attribution (a malformed schedule before
         # an unknown thread) is owned by the handler's construction order,
@@ -747,7 +747,7 @@ class TestTaskManagement:
         cmd = CreateScheduledTask(user_id="u", title="", prompt="", schedule=CRON, context_mode="not-a-mode", thread_id=None)
         assert cmd.context_mode == "not-a-mode"
 
-    def test_unset_is_a_singleton_distinct_from_none(self):
+    async def test_unset_is_a_singleton_distinct_from_none(self):
         # Three states, not two: an update field is UNSET (leave it alone),
         # None can stay a meaningful value elsewhere, and UNSET is falsy so
         # it cannot masquerade as a supplied value.
