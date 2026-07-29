@@ -279,6 +279,9 @@ class OpenVikingMemoryManager(MemoryManager):
     # memories. Hashing (role+content) means each message is extracted once.
     # On restart the set resets (residual dups are handled by OpenViking's
     # consolidation, enabled via enable_memory_decay in ov.conf).
+    # Per-thread content-hash sets are capped so the in-memory dedup dict
+    # does not grow without bound in long-running multi-tenant deployments.
+    _MAX_SEEN_PER_THREAD: int = 4096
     _seen_msgs: dict[str, set[str]] = PrivateAttr(default_factory=dict)
 
     # search() is overridden -- supports_search is auto-derived by __init_subclass__
@@ -323,7 +326,8 @@ class OpenVikingMemoryManager(MemoryManager):
         ov_conf_path = os.path.join(self._data_path, "ov.conf")
         conf = self._config.build_ov_conf()
         try:
-            with open(ov_conf_path, "w", encoding="utf-8") as f:
+            fd = os.open(ov_conf_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(conf, f, indent=2, ensure_ascii=False)
         except OSError as exc:
             raise MemoryManagerError(f"Failed to write OpenViking config {ov_conf_path}: {exc}") from exc
@@ -537,6 +541,12 @@ class OpenVikingMemoryManager(MemoryManager):
                 continue
             seen.add(h)
             new.append(msg)
+        # Cap per-thread dedup set so a long-running multi-tenant process
+        # doesn't accumulate unbounded memory.  The dedup is explicitly
+        # best-effort; residual duplicates are collapsed by OpenViking's
+        # consolidation.
+        if len(seen) > self._MAX_SEEN_PER_THREAD:
+            seen.clear()
         return new
 
     # ── Write ────────────────────────────────────────────────────────────
@@ -957,8 +967,11 @@ class OpenVikingMemoryManager(MemoryManager):
         data = payload.get("data")
         files = data.get("files") if isinstance(data, dict) else None
         if isinstance(files, dict) and files:
-            self._import_from_native(files)
-            return self.get_memory(user_id=user_id, agent_name=agent_name)
+            written = self._import_from_native(files)
+            if written == 0:
+                logger.warning("import_memory: data.files provided but _import_from_native wrote zero files; falling through to extraction")
+            else:
+                return self.get_memory(user_id=user_id, agent_name=agent_name)
 
         # ── Layer 2: extraction (feed source content to the pipeline) ────
         contents = self._collect_importable_content(payload)
@@ -1061,22 +1074,21 @@ class OpenVikingMemoryManager(MemoryManager):
         except Exception as exc:
             logger.warning("import commit_session failed: %s", exc)
 
-    def _import_from_native(self, files: dict[str, str]) -> None:
+    def _import_from_native(self, files: dict[str, str]) -> int:
         """Restore the ``memories/`` directory tree from a ``data.files`` dict.
 
         Each key is a viking URI; the value is the raw file content to write.
         URIs outside ``self._memories_base`` are remapped or skipped.
+
+        Returns the number of files actually written (0 when every URI was
+        filtered or every write failed).
         """
         self._ensure_ready()
         base = self._memories_base.rstrip("/")
-        # Remap URIs from a potentially different space to THIS space.
         remapped: dict[str, str] = {}
         for uri, raw in files.items():
             if not isinstance(uri, str) or not isinstance(raw, str):
                 continue
-            # Extract the path relative to ``memories/`` (the URI segment
-            # after /memories/…).  If the URI doesn't contain ``memories/``
-            # we can't safely place it -- skip.
             if "/memories/" not in uri:
                 continue
             rel = uri.split("/memories/", 1)[1]
@@ -1086,26 +1098,35 @@ class OpenVikingMemoryManager(MemoryManager):
             remapped[target] = raw
 
         if not remapped:
-            logger.warning("import_memory: data.files contained no remappable URIs; nothing imported")
-            return
+            logger.warning("import_memory: data.files contained no remappable URIs; nothing imported via native layer")
+            return 0
 
-        # Upsert: overwrite existing files, add new ones.  Old files not
-        # present in the import remain (additive import -- matching the
-        # existing facts[] path's behaviour).
+        written = 0
         for target_uri, raw in remapped.items():
             parent = target_uri.rsplit("/", 1)[0]
             self._safe_mkdir(parent)
             try:
+                # True upsert: if the file already exists, overwrite it
+                # in-place so re-importing a modified backup reflects edits.
+                # mode="create" would silently skip the existing file (the
+                # except below swallows the error as debug).
+                try:
+                    self._client.stat(target_uri)
+                    mode = "replace"
+                except Exception:
+                    mode = "create"
                 self._client.write(
                     target_uri,
                     raw,
-                    mode="create",
+                    mode=mode,
                     wait=self._config.wait_on_write,
                     timeout=self._config.write_timeout if self._config.wait_on_write else None,
                 )
             except Exception as exc:
-                # Already-exists for an overwrite is benign.
                 logger.debug("import_memory: write(%s) skipped: %s", target_uri, exc)
+                continue
+            written += 1
+        return written
 
     # ── Tier 3 hooks (fact CRUD) ─────────────────────────────────────────
     def create_fact(

@@ -166,6 +166,9 @@ class OpenVikingConfig:
         else:
             path = os.path.join("runtime", "openviking")
         os.makedirs(path, exist_ok=True)
+        # Restrict to owner-only: the store directory contains ov.conf (API
+        # keys) and the embedded database -- neither should be world-readable.
+        os.chmod(path, 0o700)
         return path
 
     @property
