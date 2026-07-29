@@ -29,6 +29,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, PlainSerializer
 
+from deerflow.domain.schedule.commands import UNSET, ContextChange, CreateScheduledTask, UpdateScheduledTask
 from deerflow.domain.schedule.model import ScheduledRun, ScheduledTask, ScheduleSpec, ScheduleType
 
 UtcTimestamp = Annotated[datetime, PlainSerializer(lambda value: value.isoformat(), return_type=str)]
@@ -60,7 +61,13 @@ def _spec_to_wire(spec: ScheduleSpec) -> dict[str, str]:
     return {"run_at": spec.run_at.isoformat() if spec.run_at else ""}
 
 
-class ScheduledTaskCreateRequest(BaseModel):
+class CreateScheduledTaskRequest(BaseModel):
+    """Body of ``POST /scheduled-tasks``.
+
+    No identity field: ``user_id`` is resolved server-side and injected
+    through ``to_command``, never read off the wire.
+    """
+
     thread_id: str | None = None
     context_mode: str = "fresh_thread_per_run"
     title: str = Field(min_length=1)
@@ -68,6 +75,17 @@ class ScheduledTaskCreateRequest(BaseModel):
     schedule_type: str
     schedule_spec: dict[str, Any]
     timezone: str
+
+    def to_command(self, user_id: str) -> CreateScheduledTask:
+        """Wire shape -> command (transformation ① of the chain)."""
+        return CreateScheduledTask(
+            user_id=user_id,
+            title=self.title,
+            prompt=self.prompt,
+            schedule=self.to_schedule(),
+            context_mode=self.context_mode,
+            thread_id=self.thread_id,
+        )
 
     def to_schedule(self) -> ScheduleSpec:
         """Parse the submitted triple into the value object.
@@ -86,7 +104,16 @@ class ScheduledTaskCreateRequest(BaseModel):
         )
 
 
-class ScheduledTaskUpdateRequest(BaseModel):
+class UpdateScheduledTaskRequest(BaseModel):
+    """Body of ``PATCH /scheduled-tasks/{task_id}``.
+
+    On the wire, ``None`` means "not supplied" -- an explicit ``null`` has
+    always meant that on this endpoint, and unbinding a thread is expressed
+    by switching ``context_mode``, not by nulling ``thread_id``. The
+    ``None``-to-``UNSET`` translation in ``to_command`` is where that wire
+    convention meets the command's unambiguous three-state fields.
+    """
+
     context_mode: str | None = None
     thread_id: str | None = None
     title: str | None = Field(default=None, min_length=1)
@@ -94,16 +121,44 @@ class ScheduledTaskUpdateRequest(BaseModel):
     schedule_spec: dict[str, Any] | None = None
     timezone: str | None = None
 
+    def changes_schedule(self) -> bool:
+        return self.schedule_spec is not None or self.timezone is not None
+
+    def changes_context(self) -> bool:
+        return self.context_mode is not None or self.thread_id is not None
+
+    def to_command(self, task_id: str, user_id: str, current: ScheduledTask | None) -> UpdateScheduledTask:
+        """Wire shape -> command (transformation ① of the chain).
+
+        A schedule or context change needs the parts the client omitted, so
+        the router reads the current task once and passes it in -- this model
+        stays IO-free and only translates. ``current`` may be ``None`` when
+        neither composite field is being changed.
+        """
+        schedule = UNSET
+        if current is not None and self.changes_schedule():
+            schedule = self.to_schedule(current.schedule)
+        context = UNSET
+        if current is not None and self.changes_context():
+            context = ContextChange(
+                context_mode=self.context_mode if self.context_mode is not None else str(current.context_mode),
+                thread_id=self.thread_id if self.thread_id is not None else current.thread_id,
+            )
+        return UpdateScheduledTask(
+            task_id=task_id,
+            user_id=user_id,
+            title=self.title if self.title is not None else UNSET,
+            prompt=self.prompt if self.prompt is not None else UNSET,
+            schedule=schedule,
+            context=context,
+        )
+
     def to_schedule(self, current: ScheduleSpec) -> ScheduleSpec:
         """Build the replacement spec, taking what was omitted from `current`.
 
         The schedule *type* is not patchable; only its spec and its zone are.
         Omitted parts are read straight off the current value object rather
         than round-tripped through the wire shape and back.
-
-        `None` means "not supplied" on this endpoint -- an explicit `null` has
-        always meant that here, and unbinding is expressed by switching
-        `context_mode`, not by nulling a field.
         """
         if self.schedule_spec is not None:
             cron = self.schedule_spec.get("cron")

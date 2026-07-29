@@ -23,13 +23,14 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.gateway.authz import require_permission
 from app.gateway.deps import ScheduleServiceDep, get_optional_user_from_request
 from app.gateway.routers.schedule.models import (
+    CreateScheduledTaskRequest,
     DeleteResponse,
     ScheduledRunResponse,
-    ScheduledTaskCreateRequest,
     ScheduledTaskResponse,
-    ScheduledTaskUpdateRequest,
     TriggerResponse,
+    UpdateScheduledTaskRequest,
 )
+from deerflow.domain.schedule.commands import DeleteTask, PauseTask, ResumeTask, TriggerTask
 from deerflow.domain.schedule.exceptions import (
     InvalidContextModeError,
     InvalidScheduleError,
@@ -39,7 +40,6 @@ from deerflow.domain.schedule.exceptions import (
     ThreadNotFoundError,
 )
 from deerflow.domain.schedule.model import DispatchOutcome
-from deerflow.domain.schedule.service import ContextChange
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
@@ -97,17 +97,9 @@ async def list_scheduled_tasks(request: Request, service: ScheduleServiceDep):
 @router.post("/scheduled-tasks", response_model=ScheduledTaskResponse)
 @require_permission("threads", "write")
 @_map_domain_errors
-async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest, service: ScheduleServiceDep):
+async def create_scheduled_task(request: Request, body: CreateScheduledTaskRequest, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
-    task = await service.create_task(
-        user_id=user_id,
-        title=body.title,
-        prompt=body.prompt,
-        schedule=body.to_schedule(),
-        context_mode=body.context_mode,
-        thread_id=body.thread_id,
-        now=datetime.now(UTC),
-    )
+    task = await service.create_scheduled_task(body.to_command(user_id), now=datetime.now(UTC))
     return ScheduledTaskResponse.from_domain(task)
 
 
@@ -125,43 +117,16 @@ async def get_scheduled_task(task_id: str, request: Request, service: ScheduleSe
 async def update_scheduled_task(
     task_id: str,
     request: Request,
-    body: ScheduledTaskUpdateRequest,
+    body: UpdateScheduledTaskRequest,
     service: ScheduleServiceDep,
 ):
     user_id = await _require_user_id(request)
-    # `exclude_none` rather than `exclude_unset`, matching the pre-migration
-    # router: an explicit `null` has always meant "not supplied" on this
-    # endpoint, and unbinding a thread is expressed by switching
-    # `context_mode`, not by nulling `thread_id`.
-    supplied = body.model_dump(exclude_none=True)
-
-    changes_schedule = "schedule_spec" in supplied or "timezone" in supplied
-    changes_context = "context_mode" in supplied or "thread_id" in supplied
-
-    # Both a schedule and a context change need the parts the client omitted,
-    # so the current task is read once and supplies the defaults. That one
-    # extra fetch is what lets the service receive whole value objects instead
-    # of a patch of loose fields.
-    current = await service.get_task(task_id, user_id=user_id) if changes_schedule or changes_context else None
-
-    schedule = body.to_schedule(current.schedule) if current is not None and changes_schedule else None
-
-    context = None
-    if current is not None and changes_context:
-        context = ContextChange(
-            context_mode=supplied.get("context_mode", str(current.context_mode)),
-            thread_id=supplied.get("thread_id", current.thread_id),
-        )
-
-    task = await service.update_task(
-        task_id,
-        user_id=user_id,
-        now=datetime.now(UTC),
-        title=supplied.get("title"),
-        prompt=supplied.get("prompt"),
-        schedule=schedule,
-        context=context,
-    )
+    # A schedule or context change needs the parts the client omitted, so the
+    # current task is read once and handed to `to_command`. That one extra
+    # fetch is what lets the command carry whole value objects instead of a
+    # patch of loose fields.
+    current = await service.get_task(task_id, user_id=user_id) if body.changes_schedule() or body.changes_context() else None
+    task = await service.update_scheduled_task(body.to_command(task_id, user_id, current), now=datetime.now(UTC))
     return ScheduledTaskResponse.from_domain(task)
 
 
@@ -170,7 +135,8 @@ async def update_scheduled_task(
 @_map_domain_errors
 async def pause_scheduled_task(task_id: str, request: Request, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
-    return ScheduledTaskResponse.from_domain(await service.pause_task(task_id, user_id=user_id))
+    # No body, so no request model: the command is built right here (spec §2.1 ①).
+    return ScheduledTaskResponse.from_domain(await service.pause_task(PauseTask(task_id=task_id, user_id=user_id)))
 
 
 @router.post("/scheduled-tasks/{task_id}/resume", response_model=ScheduledTaskResponse)
@@ -178,7 +144,7 @@ async def pause_scheduled_task(task_id: str, request: Request, service: Schedule
 @_map_domain_errors
 async def resume_scheduled_task(task_id: str, request: Request, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
-    return ScheduledTaskResponse.from_domain(await service.resume_task(task_id, user_id=user_id))
+    return ScheduledTaskResponse.from_domain(await service.resume_task(ResumeTask(task_id=task_id, user_id=user_id)))
 
 
 @router.post("/scheduled-tasks/{task_id}/trigger", response_model=TriggerResponse)
@@ -186,7 +152,7 @@ async def resume_scheduled_task(task_id: str, request: Request, service: Schedul
 @_map_domain_errors
 async def trigger_scheduled_task(task_id: str, request: Request, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
-    result = await service.trigger_task(task_id, user_id=user_id, now=datetime.now(UTC))
+    result = await service.trigger_task(TriggerTask(task_id=task_id, user_id=user_id), now=datetime.now(UTC))
     if result.outcome is DispatchOutcome.CONFLICT:
         raise HTTPException(status_code=409, detail=result.error or "Scheduled task trigger conflicted with an active run")
     if result.outcome is DispatchOutcome.FAILED:
@@ -201,7 +167,7 @@ async def trigger_scheduled_task(task_id: str, request: Request, service: Schedu
 @_map_domain_errors
 async def delete_scheduled_task(task_id: str, request: Request, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
-    await service.delete_task(task_id, user_id=user_id)
+    await service.delete_task(DeleteTask(task_id=task_id, user_id=user_id))
     return DeleteResponse(id=task_id, deleted=True)
 
 

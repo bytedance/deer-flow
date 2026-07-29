@@ -30,8 +30,9 @@ from schedule_fakes import (
 )
 
 from app.gateway.routers.schedule import router as router_module
+from deerflow.domain.schedule.commands import UNSET
 from deerflow.domain.schedule.exceptions import LaunchFailedError, ThreadBusyError
-from deerflow.domain.schedule.model import RunStatus, ScheduledRun, SchedulePolicy, TaskStatus, TriggerKind
+from deerflow.domain.schedule.model import RunStatus, ScheduledRun, ScheduledTask, SchedulePolicy, ScheduleSpec, TaskStatus, TriggerKind
 from deerflow.domain.schedule.service import ScheduleService
 
 USER = "user-1"
@@ -99,11 +100,11 @@ def _create_body(**overrides):
         schedule_spec={"cron": "0 9 * * *"},
         timezone="UTC",
     )
-    return router_module.ScheduledTaskCreateRequest(**{**defaults, **overrides})
+    return router_module.CreateScheduledTaskRequest(**{**defaults, **overrides})
 
 
 def _update_body(**fields):
-    return router_module.ScheduledTaskUpdateRequest(**fields)
+    return router_module.UpdateScheduledTaskRequest(**fields)
 
 
 async def _create(service, **overrides):
@@ -253,6 +254,50 @@ class TestRead:
         await _create(service, title="Unbound")
         listed = await _call(router_module.list_thread_scheduled_tasks, thread_id=THREAD, service=service)
         assert [task.title for task in listed] == ["Bound"]
+
+
+class TestToCommand:
+    """Transformation ① of the chain: wire shape -> command, owned by the
+    request models. Identity is injected as a parameter, never read off the
+    wire; the wire's `None` = "not supplied" convention becomes the command's
+    unambiguous `UNSET` here and nowhere else."""
+
+    def test_identity_is_injected_not_read_off_the_wire(self):
+        assert "user_id" not in router_module.CreateScheduledTaskRequest.model_fields
+        assert "user_id" not in router_module.UpdateScheduledTaskRequest.model_fields
+        cmd = _create_body().to_command(USER)
+        assert cmd.user_id == USER
+
+    def test_create_carries_the_parsed_value_object(self):
+        cmd = _create_body().to_command(USER)
+        assert cmd.schedule.cron == "0 9 * * *"
+        assert cmd.title == "Daily summary"
+
+    def test_update_translates_wire_none_to_unset(self):
+        cmd = _update_body(title="Renamed").to_command("task-1", USER, None)
+        assert cmd.title == "Renamed"
+        assert cmd.prompt is UNSET
+        assert cmd.schedule is UNSET
+        assert cmd.context is UNSET
+
+    def test_update_completes_composite_fields_from_the_current_task(self):
+        current = ScheduledTask.create(
+            user_id=USER,
+            title="t",
+            prompt="p",
+            schedule=ScheduleSpec.cron_schedule("0 9 * * *", "Asia/Shanghai"),
+            context_mode="fresh_thread_per_run",
+            thread_id=None,
+            now=datetime(2026, 7, 27, tzinfo=UTC),
+            policy=SchedulePolicy(),
+        )
+        cmd = _update_body(schedule_spec={"cron": "30 2 * * *"}).to_command(current.task_id, USER, current)
+        assert cmd.schedule.cron == "30 2 * * *"
+        assert cmd.schedule.timezone == "Asia/Shanghai", "the omitted zone comes from the current value object"
+
+        cmd = _update_body(thread_id=THREAD).to_command(current.task_id, USER, current)
+        assert str(cmd.context.context_mode) == "fresh_thread_per_run", "the omitted mode comes from the current task"
+        assert cmd.context.thread_id == THREAD
 
 
 class TestUpdate:

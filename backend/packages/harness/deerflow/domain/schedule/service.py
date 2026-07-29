@@ -17,6 +17,15 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from deerflow.domain.schedule.commands import (
+    UNSET,
+    CreateScheduledTask,
+    DeleteTask,
+    PauseTask,
+    ResumeTask,
+    TriggerTask,
+    UpdateScheduledTask,
+)
 from deerflow.domain.schedule.exceptions import (
     ActiveRunConflictError,
     LaunchFailedError,
@@ -31,7 +40,6 @@ from deerflow.domain.schedule.model import (
     ScheduledRun,
     ScheduledTask,
     SchedulePolicy,
-    ScheduleSpec,
     ScheduleType,
     TriggerKind,
 )
@@ -48,21 +56,6 @@ from deerflow.domain.schedule.ports import (
 # condition. Two callers must not be able to tell which one rejected them.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _SKIP_ACTIVE_RUN_ERROR = "skipped: a previous run of this task is still active"
-
-
-@dataclass(frozen=True)
-class ContextChange:
-    """A requested change of execution context.
-
-    The mode and the thread always move together -- `with_context` takes
-    both, and clearing the thread is what switching to a fresh-thread mode
-    means. Packaging them removes the one place where `None` was ambiguous
-    ("unbind the thread" versus "leave it alone") and lets every other
-    update field use plain `None` for "not supplied".
-    """
-
-    context_mode: str | ContextMode
-    thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,17 +127,7 @@ class ScheduleService:
 
     # ------------------------------------------------------------------ writes
 
-    async def create_task(
-        self,
-        *,
-        user_id: str,
-        title: str,
-        prompt: str,
-        schedule: ScheduleSpec,
-        context_mode: str | ContextMode,
-        thread_id: str | None,
-        now: datetime,
-    ) -> ScheduledTask:
+    async def create_scheduled_task(self, cmd: CreateScheduledTask, *, now: datetime) -> ScheduledTask:
         """Register a new standing instruction.
 
         The aggregate is built first so a malformed schedule or context mode is
@@ -157,79 +140,68 @@ class ScheduleService:
                 cannot use.
         """
         task = ScheduledTask.create(
-            user_id=user_id,
-            title=title,
-            prompt=prompt,
-            schedule=schedule,
-            context_mode=context_mode,
-            thread_id=thread_id,
+            user_id=cmd.user_id,
+            title=cmd.title,
+            prompt=cmd.prompt,
+            schedule=cmd.schedule,
+            context_mode=cmd.context_mode,
+            thread_id=cmd.thread_id,
             now=now,
             policy=self._policy,
         )
         await self._require_thread(task)
         return await self._tasks.add(task)
 
-    async def update_task(
-        self,
-        task_id: str,
-        *,
-        user_id: str,
-        now: datetime,
-        title: str | None = None,
-        prompt: str | None = None,
-        schedule: ScheduleSpec | None = None,
-        context: ContextChange | None = None,
-    ) -> ScheduledTask:
-        """Partially update a task; `None` means "not supplied".
+    async def update_scheduled_task(self, cmd: UpdateScheduledTask, *, now: datetime) -> ScheduledTask:
+        """Partially update a task; ``UNSET`` means "not supplied".
 
-        No sentinel is needed because nothing here has `None` as a meaningful
-        value -- the one field that does, `thread_id`, travels inside
-        `ContextChange` where it is unambiguous.
+        The one field for which ``None`` is a meaningful value, `thread_id`,
+        travels inside `ContextChange` where it is unambiguous.
 
         Context and schedule are applied through the aggregate's own
         transitions, so the re-arm rule and the running-task gate cannot be
         bypassed by patching fields directly.
         """
-        task = await self.get_task(task_id, user_id=user_id)
+        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
         task.ensure_mutable()
 
-        if context is not None:
-            task = task.with_context(context.context_mode, context.thread_id)
+        if cmd.context is not UNSET:
+            task = task.with_context(cmd.context.context_mode, cmd.context.thread_id)
             await self._require_thread(task)
-        if schedule is not None:
-            task = task.with_schedule(schedule, now=now, policy=self._policy)
-        if title is not None:
-            task = replace(task, title=title)
-        if prompt is not None:
-            task = replace(task, prompt=prompt)
+        if cmd.schedule is not UNSET:
+            task = task.with_schedule(cmd.schedule, now=now, policy=self._policy)
+        if cmd.title is not UNSET:
+            task = replace(task, title=cmd.title)
+        if cmd.prompt is not UNSET:
+            task = replace(task, prompt=cmd.prompt)
 
         return await self._save(task)
 
-    async def pause_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
+    async def pause_task(self, cmd: PauseTask) -> ScheduledTask:
         """Stop claiming this task until it is resumed.
 
         Refused while the task is being dispatched -- see `ensure_mutable`.
         """
-        task = await self.get_task(task_id, user_id=user_id)
+        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
         return await self._save(task.paused())
 
-    async def resume_task(self, task_id: str, *, user_id: str) -> ScheduledTask:
+    async def resume_task(self, cmd: ResumeTask) -> ScheduledTask:
         """Re-admit this task to claiming. Same gate as `pause_task`."""
-        task = await self.get_task(task_id, user_id=user_id)
+        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
         return await self._save(task.resumed())
 
-    async def delete_task(self, task_id: str, *, user_id: str) -> None:
+    async def delete_task(self, cmd: DeleteTask) -> None:
         """Deleting is deliberately not gated on the task being idle: the
         pre-migration router applied that gate to update/pause/resume only."""
-        if not await self._tasks.delete(task_id, user_id=user_id):
+        if not await self._tasks.delete(cmd.task_id, user_id=cmd.user_id):
             raise TaskNotFoundError("Scheduled task not found")
 
     # ------------------------------------------------------------------ dispatch
 
-    async def trigger_task(self, task_id: str, *, user_id: str, now: datetime) -> DispatchResult:
+    async def trigger_task(self, cmd: TriggerTask, *, now: datetime) -> DispatchResult:
         """Dispatch a task on demand. Unlike the scheduled path this is allowed
         while the task is paused, and leaves it paused."""
-        task = await self.get_task(task_id, user_id=user_id)
+        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
         return await self.dispatch_task(task, now=now, trigger=TriggerKind.MANUAL)
 
     async def run_once(self, *, now: datetime) -> list[DispatchResult]:

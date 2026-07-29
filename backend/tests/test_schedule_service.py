@@ -23,6 +23,17 @@ from schedule_fakes import (
     InMemoryScheduledTaskRepository,
 )
 
+from deerflow.domain.schedule.commands import (
+    UNSET,
+    ContextChange,
+    CreateScheduledTask,
+    DeleteTask,
+    PauseTask,
+    ResumeTask,
+    TriggerTask,
+    UnsetType,
+    UpdateScheduledTask,
+)
 from deerflow.domain.schedule.exceptions import (
     InvalidScheduleError,
     LaunchFailedError,
@@ -41,7 +52,7 @@ from deerflow.domain.schedule.model import (
     TriggerKind,
 )
 from deerflow.domain.schedule.ports import RunOutcome
-from deerflow.domain.schedule.service import ContextChange, ScheduleService
+from deerflow.domain.schedule.service import ScheduleService
 
 pytestmark = pytest.mark.asyncio
 
@@ -120,13 +131,15 @@ def make_service(
 
 
 async def create_cron_task(service: ScheduleService, *, schedule: ScheduleSpec = CRON):
-    return await service.create_task(
-        user_id="user-1",
-        title="Daily summary",
-        prompt="summarize",
-        schedule=schedule,
-        context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-        thread_id=None,
+    return await service.create_scheduled_task(
+        CreateScheduledTask(
+            user_id="user-1",
+            title="Daily summary",
+            prompt="summarize",
+            schedule=schedule,
+            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+            thread_id=None,
+        ),
         now=NOW,
     )
 
@@ -200,18 +213,18 @@ class TestFullLifecycle:
         assert await runs.count_active() == 0, "the active slot is free again"
 
         # -- pause / resume ---------------------------------------------------
-        paused = await service.pause_task(task.task_id, user_id="user-1")
+        paused = await service.pause_task(PauseTask(task_id=task.task_id, user_id="user-1"))
         assert paused.status is TaskStatus.PAUSED
         assert await service.run_once(now=overlap_at + timedelta(days=2)) == [], "a paused task is not claimed"
 
-        resumed = await service.resume_task(task.task_id, user_id="user-1")
+        resumed = await service.resume_task(ResumeTask(task_id=task.task_id, user_id="user-1"))
         assert resumed.status is TaskStatus.ENABLED
 
         # -- history and delete ----------------------------------------------
         history = await service.list_task_runs(task.task_id, user_id="user-1")
         assert sorted(run.status for run in history) == [RunStatus.SKIPPED, RunStatus.SUCCESS]
 
-        await service.delete_task(task.task_id, user_id="user-1")
+        await service.delete_task(DeleteTask(task_id=task.task_id, user_id="user-1"))
         with pytest.raises(TaskNotFoundError):
             await service.get_task(task.task_id, user_id="user-1")
 
@@ -244,7 +257,7 @@ class TestDispatchOutcomes:
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
         before = len(runs.all_runs())
 
-        result = await service.trigger_task(task.task_id, user_id="user-1", now=NOW)
+        result = await service.trigger_task(TriggerTask(task_id=task.task_id, user_id="user-1"), now=NOW)
 
         assert result.outcome is DispatchOutcome.CONFLICT
         assert result.record_id is None
@@ -354,13 +367,15 @@ class TestConflictCollapse:
         # mints a new uuid per dispatch, which would make the two runs differ
         # for a reason that has nothing to do with the collapse.
         service = make_service(runs=run_repo, threads=FakeThreadLookup({"thread-1": "user-1"}))
-        task = await service.create_task(
-            user_id="user-1",
-            title="t",
-            prompt="p",
-            schedule=CRON,
-            context_mode=ContextMode.REUSE_THREAD,
-            thread_id="thread-1",
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="t",
+                prompt="p",
+                schedule=CRON,
+                context_mode=ContextMode.REUSE_THREAD,
+                thread_id="thread-1",
+            ),
             now=NOW,
         )
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
@@ -392,13 +407,15 @@ class TestOnceTaskDispatch:
         """Declaring it complete at launch would stick if the run failed or the
         process died before the hook could correct it."""
         service = make_service()
-        task = await service.create_task(
-            user_id="user-1",
-            title="one shot",
-            prompt="go",
-            schedule=once_spec(),
-            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-            thread_id=None,
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="one shot",
+                prompt="go",
+                schedule=once_spec(),
+                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                thread_id=None,
+            ),
             now=NOW,
         )
 
@@ -412,13 +429,15 @@ class TestOnceTaskDispatch:
         that never happened."""
         runs = InMemoryScheduledRunRepository()
         service = make_service(runs=runs)
-        task = await service.create_task(
-            user_id="user-1",
-            title="one shot",
-            prompt="go",
-            schedule=once_spec(),
-            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-            thread_id=None,
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="one shot",
+                prompt="go",
+                schedule=once_spec(),
+                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                thread_id=None,
+            ),
             now=NOW,
         )
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
@@ -497,13 +516,15 @@ class TestRunCompletion:
     async def _launched_once_task(self):
         runs = InMemoryScheduledRunRepository()
         service = make_service(runs=runs)
-        task = await service.create_task(
-            user_id="user-1",
-            title="one shot",
-            prompt="go",
-            schedule=once_spec(),
-            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-            thread_id=None,
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="one shot",
+                prompt="go",
+                schedule=once_spec(),
+                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                thread_id=None,
+            ),
             now=NOW,
         )
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
@@ -570,18 +591,20 @@ class TestRunCompletion:
         """
         runs = InMemoryScheduledRunRepository()
         service = make_service(runs=runs)
-        task = await service.create_task(
-            user_id="user-1",
-            title="one shot",
-            prompt="go",
-            schedule=once_spec(),
-            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-            thread_id=None,
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="one shot",
+                prompt="go",
+                schedule=once_spec(),
+                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                thread_id=None,
+            ),
             now=NOW,
         )
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
         record = runs.all_runs()[0]
-        await service.delete_task(task.task_id, user_id="user-1")
+        await service.delete_task(DeleteTask(task_id=task.task_id, user_id="user-1"))
 
         await service.handle_run_completion(
             RunOutcome(
@@ -642,13 +665,15 @@ class TestReconcileOnStartup:
         runs = InMemoryScheduledRunRepository()
         tasks = InMemoryScheduledTaskRepository()
         service = make_service(tasks=tasks, runs=runs)
-        task = await service.create_task(
-            user_id="user-1",
-            title="one shot",
-            prompt="go",
-            schedule=once_spec(),
-            context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-            thread_id=None,
+        task = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="one shot",
+                prompt="go",
+                schedule=once_spec(),
+                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                thread_id=None,
+            ),
             now=NOW,
         )
         await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
@@ -670,25 +695,29 @@ class TestTaskManagement:
     async def test_reuse_thread_requires_an_accessible_thread(self):
         service = make_service(threads=FakeThreadLookup({"thread-1": "user-1"}))
 
-        created = await service.create_task(
-            user_id="user-1",
-            title="t",
-            prompt="p",
-            schedule=CRON,
-            context_mode=ContextMode.REUSE_THREAD,
-            thread_id="thread-1",
-            now=NOW,
-        )
-        assert created.thread_id == "thread-1"
-
-        with pytest.raises(ThreadNotFoundError):
-            await service.create_task(
-                user_id="user-2",
+        created = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
                 title="t",
                 prompt="p",
                 schedule=CRON,
                 context_mode=ContextMode.REUSE_THREAD,
                 thread_id="thread-1",
+            ),
+            now=NOW,
+        )
+        assert created.thread_id == "thread-1"
+
+        with pytest.raises(ThreadNotFoundError):
+            await service.create_scheduled_task(
+                CreateScheduledTask(
+                    user_id="user-2",
+                    title="t",
+                    prompt="p",
+                    schedule=CRON,
+                    context_mode=ContextMode.REUSE_THREAD,
+                    thread_id="thread-1",
+                ),
                 now=NOW,
             )
 
@@ -697,32 +726,60 @@ class TestTaskManagement:
         service = make_service(tasks=tasks)
 
         with pytest.raises(InvalidScheduleError):
-            await service.create_task(
-                user_id="user-1",
-                title="t",
-                prompt="p",
-                schedule=once_spec(after_seconds=10),  # inside min_once_delay
-                context_mode=ContextMode.FRESH_THREAD_PER_RUN,
-                thread_id=None,
+            await service.create_scheduled_task(
+                CreateScheduledTask(
+                    user_id="user-1",
+                    title="t",
+                    prompt="p",
+                    schedule=once_spec(after_seconds=10),  # inside min_once_delay
+                    context_mode=ContextMode.FRESH_THREAD_PER_RUN,
+                    thread_id=None,
+                ),
                 now=NOW,
             )
         assert await service.list_tasks("user-1") == []
+
+    def test_commands_are_dumb_data(self):
+        # A command carries intent without validating it: business rules stay
+        # on the aggregate, so error attribution (a malformed schedule before
+        # an unknown thread) is owned by the handler's construction order,
+        # not by the command's own constructor.
+        cmd = CreateScheduledTask(user_id="u", title="", prompt="", schedule=CRON, context_mode="not-a-mode", thread_id=None)
+        assert cmd.context_mode == "not-a-mode"
+
+    def test_unset_is_a_singleton_distinct_from_none(self):
+        # Three states, not two: an update field is UNSET (leave it alone),
+        # None can stay a meaningful value elsewhere, and UNSET is falsy so
+        # it cannot masquerade as a supplied value.
+        assert UnsetType() is UNSET
+        cmd = UpdateScheduledTask(task_id="t", user_id="u")
+        assert cmd.title is UNSET
+        assert cmd.title is not None
+        assert not UNSET
 
     async def test_update_leaves_omitted_fields_alone(self):
         service = make_service()
         task = await create_cron_task(service)
 
-        updated = await service.update_task(task.task_id, user_id="user-1", now=NOW, title="renamed")
+        updated = await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="renamed"), now=NOW)
 
         assert updated.title == "renamed"
         assert updated.prompt == task.prompt
         assert updated.schedule == task.schedule
 
+    async def test_update_with_everything_unset_changes_nothing(self):
+        service = make_service()
+        task = await create_cron_task(service)
+
+        updated = await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1"), now=NOW)
+
+        assert updated == task
+
     async def test_update_can_change_the_prompt(self):
         service = make_service()
         task = await create_cron_task(service)
 
-        updated = await service.update_task(task.task_id, user_id="user-1", now=NOW, prompt="new instructions")
+        updated = await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1", prompt="new instructions"), now=NOW)
 
         assert updated.prompt == "new instructions"
         assert updated.title == task.title
@@ -741,9 +798,9 @@ class TestTaskManagement:
         task = await create_cron_task(service)
 
         with pytest.raises(TaskNotFoundError):
-            await service.update_task(task.task_id, user_id="user-1", now=NOW, title="x")
+            await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="x"), now=NOW)
         with pytest.raises(TaskNotFoundError):
-            await service.pause_task(task.task_id, user_id="user-1")
+            await service.pause_task(PauseTask(task_id=task.task_id, user_id="user-1"))
 
     async def test_context_is_changed_through_the_packaged_value(self):
         """context_mode and thread_id move together, so they are supplied
@@ -752,20 +809,16 @@ class TestTaskManagement:
         service = make_service(threads=FakeThreadLookup({"thread-1": "user-1"}))
         task = await create_cron_task(service)
 
-        bound = await service.update_task(
-            task.task_id,
-            user_id="user-1",
+        bound = await service.update_scheduled_task(
+            UpdateScheduledTask(task_id=task.task_id, user_id="user-1", context=ContextChange(ContextMode.REUSE_THREAD, "thread-1")),
             now=NOW,
-            context=ContextChange(ContextMode.REUSE_THREAD, "thread-1"),
         )
         assert bound.context_mode is ContextMode.REUSE_THREAD
         assert bound.thread_id == "thread-1"
 
-        unbound = await service.update_task(
-            task.task_id,
-            user_id="user-1",
+        unbound = await service.update_scheduled_task(
+            UpdateScheduledTask(task_id=task.task_id, user_id="user-1", context=ContextChange(ContextMode.FRESH_THREAD_PER_RUN)),
             now=NOW,
-            context=ContextChange(ContextMode.FRESH_THREAD_PER_RUN),
         )
         assert unbound.thread_id is None, "switching to a fresh thread clears the binding"
 
@@ -774,11 +827,9 @@ class TestTaskManagement:
         task = await create_cron_task(service)
 
         with pytest.raises(ThreadNotFoundError):
-            await service.update_task(
-                task.task_id,
-                user_id="user-1",
+            await service.update_scheduled_task(
+                UpdateScheduledTask(task_id=task.task_id, user_id="user-1", context=ContextChange(ContextMode.REUSE_THREAD, "thread-1")),
                 now=NOW,
-                context=ContextChange(ContextMode.REUSE_THREAD, "thread-1"),
             )
 
     async def test_rescheduling_a_terminal_task_re_arms_it(self):
@@ -787,11 +838,9 @@ class TestTaskManagement:
         task = await create_cron_task(service)
         tasks.seed(replace(task, status=TaskStatus.FAILED))
 
-        updated = await service.update_task(
-            task.task_id,
-            user_id="user-1",
+        updated = await service.update_scheduled_task(
+            UpdateScheduledTask(task_id=task.task_id, user_id="user-1", schedule=ScheduleSpec.cron_schedule("0 10 * * *", "UTC")),
             now=NOW,
-            schedule=ScheduleSpec.cron_schedule("0 10 * * *", "UTC"),
         )
 
         assert updated.status is TaskStatus.ENABLED, "otherwise it would never be claimed again"
@@ -803,9 +852,9 @@ class TestTaskManagement:
         tasks.seed(replace(task, status=TaskStatus.RUNNING))
 
         with pytest.raises(TaskNotMutableError):
-            await service.update_task(task.task_id, user_id="user-1", now=NOW, title="nope")
+            await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="nope"), now=NOW)
         with pytest.raises(TaskNotMutableError):
-            await service.pause_task(task.task_id, user_id="user-1")
+            await service.pause_task(PauseTask(task_id=task.task_id, user_id="user-1"))
 
     async def test_a_running_task_can_still_be_deleted(self):
         """The pre-migration router gated update/pause/resume on this, but not
@@ -815,37 +864,37 @@ class TestTaskManagement:
         task = await create_cron_task(service)
         tasks.seed(replace(task, status=TaskStatus.RUNNING))
 
-        await service.delete_task(task.task_id, user_id="user-1")
+        await service.delete_task(DeleteTask(task_id=task.task_id, user_id="user-1"))
 
     @pytest.mark.parametrize("call", ["get", "update", "pause", "resume", "delete", "runs"])
     async def test_another_users_task_is_reported_as_missing(self, call):
         service = make_service()
         task = await create_cron_task(service)
-        kwargs = {"user_id": "intruder"}
-
         with pytest.raises(TaskNotFoundError):
             if call == "get":
-                await service.get_task(task.task_id, **kwargs)
+                await service.get_task(task.task_id, user_id="intruder")
             elif call == "update":
-                await service.update_task(task.task_id, now=NOW, title="x", **kwargs)
+                await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="intruder", title="x"), now=NOW)
             elif call == "pause":
-                await service.pause_task(task.task_id, **kwargs)
+                await service.pause_task(PauseTask(task_id=task.task_id, user_id="intruder"))
             elif call == "resume":
-                await service.resume_task(task.task_id, **kwargs)
+                await service.resume_task(ResumeTask(task_id=task.task_id, user_id="intruder"))
             elif call == "delete":
-                await service.delete_task(task.task_id, **kwargs)
+                await service.delete_task(DeleteTask(task_id=task.task_id, user_id="intruder"))
             else:
-                await service.list_task_runs(task.task_id, **kwargs)
+                await service.list_task_runs(task.task_id, user_id="intruder")
 
     async def test_tasks_are_listed_per_user_and_per_thread(self):
         service = make_service(threads=FakeThreadLookup({"thread-1": "user-1"}))
-        bound = await service.create_task(
-            user_id="user-1",
-            title="bound",
-            prompt="p",
-            schedule=CRON,
-            context_mode=ContextMode.REUSE_THREAD,
-            thread_id="thread-1",
+        bound = await service.create_scheduled_task(
+            CreateScheduledTask(
+                user_id="user-1",
+                title="bound",
+                prompt="p",
+                schedule=CRON,
+                context_mode=ContextMode.REUSE_THREAD,
+                thread_id="thread-1",
+            ),
             now=NOW,
         )
         await create_cron_task(service)
