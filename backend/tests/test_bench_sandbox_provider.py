@@ -17,8 +17,8 @@ def _load_module(name: str, relative: str):
     return module
 
 
-bench = _load_module("bench_sandbox_provider", "scripts/benchmark/bench_sandbox_provider.py")
-summarize = _load_module("summarize_bench", "scripts/benchmark/summarize_bench.py")
+bench = _load_module("bench_provider", "scripts/benchmark/sandbox/bench_provider.py")
+summarize = _load_module("summarize", "scripts/benchmark/sandbox/summarize.py")
 
 
 class _FakeProvider:

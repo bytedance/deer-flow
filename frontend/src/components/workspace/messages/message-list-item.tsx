@@ -1,9 +1,12 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
+  CheckIcon,
   FileIcon,
   Loader2Icon,
+  PencilIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
+  XIcon,
 } from "lucide-react";
 import {
   memo,
@@ -26,6 +29,8 @@ import {
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   deleteFeedback,
   upsertFeedback,
@@ -59,6 +64,7 @@ import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
+import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -139,6 +145,9 @@ export function MessageListItem({
   threadId,
   artifactPaths = [],
   showCopyButton = true,
+  canEdit = false,
+  isEditPending = false,
+  onEditAndRegenerate,
 }: {
   className?: string;
   message: Message;
@@ -148,8 +157,50 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  canEdit?: boolean;
+  isEditPending?: boolean;
+  onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
+  const { t } = useI18n();
   const isHuman = message.type === "human";
+  const editableText = useMemo(
+    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
+    [isHuman, message],
+  );
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const trimmedDraft = draft.trim();
+  const editSubmitDisabled =
+    isEditPending ||
+    isSubmittingEdit ||
+    trimmedDraft.length === 0 ||
+    trimmedDraft === editableText.trim();
+
+  const startEditing = useCallback(() => {
+    setDraft(editableText);
+    setIsEditing(true);
+  }, [editableText]);
+  const cancelEditing = useCallback(() => {
+    setIsEditing(false);
+    setDraft("");
+  }, []);
+  const submitEdit = useCallback(async () => {
+    if (editSubmitDisabled || !onEditAndRegenerate) {
+      return;
+    }
+    setIsSubmittingEdit(true);
+    try {
+      const result = await onEditAndRegenerate(trimmedDraft);
+      if (result !== false) {
+        setIsEditing(false);
+        setDraft("");
+      }
+    } finally {
+      setIsSubmittingEdit(false);
+    }
+  }, [editSubmitDisabled, onEditAndRegenerate, trimmedDraft]);
+
   return (
     <AIElementMessage
       className={cn("group/conversation-message relative w-full", className)}
@@ -162,6 +213,18 @@ export function MessageListItem({
         threadId={threadId}
         artifactPaths={artifactPaths}
         runId={runId}
+        editState={
+          isHuman && isEditing
+            ? {
+                draft,
+                disabled: isEditPending || isSubmittingEdit,
+                submitDisabled: editSubmitDisabled,
+                onCancel: cancelEditing,
+                onDraftChange: setDraft,
+                onSubmit: submitEdit,
+              }
+            : undefined
+        }
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -174,6 +237,20 @@ export function MessageListItem({
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={getMessageCopyData(message)} />
+            {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
+              <Tooltip content={t.common.editAndRerun}>
+                <Button
+                  aria-label={t.common.editAndRerun}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={isEditPending || isSubmittingEdit}
+                  onClick={startEditing}
+                >
+                  <PencilIcon className="size-3" />
+                </Button>
+              </Tooltip>
+            )}
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
@@ -285,6 +362,7 @@ function MessageContent_({
   threadId,
   artifactPaths,
   runId,
+  editState,
 }: {
   className?: string;
   message: Message;
@@ -292,6 +370,14 @@ function MessageContent_({
   threadId: string;
   artifactPaths: readonly string[];
   runId?: string;
+  editState?: {
+    draft: string;
+    disabled: boolean;
+    submitDisabled: boolean;
+    onCancel: () => void;
+    onDraftChange: (value: string) => void;
+    onSubmit: () => void | Promise<void>;
+  };
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
@@ -411,11 +497,57 @@ function MessageContent_({
           />
         )}
         {filesList}
-        {contentToDisplay && (
+        {editState ? (
+          <div className="bg-background border-border flex w-full min-w-0 flex-col gap-2 rounded-lg border p-2 shadow-sm">
+            <Textarea
+              autoFocus
+              className="min-h-24 resize-y"
+              disabled={editState.disabled}
+              value={editState.draft}
+              onChange={(event) =>
+                editState.onDraftChange(event.currentTarget.value)
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  editState.onCancel();
+                }
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void editState.onSubmit();
+                }
+              }}
+            />
+            <div className="text-muted-foreground text-xs">
+              {t.common.editRerunWarning}
+            </div>
+            <div className="flex justify-end gap-1">
+              <Button
+                size="sm"
+                type="button"
+                variant="ghost"
+                disabled={editState.disabled}
+                onClick={editState.onCancel}
+              >
+                <XIcon className="size-3" />
+                {t.common.cancel}
+              </Button>
+              <Button
+                size="sm"
+                type="button"
+                disabled={editState.submitDisabled}
+                onClick={() => void editState.onSubmit()}
+              >
+                <CheckIcon className="size-3" />
+                {t.common.updateAndRerun}
+              </Button>
+            </div>
+          </div>
+        ) : contentToDisplay ? (
           <AIElementMessageContent className="w-full max-w-full">
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
-        )}
+        ) : null}
       </div>
     );
   }

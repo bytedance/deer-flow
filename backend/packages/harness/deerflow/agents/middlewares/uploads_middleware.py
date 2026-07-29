@@ -17,7 +17,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
@@ -226,11 +226,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []
         if not new_files:
+            if (last_message.additional_kwargs or {}).get("files"):
+                logger.info(
+                    "UploadsMiddleware: files metadata was present but no files were found on disk (thread_id=%s, uploads_dir=%s)",
+                    thread_id,
+                    uploads_dir,
+                )
             # Clear stale uploaded_files so list_uploaded_files doesn't
             # exclude files that became historical after the previous turn.
             return {"uploaded_files": []}
@@ -294,7 +300,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         ``stat``, reading sibling ``.md`` outlines). When the graph runs async,
         langgraph would otherwise execute the sync hook directly on the event
         loop, so it is dispatched to a worker thread via ``run_in_executor``.
-        ``run_in_executor`` copies the current context, so the ``user_id``
-        contextvar read by ``get_effective_user_id()`` is preserved.
+        ``run_in_executor`` copies the current context, preserving both
+        LangGraph's runnable config and DeerFlow's request ContextVar fallback.
+        The runtime itself is also passed explicitly for the authoritative
+        ``runtime.context["user_id"]`` channel.
         """
         return await run_in_executor(None, self.before_agent, state, runtime)

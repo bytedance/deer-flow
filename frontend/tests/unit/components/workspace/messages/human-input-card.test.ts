@@ -3,6 +3,7 @@ import { createElement, type KeyboardEvent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  findMissingRequiredFields,
   HumanInputCard,
   shouldSubmitHumanInputTextOnKeyDown,
 } from "@/components/workspace/messages/human-input-card";
@@ -80,6 +81,116 @@ describe("HumanInputCard", () => {
     expect(html).toContain("篇幅");
     expect(html).not.toContain("**题材/类型**");
     expect(html).not.toContain("**篇幅**");
+  });
+
+  it("renders a form request with labeled fields and required markers", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Please provide the expense details.",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          { name: "amount", label: "Amount", type: "number", required: true },
+          {
+            name: "receipts",
+            label: "Receipts",
+            type: "multi_select",
+            required: false,
+            options: [
+              { id: "receipts-option-1", label: "A-1", value: "A-1" },
+              { id: "receipts-option-2", label: "A-2", value: "A-2" },
+            ],
+          },
+          { name: "note", label: "Note", type: "textarea", required: false },
+          {
+            name: "design",
+            label: "DesignPriority",
+            type: "checkbox",
+            required: false,
+          },
+        ],
+      },
+    });
+
+    expect(html).toContain("Amount");
+    expect(html).toContain("*");
+    expect(html).toContain("Receipts");
+    expect(html).toContain("A-1");
+    expect(html).toContain("Note");
+    expect(html).toContain("Submit");
+    // Checkbox fields render as a single toggle row — the label must not be
+    // duplicated by an additional field label above the control.
+    expect(html.split("DesignPriority").length - 1).toBe(1);
+  });
+
+  it("associates form labels with controls and marks required fields", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Please provide the expense details.",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          { name: "amount", label: "Amount", type: "number", required: true },
+          { name: "note", label: "Note", type: "textarea", required: false },
+        ],
+      },
+    });
+
+    // Every visible label is linked to its control via htmlFor/id.
+    const htmlForIds = [...html.matchAll(/<label[^>]*for="([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+    expect(htmlForIds.length).toBe(2);
+    for (const id of htmlForIds) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('aria-required="true"');
+  });
+
+  it("findMissingRequiredFields flags empty required values only", () => {
+    const fields = [
+      {
+        name: "amount",
+        label: "Amount",
+        type: "number" as const,
+        required: true,
+      },
+      {
+        name: "note",
+        label: "Note",
+        type: "text" as const,
+        required: false,
+      },
+      {
+        name: "receipts",
+        label: "Receipts",
+        type: "multi_select" as const,
+        required: true,
+        options: [{ id: "o1", label: "A-1", value: "A-1" }],
+      },
+    ];
+
+    expect(
+      findMissingRequiredFields(fields, {}).map((field) => field.name),
+    ).toEqual(["amount", "receipts"]);
+    expect(
+      findMissingRequiredFields(fields, {
+        amount: "  ",
+        receipts: [],
+      }).map((field) => field.name),
+    ).toEqual(["amount", "receipts"]);
+    expect(
+      findMissingRequiredFields(fields, {
+        amount: "300",
+        receipts: ["A-1"],
+      }),
+    ).toEqual([]);
   });
 
   it("does not submit text with Enter while IME composition is active", () => {

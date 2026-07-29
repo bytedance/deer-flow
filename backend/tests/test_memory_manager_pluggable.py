@@ -193,7 +193,7 @@ def test_deermem_shutdown_flush_drains_a_pending_update() -> None:
     mock_updater = MagicMock()
     mock_updater.update_memory.return_value = True
     deermem._queue._updater = mock_updater
-    deermem._queue._queue = [ConversationContext(thread_id=f"t{i}", messages=["m"], agent_name="lead_agent") for i in range(3)]
+    deermem._queue._items = [ConversationContext(thread_id=f"t{i}", messages=["m"], agent_name="lead_agent") for i in range(3)]
     assert deermem.shutdown_flush(5.0) is True
     assert deermem._queue.pending_count == 0
     assert mock_updater.update_memory.call_count == 3
