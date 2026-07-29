@@ -165,6 +165,17 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_grep_always_prints_filename_for_single_file_paths() -> None:
+    fake = _FakeBox(name="box-id")
+    box = BoxliteBox("box-id", box=fake, run=_fake_run)
+
+    box.grep("/mnt/user-data/uploads/report.md", "needle")
+
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and argv[0][2].startswith("grep ")]
+    assert grep_commands
+    assert "-H" in grep_commands[-1].split()
+
+
 def test_execute_command_invalidates_box_on_terminal_transport_error() -> None:
     invalidated: list[tuple[str, str]] = []
 

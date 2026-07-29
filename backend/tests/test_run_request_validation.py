@@ -116,6 +116,28 @@ def test_run_request_keeps_supported_modes_and_compatibility_defaults() -> None:
     assert body.if_not_exists == "create"
 
 
+@pytest.mark.parametrize(
+    "artifact_delivery",
+    [
+        {"required": True, "tool": "present_files"},
+        {},
+        None,
+        "present_files",
+        [],
+    ],
+)
+def test_run_request_rejects_removed_artifact_delivery_override(
+    client: TestClient,
+    artifact_delivery: Any,
+) -> None:
+    response = client.post(
+        "/api/runs/stream",
+        json={"artifact_delivery": artifact_delivery},
+    )
+
+    assert response.status_code == 422
+
+
 def _sdk_default_payload(method: str) -> dict[str, Any]:
     """Capture the body a stock ``langgraph_sdk`` client sends for a default run."""
     from langgraph_sdk.client import get_client

@@ -52,6 +52,7 @@ def mock_app_config():
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
     config.database.checkpoint_channel_mode = "full"
+    config.database.checkpoint_delta.snapshot_frequency = 10
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -144,6 +145,23 @@ class TestClientInit:
             ),
         ):
             DeerFlowClient()
+
+    def test_delta_snapshot_frequency_is_frozen_from_app_config(self, mock_app_config):
+        from typing import get_type_hints
+
+        from langgraph.channels import DeltaChannel
+
+        from deerflow.agents import thread_state
+
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        mock_app_config.database.checkpoint_delta.snapshot_frequency = 7
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            DeerFlowClient()
+
+        schema = thread_state.get_thread_state_schema("delta")
+        hint = get_type_hints(schema, include_extras=True)["messages"]
+        channel = next(item for item in hint.__metadata__ if isinstance(item, DeltaChannel))
+        assert channel.snapshot_frequency == 7
 
 
 # ---------------------------------------------------------------------------
@@ -1316,7 +1334,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)

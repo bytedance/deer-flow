@@ -73,6 +73,7 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
+from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
 from deerflow.skills.installer import is_executable_binary_prefix, is_symlink_member, is_unsafe_zip_member
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
@@ -107,6 +108,11 @@ LARK_CLI_SANDBOX_DATA_DIR = "/mnt/integrations/lark-cli/data"
 LARK_CLI_SANDBOX_RUNTIME_DIR = "/mnt/integrations/lark-cli/runtime"
 LARK_CLI_LINUX_ARCHES = ("amd64", "arm64")
 LARK_CLI_RUNTIME_MANIFEST_FILE = ".deerflow-lark-cli-runtime.json"
+
+# Pattern B (issue #4338): loopback URL the sandbox shim uses to reach the broker
+# sidecar. LARK_BROKER_URL_ENV is imported from the broker module so the shim,
+# server, and Gateway overlay share one source of truth.
+LARK_BROKER_SANDBOX_URL = "http://127.0.0.1:8788"
 
 # Arch-dispatch launcher for the sandbox runtime layout. Shared by the Gateway
 # writer (`_write_lark_cli_sandbox_launcher`) and the `docker/lark-cli-init`
@@ -522,13 +528,23 @@ def _lark_cli_managed_path() -> str | None:
     return None
 
 
-def lark_cli_env_overlay(user_id: str, *, sandbox_paths: bool = False) -> dict[str, str]:
+def lark_cli_env_overlay(user_id: str, *, sandbox_paths: bool = False, broker: bool = False) -> dict[str, str]:
     """Environment overlay for lark-cli using DeerFlow-managed credentials.
 
     The directories are per-user so a local trusted-mode login cannot bleed
-    across accounts. Auth Proxy support can later replace these directories for
-    sandbox execution without changing the status API contract.
+    across accounts.
+
+    When ``broker`` is set (Pattern B, issue #4338), the sandbox talks to a
+    broker sidecar that owns the credentials, so the overlay carries only the
+    broker URL and the runtime PATH — never ``LARKSUITE_CLI_CONFIG_DIR`` /
+    ``DATA_DIR``. This keeps the plaintext app secret / OAuth tokens out of the
+    sandbox filesystem entirely. ``broker`` implies ``sandbox_paths``.
     """
+    if broker:
+        return {
+            "PATH": f"{LARK_CLI_SANDBOX_RUNTIME_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            LARK_BROKER_URL_ENV: LARK_BROKER_SANDBOX_URL,
+        }
     if sandbox_paths:
         config_dir: Path | str = LARK_CLI_SANDBOX_CONFIG_DIR
         data_dir: Path | str = LARK_CLI_SANDBOX_DATA_DIR
@@ -660,7 +676,12 @@ def _resolve_sandbox_runtime_readiness(
     - ``gateway-download``: local AIO — the Gateway stages a ``sandbox-cli`` dir
       and bind-mounts it; ready when that dir validates.
     - ``init-container``: remote provisioner — a lark-cli init image provisions
-      the runtime; ready when the provisioner reports the init image is configured.
+      the runtime binary + plaintext credential mounts (Pattern A); ready when
+      the provisioner reports the init image is configured.
+    - ``broker``: remote provisioner — a lark-cli broker sidecar holds the
+      credentials and the sandbox gets only a shim (Pattern B, issue #4338);
+      ready when the provisioner reports the broker image is configured. Broker
+      supersedes ``init-container`` when both are available.
 
     ``probe`` gates the (best-effort, short-timeout) provisioner capability call.
     """
@@ -670,12 +691,16 @@ def _resolve_sandbox_runtime_readiness(
     if _uses_remote_provisioner(config):
         if not probe:
             return "init-container", False, None
-        init_image = _probe_provisioner_lark_cli_init_image(config)
-        if init_image is None:
-            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli init image."
-        if not init_image:
-            return "init-container", False, "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)."
-        return "init-container", True, None
+        caps = _probe_provisioner_capabilities(config)
+        if caps is None:
+            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image."
+        # Pattern B (broker) supersedes Pattern A (init-container binary) when
+        # the provisioner has a broker image configured.
+        if caps["lark_cli_broker_image"]:
+            return "broker", True, None
+        if caps["lark_cli_init_image"]:
+            return "init-container", True, None
+        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE)."
 
     # Local AIO: Gateway-download runtime dir.
     runtime_dir = lark_cli_managed_sandbox_dir()
@@ -684,6 +709,61 @@ def _resolve_sandbox_runtime_readiness(
     except (ValueError, OSError):
         return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed."
     return "gateway-download", True, None
+
+
+LARK_BROKER_MODE_TTL_SECONDS = 60
+# Negative results (broker not active) are cached longer than positive ones: a
+# non-broker remote-provisioner deployment stays non-broker for the life of the
+# process far more often than it flips on, so this keeps the hot bash path from
+# re-probing every minute. A positive result still refreshes on the shorter TTL.
+LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS = 300
+# Tight probe budget on the per-bash-call hot path: unlike the Settings status
+# probe (5s, user is waiting on a page), this runs inline before a sandbox
+# lark-cli command, so a slow/unreachable provisioner must not add seconds of
+# latency to every first-call-per-TTL for non-broker deployments.
+LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS = 1.5
+# Guards the cache attribute on sandbox_lark_broker_active against concurrent
+# bash invocations so the correctness story doesn't rely on idempotent races.
+_LARK_BROKER_MODE_CACHE_LOCK = threading.Lock()
+
+
+def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
+    """Whether sandbox ``lark-cli`` runs in broker mode (Pattern B).
+
+    Cached with a short TTL because it is consulted on every ``lark-cli`` bash
+    call and reads the provisioner capability over HTTP. Broker mode requires a
+    remote provisioner that reports a configured broker image; any other config
+    (local AIO, init-container binary mode, unreachable provisioner) is False, so
+    the caller falls back to the credential-mount overlay.
+
+    The probe uses a tight timeout and negatives are cached longer than positives
+    so a non-broker remote-provisioner deployment does not pay a latency penalty
+    on the bash hot path.
+    """
+    if config is None:
+        try:
+            from deerflow.config.app_config import get_app_config
+
+            config = get_app_config()
+        except Exception:  # noqa: BLE001 - degrade to non-broker overlay
+            return False
+
+    now = time.monotonic()
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        cached = getattr(sandbox_lark_broker_active, "_cache", None)
+        if cached is not None:
+            ts, value = cached
+            ttl = LARK_BROKER_MODE_TTL_SECONDS if value else LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS
+            if now - ts < ttl:
+                return value
+
+    active = False
+    if _uses_aio_sandbox(config) and _uses_remote_provisioner(config):
+        caps = _probe_provisioner_capabilities(config, timeout=LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS)
+        active = bool(caps and caps["lark_cli_broker_image"])
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        sandbox_lark_broker_active._cache = (now, active)  # type: ignore[attr-defined]
+    return active
 
 
 def get_lark_integration_status(
@@ -862,12 +942,14 @@ def _uses_remote_provisioner(config: AppConfig) -> bool:
     return bool(_sandbox_config_value(config, "provisioner_url"))
 
 
-def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
-    """Best-effort read of the provisioner's lark-cli init-image capability.
+def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) -> dict[str, bool] | None:
+    """Best-effort read of the provisioner's lark-cli capabilities.
 
-    Returns True/False when the provisioner answers, or None when it can't be
-    reached. Used only to surface a sandbox-runtime readiness signal; failures
-    degrade to "not ready" rather than raising.
+    Returns the capability dict when the provisioner answers, or None when it
+    can't be reached. Used both for the status readiness signal and to select
+    broker vs. binary mode on the bash hot path; failures degrade to "not
+    ready"/"not broker" rather than raising. ``timeout`` is caller-tunable so the
+    per-bash-call probe can use a tighter budget than the Settings status probe.
     """
     base = _sandbox_config_value(config, "provisioner_url")
     if not base:
@@ -877,9 +959,14 @@ def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
     url = f"{base.rstrip('/')}/api/capabilities"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "deer-flow", **headers})
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return bool(payload.get("lark_cli_init_image"))
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "lark_cli_init_image": bool(payload.get("lark_cli_init_image")),
+            "lark_cli_broker_image": bool(payload.get("lark_cli_broker_image")),
+        }
     except Exception:
         return None
 

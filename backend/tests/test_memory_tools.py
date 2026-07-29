@@ -416,6 +416,20 @@ class TestModeGating:
         assert MemoryMiddleware not in middleware_types
         assert "memory_add" in tool_names
 
+    def test_mem0_tool_mode_keeps_passive_write_middleware(self):
+        """mem0 has search tools but no fact CRUD, so tool mode must retain
+        the per-turn middleware write path that feeds server-side extraction."""
+        from deerflow.agents.factory import _assemble_from_features
+        from deerflow.agents.features import RuntimeFeatures
+        from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+        from deerflow.config.memory_config import MemoryConfig
+
+        config = MemoryConfig(enabled=True, mode="tool", manager_class="mem0")
+        chain, extra_tools = _assemble_from_features(RuntimeFeatures(memory=True, memory_config=config), name="test-agent")
+
+        assert MemoryMiddleware in [type(m) for m in chain]
+        assert "memory_search" in [tool.name for tool in extra_tools]
+
     def test_middleware_mode_appends_middleware_not_tools(self, monkeypatch):
         """When mode=middleware (default), MemoryMiddleware IS in the chain
         and memory tools are NOT in extra_tools."""
@@ -506,7 +520,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("memory_search"), _NamedTool("bash")])
@@ -541,7 +555,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("bash"), _NamedTool("bash")])

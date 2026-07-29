@@ -32,6 +32,23 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("renders unresolved streaming assistant text before a tool call arrives", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "I will inspect the source material first.",
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expect(html).toContain(">inspect</span>");
+    expect(html).toContain(">source</span>");
+    expect(html).toContain(">first.</span>");
+  });
+
   it("renders assistant text attached to a tool-calling processing message", () => {
     const html = renderGroup([
       {
@@ -101,6 +118,42 @@ describe("MessageGroup", () => {
     expect(html).not.toContain("first hidden query");
     expect(html).toContain("Inspect message rendering");
     expect(html).toContain("1 more step");
+  });
+
+  it("keeps content-only assistant text visible after a tool call while streaming", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "I will inspect the current implementation.",
+          tool_calls: [
+            {
+              id: "call-1",
+              name: "read_file",
+              args: { path: "message-group.tsx" },
+            },
+          ],
+        } as Message,
+        {
+          id: "tool-1",
+          type: "tool",
+          name: "read_file",
+          tool_call_id: "call-1",
+          content: "file contents",
+        } as Message,
+        {
+          id: "ai-2",
+          type: "ai",
+          content: "Here is the final streamed answer.",
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expect(html).toContain(">final</span>");
+    expect(html).toContain(">streamed</span>");
+    expect(html).toContain(">answer.</span>");
   });
 
   it("does not schedule artifact auto-open during render", () => {

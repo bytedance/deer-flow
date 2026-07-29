@@ -3,7 +3,7 @@ import type { AnchorHTMLAttributes } from "react";
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
 import { cn } from "@/lib/utils";
 
-import { CitationLink } from "../citations/citation-link";
+import { CitationLink, extractReactNodeText } from "../citations/citation-link";
 
 /**
  * Schemes we are willing to render as a navigable ``<a href=...>``.
@@ -91,8 +91,9 @@ export function createMarkdownLinkComponent(threadId?: string) {
       );
     }
     // Safe-href check passed — citation links now route through CitationLink.
-    if (typeof props.children === "string") {
-      const match = /^citation:(.+)$/.exec(props.children);
+    const childrenText = extractReactNodeText(props.children);
+    if (childrenText !== null) {
+      const match = /^citation:(.+)$/.exec(childrenText);
       if (match) {
         const [, text] = match;
         return (

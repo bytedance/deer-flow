@@ -613,6 +613,10 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
 
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
+
         async def update_model_name(self, *_args, **_kwargs):
             return None
 
@@ -693,6 +697,10 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
 
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
 
         async def update_model_name(self, *_args, **_kwargs):
             return None
@@ -873,6 +881,10 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
 
         async def set_status(self, _run_id, status, **_kwargs):
             record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
 
         async def update_model_name(self, *_args, **_kwargs):
             return None

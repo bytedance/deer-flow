@@ -165,12 +165,13 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
-    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False):
+    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False, provision_lark_cli_broker=False):
         assert thread_id == "thread-1"
         assert sandbox_id == "abc123"
         assert extra_mounts == [("/host", "/container", False)]
         assert user_id == expected_user_id
         assert provision_lark_cli_runtime is True
+        assert provision_lark_cli_broker is False
         return expected
 
     monkeypatch.setattr(backend, "_provisioner_create", mock_create)
@@ -197,6 +198,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
             "user_id": "test-user-autouse",
             "include_legacy_skills": True,
             "provision_lark_cli_runtime": False,
+            "provision_lark_cli_broker": False,
         }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
@@ -317,6 +319,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
             "user_id": "test-user-autouse",
             "include_legacy_skills": False,
             "provision_lark_cli_runtime": False,
+            "provision_lark_cli_broker": False,
         }
         assert timeout == 30
         return _StubResponse(payload={"sandbox_id": "anon123", "sandbox_url": "http://k3s:31002"})

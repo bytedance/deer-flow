@@ -34,9 +34,17 @@ class _FakeRunManager:
     recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
-    def __init__(self, *, store, run_ownership_config=None, on_orphans_recovered=None):
+    def __init__(
+        self,
+        *,
+        store,
+        run_ownership_config=None,
+        event_store=None,
+        on_orphans_recovered=None,
+    ):
         self.store = store
         self.run_ownership_config = run_ownership_config
+        self.event_store = event_store
         self.on_orphans_recovered = on_orphans_recovered
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
@@ -213,7 +221,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     """SQLite startup should recover stale active runs before serving requests."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full"),
+        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
@@ -258,7 +266,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
     """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
     app = FastAPI()
     config = SimpleNamespace(
-        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full"),
+        database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
