@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
+COREPACK_NOTICE = "Using pnpm via Corepack."
+
 
 def configure_stdio() -> None:
     """Prefer UTF-8 output so Unicode status markers render on Windows."""
@@ -23,28 +27,43 @@ def configure_stdio() -> None:
 def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, shell=False)
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=True, shell=False
+        )
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or result.stderr.strip()
 
 
-def find_pnpm_command() -> list[str] | None:
-    """Return a pnpm-compatible command that exists on this machine."""
-    pnpm_path = shutil.which("pnpm")
-    if pnpm_path:
-        return [str(Path(pnpm_path))]
+def run_pnpm_version() -> tuple[str | None, bool, str | None]:
+    """Return the pnpm version, resolution source, and failure message."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+            cwd=FRONTEND_DIR,
+        )
+    except OSError as exc:
+        return None, False, f"Unable to launch the pnpm runner: {exc}"
 
-    pnpm_cmd_path = shutil.which("pnpm.cmd")
-    if pnpm_cmd_path:
-        return [str(Path(pnpm_cmd_path))]
+    stdout = result.stdout.strip()
+    stderr_lines = result.stderr.splitlines()
+    via_corepack = COREPACK_NOTICE in stderr_lines
+    stderr = "\n".join(line for line in stderr_lines if line != COREPACK_NOTICE).strip()
+    if result.returncode == 0 and (stdout or stderr):
+        return stdout or stderr, via_corepack, None
 
-    corepack_path = shutil.which("corepack")
-    if not corepack_path:
-        corepack_path = shutil.which("corepack.cmd")
-    if corepack_path:
-        return [str(Path(corepack_path)), "pnpm"]
-    return None
+    diagnostics = "\n".join(part for part in (stderr, stdout) if part)
+    if diagnostics:
+        return None, via_corepack, diagnostics
+    return (
+        None,
+        via_corepack,
+        f"The pnpm runner exited with status {result.returncode} without output.",
+    )
 
 
 def parse_node_major(version_text: str) -> int | None:
@@ -91,22 +110,15 @@ def main() -> int:
 
     print()
     print("Checking pnpm...")
-    pnpm_command = find_pnpm_command()
-    if pnpm_command:
-        pnpm_version = run_command([*pnpm_command, "-v"])
-        if pnpm_version:
-            if Path(pnpm_command[0]).stem.lower() == "corepack":
-                print(f"  OK pnpm {pnpm_version} (via Corepack)")
-            else:
-                print(f"  OK pnpm {pnpm_version}")
-        else:
-            print("  INFO Unable to determine pnpm version")
-            failed = True
+    pnpm_version, pnpm_via_corepack, pnpm_error = run_pnpm_version()
+    if pnpm_version:
+        resolution_hint = " (via Corepack)" if pnpm_via_corepack else ""
+        print(f"  OK pnpm {pnpm_version}{resolution_hint}")
     else:
-        print("  FAIL pnpm not found")
-        print("    Install: npm install -g pnpm")
-        print("    Or enable Corepack: corepack enable")
-        print("    Or visit: https://pnpm.io/installation")
+        print("  FAIL pnpm is unavailable or failed to run")
+        if pnpm_error:
+            for line in pnpm_error.splitlines():
+                print(f"    {line}")
         failed = True
 
     print()
@@ -115,7 +127,9 @@ def main() -> int:
         uv_version_text = run_command(["uv", "--version"])
         if uv_version_text:
             uv_version_parts = uv_version_text.split()
-            uv_version = uv_version_parts[1] if len(uv_version_parts) > 1 else uv_version_text
+            uv_version = (
+                uv_version_parts[1] if len(uv_version_parts) > 1 else uv_version_text
+            )
             print(f"  OK uv {uv_version}")
         else:
             print("  INFO Unable to determine uv version")

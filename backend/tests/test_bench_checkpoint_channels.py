@@ -86,6 +86,28 @@ def test_oversized_filter_skips_full_and_delta_as_a_comparable_pair() -> None:
     assert {(case.update_count, case.mode) for case in skipped} == {(100, "full"), (100, "delta")}
 
 
+def test_oversized_filter_applies_full_cap_to_every_swept_delta_cadence() -> None:
+    cases = bench._expand_cases(
+        modes=["full", "delta"],
+        backends=["memory"],
+        update_counts=[100],
+        payload_bytes=[128],
+        repetitions=1,
+        seed=1,
+        snapshot_frequencies=[1, 250, 1000],
+    )
+
+    kept, skipped = bench._filter_oversized_pairs(cases, max_bytes=100_000)
+
+    assert kept == []
+    assert {(case.mode, case.snapshot_frequency) for case in skipped} == {
+        ("full", bench.PRODUCTION_SNAPSHOT_FREQUENCY),
+        ("delta", 1),
+        ("delta", 250),
+        ("delta", 1000),
+    }
+
+
 def test_oversized_filter_does_not_suppress_a_delta_only_diagnostic() -> None:
     case = bench.BenchmarkCase(
         mode="delta",
@@ -104,6 +126,55 @@ def test_oversized_filter_does_not_suppress_a_delta_only_diagnostic() -> None:
 
 def test_help_explains_delta_only_runs_bypass_full_payload_cap() -> None:
     assert "delta-only" in bench._build_parser().format_help()
+
+
+def test_expand_cases_sweeps_delta_frequencies_without_duplicating_full_cases() -> None:
+    cases = bench._expand_cases(
+        modes=["full", "delta"],
+        backends=["memory"],
+        update_counts=[10],
+        payload_bytes=[128],
+        repetitions=1,
+        seed=1,
+        snapshot_frequencies=[100, 250, 500, 1000],
+    )
+
+    full_cases = [case for case in cases if case.mode == "full"]
+    delta_cases = [case for case in cases if case.mode == "delta"]
+    assert len(full_cases) == 1
+    assert full_cases[0].snapshot_frequency == bench.PRODUCTION_SNAPSHOT_FREQUENCY
+    assert sorted(case.snapshot_frequency for case in delta_cases) == [100, 250, 500, 1000]
+
+
+def test_case_rejects_non_positive_snapshot_frequency() -> None:
+    with pytest.raises(ValueError, match="snapshot_frequency"):
+        bench.BenchmarkCase(
+            mode="delta",
+            backend="memory",
+            update_count=4,
+            payload_bytes=64,
+            repetition=0,
+            seed=1,
+            snapshot_frequency=0,
+        )
+
+
+def test_memory_smoke_case_materializes_at_low_snapshot_frequency(tmp_path: Path) -> None:
+    case = bench.BenchmarkCase(
+        mode="delta",
+        backend="memory",
+        update_count=6,
+        payload_bytes=64,
+        repetition=0,
+        seed=1,
+        snapshot_frequency=2,
+    )
+
+    row = bench._run_case(case, work_dir=tmp_path)
+
+    assert row["success"] is True
+    assert row["snapshot_frequency"] == 2
+    assert row["actual_message_count"] == 6
 
 
 def test_cross_mode_validation_rejects_materialized_state_mismatch() -> None:

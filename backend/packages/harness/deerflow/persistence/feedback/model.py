@@ -19,9 +19,6 @@ class FeedbackRow(Base):
     run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(64), index=True)
-    message_id: Mapped[str | None] = mapped_column(String(64))
-    # message_id is an optional RunEventStore event identifier —
-    # allows feedback to target a specific message or the entire run
 
     rating: Mapped[int] = mapped_column(nullable=False)
     # +1 (thumbs-up) or -1 (thumbs-down)

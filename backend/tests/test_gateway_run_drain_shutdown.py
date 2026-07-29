@@ -197,7 +197,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
 
     app = FastAPI()
-    startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full"), run_events=None, scheduler=SchedulerConfig())
+    startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None, scheduler=SchedulerConfig())
 
     async with langgraph_runtime(app, startup_config):
         pass

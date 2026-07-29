@@ -50,6 +50,9 @@ services:
       # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision
       # the sandbox lark-cli runtime via an init container + emptyDir.
       - LARK_CLI_INIT_IMAGE=${LARK_CLI_INIT_IMAGE:-}
+      # Optional lark-cli broker image (Pattern B, issue #4338). Empty ⇒ broker
+      # off. Supersedes LARK_CLI_INIT_IMAGE when both are set.
+      - LARK_CLI_BROKER_IMAGE=${LARK_CLI_BROKER_IMAGE:-}
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
@@ -205,8 +208,8 @@ services:
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents import create_agent
@@ -21,6 +23,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionM
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -125,6 +128,59 @@ class ConfiguredNonMiddleware:
 
 def test_make_lead_agent_signature_matches_langgraph_server_factory_abi():
     assert list(inspect.signature(lead_agent_module.make_lead_agent).parameters) == ["config"]
+
+
+def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    captured: dict[str, object] = {}
+
+    import deerflow.tools as tools_module
+
+    def _load_agent_config(name, *, user_id=None):
+        captured["agent_config_user_id"] = user_id
+        return AgentConfig(name=name)
+
+    def _load_skills(available_skills, *, app_config, user_id=None):
+        captured["skills_user_id"] = user_id
+        return []
+
+    def _build_middlewares(config, model_name, agent_name=None, **kwargs):
+        captured["middleware_user_id"] = kwargs.get("user_id")
+        return []
+
+    def _apply_prompt_template(**kwargs):
+        captured["prompt_user_id"] = kwargs.get("user_id")
+        return "system prompt"
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", _load_agent_config)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", _load_skills)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _build_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _apply_prompt_template)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+
+    lead_agent_module._make_lead_agent(
+        {
+            "configurable": {
+                "agent_name": "researcher",
+                "langgraph_auth_user_id": "authenticated-user",
+                "user_id": "spoofed-configurable-user",
+            },
+            "context": {
+                "user_id": "spoofed-context-user",
+            },
+        },
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "agent_config_user_id": "authenticated-user",
+        "skills_user_id": "authenticated-user",
+        "middleware_user_id": "authenticated-user",
+        "prompt_user_id": "authenticated-user",
+    }
 
 
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
@@ -1130,6 +1186,23 @@ def test_memory_middleware_uses_explicit_memory_config_without_global_read(monke
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None
 
 
+def test_memory_middleware_async_path_uses_async_manager_call(monkeypatch):
+    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+    manager = SimpleNamespace(aadd=AsyncMock(), add=MagicMock(side_effect=AssertionError("sync add must not run")))
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True))
+    runtime = MagicMock(context={"thread_id": "thread-1", "user_id": "user-1"})
+
+    result = asyncio.run(middleware.aafter_agent({"messages": [HumanMessage(content="hello")]}, runtime=runtime))
+
+    assert result is None
+    manager.aadd.assert_awaited_once()
+    assert manager.aadd.await_args.kwargs["user_id"] == "user-1"
+    manager.add.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Per-agent model settings (issue #4336)
 # ---------------------------------------------------------------------------
@@ -1164,7 +1237,7 @@ def test_make_lead_agent_applies_agent_model_settings(monkeypatch):
 
     import deerflow.tools as tools_module
 
-    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name: agent_config)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
     monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
 
@@ -1193,7 +1266,7 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
 
     import deerflow.tools as tools_module
 
-    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name: agent_config)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
     monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
 

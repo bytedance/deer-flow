@@ -84,6 +84,12 @@ Create a new sandbox Pod + Service.
 
 `user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
 
+When the Gateway mounts that same storage at its DeerFlow home and the PVC
+subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
+`config.yaml` to skip redundant upload-time sandbox acquire/sync. Leave the
+field unset when using unrelated storage or when the mount relationship is
+uncertain.
+
 **Response**:
 ```json
 {
@@ -146,6 +152,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
+| `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |

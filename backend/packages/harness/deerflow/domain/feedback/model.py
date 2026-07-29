@@ -4,6 +4,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from deerflow.domain.feedback import InvalidRatingError, InvalidTagError
+
 VALID_RATINGS = (-1, 1)
 
 # Language-neutral reason slugs for thumbs-down feedback. The UI translates
@@ -21,33 +23,12 @@ VALID_FEEDBACK_TAGS = frozenset(
 )
 
 
-class FeedbackError(Exception):
-    """Base error for the feedback domain."""
-
-
-class InvalidRatingError(FeedbackError):
-    """Raised when a rating is not +1 or -1."""
-
-
-class InvalidTagError(FeedbackError):
-    """Raised when a feedback tag is not a known reason slug."""
-
-
-class DuplicateFeedbackError(FeedbackError):
-    """Raised when a concurrent upsert conflicts on the same run's feedback."""
-
-
-class RunNotFoundError(FeedbackError):
-    """Raised when the run does not exist or does not belong to the thread."""
-
-
 @dataclass(frozen=True)
 class Feedback:
     """A user's rating of a single run: at most one per (thread, run, user).
 
-    Single-entity aggregate. ``message_id`` optionally narrows the rating
-    to one message within the run instead of the whole run. ``tags`` carry
-    optional thumbs-down reason slugs from the feedback dialog.
+    Single-entity aggregate. ``tags`` carry optional thumbs-down reason
+    slugs from the feedback dialog.
     """
 
     feedback_id: str
@@ -55,7 +36,6 @@ class Feedback:
     thread_id: str
     rating: int
     user_id: str | None = None
-    message_id: str | None = None
     comment: str | None = None
     tags: tuple[str, ...] = ()
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -75,7 +55,6 @@ class Feedback:
         thread_id: str,
         rating: int,
         user_id: str | None = None,
-        message_id: str | None = None,
         comment: str | None = None,
         tags: tuple[str, ...] | list[str] = (),
     ) -> Feedback:
@@ -86,7 +65,6 @@ class Feedback:
             thread_id=thread_id,
             rating=rating,
             user_id=user_id,
-            message_id=message_id,
             comment=comment,
             tags=tuple(tags),
         )

@@ -61,6 +61,7 @@ import {
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
 } from "@/core/messages/utils";
+import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
 import {
   buildMessageSidecarContext,
   type SidecarContext,
@@ -181,7 +182,9 @@ function useStableMessageGroups(
   const previousGroupsRef = useRef<ThreadMessageGroup[]>([]);
   const previousIsLoadingRef = useRef(false);
   return useMemo(() => {
-    const nextGroups = getMessageGroups(messages);
+    const nextGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: isLoading,
+    });
     const previousGroups = previousGroupsRef.current;
     const activeGroupIndex =
       isLoading || previousIsLoadingRef.current ? nextGroups.length - 1 : -1;
@@ -492,6 +495,10 @@ export function MessageList({
     getAssistantTurnUsageMessages(groupedMessages);
   const runDurationDisplaysByGroupIndex = useMemo(
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
+  const workspaceChangeAnchorGroupIndices = useMemo(
+    () => getWorkspaceChangeAnchorGroupIndices(groupedMessages),
     [groupedMessages],
   );
   useEffect(() => {
@@ -1081,6 +1088,9 @@ export function MessageList({
                             : undefined
                         }
                         showCopyButton={group.type !== "assistant"}
+                        showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
+                          groupIndex,
+                        )}
                         canEdit={
                           group.type === "human" &&
                           Boolean(msg.id) &&

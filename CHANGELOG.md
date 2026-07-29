@@ -62,6 +62,13 @@ This section accumulates work toward the **2.1.0** milestone
   intentional -- silent empties are worse than a loud startup error. Fix: switch
   to `mode: middleware` or override `search()` (and set `supports_search=True`).
   ([#4324])
+- **config:** `database.checkpoint_delta_snapshot_frequency` moved to
+  `database.checkpoint_delta.snapshot_frequency` and its default changed from
+  `1000` to `10`. A legacy top-level value is still honored with a deprecation
+  warning and mapped onto the nested key (an explicitly set nested key wins).
+  Deployments that relied on the old default now snapshot 100x more often in
+  delta mode -- set `database.checkpoint_delta.snapshot_frequency: 1000`
+  explicitly to keep the previous cadence. ([#4516])
 
 ### Added
 
@@ -1343,3 +1350,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4468]: https://github.com/bytedance/deer-flow/pull/4468
 [#4469]: https://github.com/bytedance/deer-flow/pull/4469
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
+[#4516]: https://github.com/bytedance/deer-flow/pull/4516

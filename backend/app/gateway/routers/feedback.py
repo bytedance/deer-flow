@@ -24,6 +24,8 @@ from deerflow.domain.feedback import (
     Feedback,
     InvalidRatingError,
     InvalidTagError,
+    RateRun,
+    RetractRunRating,
     RunNotFoundError,
 )
 from deerflow.utils.time import coerce_iso
@@ -37,7 +39,14 @@ router = APIRouter(prefix="/api/threads", tags=["feedback"])
 # ---------------------------------------------------------------------------
 
 
-class FeedbackUpsertRequest(BaseModel):
+class RateRunRequest(BaseModel):
+    """Request model of the RateRun use case (name = command name + Request).
+
+    Carries only what the client may supply: identity (user_id) never
+    appears on a request model -- it is resolved server-side and injected
+    through ``to_command``.
+    """
+
     rating: int = Field(..., description="Feedback rating: +1 (positive) or -1 (negative)")
     comment: str | None = Field(default=None, description="Optional text feedback")
     tags: list[str] = Field(
@@ -45,33 +54,47 @@ class FeedbackUpsertRequest(BaseModel):
         description="Optional thumbs-down reason slugs (e.g. 'incorrect', 'slow')",
     )
 
+    def to_command(self, thread_id: str, run_id: str, user_id: str | None) -> RateRun:
+        """Body + path + resolved identity -> the use-case command.
+
+        The wire shape owns the inbound translation into domain vocabulary
+        (wire types become domain types here, e.g. list -> tuple).
+        """
+        return RateRun(
+            thread_id=thread_id,
+            run_id=run_id,
+            rating=self.rating,
+            user_id=user_id,
+            comment=self.comment,
+            tags=tuple(self.tags),
+        )
+
 
 class FeedbackResponse(BaseModel):
     feedback_id: str
     run_id: str
     thread_id: str
     user_id: str | None = None
-    message_id: str | None = None
     rating: int
     comment: str | None = None
     tags: list[str] = []
     created_at: str = ""
 
-
-def _to_response(feedback: Feedback) -> FeedbackResponse:
-    """Domain object -> wire shape. ``created_at`` keeps the legacy
-    ``coerce_iso`` serialization so the API output is byte-identical."""
-    return FeedbackResponse(
-        feedback_id=feedback.feedback_id,
-        run_id=feedback.run_id,
-        thread_id=feedback.thread_id,
-        user_id=feedback.user_id,
-        message_id=feedback.message_id,
-        rating=feedback.rating,
-        comment=feedback.comment,
-        tags=list(feedback.tags),
-        created_at=coerce_iso(feedback.created_at),
-    )
+    @classmethod
+    def from_domain(cls, feedback: Feedback) -> FeedbackResponse:
+        """Domain object -> wire shape (allowlist). ``created_at`` keeps the
+        legacy ``coerce_iso`` serialization so the API output is
+        byte-identical."""
+        return cls(
+            feedback_id=feedback.feedback_id,
+            run_id=feedback.run_id,
+            thread_id=feedback.thread_id,
+            user_id=feedback.user_id,
+            rating=feedback.rating,
+            comment=feedback.comment,
+            tags=list(feedback.tags),
+            created_at=coerce_iso(feedback.created_at),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -84,21 +107,14 @@ def _to_response(feedback: Feedback) -> FeedbackResponse:
 async def upsert_feedback(
     thread_id: str,
     run_id: str,
-    body: FeedbackUpsertRequest,
+    body: RateRunRequest,
     request: Request,
 ) -> FeedbackResponse:
     """Set the current user's rating for a run (idempotent upsert)."""
     user_id = await get_current_user(request)
     service = get_feedback_service(request)
     try:
-        feedback = await service.rate_run(
-            thread_id,
-            run_id,
-            rating=body.rating,
-            comment=body.comment,
-            user_id=user_id,
-            tags=body.tags,
-        )
+        feedback = await service.rate_run(body.to_command(thread_id, run_id, user_id))
     except InvalidRatingError:
         raise HTTPException(status_code=400, detail="rating must be +1 or -1")
     except InvalidTagError as exc:
@@ -109,7 +125,7 @@ async def upsert_feedback(
         # Lost a concurrent-upsert race (legacy behavior was a 500); the
         # client can simply retry.
         raise HTTPException(status_code=409, detail="Concurrent feedback update, please retry")
-    return _to_response(feedback)
+    return FeedbackResponse.from_domain(feedback)
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback")
@@ -122,7 +138,7 @@ async def delete_run_feedback(
     """Retract the current user's rating for a run."""
     user_id = await get_current_user(request)
     service = get_feedback_service(request)
-    retracted = await service.retract_run_rating(thread_id, run_id, user_id=user_id)
+    retracted = await service.retract_run_rating(RetractRunRating(thread_id=thread_id, run_id=run_id, user_id=user_id))
     if not retracted:
         raise HTTPException(status_code=404, detail="No feedback found for this run")
     return {"success": True}

@@ -921,6 +921,27 @@ function getMessagesAfterBaseline(
   });
 }
 
+/**
+ * Human-message baseline for a prepared replay (regenerate / edit).
+ *
+ * A replay masks the turn it supersedes, so those messages leave the live
+ * message list the moment the mask is applied. Baselining on the pre-mask count
+ * means the replacement only ever restores the count instead of exceeding it,
+ * and the optimistic copy is never recognised as confirmed. That matters for
+ * the first turn of a thread, where the runtime re-keys the replacement message
+ * so identity comparison cannot stand in for the count either.
+ */
+export function countHumanMessagesExcludingSuperseded(
+  messages: Message[],
+  supersededMessageIds: readonly string[],
+): number {
+  const superseded = new Set(supersededMessageIds);
+  return messages.filter(
+    (message) =>
+      message.type === "human" && (!message.id || !superseded.has(message.id)),
+  ).length;
+}
+
 export function getVisibleOptimisticMessages(
   optimisticMessages: Message[],
   previousHumanMessageCount: number,
@@ -1449,9 +1470,12 @@ export function useThreadStream({
     threadId: onStreamThreadId,
     reconnectOnMount: true,
     fetchStateHistory: { limit: 1 },
+    // Batch stream updates received in the same macrotask without adding a
+    // fixed debounce interval that could delay a continuously active stream.
     // Coalesce same-tick stream events into one React notification. Only the
     // boolean tier is safe: the SDK's numeric tier is a trailing debounce that
     // starves UI updates while chunks keep arriving faster than the window.
+    // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
@@ -2071,6 +2095,10 @@ export function useThreadStream({
         const prepared = await prepare();
         preparedSupersededRunId = prepared.target_run_id;
         preparedSupersededMessageIds = getSupersededMessageIds(prepared);
+        prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
+          persistedMessages,
+          preparedSupersededMessageIds,
+        );
         const replacementHumanMessageId =
           "replacement_human_message_id" in prepared &&
           typeof prepared.replacement_human_message_id === "string"

@@ -143,6 +143,10 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Backends that rely on conversation-level extraction instead of fact CRUD
+    # can retain MemoryMiddleware writes while tool mode supplies query-aware
+    # search. Most backends keep tool mode fully model-directed.
+    requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -583,6 +587,15 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
         "different storage backend (memory is persistent state -- a wrong store is a "
         "silent data-integrity footgun)."
     )
+
+
+def backend_requires_passive_writes_in_tool_mode(manager_class: str) -> bool:
+    """Return whether a backend needs middleware writes in tool mode.
+
+    Resolve the class without constructing it so agent assembly does not run
+    backend startup checks or perform network I/O.
+    """
+    return _resolve_manager_class(manager_class).requires_passive_writes_in_tool_mode
 
 
 # ── Host-default hook providers (passed to from_config by the factory) ────

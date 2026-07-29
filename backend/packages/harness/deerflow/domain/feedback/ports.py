@@ -44,8 +44,12 @@ class FeedbackRepository(Protocol):
         """Retract the user's feedback for a run.
 
         Returns True if an entry was removed, False if none existed.
-        Ownership filter: a non-None user_id restricts results to the
-        user's entries; None means no filtering (no-auth mode).
+        Unlike the read methods, ownership here is an EQUALITY match, not a
+        filter: a non-None user_id removes only that user's entry, and None
+        matches only entries stored with a NULL owner (what no-auth mode
+        writes) -- it does NOT mean "remove regardless of owner". A delete
+        must never reach across owners, so the asymmetry with the reads'
+        "None = no filtering" is deliberate.
         """
         ...
 

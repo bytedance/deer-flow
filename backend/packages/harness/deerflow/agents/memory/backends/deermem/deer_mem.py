@@ -302,12 +302,18 @@ class DeerMem(MemoryManager):
     ) -> str:
         """Load memory and format it for injection (plain text, no wrap).
 
+        Middleware mode injects the selected agent's facts together with the
+        user-global summaries. Tool mode injects only those global summaries;
+        facts stay behind ``memory_search`` so they are not duplicated in the
+        prompt and a later retrieval result.
+
         Format parameters come from DeerMem's own ``DeerMemConfig`` (set at
         construction from ``backend_config``). The ``enabled``/
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
         call site (``_get_memory_context``); this returns only the body.
         """
-        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,

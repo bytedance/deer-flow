@@ -122,6 +122,13 @@ def get_configured_cors_origins() -> set[str]:
     return _configured_cors_origins()
 
 
+# Response headers a split-origin browser client must be able to read. Only the
+# CORS-safelisted set is visible to JS by default, and the created run's id
+# travels in `Content-Location` — the LangGraph SDK resolves run metadata from
+# it, so withholding it leaves such a client unable to learn its own run id.
+CORS_EXPOSED_HEADERS: tuple[str, ...] = ("Content-Location",)
+
+
 def _first_header_value(value: str | None) -> str | None:
     """Return the first value from a comma-separated proxy header."""
     if not value:

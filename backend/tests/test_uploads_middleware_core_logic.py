@@ -30,16 +30,20 @@ def _middleware(tmp_path: Path) -> UploadsMiddleware:
     return UploadsMiddleware(base_dir=str(tmp_path))
 
 
-def _runtime(thread_id: str | None = THREAD_ID) -> MagicMock:
+def _runtime(thread_id: str | None = THREAD_ID, *, user_id: str | None = None) -> MagicMock:
     rt = MagicMock()
     rt.context = {"thread_id": thread_id}
+    if user_id is not None:
+        rt.context["user_id"] = user_id
     return rt
 
 
-def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID) -> Path:
-    from deerflow.runtime.user_context import get_effective_user_id
+def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID, *, user_id: str | None = None) -> Path:
+    if user_id is None:
+        from deerflow.runtime.user_context import get_effective_user_id
 
-    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+        user_id = get_effective_user_id()
+    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=user_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -252,6 +256,29 @@ class TestBeforeAgent:
         state = self._state(msg)
         result = mw.before_agent(state, _runtime())
         assert result == {"uploaded_files": []}
+
+    def test_uses_runtime_user_bucket_for_upload_existence_checks(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path, user_id="runtime-user")
+        (uploads_dir / "data.csv").write_text("a,b,c")
+        msg = _human(
+            "analyze",
+            files=[
+                {
+                    "filename": "data.csv",
+                    "size": 5,
+                    "path": "/mnt/user-data/uploads/data.csv",
+                }
+            ],
+        )
+
+        result = mw.before_agent(
+            {"messages": [msg]},
+            _runtime(user_id="runtime-user"),
+        )
+
+        assert result is not None
+        assert result["uploaded_files"][0]["filename"] == "data.csv"
 
     def test_injects_current_uploads_tag_into_string_content(self, tmp_path):
         mw = _middleware(tmp_path)
