@@ -268,7 +268,7 @@ sequenceDiagram
 | 模块 | 状态 |
 |---|---|
 | **Feedback** | ✅ 参考实现（`domain/feedback/` + `app/adapters/feedback/`） |
-| **Scheduling** | ✅ 参考实现（`domain/schedule/` + `app/adapters/schedule/`）；旧代码已停用待删 |
+| **Scheduling** | ✅ 参考实现（`domain/schedule/` + `app/adapters/schedule/`）；旧代码已删除 |
 | Run / ThreadMeta / RunEvent / Channel 等 | 旧模式，待迁移——阅读时勿以其为模板，新模块一律照 §2 |
 
 待办，按优先级：
@@ -276,9 +276,6 @@ sequenceDiagram
 | # | 待办 |
 |---|---|
 | 1 | 补防腐层对真实上游组件的契约测试（防腐层的门本身没被测过） |
-| 2 | 删除 schedule 旧代码（`app/scheduler/service.py`、`gateway/routers/scheduled_tasks.py`、旧 `sql.py` 仓储部分） |
-| 3 | feedback 依赖注入对齐 `Annotated[Service, Depends(...)]` 别名形态 |
-| 4 | schedule 写用例按 §3.1 command 化（含部分更新的 `Unset` sentinel） |
 
 ## 7. 引用出处
 

@@ -9,6 +9,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture overview |
 | [HEXAGONAL_ARCHITECTURE_zh.md](HEXAGONAL_ARCHITECTURE_zh.md) | 六边形（Ports & Adapters）分层规范：标准结构（AWS 三文件夹 + domain 七件套）、Commands/Events 设计、规则清单与执法、调用关系 |
 | [FEEDBACK_DESIGN_zh.md](FEEDBACK_DESIGN_zh.md) | 用户反馈模块设计：首个完成的六边形切片，聚合/端口/适配器逐层走读与二次开发指引 |
+| [SCHEDULE_DESIGN_zh.md](SCHEDULE_DESIGN_zh.md) | 定时任务模块设计：第二个六边形切片——两聚合两状态机、三驱动源、四道并发防线的完整走读 |
 | [API.md](API.md) | Complete API reference |
 | [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, platform-trust (IM / Internal Auth), and per-user isolation |
 | [SSO.md](SSO.md) | OIDC / SSO single sign-on |
@@ -41,7 +42,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
 3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
 4. **Building integrations?** Check [API.md](API.md) for API reference
-5. **Wondering why the layers are split the way they are?** Read [HEXAGONAL_ARCHITECTURE_zh.md](HEXAGONAL_ARCHITECTURE_zh.md) for the rules, then [FEEDBACK_DESIGN_zh.md](FEEDBACK_DESIGN_zh.md) for a worked example
+5. **Wondering why the layers are split the way they are?** Read [HEXAGONAL_ARCHITECTURE_zh.md](HEXAGONAL_ARCHITECTURE_zh.md) for the rules, then [FEEDBACK_DESIGN_zh.md](FEEDBACK_DESIGN_zh.md) for the minimal worked example and [SCHEDULE_DESIGN_zh.md](SCHEDULE_DESIGN_zh.md) for the full-complexity one
 
 ## Document Organization
 
@@ -51,6 +52,7 @@ docs/
 ├── ARCHITECTURE.md            # System architecture
 ├── HEXAGONAL_ARCHITECTURE_zh.md  # Hexagonal layering rules (zh)
 ├── FEEDBACK_DESIGN_zh.md      # Feedback module design (zh) — first hexagonal slice
+├── SCHEDULE_DESIGN_zh.md      # Schedule module design (zh) — second hexagonal slice
 ├── API.md                     # API reference
 ├── AUTH_DESIGN.md             # User authentication and isolation design
 ├── CONFIGURATION.md           # Configuration guide
