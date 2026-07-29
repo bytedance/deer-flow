@@ -33,6 +33,17 @@ class ThreadNotFoundError(ScheduleError):
     """reuse_thread points at a thread the user cannot access."""
 
 
+class CorruptStoredScheduleError(ScheduleError):
+    """A stored task row can no longer be rebuilt into a valid aggregate.
+
+    Raised by the persistence adapter, never by the aggregate: it means the
+    *storage* is damaged, not that a client submitted something invalid --
+    which is why it is deliberately absent from the router's status table and
+    falls through to the unclassified-500 branch instead of riding
+    ``InvalidScheduleError``'s 422.
+    """
+
+
 class ActiveRunConflictError(ScheduleError):
     """The task already holds its single active run slot.
 

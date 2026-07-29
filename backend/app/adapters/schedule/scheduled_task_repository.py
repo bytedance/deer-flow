@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.domain.schedule.exceptions import InvalidScheduleError
+from deerflow.domain.schedule.exceptions import CorruptStoredScheduleError, ScheduleError
 from deerflow.domain.schedule.model import TERMINAL_TASK_STATUSES, ContextMode, ScheduledTask, ScheduleSpec, ScheduleType, TaskStatus
 from deerflow.domain.schedule.ports import ScheduledTaskRepository
 
@@ -92,39 +92,46 @@ class SqlScheduledTaskRepository(ScheduledTaskRepository):
     def _to_domain(row: ScheduledTaskRow) -> ScheduledTask:
         """ORM row -> aggregate.
 
-        Raises InvalidScheduleError for a row whose stored schedule can no
-        longer be parsed. That is a **new** failure mode: the legacy repository
-        returned bare dicts and a corrupt spec only surfaced at dispatch time.
-        Single-row reads let it propagate; list reads skip and log, so one bad
-        row cannot 500 an entire listing.
+        Raises CorruptStoredScheduleError for a row that can no longer be
+        rebuilt -- unparseable schedule, unknown enum value. The rebuild goes
+        through the aggregate's own validation, so a hand-damaged row blows up
+        here rather than flowing on; the translation to the dedicated error is
+        what keeps it off ``InvalidScheduleError``'s client-facing 422 mapping
+        (a stored fault is the server's problem, and PATCH -- which reads
+        before writing -- must not become unusable for the one row it could
+        repair). Single-row reads let it propagate; list reads skip and log,
+        so one bad row cannot take down an entire listing.
         """
-        return ScheduledTask(
-            task_id=row.id,
-            user_id=row.user_id,
-            title=row.title,
-            prompt=row.prompt,
-            schedule=SqlScheduledTaskRepository._spec_from_row(row),
-            context_mode=ContextMode(row.context_mode),
-            thread_id=row.thread_id,
-            assistant_id=row.assistant_id,
-            status=TaskStatus(row.status),
-            overlap_policy=row.overlap_policy,
-            next_run_at=_tz_aware(row.next_run_at),
-            last_run_at=_tz_aware(row.last_run_at),
-            last_run_id=row.last_run_id,
-            last_thread_id=row.last_thread_id,
-            last_error=row.last_error,
-            run_count=row.run_count,
-            created_at=_tz_aware(row.created_at),
-            updated_at=_tz_aware(row.updated_at),
-        )
+        try:
+            return ScheduledTask(
+                task_id=row.id,
+                user_id=row.user_id,
+                title=row.title,
+                prompt=row.prompt,
+                schedule=SqlScheduledTaskRepository._spec_from_row(row),
+                context_mode=ContextMode(row.context_mode),
+                thread_id=row.thread_id,
+                assistant_id=row.assistant_id,
+                status=TaskStatus(row.status),
+                overlap_policy=row.overlap_policy,
+                next_run_at=_tz_aware(row.next_run_at),
+                last_run_at=_tz_aware(row.last_run_at),
+                last_run_id=row.last_run_id,
+                last_thread_id=row.last_thread_id,
+                last_error=row.last_error,
+                run_count=row.run_count,
+                created_at=_tz_aware(row.created_at),
+                updated_at=_tz_aware(row.updated_at),
+            )
+        except (ScheduleError, ValueError) as exc:
+            raise CorruptStoredScheduleError(f"stored scheduled task {row.id} cannot be rebuilt: {exc}") from exc
 
     @classmethod
     def _to_domain_or_skip(cls, row: ScheduledTaskRow) -> ScheduledTask | None:
         try:
             return cls._to_domain(row)
-        except InvalidScheduleError:
-            logger.warning("Skipping scheduled task %s: stored schedule is unparseable", row.id, exc_info=True)
+        except CorruptStoredScheduleError:
+            logger.warning("Skipping scheduled task %s: stored row cannot be rebuilt", row.id, exc_info=True)
             return None
 
     @staticmethod
