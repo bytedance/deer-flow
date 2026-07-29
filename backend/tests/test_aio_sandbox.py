@@ -358,6 +358,20 @@ class TestNoChangeTimeout:
         assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
 
 
+class TestReadFile:
+    def test_read_file_forwards_requested_line_range(self, sandbox):
+        sandbox._client.file.read_file = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2")))
+
+        result = sandbox.read_file("/mnt/user-data/workspace/huge.log", start_line=1, end_line=10)
+
+        assert result == "line 1\nline 2"
+        sandbox._client.file.read_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/huge.log",
+            start_line=0,
+            end_line=10,
+        )
+
+
 class TestConcurrentFileWrites:
     """Verify file write paths do not lose concurrent updates."""
 
