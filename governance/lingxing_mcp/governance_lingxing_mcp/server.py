@@ -78,24 +78,27 @@ def create_server(config: LXConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def lx_parent_ad(
-        sid: int,
-        report_date: str,
-        profile_id: int | None = None,
-        show_detail: int = 0,
-        offset: int = 0,
+        sid: list | str,
+        start_date: str,
+        end_date: str,
+        search_value: list | None = None,
+        summary_field: str = "parent_asin",
         length: int = 100,
     ) -> list[dict]:
-        """查询 SP 广告商品报表：impressions/clicks/cost/sales/orders/units 等。小时级数据。
+        """查询广告指标（父ASIN 级）：acos/roas/acoas/clicks/ctr/spend/ad_sales_amount 等。
+
+        来源统计→产品表现 asinList（与 lx_parent_sales 同端点），asinList 直接返回
+        广告字段（非计算）。T+1 统计数据。
 
         参数:
-            sid: 店铺 id。与 profile_id 二选一。
-            report_date: 报告日期，格式 YYYY-MM-DD。
-            profile_id: 可选广告 profile id。提供时覆盖 sid。
-            show_detail: 是否返回明细，0/1。
-            offset: 分页起始偏移。
+            sid: 店铺 id 列表（也可传单个值）。
+            start_date: 起始日期，格式 YYYY-MM-DD。
+            end_date: 结束日期，格式 YYYY-MM-DD。
+            search_value: 可选 parent_asin 过滤列表。
+            summary_field: 汇总维度，默认 parent_asin。
             length: 单页条数，默认 100。
         """
-        return query_parent_ad(client, sid, report_date, profile_id, show_detail, offset, length)
+        return query_parent_ad(client, sid, start_date, end_date, search_value, summary_field, length)
 
     @mcp.tool()
     def lx_keyword_share(

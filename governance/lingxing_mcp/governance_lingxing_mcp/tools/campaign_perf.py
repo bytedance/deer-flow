@@ -12,9 +12,14 @@ def query_campaign_perf(
     offset: int = 0,
     length: int = 100,
 ) -> list[dict]:
-    """查询 SP 广告活动报表。返回 targeting_type/clicks/cost/sales/orders/units 等。
+    """查询 SP 广告活动报表。返回 targeting_type/clicks/cost/sales/orders 等。
 
-    API: POST /pb/openapi/newad/spCampaignReports （sid 与 profile_id 二选一）。
+    show_detail=1 时返回归因数据（orders_1d/7d/14d/30d, same_orders_7d 等），
+    对应业务口径"近7/14/30天"维度。
+
+    ⚠️ 缺失字段：budget（预算）—— spCampaignReports 不返回预算字段，
+    需另调广告活动管理 API。当前未接入。
+
     广告数据小时级，TTL=1800（30 分钟）。
     """
     params = {
