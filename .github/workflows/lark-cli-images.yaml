@@ -48,10 +48,14 @@ jobs:
       - name: Resolve lark-cli version
         id: version
         # workflow_dispatch supplies it as an input; a `lark-cli-v*` tag encodes
-        # it after the prefix (lark-cli-v1.0.65 -> v1.0.65).
+        # it after the prefix (lark-cli-v1.0.65 -> v1.0.65). The input is passed
+        # via env (not interpolated into the script) to avoid shell expression
+        # injection if the repo gate on dispatch ever widens.
+        env:
+          LARK_CLI_VERSION_INPUT: ${{ inputs.lark_cli_version }}
         run: |
-          if [ -n "${{ inputs.lark_cli_version }}" ]; then
-            version="${{ inputs.lark_cli_version }}"
+          if [ -n "$LARK_CLI_VERSION_INPUT" ]; then
+            version="$LARK_CLI_VERSION_INPUT"
           else
             version="${GITHUB_REF_NAME#lark-cli-}"
           fi
@@ -83,8 +87,8 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: true
-          # The sidecar/init stage a real arch-dispatched lark-cli binary, so
-          # publish both arches the sandbox may run on.
+          # The sidecar/init image ships a real arch-dispatched lark-cli binary,
+          # so publish both arches the sandbox may run on.
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
