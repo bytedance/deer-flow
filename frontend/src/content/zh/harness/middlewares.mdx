@@ -17,6 +17,10 @@ import { Callout } from "nextra/components";
 
 这种设计使 Agent 核心保持简单稳定，同时允许丰富的可组合行为分层叠加。
 
+<Callout type="info">
+  每个子 Agent 运行各自的 Agent 循环，并拥有自己的中间件链。下方的循环检测、token 预算和摘要压缩防护已镜像到子 Agent 链（#3875）；其余中间件为 Lead Agent 专属（如记忆、标题生成、澄清）。参见[子 Agent → 失控行为防护](/docs/harness/subagents#失控行为防护)。
+</Callout>
+
 ## 链的工作方式
 
 中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
@@ -57,6 +61,8 @@ import { Callout } from "nextra/components";
 检测 Agent 是否在没有取得进展的情况下重复进行相同的工具调用。检测到循环时，中间件会介入打破循环，防止 Agent 无限消耗轮次。
 
 Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合并为一条隐藏的 `HumanMessage(name="loop_warning")`，追加到已有工具结果之后。这样不会破坏 provider 对 tool-call/tool-message 配对的校验。Run 开始和结束时会清理过期或未送达的 warning；达到 hard stop 时仍会清空 tool calls 并强制生成最终文本回复。
+
+此中间件同样挂载到子 Agent 链——子 Agent 不允许调用 `task`，因此这里只会触发工具循环启发式判定，退化的子 Agent 循环会被同样地打破。
 
 **配置**：内置，无需用户配置。
 
@@ -136,6 +142,8 @@ token_usage:
 ### SummarizationMiddleware
 
 当对话变长时，对旧消息进行摘要以减少上下文大小。生成的摘要存入线程状态，并在后续模型调用中作为隐藏的 durable context 数据投影进去，在不把旧消息继续留在活跃 transcript 中的情况下保留含义。
+
+同一个中间件与同一个 `summarization.enabled` 开关也会压缩子 Agent transcript，使一份配置同时覆盖 Lead Agent 与子 Agent 两条链（#3875）。
 
 **配置**：`config.yaml` 中的 `summarization:` 部分。详见下方详细配置。
 

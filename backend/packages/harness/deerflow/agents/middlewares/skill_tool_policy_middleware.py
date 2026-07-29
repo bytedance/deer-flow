@@ -40,7 +40,7 @@ type _PolicySignature = tuple[str, tuple[str, ...]]
 
 
 class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
-    """Restrict lead tools to declarations from slash/in-context skills.
+    """Restrict agent tools to declarations from slash/in-context skills.
 
     Merely enabling a skill makes it discoverable; it does not activate its
     authority policy. A skill becomes policy-active when the user slash-activates

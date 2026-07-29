@@ -36,6 +36,7 @@ from deerflow.agents.middlewares.clarification_middleware import ClarificationMi
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, create_summarization_middleware
@@ -55,6 +56,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
@@ -133,9 +135,14 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> DeerFlowSummarizationMiddleware | None:
-    """Create and configure the summarization middleware from config."""
-    return create_summarization_middleware(app_config=app_config)
+def _create_summarization_middleware(*, app_config: AppConfig | None = None, run_model_name: str | None = None) -> DeerFlowSummarizationMiddleware | None:
+    """Create and configure the summarization middleware from config.
+
+    ``run_model_name`` is the resolved run model; it is the source of truth for
+    ``model_name: null`` summarization and the explicit-summary-model fallback, so a
+    custom agent's model is used instead of ``config.models[0]``.
+    """
+    return create_summarization_middleware(app_config=app_config, run_model_name=run_model_name)
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -359,7 +366,7 @@ def build_middlewares(
     )
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, run_model_name=model_name)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -377,9 +384,13 @@ def build_middlewares(
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
-    # Add MemoryMiddleware (after TitleMiddleware) — skipped in enabled tool mode
+    # Add MemoryMiddleware after TitleMiddleware. Tool mode normally skips it;
+    # conversation-extraction backends may explicitly retain passive writes.
     if should_use_memory_tools(resolved_app_config.memory):
-        pass
+        from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
+
+        if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
+            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
     else:
         if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
@@ -447,6 +458,12 @@ def build_middlewares(
     # allowing LangChain's no-tool-call router to end a silent successful run.
     middlewares.append(TerminalResponseMiddleware())
 
+    # A provider may also cap the final assistant response at the model output
+    # limit. Preserve the assistant content unchanged, but stamp a run-level
+    # stop_reason so Gateway consumers can tell a length-capped completion from
+    # a clean one.
+    middlewares.append(ModelLengthFinishReasonMiddleware())
+
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after the terminal-response
     # and custom/configured middlewares so LangChain's reverse-order after_model
@@ -506,6 +523,10 @@ def make_lead_agent(config: RunnableConfig):
             runtime_app_config.database.checkpoint_channel_mode,
         )
     mode = freeze_checkpoint_channel_mode(requested_mode)
+    # The snapshot cadence travels with the mode: restart-required, frozen
+    # from the app config, and deliberately not client-injectable (a forged
+    # configurable key must not recompile the channel table either).
+    freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
     return _make_lead_agent(config, app_config=runtime_app_config)
 
@@ -523,13 +544,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         resolved_app_config.database.checkpoint_channel_mode,
     )
 
-    # Extract user_id for user-scoped skill loading.
-    # LangGraph gateway injects user_id into config["configurable"];
-    # fall back to the runtime contextvar when not present.
-    from deerflow.runtime.user_context import get_effective_user_id
+    # Resolve one authoritative identity for every user-scoped factory input.
+    # Agent Server's reserved auth fields win over ordinary client-supplied
+    # context/configurable values; the embedded Gateway path uses context.user_id.
+    from deerflow.runtime.user_context import resolve_config_user_id
 
-    runtime_user_id = cfg.get("user_id")
-    resolved_user_id = str(runtime_user_id) if runtime_user_id else get_effective_user_id()
+    resolved_user_id = resolve_config_user_id(config)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -540,7 +560,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name) if not is_bootstrap else None
+    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None

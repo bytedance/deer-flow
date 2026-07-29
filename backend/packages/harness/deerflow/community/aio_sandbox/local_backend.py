@@ -271,6 +271,8 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new container and return its connection info.
 
@@ -280,6 +282,10 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
             user_id: User bucket already reflected in extra_mounts. Accepted for
                 interface compatibility with remote backends.
+            provision_lark_cli_runtime: Ignored — the local backend provisions the
+                lark-cli runtime via the Gateway-download bind mount in extra_mounts.
+            provision_lark_cli_broker: Ignored — the local backend has no sandbox
+                boundary to protect, so it keeps the credential-mount overlay.
 
         Returns:
             SandboxInfo with container details.
@@ -287,7 +293,7 @@ class LocalContainerBackend(SandboxBackend):
         Raises:
             RuntimeError: If the container fails to start.
         """
-        del user_id
+        del user_id, provision_lark_cli_runtime, provision_lark_cli_broker
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still

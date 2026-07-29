@@ -16,8 +16,9 @@ import {
 import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
 import {
   preprocessStreamdownMarkdown,
+  rehypeStreamingListItems,
   streamdownPluginsWithoutRawHtml,
-  streamdownWordAnimation,
+  streamdownSmoothStreamingAnimation,
 } from "@/core/streamdown";
 import {
   SafeMessageResponse,
@@ -241,8 +242,13 @@ export function MarkdownContent({
   const effectiveRehypePlugins = useMemo(() => {
     const base = streamdownPluginsWithoutRawHtml.rehypePlugins ?? [];
     const extra = rehypePlugins ?? [];
-    return [...base, ...extra] as ClipboardSafeStreamdownProps["rehypePlugins"];
-  }, [rehypePlugins]);
+    const streaming = isStreamingRender ? [rehypeStreamingListItems] : [];
+    return [
+      ...base,
+      ...extra,
+      ...streaming,
+    ] as ClipboardSafeStreamdownProps["rehypePlugins"];
+  }, [isStreamingRender, rehypePlugins]);
   const components = useMemo(() => {
     const baseComponents = {
       a: createMarkdownLinkComponent(),
@@ -267,7 +273,7 @@ export function MarkdownContent({
       rehypePlugins={effectiveRehypePlugins}
       components={toStreamdownComponents(components)}
       parseIncompleteMarkdown={isLoading}
-      animated={streamdownWordAnimation}
+      animated={streamdownSmoothStreamingAnimation}
       isAnimating={isLoading}
     >
       {normalizedContent}

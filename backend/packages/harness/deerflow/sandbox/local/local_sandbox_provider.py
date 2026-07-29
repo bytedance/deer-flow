@@ -136,6 +136,7 @@ class LocalSandboxProvider(SandboxProvider):
             _RESERVED_CONTAINER_PREFIXES = [
                 f"{container_path}/public",
                 f"{container_path}/custom",
+                f"{container_path}/integrations",
                 f"{container_path}/legacy",
                 _ACP_WORKSPACE_VIRTUAL_PREFIX,
                 _USER_DATA_VIRTUAL_PREFIX,
@@ -287,12 +288,21 @@ class LocalSandboxProvider(SandboxProvider):
             config = get_app_config()
             skills_container_path = config.skills.container_path
             user_custom_path = paths.user_custom_skills_dir(effective_user_id)
+            integrations_path = paths.integration_skills_dir()
             user_custom_path.mkdir(parents=True, exist_ok=True)
+            integrations_path.mkdir(parents=True, exist_ok=True)
 
             mappings.append(
                 PathMapping(
                     container_path=f"{skills_container_path}/custom",
                     local_path=str(user_custom_path),
+                    read_only=True,
+                )
+            )
+            mappings.append(
+                PathMapping(
+                    container_path=f"{skills_container_path}/integrations",
+                    local_path=str(integrations_path),
                     read_only=True,
                 )
             )

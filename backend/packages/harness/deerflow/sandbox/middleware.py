@@ -14,6 +14,7 @@ from langgraph.types import Command
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.overwrite import unwrap_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +100,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             get_sandbox_provider().release(sandbox_id)
             return None
@@ -117,9 +123,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             await self._release_sandbox_async(sandbox_id)
             return None

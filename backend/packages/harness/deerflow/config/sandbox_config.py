@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SandboxOwnershipType = Literal["memory", "redis"]
+SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 
 
 class SandboxOwnershipConfig(BaseModel):
@@ -73,9 +74,10 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider and BoxliteProvider shared options:
+    AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
-        replicas: Maximum active + warm sandboxes/VMs per gateway process (default: 3). When the limit is reached, warm/least-recently-used sandboxes are evicted to make room; active sandboxes are not forcibly stopped.
+        replicas: Positive provider capacity per gateway process. Each provider
+            defines which lifecycle states count toward this limit.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
@@ -86,8 +88,12 @@ class SandboxConfig(BaseModel):
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         mounts: List of volume mounts to share directories with the container
-        ownership: Cross-instance container ownership store (memory | redis). Multi-instance
-            deployments sharing a container backend need redis; see SandboxOwnershipConfig.
+        thread_data_mounts: Override whether thread data is already visible to
+            the sandbox through shared mounts. Omit to auto-detect from the backend.
+
+    AioSandboxProvider and E2BSandboxProvider shared options:
+        ownership: Cross-instance sandbox ownership store (memory | redis). Multi-instance
+            deployments sharing a sandbox backend need redis; see SandboxOwnershipConfig.
     """
 
     use: str = Field(
@@ -108,7 +114,22 @@ class SandboxConfig(BaseModel):
     )
     replicas: int | None = Field(
         default=None,
-        description="Maximum active + warm sandboxes/VMs per gateway process (default: 3). Warm/least-recently-used entries are evicted to make room; active sandboxes are not forcibly stopped.",
+        gt=0,
+        description="Positive provider capacity per gateway process. Each provider defines which lifecycle states count toward this limit.",
+    )
+    overflow_policy: SandboxOverflowPolicy = Field(
+        default="wait",
+        description="E2B capacity policy. Use wait, reject, or burst.",
+    )
+    acquire_timeout: int = Field(
+        default=30,
+        gt=0,
+        description="Seconds that E2B wait policy waits for capacity.",
+    )
+    burst_limit: int = Field(
+        default=0,
+        ge=0,
+        description="Extra E2B capacity slots when overflow_policy is burst.",
     )
     container_prefix: str | None = Field(
         default=None,
@@ -126,13 +147,17 @@ class SandboxConfig(BaseModel):
     ownership: SandboxOwnershipConfig | None = Field(
         default=None,
         description=(
-            "AioSandboxProvider-only: where cross-instance container ownership is tracked (#4206). Omitted = memory (single-instance). "
-            "Multi-worker / load-balanced gateways sharing one container backend must set type: redis, or peers will adopt and idle-destroy each other's live sandboxes."
+            "AioSandboxProvider/E2BSandboxProvider: where cross-instance sandbox ownership is tracked (#4206, #4341). Omitted = memory (single-instance). "
+            "Multi-worker / load-balanced gateways sharing one sandbox backend must set type: redis, or peers can adopt and destroy each other's live sandboxes."
         ),
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
+    )
+    thread_data_mounts: bool | None = Field(
+        default=None,
+        description=("AioSandboxProvider: override whether /mnt/user-data is already visible through shared mounts. Omitted uses backend auto-detection; true skips explicit upload synchronization; false forces it."),
     )
     environment: dict[str, str] = Field(
         default_factory=dict,

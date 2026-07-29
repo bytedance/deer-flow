@@ -41,6 +41,7 @@ T = TypeVar("T")
 
 DEFAULT_IMAGE = "python:3.12-slim"
 _BOX_NAME_PREFIX = "deer-flow-boxlite-"
+_NO_ACTIVE_IDENTITY = object()
 # DeerFlow's virtual prefixes, materialised on the box rootfs at start so the
 # Sandbox file APIs (which address /mnt/user-data/...) resolve natively.
 _VIRTUAL_DIRS = (
@@ -49,6 +50,18 @@ _VIRTUAL_DIRS = (
     f"{VIRTUAL_PATH_PREFIX}/outputs",
     DEFAULT_SKILLS_CONTAINER_PATH,
 )
+
+
+class SandboxIdentityCollisionError(RuntimeError):
+    """A deterministic ID is already tracked for a different user/thread."""
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        stored_key: tuple[str, str] | None,
+        requested_key: tuple[str, str],
+    ) -> None:
+        super().__init__(f"Sandbox ID collision for {sandbox_id}: active box belongs to {stored_key!r}, not {requested_key!r}")
 
 
 def _import_simplebox() -> type[SimpleBox]:
@@ -166,8 +179,13 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         Includes user_id so a box created for one user's bucket cannot be
         reclaimed by another user's thread with the same thread_id.
+
+        The 8-to-16-character change intentionally causes one cold start during
+        a mixed-version rollout. Older 8-character boxes remain in the warm pool
+        until the normal orphan cleanup removes them; they are never reused
+        under a new 16-character identity.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:8]
+        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
     # ── Provider ────────────────────────────────────────────────────────
 
@@ -176,6 +194,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         self._boxes: dict[str, BoxliteBox] = {}
         self._thread_boxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[BoxliteBox, float]] = {}
+        self._active_box_identity: dict[str, tuple[str, str] | None] = {}
+        self._warm_pool_identity: dict[str, tuple[str, str] | None] = {}
         self._skip_health_check_warm_ids: set[str] = set()
         self._acquire_locks: dict[str, threading.Lock] = {}
         self._idle_checker_stop = threading.Event()
@@ -245,7 +265,9 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
     def _destroy_warm_entry(self, sandbox_id: str, entry: BoxliteBox, *, reason: str) -> None:
         """Close a removed warm-pool entry and log with context."""
         with self._lock:
-            self._skip_health_check_warm_ids.discard(sandbox_id)
+            if sandbox_id not in self._warm_pool:
+                self._skip_health_check_warm_ids.discard(sandbox_id)
+                self._warm_pool_identity.pop(sandbox_id, None)
         try:
             entry.close()
             if reason == "idle_timeout":
@@ -268,6 +290,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         with self._lock:
             active_box = self._boxes.pop(sandbox_id, None)
             warm_entry = self._warm_pool.pop(sandbox_id, None)
+            self._active_box_identity.pop(sandbox_id, None)
+            self._warm_pool_identity.pop(sandbox_id, None)
             self._skip_health_check_warm_ids.discard(sandbox_id)
             for key in [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]:
                 self._thread_boxes.pop(key, None)
@@ -335,6 +359,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                     box_runtime.stop()
                     continue
                 self._warm_pool[sandbox_id] = (wrapped, now)
+                self._warm_pool_identity[sandbox_id] = None
                 adopted += 1
             logger.info("Adopted existing BoxLite box %s (%s) into warm pool", sandbox_id, name)
 
@@ -348,6 +373,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             box = self._create_box(sandbox_id)
             with self._lock:
                 self._boxes[box.id] = box
+                self._active_box_identity[box.id] = None
             return box.id
 
         key = self._thread_key(thread_id, user_id)
@@ -358,17 +384,42 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 existing = self._thread_boxes.get(key)
                 if existing is not None and existing in self._boxes:
                     return existing
+                if sandbox_id in self._boxes:
+                    owner = self._active_box_identity.get(sandbox_id)
+                    if owner != key:
+                        raise SandboxIdentityCollisionError(
+                            sandbox_id,
+                            owner,
+                            key,
+                        )
+                    self._thread_boxes[key] = sandbox_id
+                    return sandbox_id
 
-            reclaimed = self._reclaim_warm_pool(sandbox_id)
+            reclaimed = self._reclaim_warm_pool(sandbox_id, key)
             if reclaimed is not None:
                 with self._lock:
                     self._thread_boxes[key] = reclaimed
                 return reclaimed
 
             box = self._create_box(sandbox_id)
+            conflict: tuple[str, str] | None | object = _NO_ACTIVE_IDENTITY
             with self._lock:
-                self._boxes[box.id] = box
-                self._thread_boxes[key] = box.id
+                if box.id in self._boxes:
+                    conflict = self._active_box_identity.get(box.id)
+                    if conflict == key:
+                        self._thread_boxes[key] = box.id
+                else:
+                    self._boxes[box.id] = box
+                    self._active_box_identity[box.id] = key
+                    self._thread_boxes[key] = box.id
+            if conflict is not _NO_ACTIVE_IDENTITY:
+                box.close()
+                if conflict != key:
+                    raise SandboxIdentityCollisionError(
+                        sandbox_id,
+                        conflict,
+                        key,
+                    )
             return box.id
 
     def _create_box(self, sandbox_id: str) -> BoxliteBox:
@@ -410,15 +461,19 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         close_box: BoxliteBox | None = None
         with self._lock:
             box = self._boxes.pop(sandbox_id, None)
-            for key in [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]:
+            released_keys = [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]
+            for key in released_keys:
                 self._thread_boxes.pop(key, None)
+            active_identity = self._active_box_identity.pop(sandbox_id, None)
             if box is None:
                 return
             if self._shutdown_called:
                 close_box = box
                 self._skip_health_check_warm_ids.discard(sandbox_id)
+                self._warm_pool_identity.pop(sandbox_id, None)
             else:
                 self._warm_pool[sandbox_id] = (box, time.time())
+                self._warm_pool_identity[sandbox_id] = released_keys[0] if released_keys else active_identity
                 self._skip_health_check_warm_ids.add(sandbox_id)
 
         if close_box is not None:
@@ -427,7 +482,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         else:
             logger.info("Released sandbox %s to warm pool (VM still running)", sandbox_id)
 
-    def _reclaim_warm_pool(self, sandbox_id: str) -> str | None:
+    def _reclaim_warm_pool(self, sandbox_id: str, expected_key: tuple[str, str]) -> str | None:
         """Try to reclaim a warm-pool box by sandbox_id.
 
         Returns sandbox_id on success, None if not found or dead.
@@ -440,6 +495,14 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
+            # Startup-adopted entries have unknown identity until their first reclaim.
+            stored_key = self._warm_pool_identity.get(sandbox_id)
+            if stored_key is not None and stored_key != expected_key:
+                raise SandboxIdentityCollisionError(
+                    sandbox_id,
+                    stored_key,
+                    expected_key,
+                )
             box, released_at = self._warm_pool[sandbox_id]
             skip_eligible = sandbox_id in self._skip_health_check_warm_ids
 
@@ -449,10 +512,21 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             # health-check round trip, but never return an adapter that this
             # process already knows is closed.
             with self._lock:
+                current = self._warm_pool.get(sandbox_id)
+                stored_key = self._warm_pool_identity.get(sandbox_id)
+                if stored_key is not None and stored_key != expected_key:
+                    raise SandboxIdentityCollisionError(
+                        sandbox_id,
+                        stored_key,
+                        expected_key,
+                    )
+                if current is None or current[0] is not box:
+                    return None
                 warm_entry = self._warm_pool.pop(sandbox_id, None)
                 if warm_entry is None:
                     return None  # Raced with another thread
                 self._skip_health_check_warm_ids.discard(sandbox_id)
+                self._warm_pool_identity.pop(sandbox_id, None)
                 box, _ = warm_entry
                 if box.is_closed:
                     logger.warning("Warm-pool box %s was closed before skipped health check reclaim", sandbox_id)
@@ -460,6 +534,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 else:
                     close_box = None
                     self._boxes[sandbox_id] = box
+                    self._active_box_identity[sandbox_id] = expected_key
             if close_box is not None:
                 close_box.close()
                 return None
@@ -476,26 +551,60 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             if "ok" not in result:
                 logger.warning("Warm pool box %s health check failed: %s", sandbox_id, result)
                 with self._lock:
-                    warm_entry = self._warm_pool.pop(sandbox_id, None)
+                    current = self._warm_pool.get(sandbox_id)
+                    stored_key = self._warm_pool_identity.get(sandbox_id)
+                    if current is not None and current[0] is not box and stored_key is not None and stored_key != expected_key:
+                        raise SandboxIdentityCollisionError(
+                            sandbox_id,
+                            stored_key,
+                            expected_key,
+                        )
+                    warm_entry = self._warm_pool.pop(sandbox_id, None) if current is not None and current[0] is box else None
+                    if warm_entry is not None:
+                        self._warm_pool_identity.pop(sandbox_id, None)
                 if warm_entry is not None:
                     self._destroy_warm_entry(sandbox_id, warm_entry[0], reason="health_check_failed")
                 return None
+        except SandboxIdentityCollisionError:
+            raise
         except Exception as e:
             logger.warning("Warm pool box %s health check error: %s", sandbox_id, e)
             with self._lock:
-                warm_entry = self._warm_pool.pop(sandbox_id, None)
+                current = self._warm_pool.get(sandbox_id)
+                stored_key = self._warm_pool_identity.get(sandbox_id)
+                if current is not None and current[0] is not box and stored_key is not None and stored_key != expected_key:
+                    raise SandboxIdentityCollisionError(
+                        sandbox_id,
+                        stored_key,
+                        expected_key,
+                    )
+                warm_entry = self._warm_pool.pop(sandbox_id, None) if current is not None and current[0] is box else None
+                if warm_entry is not None:
+                    self._warm_pool_identity.pop(sandbox_id, None)
             if warm_entry is not None:
                 self._destroy_warm_entry(sandbox_id, warm_entry[0], reason="health_check_failed")
             return None
 
         # Promote from warm pool to active
         with self._lock:
+            current = self._warm_pool.get(sandbox_id)
+            stored_key = self._warm_pool_identity.get(sandbox_id)
+            if stored_key is not None and stored_key != expected_key:
+                raise SandboxIdentityCollisionError(
+                    sandbox_id,
+                    stored_key,
+                    expected_key,
+                )
+            if current is None or current[0] is not box:
+                return None
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             if warm_entry is None:
                 return None  # Raced with another thread
             self._skip_health_check_warm_ids.discard(sandbox_id)
+            self._warm_pool_identity.pop(sandbox_id, None)
             box, _ = warm_entry
             self._boxes[sandbox_id] = box
+            self._active_box_identity[sandbox_id] = expected_key
 
         logger.info("Reclaimed warm-pool box %s", sandbox_id)
         return sandbox_id
@@ -513,8 +622,10 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             now = time.time()
             for sandbox_id, box in self._boxes.items():
                 self._warm_pool.setdefault(sandbox_id, (box, now))
+                self._warm_pool_identity.setdefault(sandbox_id, self._active_box_identity.get(sandbox_id))
                 self._skip_health_check_warm_ids.discard(sandbox_id)
             self._boxes.clear()
+            self._active_box_identity.clear()
             self._thread_boxes.clear()
             self._acquire_locks.clear()
 
@@ -531,6 +642,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             warm = [box for box, _ in self._warm_pool.values()]
             self._boxes.clear()
             self._warm_pool.clear()
+            self._active_box_identity.clear()
+            self._warm_pool_identity.clear()
             self._thread_boxes.clear()
             self._acquire_locks.clear()
             self._skip_health_check_warm_ids.clear()

@@ -143,6 +143,10 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Backends that rely on conversation-level extraction instead of fact CRUD
+    # can retain MemoryMiddleware writes while tool mode supplies query-aware
+    # search. Most backends keep tool mode fully model-directed.
+    requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -481,6 +485,15 @@ class MemoryManager(BaseModel):
         ``cls(backend_config=backend_config, mode=mode)``.
         """
 
+    def close(self) -> None:
+        """Release backend resources during graceful process shutdown.
+
+        Backends that own external resources may override this hook. The
+        default is intentionally a no-op for lightweight or third-party
+        implementations.
+        """
+        return None
+
 
 # ── Backend discovery (drop-in) ───────────────────────────────────────────
 def _scan_backends() -> dict[str, type[MemoryManager]]:
@@ -576,6 +589,15 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     )
 
 
+def backend_requires_passive_writes_in_tool_mode(manager_class: str) -> bool:
+    """Return whether a backend needs middleware writes in tool mode.
+
+    Resolve the class without constructing it so agent assembly does not run
+    backend startup checks or perform network I/O.
+    """
+    return _resolve_manager_class(manager_class).requires_passive_writes_in_tool_mode
+
+
 # ── Host-default hook providers (passed to from_config by the factory) ────
 #
 # These callables are the host's defaults for the slots a backend may consume
@@ -656,6 +678,51 @@ def _host_default_llm() -> Any:
         return None
 
 
+def _host_default_extraction_callback(payload: Any) -> None:
+    """deer-flow default for DeerMem's ``extraction_callback`` slot.
+
+    Logs post-extraction metrics (token usage, facts passing/rejected by the
+    confidence filter, gate rejection rate) for ops observability, and flags a
+    high rejection rate
+    (>60%) so a prompt/threshold regression is visible without inspecting every
+    trace. A Langfuse-aware callback can replace this to emit a dedicated
+    extraction span; the metrics keys are stable for that handoff. Exceptions
+    are never raised (the DeerMem side already wraps the call).
+    """
+    if not isinstance(payload, dict):
+        return
+    extracted = payload.get("facts_extracted")
+    passed_confidence = payload.get("facts_passed_confidence")
+    rejected = payload.get("rejected_low_confidence", 0)
+    thread_id = payload.get("thread_id")
+    model_name = payload.get("model_name")
+    if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
+        rejection_rate = (extracted - passed_confidence) / extracted
+        logger.info(
+            "Memory extraction metrics: thread=%s model=%s extracted=%d passed_confidence=%d rejected=%d rejection_rate=%.2f",
+            thread_id,
+            model_name,
+            extracted,
+            passed_confidence,
+            rejected,
+            rejection_rate,
+        )
+        if rejection_rate > 0.6:
+            logger.warning(
+                "Memory extraction rejection rate %.0f%% exceeds 60%% - review extraction prompt / confidence threshold (thread=%s)",
+                rejection_rate * 100,
+                thread_id,
+            )
+    else:
+        logger.info(
+            "Memory extraction metrics: thread=%s model=%s success=%s token_usage=%s",
+            thread_id,
+            model_name,
+            payload.get("success"),
+            payload.get("token_usage"),
+        )
+
+
 def _collect_host_hooks() -> dict[str, Any]:
     """Provide host hook callables for backends to consume in ``from_config``.
 
@@ -674,6 +741,7 @@ def _collect_host_hooks() -> dict[str, Any]:
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
         "trace_context_manager": request_trace_context,
         "host_llm_factory": _host_default_llm,
+        "extraction_callback": _host_default_extraction_callback,
     }
 
 

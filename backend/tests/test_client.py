@@ -52,6 +52,7 @@ def mock_app_config():
     config.skills.container_path = "/mnt/skills"
     config.tool_search.enabled = False
     config.database.checkpoint_channel_mode = "full"
+    config.database.checkpoint_delta.snapshot_frequency = 10
     config.authorization = AuthorizationConfig(enabled=False)
     return config
 
@@ -144,6 +145,23 @@ class TestClientInit:
             ),
         ):
             DeerFlowClient()
+
+    def test_delta_snapshot_frequency_is_frozen_from_app_config(self, mock_app_config):
+        from typing import get_type_hints
+
+        from langgraph.channels import DeltaChannel
+
+        from deerflow.agents import thread_state
+
+        mock_app_config.database.checkpoint_channel_mode = "delta"
+        mock_app_config.database.checkpoint_delta.snapshot_frequency = 7
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            DeerFlowClient()
+
+        schema = thread_state.get_thread_state_schema("delta")
+        hint = get_type_hints(schema, include_extras=True)["messages"]
+        channel = next(item for item in hint.__metadata__ if isinstance(item, DeltaChannel))
+        assert channel.snapshot_frequency == 7
 
 
 # ---------------------------------------------------------------------------
@@ -691,6 +709,47 @@ class TestStream:
         assert tool_events[0].data["content"] == "file.txt"
         assert tool_events[0].data["name"] == "bash"
         assert tool_events[0].data["tool_call_id"] == "tc-1"
+        assert "artifact" not in tool_events[0].data
+
+    def test_messages_mode_tool_message_preserves_human_input_artifact(self, client):
+        """Structured clarification data survives both embedded stream paths."""
+        artifact = {
+            "human_input": {
+                "request_id": "request-1",
+                "tool_call_id": "tc-1",
+                "question": "Which environment should be used?",
+                "options": [{"label": "Production", "value": "production"}],
+            }
+        }
+        tool_message = ToolMessage(
+            content="Which environment should be used?",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="ask_clarification",
+            artifact=artifact,
+        )
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                ("messages", (tool_message, {})),
+                ("values", {"messages": [HumanMessage(content="deploy", id="h-1"), tool_message]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("deploy", thread_id="t-tool-artifact"))
+
+        tool_event = next(event for event in events if event.type == "messages-tuple" and event.data.get("type") == "tool")
+        values_event = next(event for event in events if event.type == "values")
+        serialized_tool_message = next(message for message in values_event.data["messages"] if message["type"] == "tool")
+
+        assert tool_event.data["artifact"] == artifact
+        assert serialized_tool_message["artifact"] == artifact
+        assert tool_event.data["artifact"] is artifact
+        assert serialized_tool_message["artifact"] is artifact
 
     def test_list_content_blocks(self, client):
         """stream() handles AIMessage with list-of-blocks content."""
@@ -1275,7 +1334,7 @@ class TestEnsureAgent:
         """_ensure_agent does not recreate if config key unchanged."""
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", None)
+        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, None)
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -3658,6 +3717,35 @@ class TestSerializeMessage:
         result = DeerFlowClient._serialize_message(msg)
         assert result["type"] == "tool"
         assert isinstance(result["content"], str)
+        assert "artifact" not in result
+
+    def test_tool_message_event_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._tool_message_event(msg)
+
+        assert result.data["artifact"] is msg.artifact
+
+    def test_tool_message_values_serialization_preserves_native_artifact(self):
+        marker = object()
+        msg = ToolMessage(
+            content="result",
+            id="tm-1",
+            tool_call_id="tc-1",
+            name="tool",
+            artifact={"payload": marker},
+        )
+
+        result = DeerFlowClient._serialize_message(msg)
+
+        assert result["artifact"] is msg.artifact
 
 
 # ===========================================================================

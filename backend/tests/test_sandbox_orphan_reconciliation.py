@@ -431,6 +431,8 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._thread_locks = {}
     provider._last_activity = {}
     provider._warm_pool = {}
+    provider._active_sandbox_identity = {}
+    provider._warm_pool_identity = {}
     provider._unowned_since = {}
     provider._local_teardown = set()
     provider._acquire_epoch = {}

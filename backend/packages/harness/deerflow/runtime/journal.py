@@ -91,7 +91,7 @@ def build_branch_history_seed_events(
     messages: Sequence[Any],
     *,
     thread_id: str,
-    run_id: str,
+    run_id_prefix: str,
     parent_thread_id: str,
 ) -> list[dict]:
     """Serialize a branch checkpoint's messages into run-event message rows.
@@ -103,6 +103,18 @@ def build_branch_history_seed_events(
     the feed (#4380). Seeding the branch's run_events from the same
     checkpoint snapshot the branch was created from keeps the feed
     consistent with what the branch actually contains.
+
+    Rows are grouped into one synthetic run per inherited turn
+    (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
+    message — the same boundary a real run has, since a run begins with a
+    human input (including the allowlisted hidden ``ask_clarification``
+    reply, which resumes as its own run). ``run_id`` is a *turn* identity to
+    the feed's consumers, not merely a provenance tag: regenerating the last
+    inherited answer resolves that row's ``run_id`` as the superseded source
+    (``_find_target_run_id``) and ``GET /messages/page`` then drops **every**
+    row carrying it. One shared id for the whole seed therefore deleted the
+    complete inherited history on the branch's first regenerate (#4458); one
+    id per turn confines the drop to the turn actually regenerated.
 
     Mirrors RunJournal's message-event contract so seeded rows are
     indistinguishable from journaled ones except by the ``branch_seed``
@@ -125,6 +137,8 @@ def build_branch_history_seed_events(
     events: list[dict] = []
     created_at = datetime.now(UTC).isoformat()
     seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
+    # Messages ahead of the first human turn (none in practice) stay in turn 0.
+    turn_index = 0
     for raw_message in messages:
         message = _coerce_seed_message(raw_message)
         if not isinstance(message, BaseMessage):
@@ -132,6 +146,7 @@ def build_branch_history_seed_events(
         if isinstance(message, HumanMessage):
             if not _should_persist_human_input_message(message):
                 continue
+            turn_index += 1
             event_type = "llm.human.input"
             content = restore_original_human_message(message).model_dump()
             metadata: dict[str, Any] = {"caller": "lead_agent", **seed_metadata}
@@ -149,7 +164,7 @@ def build_branch_history_seed_events(
         events.append(
             {
                 "thread_id": thread_id,
-                "run_id": run_id,
+                "run_id": f"{run_id_prefix}-{turn_index}",
                 "event_type": event_type,
                 "category": "message",
                 "content": content,
@@ -162,6 +177,18 @@ def build_branch_history_seed_events(
 
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
+
+    # Subagents may execute on a persistent event loop in another thread. This
+    # handler owns loop-local tasks and a store/pool created for the parent run,
+    # so the isolated-loop context copier must not inherit it. LangGraph's own
+    # stream callbacks remain inheritable and keep child token frames flowing.
+    deerflow_loop_bound = True
+
+    # Every callback only updates in-memory run state or schedules async IO.
+    # Keeping callbacks on the run's event-loop thread serializes mutations
+    # from parallel tool calls and prevents cancelled executor callbacks from
+    # racing terminal delivery recording and flush.
+    run_inline = True
 
     def __init__(
         self,
@@ -226,6 +253,11 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+
+        # Artifact-production tracking for the terminal run.delivery event
+        # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
+        self._produced_artifacts: list[tuple[str, str | None]] = []
+        self._produced_artifact_keys: set[tuple[str, str | None]] = set()
 
     # -- Lifecycle callbacks --
 
@@ -474,11 +506,26 @@ class RunJournal(BaseCallbackHandler):
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
+                # A non-empty ``artifacts`` update is only produced on the
+                # success path (e.g. present_files returns an error ToolMessage
+                # without touching state when validation fails), so its
+                # presence is the artifact-production signal (#4272 slice 1).
+                artifacts = cmd.update.get("artifacts")
+                artifact_tool_names: set[str] = set()
                 for message in messages:
                     if isinstance(message, BaseMessage):
                         self._persist_tool_result_message(message)
+                        if artifacts and isinstance(message, ToolMessage):
+                            tool_call_id = getattr(message, "tool_call_id", None)
+                            if isinstance(tool_call_id, str):
+                                tool_name = self._current_run_tool_call_names.get(tool_call_id)
+                                if tool_name:
+                                    artifact_tool_names.add(tool_name)
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
+                if artifacts:
+                    artifact_tool_name = next(iter(artifact_tool_names)) if len(artifact_tool_names) == 1 else None
+                    self._record_produced_artifacts(artifacts, artifact_tool_name)
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
         finally:
@@ -768,6 +815,44 @@ class RunJournal(BaseCallbackHandler):
             content={"content_sha256": content_sha256},
         )
         self._memory_context_recorded = True
+
+    def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
+        """Accumulate produced artifact paths, deduped by (path, tool_name)."""
+        if not isinstance(artifacts, list):
+            return
+        for path in artifacts:
+            if not isinstance(path, str) or not path:
+                continue
+            key = (path, tool_name)
+            if key not in self._produced_artifact_keys:
+                self._produced_artifact_keys.add(key)
+                self._produced_artifacts.append(key)
+
+    def get_delivery_content(self) -> dict[str, Any]:
+        """Return the terminal delivery fact accumulated for this run.
+
+        This is a fact record, not a verdict: runs that produced no artifacts
+        emit ``presented: 0``.
+        """
+        by_tool: dict[str, list[str]] = {}
+        paths: list[str] = []
+        for path, tool_name in self._produced_artifacts:
+            paths.append(path)
+            if tool_name:
+                by_tool.setdefault(tool_name, []).append(path)
+        return {"presented": len(paths), "paths": paths, "by_tool": by_tool}
+
+    def record_delivery(self) -> None:
+        """Buffer the terminal ``run.delivery`` event for this run (#4272 slice 1).
+
+        Kept for direct journal users. The worker uses the event store's
+        idempotent singleton write so crash recovery can safely backfill it.
+        """
+        self._put(
+            event_type="run.delivery",
+            category="outputs",
+            content=self.get_delivery_content(),
+        )
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""

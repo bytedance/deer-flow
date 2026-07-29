@@ -48,6 +48,7 @@ from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
+    freeze_checkpoint_snapshot_frequency,
     inject_checkpoint_mode,
 )
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
@@ -192,6 +193,7 @@ class DeerFlowClient:
             reload_app_config(config_path)
         self._app_config = get_app_config()
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
+        self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
         if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
@@ -287,6 +289,7 @@ class DeerFlowClient:
             self._agent_name,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
             authorization_identity,
         )
 
@@ -358,6 +361,7 @@ class DeerFlowClient:
                     authorization_provider=_authz_provider,
                 ),
                 self._checkpoint_channel_mode,
+                self._checkpoint_snapshot_frequency,
             ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -371,7 +375,7 @@ class DeerFlowClient:
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
             ),
-            "state_schema": get_thread_state_schema(self._checkpoint_channel_mode),
+            "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
@@ -431,16 +435,16 @@ class DeerFlowClient:
     @staticmethod
     def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
         """Build a ``messages-tuple`` tool-result event from a ToolMessage."""
-        return StreamEvent(
-            type="messages-tuple",
-            data={
-                "type": "tool",
-                "content": DeerFlowClient._extract_text(msg.content),
-                "name": msg.name,
-                "tool_call_id": msg.tool_call_id,
-                "id": msg.id,
-            },
-        )
+        data: dict[str, Any] = {
+            "type": "tool",
+            "content": DeerFlowClient._extract_text(msg.content),
+            "name": msg.name,
+            "tool_call_id": msg.tool_call_id,
+            "id": msg.id,
+        }
+        if (artifact := getattr(msg, "artifact", None)) is not None:
+            data["artifact"] = artifact
+        return StreamEvent(type="messages-tuple", data=data)
 
     @staticmethod
     def _serialize_message(msg) -> dict:
@@ -464,6 +468,8 @@ class DeerFlowClient:
             }
             if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
                 d["additional_kwargs"] = additional_kwargs
+            if (artifact := getattr(msg, "artifact", None)) is not None:
+                d["artifact"] = artifact
             return d
         if isinstance(msg, HumanMessage):
             d = {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
@@ -803,6 +809,7 @@ class DeerFlowClient:
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "additional_kwargs": {...}}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
+              Tool results also include ``"artifact"`` when the source ToolMessage has a non-None artifact.
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
         if thread_id is None:

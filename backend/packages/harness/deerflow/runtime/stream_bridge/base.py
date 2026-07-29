@@ -30,8 +30,24 @@ class StreamEvent:
     data: Any
 
 
+@dataclass(frozen=True)
+class StreamGap:
+    """A subscriber cursor can no longer be replayed completely.
+
+    ``requested_event_id`` is the reconnect cursor, or the most recently
+    delivered event for a live subscriber that fell behind.  The retained
+    bounds let callers reload durable state and resume at the current tail
+    without mistaking a partial replay for a complete one.
+    """
+
+    requested_event_id: str | None
+    earliest_available_event_id: str
+    latest_available_event_id: str
+
+
 HEARTBEAT_SENTINEL = StreamEvent(id="", event="__heartbeat__", data=None)
 END_SENTINEL = StreamEvent(id="", event="__end__", data=None)
+type StreamItem = StreamEvent | StreamGap
 
 
 class StreamBridge(abc.ABC):
@@ -54,12 +70,13 @@ class StreamBridge(abc.ABC):
         *,
         last_event_id: str | None = None,
         heartbeat_interval: float = 15.0,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[StreamItem]:
         """Async iterator that yields events for *run_id* (consumer side).
 
         Yields :data:`HEARTBEAT_SENTINEL` when no event arrives within
         *heartbeat_interval* seconds.  Yields :data:`END_SENTINEL` once
-        the producer calls :meth:`publish_end`.
+        the producer calls :meth:`publish_end`. Yields :class:`StreamGap` and
+        stops when the subscriber has fallen behind retained history.
         """
 
     @abc.abstractmethod

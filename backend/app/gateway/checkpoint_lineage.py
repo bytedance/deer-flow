@@ -45,6 +45,23 @@ def is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
     return isinstance(writes, dict) and "runtime_run_duration" in writes
 
 
+def has_pending_tasks(checkpoint_tuple: Any) -> bool:
+    """Return whether *checkpoint_tuple* still has graph work scheduled.
+
+    A replay base must be a state the thread was at rest in. A mid-run
+    checkpoint owns the writes of the node that was about to run, and resuming
+    from it replays them — re-adding the very turn the replay is meant to
+    replace. Message ids alone cannot detect this, because middleware may
+    rewrite a message's id in the same run that produced it.
+
+    ``next`` is not derivable on the degraded raw-checkpoint read path, which
+    reports no tasks at all. Absence of evidence therefore stays permissive:
+    those reads keep selecting the same base they always did.
+    """
+
+    return bool(getattr(checkpoint_tuple, "next", None))
+
+
 def _message_id(message: Any) -> str | None:
     value = getattr(message, "id", None)
     if value is None and isinstance(message, dict):
@@ -96,7 +113,8 @@ async def find_checkpoint_before_message(
     Following ``parent_config`` is important after a regenerate: a thread can contain
     sibling checkpoint branches, and a global time-ordered scan can otherwise select
     a checkpoint from the wrong branch. Duration-only metadata checkpoints do not
-    represent an addressable conversation state and are skipped.
+    represent an addressable conversation state and are skipped, and so are
+    checkpoints that still have pending tasks (see :func:`has_pending_tasks`).
     """
 
     if message_id not in {_message_id(message) for message in checkpoint_messages(head_checkpoint)}:
@@ -132,7 +150,7 @@ async def find_checkpoint_before_message(
             continue
 
         parent_message_ids = {_message_id(message) for message in checkpoint_messages(parent)}
-        if message_id not in parent_message_ids:
+        if message_id not in parent_message_ids and not has_pending_tasks(parent):
             return parent
         current = parent
 
@@ -148,8 +166,9 @@ def find_checkpoint_before_message_chronologically(
     This is a compatibility fallback for imported or legacy checkpoints that do
     not carry ``parent_config`` links. Callers must prefer the lineage walk when
     links are available because a chronological scan cannot distinguish sibling
-    checkpoint branches. Duration-only checkpoints are ignored, and only
-    checkpoints with an addressable id can become the replay base.
+    checkpoint branches. Duration-only checkpoints are ignored, and only settled
+    checkpoints (see :func:`has_pending_tasks`) with an addressable id can become
+    the replay base.
     """
 
     previous_checkpoint = None
@@ -159,6 +178,6 @@ def find_checkpoint_before_message_chronologically(
         message_ids = {_message_id(message) for message in checkpoint_messages(checkpoint_tuple)}
         if message_id in message_ids:
             return previous_checkpoint, True
-        if checkpoint_configurable(checkpoint_tuple).get("checkpoint_id"):
+        if checkpoint_configurable(checkpoint_tuple).get("checkpoint_id") and not has_pending_tasks(checkpoint_tuple):
             previous_checkpoint = checkpoint_tuple
     return None, False
