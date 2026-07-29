@@ -1,7 +1,7 @@
 import { FilesIcon, XIcon } from "lucide-react";
 import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { usePanelRef } from "react-resizable-panels";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type PanelSize, usePanelRef } from "react-resizable-panels";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
@@ -148,6 +148,30 @@ const ChatBox: React.FC<{
   // later open/close.
   const [initialRightPanelSize] = useState(() =>
     rightPanelOpen ? RIGHT_PANEL_DEFAULT_SIZE : "0%",
+  );
+
+  const handleSidePanelResize = useCallback(
+    (size: PanelSize) => {
+      if (!rightPanelOpenRef.current) {
+        return;
+      }
+      if (size.asPercentage > 0) {
+        openSizeRef.current = `${size.asPercentage}%`;
+        return;
+      }
+
+      // Dragging a collapsible panel below its minimum snaps it to 0% without
+      // updating the state that owns the panel. Treat that as a normal close so
+      // its trigger can reopen it at the last non-zero size.
+      if (activeRightPanel === "sidecar") {
+        sidecar?.close();
+      } else if (activeRightPanel === "browser") {
+        browserView?.close();
+      } else if (activeRightPanel === "artifacts") {
+        setArtifactsOpen(false);
+      }
+    },
+    [activeRightPanel, browserView, setArtifactsOpen, sidecar],
   );
 
   useEffect(() => {
@@ -360,6 +384,7 @@ const ChatBox: React.FC<{
         collapsedSize="0%"
         defaultSize={initialRightPanelSize}
         minSize="20%"
+        onResize={handleSidePanelResize}
         className="min-h-0 min-w-0"
       >
         <aside
