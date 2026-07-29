@@ -1,135 +1,199 @@
-"""Configuration for the OpenViking HTTP memory backend."""
+"""OpenViking backend config -- parse ``backend_config`` into :class:`OpenVikingConfig`.
+
+Follows the portability golden rule (see ``backends/noop/config.py`` for the full
+version): a backend receives ALL host info through (1) the ABC method args and
+(2) the ``backend_config`` dict. The ONLY ``from deerflow`` import allowed in
+this folder is the ABC contract line in ``openviking_manager.py``.
+
+The factory (``manager.py::get_memory_manager``) injects ``storage_path`` (a
+writable state dir) into ``backend_config`` for every backend. OpenViking owns
+its own storage layout, so we use ``storage_path`` only as the default parent for
+``data_path`` (the OpenViking store directory) when ``data_path`` is empty.
+
+OpenViking's providers (embedding / VLM / rerank / vector-db / ...) are normally
+in ``~/.openviking/ov.conf``. This backend can ALSO generate that file from
+deerflow config so everything lives in one place: set ``embedding`` / ``vlm``
+(shortcuts for the two most common providers) or ``ov_conf`` (a raw dict written
+verbatim -- full control over every ov.conf field). The backend writes it to
+``<data_path>/ov.conf`` and points OpenViking at it via the
+``OPENVIKING_CONFIG_FILE`` env var. If none of these are provided, the backend
+falls back to ``~/.openviking/ov.conf`` (run ``openviking-server init``).
+"""
 
 from __future__ import annotations
 
+import copy
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
-from urllib.parse import urlparse
+from typing import Any
 
 
-@dataclass(frozen=True)
+@dataclass
 class OpenVikingConfig:
-    """Parsed backend-private configuration.
+    """Parsed config for the OpenViking embedded backend.
 
-    The backend is intentionally remote-only: DeerFlow talks to an independent
-    OpenViking server and does not import the OpenViking Python runtime.
+    All fields have safe defaults so zero-config construction works (given a
+    valid ``~/.openviking/ov.conf`` for the embedding provider).
     """
 
-    base_url: str
-    storage_path: str
-    auth_mode: Literal["trusted", "dev"]
-    account: str
-    api_key: str | None = field(repr=False)
-    connect_timeout_seconds: float
-    read_timeout_seconds: float
-    write_timeout_seconds: float
-    pool_timeout_seconds: float
-    max_connections: int
-    max_keepalive_connections: int
-    max_retries: int
-    search_top_k: int
-    score_threshold: float | None
-    max_injection_chars: int
-    injection_query: str
-    startup_policy: Literal["fail_fast", "warn"]
-    read_failure_policy: Literal["fail_open", "raise"]
-    write_failure_policy: Literal["log_and_drop", "raise"]
-    allow_insecure_http: bool
-    allow_insecure_dev: bool
-    max_seen_message_ids: int
+    #: Writable state dir, host-injected. Used as the parent of ``data_path``
+    #: when ``data_path`` is empty. OpenViking lands its store under ``data_path``.
+    storage_path: str = ""
+
+    #: OpenViking store directory (passed as ``OpenViking(path=...)``). Empty =
+    #: ``{storage_path}/openviking``; falls back to ``./runtime/openviking`` if
+    #: ``storage_path`` is also empty.
+    data_path: str = ""
+
+    #: User space in the viking URI tree -> ``viking://user/{user_space}/memories``.
+    #: At runtime the manager uses ``user_id`` (from the ABC args) when provided,
+    #: falling back to this. Single-user deployments leave this as ``"default"``.
+    user_space: str = "default"
+
+    #: OpenViking actor peer identity. Defaults to ``user_space``. Set explicitly
+    #: only if the deployment needs a stable peer id independent of the space.
+    actor_peer_id: str | None = None
+
+    #: Subdirectory under ``memories/`` where :meth:`add` lands conversation
+    #: transcripts (e.g. ``memories/conversation/{thread_id}/{id}.md``).
+    memory_category: str = "conversation"
+
+    #: Minimum semantic score for ``find`` results; 0.0 = no filter (pass None).
+    score_threshold: float = 0.0
+
+    #: Default ``limit`` for :meth:`search` when the caller does not pass ``top_k``.
+    search_limit: int = 5
+
+    #: Hard character budget for :meth:`get_context` injection text. OpenViking
+    #: does not truncate for you; the backend must (the host applies no budget).
+    max_injection_chars: int = 2000
+
+    #: Per-file character budget when rendering memory content for injection.
+    per_file_injection_chars: int = 500
+
+    #: Whether :meth:`add` blocks on vector/semantic indexing (``write(wait=...)``).
+    #: False = fire-and-forget (content is persisted immediately; vectors lag).
+    #: :meth:`add_nowait` (the summarization-flush path) always forces True so
+    #: content is fully indexed before the host drops the source messages.
+    wait_on_write: bool = False
+
+    #: Timeout (seconds) for ``write(wait=True)`` and ``wait_processed``.
+    write_timeout: float = 60.0
+
+    #: Host-injected hook: filter ``hide_from_ui`` messages. ``None`` = skip all
+    #: hidden messages. Called as ``should_keep_hidden_message(additional_kwargs)``
+    #: -> bool (True = keep despite hide_from_ui).
+    should_keep_hidden_message: Callable[[Any], bool] | None = field(default=None)
+
+    #: Raw ov.conf dict -- written verbatim to ``<data_path>/ov.conf``. Full
+    #: control over EVERY OpenViking field (embedding/vlm/rerank/storage/parsers/
+    #: encryption/search_mode/...). Use this when you need fields beyond the
+    #: ``embedding``/``vlm`` shortcuts. ``$ENV`` refs are expanded by OpenViking
+    #: at load time (deerflow's dotenv already populated ``os.environ``).
+    ov_conf: dict[str, Any] | None = None
+
+    #: Shortcut for ``ov_conf.embedding.dense`` (the embedding provider: provider,
+    #: model, api_base, api_key, dimension, input). Merged into ``ov_conf``.
+    embedding: dict[str, Any] | None = None
+
+    #: Shortcut for ``ov_conf.vlm`` (the VLM used for memory extraction:
+    #: provider, model, api_base, api_key, ...). Merged into ``ov_conf``.
+    vlm: dict[str, Any] | None = None
 
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> OpenVikingConfig:
+        """Build a config from the ``backend_config`` dict.
+
+        Reads ONLY known keys; unknown keys are ignored (with a warning logged)
+        so the host can safely inject ``storage_path`` into every backend's
+        ``backend_config`` without breaking ones that don't use it. ``None``
+        values are dropped so YAML empty keys fall back to defaults.
+        """
+        import logging
+
         cfg = dict(backend_config or {})
-        retrieval = _mapping(cfg.pop("retrieval", {}), "retrieval")
-        failure_policy = _mapping(cfg.pop("failure_policy", {}), "failure_policy")
 
-        api_key_env = str(cfg.pop("api_key_env", "OPENVIKING_API_KEY")).strip()
-        api_key = os.environ.get(api_key_env) if api_key_env else None
+        known = {
+            "storage_path",
+            "data_path",
+            "user_space",
+            "actor_peer_id",
+            "memory_category",
+            "score_threshold",
+            "search_limit",
+            "max_injection_chars",
+            "per_file_injection_chars",
+            "wait_on_write",
+            "write_timeout",
+            "should_keep_hidden_message",
+            "ov_conf",
+            "embedding",
+            "vlm",
+        }
 
-        result = cls(
-            base_url=str(cfg.pop("base_url", "http://127.0.0.1:1933")).rstrip("/"),
-            storage_path=str(cfg.pop("storage_path", "")),
-            auth_mode=str(cfg.pop("auth_mode", "trusted")).lower(),  # type: ignore[arg-type]
-            account=str(cfg.pop("account", "deerflow")).strip(),
-            api_key=api_key,
-            connect_timeout_seconds=float(cfg.pop("connect_timeout_seconds", 2.0)),
-            read_timeout_seconds=float(cfg.pop("read_timeout_seconds", 10.0)),
-            write_timeout_seconds=float(cfg.pop("write_timeout_seconds", 10.0)),
-            pool_timeout_seconds=float(cfg.pop("pool_timeout_seconds", 2.0)),
-            max_connections=int(cfg.pop("max_connections", 100)),
-            max_keepalive_connections=int(cfg.pop("max_keepalive_connections", 20)),
-            max_retries=int(cfg.pop("max_retries", 1)),
-            search_top_k=int(retrieval.pop("top_k", 8)),
-            score_threshold=_optional_float(retrieval.pop("score_threshold", None)),
-            max_injection_chars=int(retrieval.pop("max_injection_chars", 12_000)),
-            injection_query=str(
-                retrieval.pop(
-                    "injection_query",
-                    "user profile preferences important entities events ongoing goals constraints and prior decisions",
-                )
-            ).strip(),
-            startup_policy=str(cfg.pop("startup_policy", "fail_fast")).lower(),  # type: ignore[arg-type]
-            read_failure_policy=str(failure_policy.pop("read", "fail_open")).lower(),  # type: ignore[arg-type]
-            write_failure_policy=str(failure_policy.pop("write", "log_and_drop")).lower(),  # type: ignore[arg-type]
-            allow_insecure_http=bool(cfg.pop("allow_insecure_http", False)),
-            allow_insecure_dev=bool(cfg.pop("allow_insecure_dev", False)),
-            max_seen_message_ids=int(cfg.pop("max_seen_message_ids", 512)),
+        unknown = sorted(k for k in cfg if k not in known)
+        if unknown:
+            logging.getLogger(__name__).warning("OpenViking backend_config: ignoring unknown keys: %s", ", ".join(unknown))
+
+        # Drop None values so empty YAML keys fall back to defaults.
+        picked = {k: v for k, v in cfg.items() if k in known and v is not None}
+
+        return cls(
+            storage_path=str(picked.get("storage_path") or ""),
+            data_path=str(picked.get("data_path") or ""),
+            user_space=str(picked.get("user_space") or "default") or "default",
+            actor_peer_id=picked.get("actor_peer_id"),
+            memory_category=str(picked.get("memory_category") or "conversation") or "conversation",
+            score_threshold=float(picked.get("score_threshold", 0.0) or 0.0),
+            search_limit=int(picked.get("search_limit", 5) or 5),
+            max_injection_chars=int(picked.get("max_injection_chars", 2000) or 2000),
+            per_file_injection_chars=int(picked.get("per_file_injection_chars", 500) or 500),
+            wait_on_write=bool(picked.get("wait_on_write", False)),
+            write_timeout=float(picked.get("write_timeout", 60.0) or 60.0),
+            should_keep_hidden_message=picked.get("should_keep_hidden_message"),
+            ov_conf=picked.get("ov_conf"),
+            embedding=picked.get("embedding"),
+            vlm=picked.get("vlm"),
         )
 
-        unknown = sorted([*cfg, *(f"retrieval.{key}" for key in retrieval), *(f"failure_policy.{key}" for key in failure_policy)])
-        if unknown:
-            raise ValueError(f"Unknown OpenViking backend_config fields: {', '.join(unknown)}")
-        result._validate()
-        return result
+    def resolve_data_path(self) -> str:
+        """Resolve the OpenViking store directory, creating it if needed."""
+        if self.data_path:
+            path = self.data_path
+        elif self.storage_path:
+            path = os.path.join(self.storage_path, "openviking")
+        else:
+            path = os.path.join("runtime", "openviking")
+        os.makedirs(path, exist_ok=True)
+        return path
 
-    def _validate(self) -> None:
-        parsed = urlparse(self.base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("OpenViking base_url must be an absolute http(s) URL")
-        if parsed.scheme == "http" and not self.allow_insecure_http and parsed.hostname not in {"127.0.0.1", "localhost", "openviking"}:
-            raise ValueError("OpenViking plain HTTP is allowed only for localhost/openviking; set allow_insecure_http=true for a trusted internal network")
-        if self.auth_mode not in {"trusted", "dev"}:
-            raise ValueError("OpenViking auth_mode must be 'trusted' or 'dev'")
-        if self.auth_mode == "dev" and not self.allow_insecure_dev:
-            raise ValueError("OpenViking auth_mode='dev' requires allow_insecure_dev=true")
-        if self.auth_mode == "trusted" and not self.account:
-            raise ValueError("OpenViking trusted auth requires a non-empty account")
-        for field_name in ("connect_timeout_seconds", "read_timeout_seconds", "write_timeout_seconds", "pool_timeout_seconds"):
-            if getattr(self, field_name) <= 0:
-                raise ValueError(f"OpenViking {field_name} must be > 0")
-        if not 1 <= self.max_connections <= 1000:
-            raise ValueError("OpenViking max_connections must be between 1 and 1000")
-        if not 0 <= self.max_keepalive_connections <= self.max_connections:
-            raise ValueError("OpenViking max_keepalive_connections must be between 0 and max_connections")
-        if not 0 <= self.max_retries <= 5:
-            raise ValueError("OpenViking max_retries must be between 0 and 5")
-        if not 1 <= self.search_top_k <= 100:
-            raise ValueError("OpenViking retrieval.top_k must be between 1 and 100")
-        if self.score_threshold is not None and not 0 <= self.score_threshold <= 1:
-            raise ValueError("OpenViking retrieval.score_threshold must be between 0 and 1")
-        if not 256 <= self.max_injection_chars <= 100_000:
-            raise ValueError("OpenViking retrieval.max_injection_chars must be between 256 and 100000")
-        if not self.injection_query:
-            raise ValueError("OpenViking retrieval.injection_query must not be empty")
-        if self.startup_policy not in {"fail_fast", "warn"}:
-            raise ValueError("OpenViking startup_policy must be 'fail_fast' or 'warn'")
-        if self.read_failure_policy not in {"fail_open", "raise"}:
-            raise ValueError("OpenViking failure_policy.read must be 'fail_open' or 'raise'")
-        if self.write_failure_policy not in {"log_and_drop", "raise"}:
-            raise ValueError("OpenViking failure_policy.write must be 'log_and_drop' or 'raise'")
-        if not 16 <= self.max_seen_message_ids <= 10_000:
-            raise ValueError("OpenViking max_seen_message_ids must be between 16 and 10000")
+    @property
+    def has_providers(self) -> bool:
+        """True if any provider config was given (so we generate ov.conf)."""
+        return bool(self.ov_conf or self.embedding or self.vlm)
 
+    def build_ov_conf(self) -> dict[str, Any]:
+        """Assemble the ov.conf dict to write under ``data_path``.
 
-def _mapping(value: Any, name: str) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"OpenViking {name} must be a mapping")
-    return dict(value)
-
-
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
+        Layered (later wins): raw ``ov_conf`` (full user control) -> ``embedding``
+        / ``vlm`` shortcuts merged in -> backend-required defaults via
+        ``setdefault`` (only the knobs the session-pipeline backend needs to
+        function; the user's explicit values always win).
+        """
+        # Deep-copy the raw user dict so we never mutate the parsed config.
+        conf: dict[str, Any] = copy.deepcopy(dict(self.ov_conf or {}))
+        if self.embedding:
+            emb = dict(conf.get("embedding") or {})
+            emb["dense"] = copy.deepcopy(self.embedding)
+            conf["embedding"] = emb
+        if self.vlm:
+            conf["vlm"] = copy.deepcopy(self.vlm)
+        # Backend-required defaults (setdefault = user override wins).
+        conf.setdefault("auto_generate_l0", True)
+        conf.setdefault("auto_generate_l1", False)
+        mem = dict(conf.get("memory") or {})
+        mem.setdefault("version", "v2")
+        mem.setdefault("extraction_enabled", True)
+        conf["memory"] = mem
+        return conf

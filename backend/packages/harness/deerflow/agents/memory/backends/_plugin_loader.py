@@ -183,7 +183,7 @@ def ensure_backend_deps(
 
     p = str(target)
     if p not in sys.path:
-        sys.path.insert(0, p)
+        _add_to_sys_path(p)  # same insertion strategy as restart path
     still_missing = [n for n in manifest.import_names if not _find_spec(n)]
     if still_missing:
         raise MemoryManagerError(f"Auto-install of {manifest.dependencies} completed but {still_missing} still not importable (target={target}). Check the install output / sys.path.")

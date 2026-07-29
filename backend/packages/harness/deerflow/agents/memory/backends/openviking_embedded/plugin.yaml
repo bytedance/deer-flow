@@ -7,7 +7,7 @@
 # (default) it raises a clear error with the install command.
 #
 # New backend = copy this file, change the deps. No pyproject edit, no core code.
-name: openviking_embedded
+name: openviking
 description: "OpenViking embedded memory backend (session pipeline + extraction)."
 
 # pip specs (PEP 508, may pin versions) -- what to download.
