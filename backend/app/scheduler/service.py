@@ -131,8 +131,13 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+        # Captured before the try so the except block can reference these
+        # when _launch_run succeeded but a subsequent bookkeeping write failed.
+        _launch_run_succeeded = False
+        _launch_run_result: dict[str, Any] = {}
+        _task_status: str | None = None
         try:
-            result = await self._launch_run(
+            _launch_run_result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
                 prompt=task["prompt"],
@@ -143,6 +148,9 @@ class ScheduledTaskService:
                     "scheduled_trigger": trigger,
                 },
             )
+            # Mark launch success before any subsequent bookkeeping write
+            # that could fail, so the except block knows the run is live.
+            _launch_run_succeeded = True
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
@@ -154,15 +162,15 @@ class ScheduledTaskService:
                 # terminal outcome; declaring "completed" at launch would stick
                 # if the run fails or the process dies (startup reconciliation
                 # is cancel_stuck_once_tasks).
-                task_status = "running"
+                _task_status = "running"
             elif trigger == "manual" and task.get("status") == "paused":
-                task_status = "paused"
+                _task_status = "paused"
             else:
-                task_status = "enabled"
+                _task_status = "enabled"
             await self._task_run_repo.update_status(
                 task_run_id,
                 status="running",
-                run_id=result["run_id"],
+                run_id=_launch_run_result["run_id"],
                 started_at=now,
                 # A fast-failing run can reach handle_run_completion before this
                 # write resumes; never clobber its terminal status.
@@ -170,11 +178,11 @@ class ScheduledTaskService:
             )
             await self._task_repo.update_after_launch(
                 task["id"],
-                status=task_status,
+                status=_task_status,
                 next_run_at=next_at,
                 last_run_at=now,
-                last_run_id=result["run_id"],
-                last_thread_id=result["thread_id"],
+                last_run_id=_launch_run_result["run_id"],
+                last_thread_id=_launch_run_result["thread_id"],
                 last_error=None,
                 increment_run_count=True,
                 # Same race as the run-row write above: a fast-failing run's
@@ -184,8 +192,8 @@ class ScheduledTaskService:
             return {
                 "outcome": "launched",
                 "task_run_id": task_run_id,
-                "run_id": result["run_id"],
-                "thread_id": result["thread_id"],
+                "run_id": _launch_run_result["run_id"],
+                "thread_id": _launch_run_result["thread_id"],
                 "error": None,
             }
         except Exception as exc:
@@ -197,6 +205,49 @@ class ScheduledTaskService:
             )
             if self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
                 return await self._finalize_skip(task, task_run_id=task_run_id, thread_id=execution_thread_id, now=now, error=str(exc))
+
+            # If _launch_run succeeded but a subsequent bookkeeping write
+            # (update_status / update_after_launch) failed, the run_id is
+            # already live in the external scheduler. Keep the active slot
+            # occupied so a second run cannot be launched while this one is
+            # still running, and preserve the run_id for reconciliation.
+            if _launch_run_succeeded:
+                # Reuse the success-path task_status so the recovery branch
+                # stays in lockstep for all three cases:
+                #   once           → "running" (cancel_stuck_once_tasks can reconcile)
+                #   cron           → "enabled" (claim_due_tasks can reclaim)
+                #   manual-paused  → "paused"
+                task_status = _task_status if _task_status is not None else self._task_status_for_failure(task, trigger=trigger)
+                await self._task_run_repo.update_status(
+                    task_run_id,
+                    status="running",
+                    run_id=_launch_run_result["run_id"],
+                    started_at=now,
+                    protect_terminal=True,
+                )
+                await self._task_repo.update_after_launch(
+                    task["id"],
+                    status=task_status,
+                    next_run_at=next_at,
+                    last_run_at=now,
+                    last_run_id=_launch_run_result["run_id"],
+                    last_thread_id=_launch_run_result["thread_id"],
+                    last_error=str(exc),
+                    increment_run_count=True,
+                    protect_terminal=True,
+                )
+                # Distinct outcome because a run IS live (run_id is non-None),
+                # unlike every other "failed" return in dispatch_task which
+                # means "no run was launched".  Callers that branch on
+                # outcome == "failed" to mean "safe to retry" would be wrong
+                # here — the external scheduler is already executing this run.
+                return {
+                    "outcome": "launched_bookkeeping_failed",
+                    "task_run_id": task_run_id,
+                    "run_id": _launch_run_result["run_id"],
+                    "thread_id": _launch_run_result["thread_id"],
+                    "error": str(exc),
+                }
 
             task_status = self._task_status_for_failure(task, trigger=trigger)
             await self._task_run_repo.update_status(
