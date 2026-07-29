@@ -265,7 +265,14 @@ class ScheduledTaskService:
                         last_run_at=now,
                         last_run_id=launched_run_id,
                         last_thread_id=launched_thread_id,
-                        last_error=str(exc),
+                        # The bookkeeping exception is an infrastructure-level
+                        # transient, not a run-level failure: the run launched
+                        # and is still in flight. Clear last_error like the
+                        # success path so the task list does not show an error
+                        # on a task whose run is actively running; the real
+                        # terminal outcome is written by handle_run_completion.
+                        # The transient itself is logged above.
+                        last_error=None,
                         increment_run_count=True,
                         protect_terminal=True,
                     )

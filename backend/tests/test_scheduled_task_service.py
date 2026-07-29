@@ -670,6 +670,13 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     assert run_repo.rows[first_row_id]["status"] == "running"
     assert run_repo.rows[first_row_id]["run_id"] == "run-1"
 
+    # The bookkeeping transient is NOT surfaced as the parent task's
+    # last_error: the run launched and is still in flight, so the task list
+    # must not show an error on an actively running task (matching the
+    # success path's clear-on-launch model). The real terminal outcome is
+    # written by handle_run_completion.
+    assert task_repo.updated[1]["last_error"] is None
+
 
 @pytest.mark.asyncio
 async def test_pre_launch_failure_still_releases_active_slot():
