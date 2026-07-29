@@ -2136,7 +2136,9 @@ def read_file_tool(
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
-        effective_start = max(start_line or 1, 1)
+        if start_line is not None and start_line < 1:
+            return "(start_line must be >= 1)"
+        effective_start = start_line or 1
         if end_line is not None and end_line < 1:
             return "(end_line must be >= 1)"
         if end_line is not None and effective_start > end_line:
