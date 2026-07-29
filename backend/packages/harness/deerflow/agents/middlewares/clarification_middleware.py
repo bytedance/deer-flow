@@ -107,7 +107,13 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         # Handle XML-to-dict parsing results: models that emit XML-style
         # option tags get parsed into nested dict structures that would
         # otherwise render as raw Python dict syntax in the UI.
-        if isinstance(options, dict):
+        #
+        # Flattening is applied uniformly for both `dict` (top-level dict
+        # wrapper) and `list` (top-level list[dict] e.g. when a JSON string
+        # deserialises directly to an array of {$text: ...} items) inputs,
+        # because both shapes are reachable depending on whether the
+        # upstream parser wrapped the list in a structural key or not.
+        if isinstance(options, (dict, list)):
             options = self._flatten_dict_option_values(options)
 
         if not isinstance(options, list):
@@ -127,34 +133,47 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         return normalized
 
     @staticmethod
-    def _flatten_dict_option_values(value: dict[str, Any]) -> list[str | int | float]:
+    def _flatten_dict_option_values(value: dict[str, Any] | list[Any]) -> list[str | int | float]:
         """Flatten scalar leaves from XML-to-dict option payloads in source order.
 
         When models emit XML-style options (e.g. ``<item>A</item><item>B</item>``),
         upstream parsers convert them to nested dicts (e.g.
-        ``{"item": [{"$text": "A"}, {"$text": "B"}]}``). This method flattens those
-        structures into a clean list of displayable scalars, extracting ``$text``
-        leaf values and skipping structural wrapper keys.
+        ``{"item": [{"$text": "A"}, {"$text": "B"}]}``). They may also emit a
+        top-level list of such dicts when the parser unwraps the outer key.
+        This method flattens those structures into a clean list of displayable
+        scalars, recursively extracting ``$text`` leaves (even when the $text
+        value itself is a list or dict, which some XML-to-dict bridges can
+        produce) and skipping structural wrapper keys.  Scalars that are not
+        themselves nested wrappers (e.g. direct integers) are still emitted
+        alongside the $text-extracted values.
         """
         flattened: list[str | int | float] = []
 
         def collect(nested: Any) -> None:
             if isinstance(nested, dict):
+                # When a dict has a $text key we prefer it even if other keys
+                # are present — XML-to-dict bridges often represent the
+                # textual content under $text alongside structural attrs.
+                if "$text" in nested:
+                    text_val = nested["$text"]
+                    if isinstance(text_val, (dict, list)):
+                        collect(text_val)
+                    elif isinstance(text_val, (str, int, float)):
+                        stripped = str(text_val).strip()
+                        if stripped:
+                            flattened.append(stripped)
                 for key, item in nested.items():
                     if key == "$text":
-                        if isinstance(item, (str, int, float)):
-                            text = str(item).strip()
-                            if text:
-                                flattened.append(text)
-                    else:
-                        collect(item)
+                        # already handled above
+                        continue
+                    collect(item)
             elif isinstance(nested, list):
                 for item in nested:
                     collect(item)
             elif isinstance(nested, (str, int, float)):
-                text = str(nested).strip()
-                if text:
-                    flattened.append(nested)
+                stripped = str(nested).strip()
+                if stripped:
+                    flattened.append(stripped)
 
         collect(value)
         return flattened

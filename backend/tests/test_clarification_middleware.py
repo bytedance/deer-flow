@@ -263,6 +263,53 @@ class TestHumanInputPayload:
 
         assert middleware._normalize_options(options) == ["First", "2"]
 
+    def test_options_top_level_list_of_dicts_extracts_each_item(self, middleware):
+        """willem-bd review point 2: JSON can deserialize straight to a list
+        of {$text: ...} dicts without a top-level structural wrapper key."""
+        options = [{"$text": "Alpha"}, {"$text": "Beta"}, {"$text": "Gamma"}]
+        args = {
+            "question": "Pick one",
+            "clarification_type": "approach_choice",
+            "options": options,
+        }
+        result = middleware._format_clarification_message(args)
+        assert "1. Alpha" in result
+        assert "2. Beta" in result
+        assert "3. Gamma" in result
+        # The raw dict repr must not leak into the UI
+        assert "$text" not in result
+        assert "{" not in result
+
+    def test_options_nested_list_text_value_recursively_extracted(self, middleware):
+        """willem-bd review point 1: a $text value that is itself a list or
+        dict (produced by some XML-to-dict bridges) must be descended into
+        rather than dropped."""
+        options = {
+            "item": [
+                {"$text": ["Line one"]},
+                {"$text": {"inner": {"$text": "Line two"}}},
+            ],
+        }
+        assert middleware._normalize_options(options) == ["Line one", "Line two"]
+
+    def test_options_json_string_list_of_dicts_handled(self, middleware):
+        """Composed case: options arrives as a JSON string that parses to a
+        list of {$text: ...} dicts."""
+        options = json.dumps([{"$text": "Choice A"}, {"$text": "Choice B"}])
+        payload = middleware._build_human_input_payload(
+            {
+                "question": "Pick one",
+                "clarification_type": "approach_choice",
+                "options": options,
+            },
+            tool_call_id="call-abc",
+            request_id="clarification:call-abc",
+        )
+        assert payload["options"] == [
+            {"id": "option-1", "label": "Choice A", "value": "Choice A"},
+            {"id": "option-2", "label": "Choice B", "value": "Choice B"},
+        ]
+
     def test_payload_with_plain_string_option(self, middleware):
         payload = middleware._build_human_input_payload(
             {
