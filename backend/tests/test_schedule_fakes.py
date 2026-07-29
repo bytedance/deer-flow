@@ -10,7 +10,7 @@ selects, that `add` refuses a second active record, what `protect_terminal`
 preserves. What it deliberately does **not** own is atomicity -- the doubles
 provide none, and a green run here says nothing about two dispatchers racing.
 That is covered against a real database in
-``test_scheduled_task_dispatch_race.py``. Do not read a passing contract suite
+``test_schedule_dispatch_race.py``. Do not read a passing contract suite
 as licence to run more than one scheduler.
 """
 

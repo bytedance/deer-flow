@@ -7,9 +7,9 @@ to the aggregate -- and knows nothing about HTTP, SQL, or the run runtime.
 primary adapter's job.
 
 The dispatch path deliberately mirrors the structure of the pre-migration
-`app/scheduler/service.py`, including its ordering and its comments, because
-its concurrency and idempotency semantics are load-bearing and are pinned by
-tests that must keep passing unchanged.
+`app/scheduler/service.py` (since deleted), including its ordering and its
+comments, because its concurrency and idempotency semantics are load-bearing
+and are pinned by tests that must keep passing unchanged.
 """
 
 from __future__ import annotations

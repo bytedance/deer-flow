@@ -10,10 +10,9 @@ being raised.
 own suite) while keeping `_map_domain_errors` in the call path, which is the
 layer under test here.
 
-The legacy `test_scheduled_task_router_behavior.py` remains the reference for
-what this endpoint must do; every scenario it pins has a counterpart below,
-plus the response-shape and error-mapping cases the old dict-returning router
-could not express.
+Every scenario the deleted legacy suite (`test_scheduled_task_router_behavior.py`)
+pinned has a counterpart below, plus the response-shape and error-mapping
+cases the old dict-returning router could not express.
 """
 
 from __future__ import annotations

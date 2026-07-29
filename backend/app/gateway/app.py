@@ -287,7 +287,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
+            # Closure over `app` (mirrors the schedule composition root's `launch_run`
             # below) rather than resolving `app.state.stream_bridge` here
             # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
             # once, above, by `langgraph_runtime(app, startup_config)`, so

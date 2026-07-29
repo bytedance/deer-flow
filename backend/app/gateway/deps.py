@@ -414,18 +414,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
 
-        if sf is not None:
-            from deerflow.persistence.scheduled_task_runs import (
-                ScheduledTaskRunRepository,
-            )
-            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
-        else:
-            app.state.scheduled_task_repo = None
-            app.state.scheduled_task_run_repo = None
-
         # Hexagonal slices: every adapter is instantiated by the composition
         # root and nowhere else. It is a pure function of the infrastructure
         # built above, so what it decides — including "no SQL backend means no
@@ -573,27 +561,6 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     val = getattr(request.app.state, "thread_store", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Thread metadata store not available")
-    return val
-
-
-def get_scheduled_task_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_repo", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
-    return val
-
-
-def get_scheduled_task_run_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_run_repo", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
-    return val
-
-
-def get_scheduled_task_service(request: Request):
-    val = getattr(request.app.state, "scheduled_task_service", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
     return val
 
 

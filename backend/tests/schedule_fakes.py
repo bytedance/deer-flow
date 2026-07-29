@@ -8,7 +8,7 @@ relying on the tests directory happening to be on ``sys.path``.
 single-threaded semantics of each port -- which rows `claim_due` selects, that
 `add` refuses a second active run -- and provide no atomicity whatsoever. A
 green run here says nothing about two dispatchers racing; that is covered
-against a real database in ``test_scheduled_task_dispatch_race.py``. Do not
+against a real database in ``test_schedule_dispatch_race.py``. Do not
 read a passing contract suite as licence to run more than one scheduler.
 """
 

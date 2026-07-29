@@ -22,7 +22,7 @@ same-valued ones:
   there would hand back a next_run_at that silently never fires.
 - The repository's `protect_terminal` compare-and-set refuses to overwrite
   them, because a fast-failing run's completion hook can land before the launch
-  path's own write (scheduled_tasks/sql.py:12).
+  path's own write.
 
 The two coincide because terminal *is* the definition of re-armable. The name
 states what the statuses are; what each rule does with them belongs to that
