@@ -14,7 +14,7 @@ async function openSkillSettings(page: Page) {
 }
 
 test.describe("Skill settings", () => {
-  test("shows a failure and keeps the toggle state when enabling a skill is rejected", async ({
+  test("shows a failure and keeps the toggle state when disabling a skill is rejected", async ({
     page,
   }) => {
     mockLangGraphAPI(page, {
