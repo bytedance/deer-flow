@@ -17,6 +17,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,15 +52,24 @@ async def test_update_mcp_configuration_does_not_block_event_loop(tmp_path: Path
     assert await asyncio.to_thread(config_path.exists)
 
 
-async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
+async def test_concurrent_mcp_updates_are_serialized(tmp_path: Path, monkeypatch) -> None:
     """The write lock keeps the offloaded read-modify-write atomic within the process.
 
     Offloading the RMW to a worker thread dropped the implicit serialization the
-    single-threaded event loop provided. ``_mcp_config_write_lock`` restores it:
-    even with several concurrent ``PUT /api/mcp/config`` calls, only one
-    ``_apply_mcp_config_update`` runs at a time. (Without the lock the tracked
-    max concurrency would exceed 1.)
+    single-threaded event loop provided. ``extensions_config_write_lock`` restores
+    it — and, being shared with the skills router (the other writer of this file),
+    also serializes against skill toggles: even with several concurrent
+    ``PUT /api/mcp/config`` calls, only one RMW is inside the critical section at a
+    time. (Without the lock the tracked max concurrency would exceed 1.)
+
+    The tracker is injected *inside* the real worker (via ``reload_extensions_config``,
+    the last step under the lock) rather than replacing ``_apply_mcp_config_update``,
+    because the lock now lives in the worker — stubbing the worker out would bypass
+    the very thing under test.
     """
+    config_path = tmp_path / "extensions_config.json"
+    await asyncio.to_thread(config_path.write_text, '{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
 
     async def _noop_admin(_request, **_kwargs) -> None:
         return None
@@ -68,20 +78,19 @@ async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
 
     state_lock = threading.Lock()
-    active = 0
-    max_active = 0
+    counters = {"active": 0, "max": 0}
 
-    def _tracking_apply(_body) -> dict:
-        nonlocal active, max_active
+    def _tracking_reload(*_args, **_kwargs):
+        # Runs inside the real worker, under extensions_config_write_lock.
         with state_lock:
-            active += 1
-            max_active = max(max_active, active)
-        time.sleep(0.02)  # worker thread (off-loop): hold long enough to expose any overlap
+            counters["active"] += 1
+            counters["max"] = max(counters["max"], counters["active"])
+        time.sleep(0.02)  # worker thread (off-loop): hold long enough to expose overlap
         with state_lock:
-            active -= 1
-        return {}
+            counters["active"] -= 1
+        return SimpleNamespace(mcp_servers={})
 
-    monkeypatch.setattr(mcp_router, "_apply_mcp_config_update", _tracking_apply)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", _tracking_reload)
 
     body = McpConfigUpdateRequest(
         mcp_servers={"s": McpServerConfigResponse(type="http", url="https://example.test/mcp")},
@@ -89,4 +98,4 @@ async def test_concurrent_mcp_updates_are_serialized(monkeypatch) -> None:
 
     await asyncio.gather(*[update_mcp_configuration(request=None, body=body) for _ in range(5)])
 
-    assert max_active == 1, f"config updates were not serialized (max concurrency {max_active})"
+    assert counters["max"] == 1, f"config updates were not serialized (max concurrency {counters['max']})"

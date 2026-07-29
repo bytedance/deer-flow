@@ -44,7 +44,7 @@ async function panelWidth(panel: Locator): Promise<number> {
   return box?.width ?? 0;
 }
 
-async function dragPanel(handle: Locator, distance: number): Promise<void> {
+async function dragPanel(handle: Locator, ...deltas: number[]): Promise<void> {
   // hover() waits for a stable bounding box: the open animation moves the
   // 1px-wide divider, so coordinates read any earlier miss it entirely.
   await handle.hover();
@@ -58,7 +58,11 @@ async function dragPanel(handle: Locator, distance: number): Promise<void> {
   const mouse = handle.page().mouse;
   await mouse.down();
   await expect(handle).toHaveAttribute("data-separator", "active");
-  await mouse.move(x + distance, y, { steps: 10 });
+  let currentX = x;
+  for (const delta of deltas) {
+    currentX += delta;
+    await mouse.move(currentX, y, { steps: 10 });
+  }
   await mouse.up();
 }
 
@@ -133,6 +137,24 @@ test.describe("Artifacts panel resize", () => {
     await expect
       .poll(async () => panelWidth(artifactsPanel))
       .toBeGreaterThan(groupWidth * 0.19);
+  });
+
+  test("reversing a collapse drag before release keeps the panel open", async ({
+    page,
+  }) => {
+    await openArtifact(page);
+
+    const artifactsPanel = page.locator("#artifacts");
+    const handle = page.locator('[data-slot="resizable-handle"]');
+    await expect(artifactsPanel.getByText("report.html")).toBeVisible();
+
+    // Cross the collapse threshold, then reverse the same drag before the
+    // pointer is released. The final non-zero layout should remain open.
+    await dragPanel(handle, 500, -500);
+
+    await expect(artifactsPanel).toHaveAttribute("aria-hidden", "false");
+    await expect(artifactsPanel.getByText("report.html")).toBeVisible();
+    await expect(handle).not.toHaveAttribute("data-separator", "disabled");
   });
 
   test("a dragged width is kept when the panel is reopened", async ({
