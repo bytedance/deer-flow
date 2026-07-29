@@ -20,7 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.domain.feedback.model import DuplicateFeedbackError, Feedback
+from deerflow.domain.feedback.exceptions import DuplicateFeedbackError
+from deerflow.domain.feedback.model import Feedback
 from deerflow.domain.feedback.ports import FeedbackRepository
 
 # Transitional: the ORM row stays in the harness until PR-N moves engine,
@@ -53,31 +54,33 @@ class SqlFeedbackRepository(FeedbackRepository):
             thread_id=row.thread_id,
             rating=row.rating,
             user_id=row.user_id,
-            message_id=row.message_id,
             comment=row.comment,
             tags=tuple(row.tags or ()),
             created_at=_tz_aware(row.created_at),
         )
 
     @staticmethod
-    def _to_row(feedback: Feedback) -> FeedbackRow:
-        """Aggregate -> ORM row. Explicit field list: new columns stay
+    def _apply(row: FeedbackRow, feedback: Feedback) -> None:
+        """Aggregate -> ORM row, in place. One explicit field list serves
+        BOTH write paths (insert and update), so a new field cannot be
+        stored on insert yet silently dropped on update. ``feedback_id``
+        is deliberately absent: the surrogate key is fixed at insert and
+        an upsert keeps the existing identity (see the port contract).
+        Explicit field list rather than ``**asdict()``: new fields stay
         private until deliberately mapped here."""
-        return FeedbackRow(
-            feedback_id=feedback.feedback_id,
-            run_id=feedback.run_id,
-            thread_id=feedback.thread_id,
-            user_id=feedback.user_id,
-            message_id=feedback.message_id,
-            rating=feedback.rating,
-            comment=feedback.comment,
-            tags=list(feedback.tags) or None,
-            created_at=feedback.created_at,
-        )
+        row.thread_id = feedback.thread_id
+        row.run_id = feedback.run_id
+        row.user_id = feedback.user_id
+        row.rating = feedback.rating
+        row.comment = feedback.comment
+        row.tags = list(feedback.tags) or None
+        row.created_at = feedback.created_at
 
     async def save(self, feedback: Feedback) -> Feedback:
         # Migrated from legacy ``upsert``: look up by aggregate identity,
-        # then update in place or insert.
+        # then apply the aggregate onto the existing or a fresh row. The
+        # identity fields are rewritten with equal values on update --
+        # idempotent, and the price of a single field list.
         async with self._session_factory() as session:
             stmt = select(FeedbackRow).where(
                 FeedbackRow.thread_id == feedback.thread_id,
@@ -85,14 +88,10 @@ class SqlFeedbackRepository(FeedbackRepository):
                 FeedbackRow.user_id == feedback.user_id,
             )
             row = (await session.execute(stmt)).scalar_one_or_none()
-            if row is not None:
-                row.rating = feedback.rating
-                row.comment = feedback.comment
-                row.tags = list(feedback.tags) or None
-                row.created_at = feedback.created_at
-            else:
-                row = self._to_row(feedback)
+            if row is None:
+                row = FeedbackRow(feedback_id=feedback.feedback_id)
                 session.add(row)
+            self._apply(row, feedback)
             try:
                 await session.commit()
             except IntegrityError as exc:

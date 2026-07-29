@@ -89,6 +89,20 @@ class FeedbackRepositoryContract:
         assert await repo.latest_per_run_in_thread("t1", user_id="u1") == {}
 
     @pytest.mark.anyio
+    async def test_remove_for_run_none_user_matches_only_null_owner(self, repo):
+        # Deletion is an equality match, not a filter: user_id=None targets
+        # only the NULL-owner entry (no-auth writes) and must never reach
+        # across into a named user's entry.
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=-1, user_id=None))
+
+        assert await repo.remove_for_run("t1", "r1", user_id=None) is True
+        assert await repo.remove_for_run("t1", "r1", user_id=None) is False
+
+        remaining = await repo.latest_per_run_in_thread("t1", user_id="u1")
+        assert remaining["r1"].rating == 1
+
+    @pytest.mark.anyio
     async def test_remove_for_run_nonexistent(self, repo):
         assert await repo.remove_for_run("t1", "r1", user_id="u1") is False
 

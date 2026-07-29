@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0010_feedback_tags"
+HEAD = "0011_feedback_drop_message_id"
 BASELINE = "0001_baseline"
 
 

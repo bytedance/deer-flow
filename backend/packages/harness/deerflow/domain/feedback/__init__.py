@@ -6,14 +6,15 @@ here; import ports (FeedbackRepository, RunLookup) from
 adapters and tests, not everyday call-site symbols.
 """
 
-from deerflow.domain.feedback.model import (
+from deerflow.domain.feedback.commands import RateRun, RetractRunRating
+from deerflow.domain.feedback.exceptions import (
     DuplicateFeedbackError,
-    Feedback,
     FeedbackError,
     InvalidRatingError,
     InvalidTagError,
     RunNotFoundError,
 )
+from deerflow.domain.feedback.model import Feedback
 from deerflow.domain.feedback.service import FeedbackService
 
 __all__ = [
@@ -23,5 +24,7 @@ __all__ = [
     "FeedbackService",
     "InvalidRatingError",
     "InvalidTagError",
+    "RateRun",
+    "RetractRunRating",
     "RunNotFoundError",
 ]
