@@ -400,23 +400,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
-            from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
-            from app.adapters.feedback.run_lookup import RunStoreRunLookup
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
-            # Hexagonal feedback slice: the service (input port) is wired with
-            # its SQL adapter here — the composition root is the only place
-            # adapters are instantiated.
-            app.state.feedback_service = FeedbackService(
-                repository=SqlFeedbackRepository(sf),
-                runs=RunStoreRunLookup(app.state.run_store),
-            )
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
-            app.state.feedback_service = None  # memory backend → 503, as before
+
+        # Composition root: adapters are instantiated only inside
+        # build_domain_services; a memory backend yields None services and
+        # the dependency providers translate that into 503.
+        from app.composition import build_domain_services
+
+        domain_services = build_domain_services(session_factory=sf, run_store=app.state.run_store)
+        app.state.feedback_service = domain_services.feedback
 
         from deerflow.persistence.thread_meta import make_thread_store
 
