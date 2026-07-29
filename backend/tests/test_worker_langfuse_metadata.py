@@ -11,10 +11,15 @@ import asyncio
 
 import pytest
 
-from deerflow.runtime.runs.manager import RunRecord
+from deerflow.runtime.runs.manager import RunRecord, RunStartOutcome
 from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, request_trace_context
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    mark_trace_id_from_request_header,
+    request_trace_context,
+    reset_trace_id_from_request_header,
+)
 
 
 class _FakeAgent:
@@ -37,6 +42,9 @@ class _FakeAgent:
 
 
 class _FakeRunManager:
+    async def try_start(self, _run_id: str) -> RunStartOutcome:
+        return RunStartOutcome.started
+
     async def wait_for_prior_finalizing(self, *_args, **_kwargs) -> None:
         return None
 
@@ -47,6 +55,10 @@ class _FakeRunManager:
         return False
 
     async def set_status(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def set_status_if_not_cancelled(self, *_args, **_kwargs) -> None:
+        await self.set_status(*_args, **_kwargs)
         return None
 
     async def update_model_name(self, *_args, **_kwargs) -> None:
@@ -285,6 +297,56 @@ async def test_run_agent_preserves_caller_metadata_overrides(monkeypatch):
     assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "explicit-deerflow-trace"
     # Worker still fills in keys that the caller didn't set.
     assert metadata["langfuse_trace_name"] == "lead-agent"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_inbound_header_trace_overrides_metadata(monkeypatch):
+    """A valid inbound ``X-Trace-Id`` wins over ``config.metadata.deerflow_trace_id``."""
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+
+    fake_agent = _FakeAgent()
+
+    def agent_factory(config):
+        return fake_agent
+
+    record = RunRecord(
+        run_id="run-header-override",
+        thread_id="thread-header",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+    )
+    record.abort_event = asyncio.Event()
+    ctx = RunContext(checkpointer=None)
+
+    with request_trace_context("header-trace-1"):
+        header_token = mark_trace_id_from_request_header(from_header=True)
+        try:
+            await run_agent(
+                _FakeBridge(),
+                _FakeRunManager(),
+                record,
+                ctx=ctx,
+                agent_factory=agent_factory,
+                graph_input={"messages": []},
+                config={
+                    "configurable": {"thread_id": "thread-header"},
+                    "metadata": {
+                        DEERFLOW_TRACE_METADATA_KEY: "metadata-trace-ignored",
+                    },
+                },
+            )
+        finally:
+            reset_trace_id_from_request_header(header_token)
+
+    metadata = fake_agent.captured_config.get("metadata") or {}
+    assert metadata[DEERFLOW_TRACE_METADATA_KEY] == "header-trace-1"
+    assert fake_agent.captured_config.get("context", {}).get(DEERFLOW_TRACE_METADATA_KEY) == "header-trace-1"
 
 
 @pytest.mark.asyncio

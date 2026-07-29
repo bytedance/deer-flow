@@ -81,6 +81,52 @@ _UNKNOWN_ERROR: dict[str, object] = {
     "recommended_next_action": "try_alternative",
 }
 
+# Tool names whose result content is a *rendered remote page* rather than a tool's
+# own message. Name-based, mirroring ToolResultSanitizationMiddleware's
+# _REMOTE_CONTENT_TOOL_NAMES: the first-party fetch providers all normalize to
+# ``web_fetch`` (see community/*/tools.py), so the gate stays provider-agnostic.
+# The gate is required because normalize_tool_message() runs for *every* tool —
+# a short "not found" line is legitimate output from many of them.
+# ``web_capture`` is deliberately absent: its result is a tool message about an
+# artifact ("Captured screenshot: <path> (warning: ...)"), not a rendered page, so
+# a title rule cannot apply. A dead-target capture still yields the artifact plus a
+# model-visible warning; stamping it belongs to the provider boundary (#4239).
+_PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
+
+# Category attributes reused by the error-shell path, indexed by the error_type
+# _ERROR_RULES already declares. Derived rather than duplicated so a shell can
+# never drift from the recoverable/next-action contract of its own category.
+_ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
+
+# Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
+# error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
+# actually lands on as a rendered page. The 5xx split mirrors _ERROR_RULES' own:
+# 500/501 sit with its "500"/"internal error" keywords (internal → stop), while
+# 502/503/504 sit with its "timeout"/"temporarily unavailable" keywords (transient
+# → try_alternative) — a gateway error is the try-a-different-source case, and the
+# same words must not classify differently here than through _classify_error_text.
+_ERROR_SHELL_PHRASES: dict[str, str] = {
+    "unauthorized": "auth",
+    "proxy authentication required": "auth",
+    "forbidden": "permission",
+    "access denied": "permission",
+    "permission denied": "permission",
+    "not found": "not_found",
+    "too many requests": "rate_limited",
+    "internal server error": "internal",
+    "not implemented": "internal",
+    "bad gateway": "transient",
+    "service unavailable": "transient",
+    "service temporarily unavailable": "transient",
+    "gateway timeout": "transient",
+}
+
+# Generic subject nouns a server may prefix onto the reason phrase ("Page not found",
+# IIS's "404 - File or directory not found."). Stripped from the *front* only, so any
+# word left over after the phrase still rejects the title.
+_STATUS_TITLE_FILLER: frozenset[str] = frozenset({"http", "error", "page", "the", "file", "or", "directory", "url", "resource"})
+
+
 # Pre-compiled at module load from _ERROR_RULES. Anchoring bare numeric codes (401, 403, 404,
 # 500) to word boundaries prevents substring hits on unrelated numbers like "took 500ms".
 # Computed here (after _ERROR_RULES) so the set is authoritative and thread-safe — no lazy
@@ -127,6 +173,50 @@ def _classify_error_text(text: str) -> dict[str, object]:
         if any(_match_keyword(kw, lower) for kw in keywords):
             return {**attrs}
     return {**_UNKNOWN_ERROR}
+
+
+def _classify_error_shell(msg: ToolMessage, content: str) -> dict[str, object] | None:
+    """Return category attributes when a fetched page is an HTTP error page.
+
+    A fetch of a missing URL succeeds at the transport layer, so none of the branches
+    above apply and the server's error page reaches the model stamped
+    ``status="success"`` — counted as evidence it never contained (issue #4273).
+
+    The signal is the *extracted title*: error pages from nginx / Apache / IIS /
+    Cloudflare all render with the status line as their heading and only server
+    boilerplate as the body ("# 404 Not Found" over "nginx/1.24.0"). Matching is by
+    equality after normalization, never substring, so a document merely *about* a
+    status keeps its title's other words and is rejected: "404 Ways to Cook Rice" and
+    "Not Found: a short history of the 404" both survive as successes.
+
+    Content length deliberately plays no part — measured against real error pages it
+    does not separate (an IIS 404 renders to 193 chars, a genuine article to 202).
+
+    This is the provider-agnostic fallback only. The authoritative signal is the
+    provider's own status code, which stays at the web_fetch boundary (Browserless
+    surfaces ``X-Response-Code`` per #4239); a page whose title is not a status line
+    remains that layer's job.
+    """
+    if msg.name not in _PAGE_CONTENT_TOOL_NAMES:
+        return None
+    title = next((line for line in content.splitlines() if line.strip()), "")
+    phrase = _as_status_line(title.lstrip("#").strip())
+    error_type = _ERROR_SHELL_PHRASES.get(phrase) if phrase else None
+    return {**_ATTRS_BY_ERROR_TYPE[error_type]} if error_type else None
+
+
+def _as_status_line(title: str) -> str | None:
+    """Reduce a page title to its bare reason phrase, or None if it carries content.
+
+    "404 Not Found" -> "not found"; "404 - File or directory not found." -> "not found";
+    "404 Ways to Cook Rice" -> "ways to cook rice" (words survive, so it is a document).
+    """
+    words = re.sub(r"[^0-9a-z]+", " ", title.lower()).split()
+    # Strip leading status codes and generic nouns in either order — servers write both
+    # "404 - File or directory not found" and "HTTP Error 404 - Not Found".
+    while words and (words[0] in _STATUS_TITLE_FILLER or (len(words[0]) == 3 and words[0].isdigit() and 400 <= int(words[0]) <= 599)):
+        words = words[1:]
+    return " ".join(words) or None
 
 
 def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
@@ -190,6 +280,8 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     elif (json_error := _extract_json_error_text(content)) is not None:
         attrs = _classify_error_text(json_error)
         meta = _make_meta(status="error", source="tool_return", **attrs)
+    elif (shell_attrs := _classify_error_shell(msg, content)) is not None:
+        meta = _make_meta(status="error", source="content_analysis", **shell_attrs)
     elif any(m in content_lower for m in _PARTIAL_MARKERS):
         meta = _make_meta(
             status="partial_success",

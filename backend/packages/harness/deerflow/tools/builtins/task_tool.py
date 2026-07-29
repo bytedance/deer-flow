@@ -12,6 +12,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
@@ -31,6 +32,7 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -341,6 +343,11 @@ async def task_tool(
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
+    # Propagate authorization identity: is_internal (strict bool) and
+    # authz_attributes (validated Mapping, copied). These follow the same
+    # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
+    is_internal = parent_context.get("is_internal") is True
+    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -361,11 +368,15 @@ async def task_tool(
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
-    # Subagents should not have subagent tools enabled (prevent recursive nesting)
+    # Subagents should not have subagent tools enabled (prevent recursive nesting).
+    # Subagents also must not get list_uploaded_files — they have an independent
+    # ThreadState where runtime.state["uploaded_files"] is absent, so the
+    # current-run file exclusion would not work.
     available_tools_kwargs = {
         "model_name": effective_model,
         "groups": parent_tool_groups,
         "subagent_enabled": False,
+        "include_upload_tool": False,
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
@@ -386,6 +397,8 @@ async def task_tool(
         "oauth_id": oauth_id,
         "run_id": run_id,
         "channel_user_id": channel_user_id,
+        "is_internal": is_internal,
+        "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
     }
     if resolved_app_config is not None:
@@ -407,13 +420,14 @@ async def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer(
+    await aemit_custom_event(
         {
             "type": "task_started",
             "task_id": task_id,
             "description": description,
             "model_name": effective_model,
-        }
+        },
+        writer=writer,
     )
 
     try:
@@ -422,7 +436,10 @@ async def task_tool(
 
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
-                writer({"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"})
+                await aemit_custom_event(
+                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"},
+                    writer=writer,
+                )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
                 return _task_result_command(
@@ -448,7 +465,7 @@ async def task_tool(
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
                     message = ai_messages[i]
-                    writer(
+                    await aemit_custom_event(
                         {
                             "type": "task_running",
                             "task_id": task_id,
@@ -457,7 +474,8 @@ async def task_tool(
                             "total_messages": current_message_count,
                             "usage": usage,
                             "model_name": effective_model,
-                        }
+                        },
+                        writer=writer,
                     )
                     logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
                 last_message_count = current_message_count
@@ -466,14 +484,15 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_completed",
                         "task_id": task_id,
                         "result": result.result,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
@@ -491,14 +510,15 @@ async def task_tool(
             elif result.status == SubagentStatus.FAILED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_failed",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
@@ -516,14 +536,15 @@ async def task_tool(
             elif result.status == SubagentStatus.CANCELLED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_cancelled",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
@@ -537,14 +558,15 @@ async def task_tool(
             elif result.status == SubagentStatus.TIMED_OUT:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
@@ -569,13 +591,14 @@ async def task_tool(
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
-                writer(
+                await aemit_custom_event(
                     {
                         "type": "task_timed_out",
                         "task_id": task_id,
                         "usage": usage,
                         "model_name": effective_model,
-                    }
+                    },
+                    writer=writer,
                 )
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from

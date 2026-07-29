@@ -262,6 +262,40 @@ def test_update_agent_updates_soul_only(tmp_path, patched_paths):
     assert "soul" in result.update["messages"][0].content
 
 
+def test_update_agent_rejects_empty_soul_and_does_not_overwrite(tmp_path, patched_paths):
+    """Mirror setup_agent's empty-SOUL guard (#3553 / #3549).
+
+    setup_agent refuses empty/whitespace soul before touching the filesystem.
+    update_agent previously accepted the same input and reported success while
+    writing a blank SOUL.md, wiping a working agent personality.
+    """
+    agent_dir = _seed_agent(tmp_path, description="keep me", soul="original soul")
+
+    result = update_agent.func(runtime=_runtime(), soul="")
+
+    msg = result.update["messages"][0]
+    assert "soul content is empty" in msg.content
+    # Message must guide the retry (omit the field) so the model self-corrects
+    # in one step instead of retrying with another empty-ish value.
+    assert "Omit the soul field" in msg.content
+    assert msg.status == "error"
+    assert (agent_dir / "SOUL.md").read_text() == "original soul"
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert cfg["description"] == "keep me", "config must be untouched on empty-soul reject"
+
+
+def test_update_agent_rejects_whitespace_only_soul_and_does_not_overwrite(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path, description="keep me", soul="original soul")
+
+    result = update_agent.func(runtime=_runtime(), soul="   \n\t  ")
+
+    msg = result.update["messages"][0]
+    assert "soul content is empty" in msg.content
+    assert "Omit the soul field" in msg.content
+    assert msg.status == "error"
+    assert (agent_dir / "SOUL.md").read_text() == "original soul"
+
+
 def test_update_agent_updates_description_only(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, description="old desc", soul="keep this soul")
 
@@ -306,6 +340,34 @@ def test_update_agent_preserves_github_block_on_description_change(tmp_path, pat
     assert cfg["description"] == "refined desc"
     # The github block must round-trip unchanged.
     assert cfg["github"] == github_block
+
+
+def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, patched_paths):
+    """UI/API-owned model behavior must survive agent self-edits.
+
+    ``update_agent`` does not expose temperature / max_tokens / thinking /
+    reasoning arguments to the LLM, but it still rewrites config.yaml for
+    ordinary self-edits. Those fields therefore need an explicit carry-forward
+    path or a description tweak would silently reset the agent's model defaults.
+    """
+    agent_dir = _seed_agent(tmp_path, description="old desc")
+    cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    cfg.update(
+        {
+            "model_settings": {"temperature": 0.2, "max_tokens": 12000},
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+        }
+    )
+    (agent_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    update_agent.func(runtime=_runtime(), description="refined desc")
+
+    out = yaml.safe_load((agent_dir / "config.yaml").read_text())
+    assert out["description"] == "refined desc"
+    assert out["model_settings"] == {"temperature": 0.2, "max_tokens": 12000}
+    assert out["thinking_enabled"] is True
+    assert out["reasoning_effort"] == "high"
 
 
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
@@ -389,7 +451,7 @@ def test_update_agent_soul_failure_does_not_replace_config(tmp_path, patched_pat
             raise OSError("disk full while staging SOUL.md")
         return real_named_temp_file(*args, **kwargs)
 
-    with patch("deerflow.tools.builtins.update_agent_tool.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
+    with patch("deerflow.persistence.agents.file.tempfile.NamedTemporaryFile", side_effect=_explode_on_soul):
         result = update_agent.func(runtime=_runtime(), description="new-desc", soul="new soul")
 
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())

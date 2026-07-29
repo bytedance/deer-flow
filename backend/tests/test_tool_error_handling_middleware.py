@@ -3,6 +3,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
@@ -15,10 +16,15 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config import summarization_config
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.subagents.status_contract import SUBAGENT_ERROR_KEY, SUBAGENT_STATUS_KEY
+
+
+class ConfiguredSubagentMiddleware(AgentMiddleware):
+    pass
 
 
 def _request(name: str = "web_search", tool_call_id: str | None = "tc-1"):
@@ -138,7 +144,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
-        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=FakeMiddleware,
+            neutralize_untrusted_tags=lambda value: value,
+        ),
     )
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
@@ -149,21 +159,28 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
+    # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 15
+    assert len(middlewares) == 17
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     # The token-budget backstop is attached by default so the cap engages (#3875).
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
+    activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
+    policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
+    assert policy_idx == activation_idx + 1
+    assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is
     # appended innermost so it can merge the SystemMessage DurableContext injects.
     # The coalescer is appended unconditionally (after the optional summarization
@@ -171,7 +188,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # unlike DurableContextMiddleware, which is only last when summarization is off.
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
-    assert durable_idx < len(middlewares) - 1
+    assert policy_idx < durable_idx < len(middlewares) - 1
 
 
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -560,6 +577,24 @@ def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_name
     assert filter_idx < safety_idx
 
 
+def test_subagent_runtime_middlewares_inject_configured_extension_middlewares(monkeypatch):
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredSubagentMiddleware"])
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config)
+
+    extension_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ConfiguredSubagentMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    for guard_name in ("LoopDetectionMiddleware", "TokenBudgetMiddleware"):
+        guard_idx = next((i for i, m in enumerate(middlewares) if type(m).__name__ == guard_name), None)
+        if guard_idx is not None:
+            assert guard_idx < extension_idx
+    assert extension_idx < safety_idx
+
+
 def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
     from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
@@ -657,10 +692,11 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     sentinel = object()
     captured: dict[str, object] = {}
 
-    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False):
+    def fake_create_summarization_middleware(*, app_config=None, keep=None, skip_memory_flush=False, run_model_name=None):
         captured["app_config"] = app_config
         captured["keep"] = keep
         captured["skip_memory_flush"] = skip_memory_flush
+        captured["run_model_name"] = run_model_name
         return sentinel
 
     # summarization is enabled by default False; flip it on so the factory path
@@ -679,6 +715,10 @@ def test_subagent_runtime_middlewares_attach_durable_context_before_summarizatio
     # skip_memory_flush=True so subagent-internal turns are not flushed into the
     # PARENT thread's durable memory (#3875 Phase 3 review).
     assert captured["skip_memory_flush"] is True
+    # Model ownership: the subagent's own resolved model is threaded into the factory
+    # so a distinct-model subagent summarizes with its model, not the parent's — the
+    # subagent context/configurable never carries the child model.
+    assert captured["run_model_name"] == "test-model"
     durable = [middleware for middleware in middlewares if isinstance(middleware, DurableContextMiddleware)]
     assert len(durable) == 1
     # ``_skills_root`` is ``posixpath.normpath(container_path)``, so compare against
@@ -861,10 +901,9 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     """Integration anchor for the ThreadData → Uploads ordering.
 
     Under lazy_init=False, ThreadDataMiddleware eagerly creates the thread
-    directories in before_agent. UploadsMiddleware then scans the uploads
-    directory. Running both middlewares via the real build_lead_runtime_middlewares
-    chain (TD before UM) must surface pre-existing historical files in the
-    injected <uploaded_files> context.
+    directories in before_agent. UploadsMiddleware then only injects
+    <current_uploads> for new files — historical uploads are discovered
+    on demand via list_uploaded_files, not injected every turn.
 
     This complements the static order contract
     (test_build_lead_runtime_middlewares_orders_thread_data_before_uploads):
@@ -904,11 +943,12 @@ def test_lead_runtime_chain_finds_historical_uploads_under_lazy_init_false(tmp_p
     um_input = {**state, "messages": td_result["messages"]}
     um_result = um.before_agent(um_input, runtime)
 
-    assert um_result is not None, "UploadsMiddleware must inject context when historical files exist"
-    injected_content = um_result["messages"][-1].content
-    assert "<uploaded_files>" in injected_content
-    assert "prior-report.txt" in injected_content
-    assert "previous messages" in injected_content  # historical section header
+    # Historical files are NO LONGER injected — only new (current-run) uploads.
+    # The prior-report.txt file exists in the uploads dir from a previous turn,
+    # so UploadsMiddleware must NOT inject it into the prompt.
+    # It MUST however clear uploaded_files so list_uploaded_files doesn't
+    # incorrectly exclude files that just became historical.
+    assert um_result == {"uploaded_files": []}, "UploadsMiddleware must NOT inject context for historical files, but MUST clear uploaded_files to prevent cross-turn state leakage into list_uploaded_files"
 
 
 def test_subagent_summarization_fires_mid_run_and_produces_usable_result(monkeypatch):

@@ -43,9 +43,14 @@ def _fix_messages(messages: list) -> list:
             fixed.append(AIMessage(content=full_text.strip() or " "))
             continue
 
-        # Wrap tool execution results in XML tags and convert to HumanMessage
+        # Wrap tool execution results in XML tags and convert to HumanMessage.
+        # Escape the tool output so a result containing a literal "</tool_response>"
+        # (e.g. from read_file on an untrusted file, bash output, or an MCP tool the
+        # ToolResultSanitizationMiddleware allowlist does not cover) cannot close the
+        # framing early and inject trailing text into the turn — matching the escaping
+        # already applied to tool-call names/args above.
         if isinstance(msg, ToolMessage):
-            tool_result_text = f"<tool_response>\n{text}\n</tool_response>"
+            tool_result_text = f"<tool_response>\n{html.escape(text, quote=False)}\n</tool_response>"
             fixed.append(HumanMessage(content=tool_result_text))
             continue
 

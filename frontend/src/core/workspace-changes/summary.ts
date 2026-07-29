@@ -8,7 +8,12 @@ export type WorkspaceChangeLineClass =
   | "meta";
 
 export function getChangedFileCount(summary: WorkspaceChangeSummary) {
-  return summary.created + summary.modified + summary.deleted;
+  return (
+    summary.created +
+    summary.modified +
+    summary.deleted +
+    summary.symlink_created
+  );
 }
 
 export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
@@ -38,9 +43,16 @@ export function getWorkspaceChangeLineClass(
 }
 
 export function sortWorkspaceChanges(files: WorkspaceFileChange[]) {
+  // `symlink_created` shares modified's rank: it is a distinct change kind
+  // (a symlink replacing a file) that otherwise renders like a modification
+  // (see StatusIcon / statusLabel). This `satisfies Record<...>` guard forces
+  // every WorkspaceChangeStatus variant to have a rank, so adding a new status
+  // without updating this table is a compile error instead of a silent NaN
+  // from an unranked lookup (which broke Array#sort's ordering contract).
   const statusRank = {
     created: 0,
     modified: 1,
+    symlink_created: 1,
     deleted: 2,
   } satisfies Record<WorkspaceFileChange["status"], number>;
 

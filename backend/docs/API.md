@@ -103,8 +103,22 @@ Content-Type: application/json
 ```
 
 **Stream Mode Compatibility:**
-- Use: `values`, `messages-tuple`, `custom`, `updates`, `events`, `debug`, `tasks`, `checkpoints`
-- Do not use: `tools` (deprecated/invalid in current `langgraph-api` and will trigger schema validation errors)
+- Use: `values`, `messages-tuple`, `custom`, `updates`, `debug`, `tasks`, `checkpoints`
+- Unsupported modes, including `messages`, `events`, and `tools`, return `422` before a run is created. DeerFlow never substitutes `values` for an unsupported mode.
+
+**Run Option Compatibility:**
+- Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
+- Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
+- `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
+- Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
+
+When outputs changed during the run, `run.delivery` events retain the Slice 1
+facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
+`presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
+`stage` (`presented`, `mismatched`, or `not_started`), and `satisfied`. Receipts
+for runs without changed outputs keep their existing shape.
 
 **Recursion Limit:**
 
@@ -506,6 +520,51 @@ Content-Type: multipart/form-data
 }
 ```
 
+#### Reload Skills
+
+Invalidate the skill prompt caches for every user in the current Gateway
+process. Subsequent runs rescan the configured public, custom, and legacy skill
+directories; runs that have already started keep their existing skill snapshot.
+
+```http
+POST /api/skills/reload
+```
+
+The request has no body and requires an authenticated administrator. For a
+cookie-authenticated request, send the CSRF cookie value in the matching header:
+
+```bash
+curl -X POST http://localhost:2026/api/skills/reload \
+  -b cookies.txt \
+  -H "X-CSRF-Token: <csrf_token-cookie-value>"
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "scope": "process",
+  "message": "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
+}
+```
+
+`success` confirms cache invalidation, not that every file on disk was valid:
+malformed skills retain the existing parser behavior of being skipped and
+logged. The endpoint returns `401` for unauthenticated callers, `403` for
+non-admin users, and a generic `500` if the invalidation mechanism itself
+fails or the process-local background scan does not finish within the cache
+refresh timeout. A loader-level failure, such as an unavailable mounted root,
+does not publish an empty catalog: the last successfully loaded process cache
+remains available. A timed-out scan continues in its daemon worker and can
+still populate the process cache when it finishes.
+
+The scope is deliberately process-local. Each Uvicorn worker or Kubernetes Pod
+must be called directly; repeated requests through a load-balanced Service do
+not guarantee that every instance is reached. External MinIO/NFS/CSI writes
+bypass the validation, SkillScan, and history used by the install/edit APIs, so
+the mounted directory must be writable only by trusted operators.
+
 ### File Uploads
 
 #### Upload Files
@@ -737,6 +796,31 @@ Accept: text/event-stream
 Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`.
 The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
 assigned `thread_id` and `run_id` on the first message of a new chat.
+
+### SSE replay retention and gaps
+
+Clients may reconnect to a run stream with `Last-Event-ID`. Replay history is
+bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
+rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
+additional control frame.
+
+When a syntactically valid cursor is older than the retained watermark, the
+server sends exactly one `gap` event before any retained data and closes that
+subscription without an `end` event:
+
+```text
+event: gap
+data: {"code":"stream_replay_gap","run_id":"run-123","requested_event_id":"1718000000000-1","earliest_available_event_id":"1718000000100-42","latest_available_event_id":"1718000000200-84","recovery":"reload_durable_state"}
+
+```
+
+The frame deliberately has no SSE `id:`. Consumers must reload durable thread
+state and persisted run events/messages, then may reconnect from
+`latest_available_event_id` to follow newer live events. A gap does not cancel
+the active run. The same signal applies when a no-cursor subscriber has already
+established an empty-stream wait but the first Redis wake-up falls behind before
+delivery; in that case `requested_event_id` is `null`. Malformed cursor handling
+is backend-specific and is not the same as a valid cursor that was evicted.
 
 ---
 

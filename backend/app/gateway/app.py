@@ -8,14 +8,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
-from app.gateway.csrf_middleware import CSRFMiddleware, get_configured_cors_origins
+from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
     artifacts,
     assistants_compat,
     auth,
+    browser,
     channel_connections,
     channels,
     console,
@@ -23,6 +25,7 @@ from app.gateway.routers import (
     feedback,
     github_webhooks,
     input_polish,
+    integrations,
     mcp,
     memory,
     models,
@@ -56,6 +59,10 @@ logger = logging.getLogger(__name__)
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
+
+# The retrieval index is derived state, so shutdown only waits briefly for its
+# startup rebuild. The canonical memory flush keeps its full configured budget.
+_RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -167,6 +174,18 @@ async def _migrate_orphaned_threads(store, admin_user_id: str) -> int:
     return migrated
 
 
+async def _warm_memory_retrieval(manager) -> None:
+    """Rebuild the derived retrieval index without delaying Gateway readiness."""
+    try:
+        rebuilt = await asyncio.to_thread(manager.warm_retrieval)
+        if rebuilt:
+            logger.info("Memory retrieval index rebuilt successfully")
+        else:
+            logger.warning("Memory retrieval index rebuild failed; scoped searches will retry lazily")
+    except Exception:
+        logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -181,6 +200,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         startup_config = get_app_config()
         configure_logging(startup_config)
+        ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
     except Exception as e:
@@ -200,30 +220,49 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:  # observability must never break startup
         logger.exception("Monocle tracing setup failed; continuing without it")
 
-    # Pre-warm tiktoken encoding cache so the first memory-injection request
-    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
-    # that may be unreachable in restricted networks — see issue #3402).
-    # Warm-up runs via the manager's `warm` capability (getattr-probed, so
-    # non-DeerMem backends skip it). DeerMem.warm re-checks token_counting==
-    # "char" and returns early, so char-mode backends never touch tiktoken
-    # (avoids even the 5s probe in
-    # network-restricted deployments — see issue #3429).
+    # Rebuild the derived memory retrieval index in the background. Scoped
+    # searches remain correct while this runs because DeerMem lazily rebuilds
+    # the requested scope when the full warm-up has not completed yet.
+    retrieval_warm_task: asyncio.Task[None] | None = None
     try:
         from deerflow.agents.memory import get_memory_manager
 
-        manager = get_memory_manager()
-        warm = getattr(manager, "warm", None)
-        if not callable(warm):
-            logger.info("Memory backend %s has no warm-up hook; skipping tiktoken warm-up", type(manager).__name__)
+        if startup_config.memory.enabled:
+            manager = await asyncio.to_thread(get_memory_manager)
+            warm_retrieval = getattr(manager, "warm_retrieval", None)
+            if callable(warm_retrieval):
+                retrieval_warm_task = asyncio.create_task(
+                    _warm_memory_retrieval(manager),
+                    name="memory-retrieval-warm-up",
+                )
         else:
-            warmed = await asyncio.wait_for(
-                asyncio.to_thread(warm),
-                timeout=5,
-            )
-            if warmed:
-                logger.info("tiktoken encoding cache warmed successfully")
-            else:
-                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
+            logger.info("Memory is disabled; skipping retrieval index rebuild")
+    except Exception:
+        logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
+
+    # Pre-warm tiktoken encoding cache so the first memory-injection request
+    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
+    # that may be unreachable in restricted networks — see issue #3402).
+    # Warm-up runs via the manager's `warm()` tier-3 hook. DeerMem.warm re-checks
+    # token_counting=="char" and returns early, so char-mode backends never touch
+    # tiktoken (avoids even the 5s probe in network-restricted deployments - see
+    # issue #3429). A backend with nothing to warm (e.g. noop) returns None from
+    # the base default -- log "skipping" instead of the misleading "warmed
+    # successfully" so the log reflects what actually happened.
+    try:
+        from deerflow.agents.memory import get_memory_manager
+
+        manager = await asyncio.to_thread(get_memory_manager)
+        warmed = await asyncio.wait_for(
+            asyncio.to_thread(manager.warm),
+            timeout=5,
+        )
+        if warmed is None:
+            logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(manager).__name__)
+        elif warmed:
+            logger.info("tiktoken encoding cache warmed successfully")
+        else:
+            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
     except TimeoutError:
         logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
     except Exception:
@@ -248,7 +287,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.channels.service import start_channel_service
 
-            channel_service = await start_channel_service(startup_config)
+            # Closure over `app` (mirrors ScheduledTaskService's `launch_run`
+            # below) rather than resolving `app.state.stream_bridge` here
+            # directly: `stream_bridge` is a STARTUP_ONLY_FIELDS singleton set
+            # once, above, by `langgraph_runtime(app, startup_config)`, so
+            # either shape is safe by construction — the closure is just the
+            # more defensive/consistent-with-precedent form, and it is what
+            # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
+            # uses to reach the same StreamBridge every other run consumer
+            # goes through `get_stream_bridge(request)` for.
+            channel_service = await start_channel_service(
+                startup_config,
+                get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+            )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
@@ -301,6 +352,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
 
+        try:
+            from deerflow.community.browser_automation import get_browser_session_manager
+
+            closed = await asyncio.wait_for(
+                get_browser_session_manager().close_all_sessions(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+            if closed:
+                logger.info("Closed %d browser session(s)", closed)
+        except TimeoutError:
+            logger.warning(
+                "Browser session shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to close browser sessions")
+
         # Drain the memory backend's pending-update buffer before the worker
         # exits (best-effort, bounded). IM channels and the scheduler are
         # already stopped above, so no new IM/scheduler updates arrive during
@@ -317,15 +385,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # would (review #6 on the original PR).
         #
         # K8s caveat: ``shutdown_flush_timeout_seconds`` must fit inside the
-        # pod's ``terminationGracePeriodSeconds`` (channel stop + this drain +
-        # buffer), set on the gateway Helm deployment -- or K8s SIGKILLs the
-        # drain mid-flight and the loss this is fixing is silently re-introduced.
+        # pod's ``terminationGracePeriodSeconds`` (channel stop + browser
+        # session close + the brief retrieval-warm wait + this drain + buffer),
+        # set on the gateway Helm deployment -- or K8s SIGKILLs the drain
+        # mid-flight and the loss this is fixing is silently re-introduced.
+        # The retrieval index is derived from canonical memory files, so its
+        # wait is independently capped and never consumes the flush budget.
+        retrieval_warm_finished = True
+        if retrieval_warm_task is not None and not retrieval_warm_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(retrieval_warm_task),
+                    timeout=min(
+                        _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS,
+                        startup_config.memory.shutdown_flush_timeout_seconds,
+                    ),
+                )
+            except TimeoutError:
+                retrieval_warm_finished = False
+                logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
+
+        manager = None
         try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:
                 from deerflow.agents.memory import get_memory_manager
 
-                manager = get_memory_manager()
+                manager = await asyncio.to_thread(get_memory_manager)
                 flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
                 completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
                 if completed:
@@ -337,6 +423,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     )
         except Exception:
             logger.exception("Failed to flush memory queue on shutdown")
+        finally:
+            close = getattr(manager, "close", None)
+            if callable(close) and retrieval_warm_finished:
+                try:
+                    await asyncio.to_thread(close)
+                except Exception:
+                    logger.exception("Failed to close memory backend on shutdown")
 
     logger.info("Shutting down API Gateway")
 
@@ -446,7 +539,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # CORS: the unified nginx endpoint is same-origin by default. Split-origin
     # browser clients must opt in with this explicit Gateway allowlist so CORS
-    # and CSRF origin checks share the same source of truth.
+    # and CSRF origin checks share the same source of truth. They also need the
+    # run id the Gateway returns in a non-safelisted response header; without
+    # exposing it the SDK never reports a created run, so a new thread keeps its
+    # placeholder route and every action gated on an established thread stays
+    # hidden until the page is reloaded.
     cors_origins = sorted(get_configured_cors_origins())
     if cors_origins:
         app.add_middleware(
@@ -455,6 +552,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=list(CORS_EXPOSED_HEADERS),
         )
 
     # Request trace correlation: when logging.enhance.enabled=true, bind one
@@ -484,8 +582,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
 
+    # First-party integrations API is mounted at /api/integrations
+    app.include_router(integrations.router)
+
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
+
+    # Browser API is mounted at /api/threads/{thread_id}/browser
+    app.include_router(browser.router)
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)

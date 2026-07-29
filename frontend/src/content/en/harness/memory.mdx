@@ -45,7 +45,7 @@ memory:
   enabled: true
   injection_enabled: true
 
-  # Backend selector: deermem (default) | noop | a dotted path to a custom
+  # Backend selector: deermem (default) | noop | openviking | a dotted path to a custom
   # MemoryManager subclass. Swap backend = drop a backends/<name>/ folder and
   # set this (see backend/.../agents/memory/backends/).
   manager_class: deermem
@@ -88,6 +88,36 @@ memory:
     # Maximum tokens to use for memory injection into system prompt
     max_injection_tokens: 2000
 ```
+
+## OpenViking HTTP backend
+
+Set `manager_class: openviking` to send completed turns to an independent
+OpenViking server and recall its memory over HTTP. This backend currently
+supports middleware mode only; DeerMem remains the default.
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware
+  backend_config:
+    base_url: http://openviking:1933
+    auth_mode: trusted
+    account: deerflow
+    api_key_env: OPENVIKING_API_KEY
+    failure_policy:
+      read: fail_open
+      write: log_and_drop
+    retrieval:
+      top_k: 8
+      score_threshold: 0.25
+      max_injection_chars: 12000
+```
+
+The backend hashes each DeerFlow user/agent scope into a distinct OpenViking
+trusted identity. Keep trusted-mode OpenViking on an internal network and put
+the API key in the server environment, not directly in `config.yaml`.
 
 ## Global vs per-agent memory
 

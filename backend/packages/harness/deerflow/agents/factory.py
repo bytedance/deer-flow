@@ -22,7 +22,8 @@ from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import adapt_state_schema_for_mode, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.tools.builtins import ask_clarification_tool
 
 if TYPE_CHECKING:
@@ -70,6 +71,8 @@ def create_deerflow_agent(
     extra_middleware: list[AgentMiddleware] | None = None,
     plan_mode: bool = False,
     state_schema: type | None = None,
+    checkpoint_channel_mode: CheckpointChannelMode = "full",
+    checkpoint_snapshot_frequency: int | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
 ) -> CompiledStateGraph:
@@ -99,6 +102,16 @@ def create_deerflow_agent(
         Enable TodoMiddleware for task tracking.
     state_schema:
         LangGraph state type.  Defaults to ``ThreadState``.
+    checkpoint_channel_mode:
+        Checkpoint representation for accumulating channels.  Defaults to the
+        full-state compatibility schema.  ``"delta"`` requires the guarded
+        persistence paths (mode markers + compatibility gate) and is therefore
+        rejected when combined with *checkpointer* in this factory; without a
+        checkpointer the graph is ephemeral and delta is allowed.
+    checkpoint_snapshot_frequency:
+        DeltaChannel snapshot cadence for ``"delta"`` mode.  ``None`` uses the
+        process-frozen value, falling back to the config default.  Ignored in
+        ``"full"`` mode.
     checkpointer:
         Optional persistence backend.
     name:
@@ -111,6 +124,14 @@ def create_deerflow_agent(
     """
     if middleware is not None and features is not None:
         raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
+    if checkpoint_channel_mode == "delta" and checkpointer is not None:
+        raise ValueError(
+            "create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: "
+            "persisted graphs built here bypass checkpoint mode marker injection and the fail-closed "
+            "compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would "
+            "silently corrupt thread state.  Use the guarded application paths (make_lead_agent or "
+            "DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed."
+        )
     if middleware is not None and extra_middleware:
         raise ValueError("Cannot use 'extra_middleware' with 'middleware' (full takeover).")
     if extra_middleware:
@@ -119,7 +140,7 @@ def create_deerflow_agent(
                 raise TypeError(f"extra_middleware items must be AgentMiddleware instances, got {type(mw).__name__}")
 
     effective_tools: list[BaseTool] = list(tools or [])
-    effective_state = state_schema or ThreadState
+    effective_state = get_thread_state_schema(checkpoint_channel_mode, checkpoint_snapshot_frequency) if state_schema is None else adapt_state_schema_for_mode(state_schema, checkpoint_channel_mode, checkpoint_snapshot_frequency)
 
     if middleware is not None:
         effective_middleware = list(middleware)
@@ -137,6 +158,12 @@ def create_deerflow_agent(
             if t.name not in existing_names:
                 effective_tools.append(t)
                 existing_names.add(t.name)
+
+    effective_middleware = normalize_middleware_state_schemas(
+        effective_middleware,
+        checkpoint_channel_mode,
+        checkpoint_snapshot_frequency,
+    )
 
     return create_agent(
         model=model,
@@ -248,6 +275,7 @@ def _assemble_from_features(
 
             memory_cfg: MemoryConfig = feat.memory_config or get_memory_config()
             if should_use_memory_tools(memory_cfg):
+                from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
                 from deerflow.agents.memory.tools import get_memory_tools
 
                 existing_names = {tool.name for tool in extra_tools}
@@ -257,8 +285,10 @@ def _assemble_from_features(
                         continue
                     extra_tools.append(memory_tool)
                     existing_names.add(memory_tool.name)
-                # MemoryMiddleware is intentionally NOT appended in tool mode.
-                # The model drives memory via tools instead of passive middleware.
+                if backend_requires_passive_writes_in_tool_mode(memory_cfg.manager_class):
+                    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+                    chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
             else:
                 if memory_cfg.mode == "tool" and not memory_cfg.enabled:
                     logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")

@@ -4,11 +4,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"
+from deerflow.constants import (
+    WORKSPACE_CHANGES_EVENT_CATEGORY as WORKSPACE_CHANGES_EVENT_CATEGORY,
+)
+from deerflow.constants import WORKSPACE_CHANGES_EVENT_TYPE as WORKSPACE_CHANGES_EVENT_TYPE
+
 WORKSPACE_CHANGES_METADATA_KEY = "workspace_changes"
 
-WorkspaceChangeStatus = Literal["created", "modified", "deleted"]
-DiffUnavailableReason = Literal["binary", "large", "sensitive", "truncated"]
+WorkspaceChangeStatus = Literal["created", "modified", "deleted", "symlink_created"]
+DiffUnavailableReason = Literal["binary", "large", "sensitive", "truncated", "symlink"]
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ class FileSnapshot:
     text: str | None = None
     text_path: str | None = None
     content_unavailable_reason: DiffUnavailableReason | None = None
+    symlink: bool = False
+    symlink_target: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,9 @@ class WorkspaceFileChange:
     diff_unavailable_reason: DiffUnavailableReason | None = None
     additions: int = 0
     deletions: int = 0
+    symlink: bool = False
+    symlink_target_before: str | None = None
+    symlink_target_after: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -80,6 +89,7 @@ class WorkspaceChangeSummary:
     created: int = 0
     modified: int = 0
     deleted: int = 0
+    symlink_created: int = 0
     additions: int = 0
     deletions: int = 0
     truncated: bool = False
@@ -96,7 +106,7 @@ class WorkspaceChangeResult:
     version: int = 1
 
     def has_changes(self) -> bool:
-        return bool(self.summary.created or self.summary.modified or self.summary.deleted or self.summary.additions or self.summary.deletions)
+        return bool(self.summary.created or self.summary.modified or self.summary.deleted or self.summary.symlink_created or self.summary.additions or self.summary.deletions)
 
     def to_dict(self) -> dict:
         return {
