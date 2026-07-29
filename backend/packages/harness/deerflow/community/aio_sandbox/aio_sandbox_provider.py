@@ -1915,18 +1915,46 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         ``_drop_unhealthy_reserved``); fail closed (leave the container for the
         peer to reap via its own reconciliation) if a peer already owns it or
         the ownership store cannot answer.
+
+        The claim alone is only the cross-**instance** half: it succeeds against
+        our own lease by design, so it says nothing about this process. The
+        same-process half is the local teardown reservation, taken first and
+        held across the whole path — between the readiness timeout and the
+        claim, ``_reconcile_orphans`` (idle checker, every 60s) can see this
+        container running, untracked, and past its recovery grace, and park it
+        in ``_warm_pool``; the subsequent claim would still succeed and the
+        stop would land on an entry this instance has just adopted, leaving a
+        dead warm entry for the next reclaim to hand out. The predicate checks
+        the id is absent from both the active and warm maps; the reservation
+        makes that check and the teardown mark one critical section, so no
+        adopt/acquire can slip between them (same pairing as
+        ``_destroy_warm_entry``).
         """
-        if not self._claim_ownership(sandbox_id, for_destroy=True):
+        if not self._reserve_local_teardown(
+            sandbox_id,
+            lambda: sandbox_id not in self._sandboxes
+            and sandbox_id not in self._sandbox_infos
+            and sandbox_id not in self._warm_pool,
+        ):
             logger.warning(
-                "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
+                "Not destroying unready sandbox %s: adopted or being torn down by this instance",
                 sandbox_id,
             )
             return
         try:
-            with self._held_teardown_lease(sandbox_id):
-                self._backend.destroy(info)
-        except Exception as e:
-            logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
+            if not self._claim_ownership(sandbox_id, for_destroy=True):
+                logger.warning(
+                    "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
+                    sandbox_id,
+                )
+                return
+            try:
+                with self._held_teardown_lease(sandbox_id):
+                    self._backend.destroy(info)
+            except Exception as e:
+                logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
+        finally:
+            self._finish_local_teardown(sandbox_id)
 
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.

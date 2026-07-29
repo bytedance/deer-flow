@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import importlib
 import stat
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1128,3 +1129,86 @@ def test_create_sandbox_skips_destroy_when_unready_sandbox_owned_by_peer(tmp_pat
         provider._create_sandbox("thread-peer", "peer-owned", user_id="user-peer")
 
     provider._backend.destroy.assert_not_called()
+
+
+def test_reconcile_does_not_adopt_a_container_whose_unready_teardown_is_reserved(tmp_path, monkeypatch):
+    """#4248 follow-up: the readiness-timeout destroy must hold the local
+    reservation, not just the cross-instance claim.
+
+    The claim succeeds against our own lease by design, so without
+    ``_reserve_local_teardown`` there is a window — readiness failed, claim not
+    yet written — in which the idle checker's ``_reconcile_orphans`` sees the
+    container running, untracked, and past its recovery grace, and adopts it
+    into ``_warm_pool``. The claim then still succeeds (the lease is ours) and
+    the stop lands on an entry this instance has just adopted, leaving a dead
+    warm entry for the next reclaim to hand out. This is the same interleaving
+    shape as ``test_reconcile_does_not_adopt_a_container_this_instance_is_tearing_down``
+    in ``test_sandbox_orphan_reconciliation.py``.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(
+        tmp_path,
+        sandbox_id="unready-race",
+        base_url="http://unready-race",
+        monkeypatch=monkeypatch,
+        aio_mod=aio_mod,
+    )
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[unready_info])
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, *, timeout=60: False)
+
+    # Park the destroy thread after it has reserved the local teardown but
+    # before the `del:` claim lands — the exact window reconcile would adopt in.
+    at_claim, let_claim = threading.Event(), threading.Event()
+    real_claim = provider._claim_ownership
+
+    def gated_claim(sandbox_id, *, for_destroy=False):
+        if for_destroy:
+            at_claim.set()
+            assert let_claim.wait(timeout=5)
+        return real_claim(sandbox_id, for_destroy=for_destroy)
+
+    provider._claim_ownership = gated_claim
+    reaper = threading.Thread(
+        target=lambda: provider._destroy_unready_sandbox("unready-race", unready_info),
+        daemon=True,
+    )
+    reaper.start()
+    try:
+        assert at_claim.wait(timeout=5), "the unready destroy never reached its claim"
+        # Reserved locally, still running, untracked, and the `del:` marker is
+        # not written yet — exactly the shape reconcile would have adopted
+        # before the reservation wrapped this path.
+        provider._reconcile_orphans()
+        assert "unready-race" not in provider._warm_pool, (
+            "reconcile adopted a container this instance is tearing down"
+        )
+    finally:
+        let_claim.set()
+        reaper.join(timeout=5)
+
+    # The reservation is released once the stop returns, and the destroy did run.
+    provider._backend.destroy.assert_called_once_with(unready_info)
+    assert provider._local_teardown == set(), "a teardown reservation outlived the stop it guarded"
+
+
+def test_reconcile_adopts_unready_container_when_no_teardown_is_in_flight(tmp_path, monkeypatch):
+    """Mirror of the interleaving test: with no destroy running, the same
+    not-yet-registered container *is* adoptable, so the guard above cannot
+    over-block legitimate reconciliation of a container whose creator crashed
+    before the readiness gate.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, unready_info = _make_unready_destroy_provider(
+        tmp_path,
+        sandbox_id="adoptable",
+        base_url="http://adoptable",
+        monkeypatch=monkeypatch,
+        aio_mod=aio_mod,
+    )
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[unready_info])
+
+    provider._reconcile_orphans()
+
+    assert "adoptable" in provider._warm_pool, "reconcile must still adopt a genuinely unowned container"
