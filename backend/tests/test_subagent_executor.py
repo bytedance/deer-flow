@@ -1667,12 +1667,17 @@ class TestSkillAllowedTools:
         assert "declared empty allowed-tools" in caplog.text
 
     @pytest.mark.anyio
-    async def test_explicit_tools_config_skips_skill_allowed_tools_filtering(self, classes, mock_agent, msg, caplog):
+    async def test_explicit_tools_config_skips_skill_allowed_tools_filtering(self, classes, mock_agent, msg, caplog, monkeypatch):
         """When sub-agent has explicit tools config, skill allowed-tools must not over-trim.
 
         Regression test for #4492: a sub-agent with config.tools=["bash", "read_file"]
         should NOT have its tools reduced to just ["bash"] when a loaded skill has
         allowed_tools=["bash"]. The sub-agent's explicit tool config takes precedence.
+
+        NB: the default fixture has ``tool_search.enabled=False`` so ``tool_search``
+        is never appended by ``_build_initial_state``. We therefore do NOT assert on
+        ``tool_search`` being present here; we only verify the explicit-configured
+        tools survived the skill filter unchanged. (willem-bd review fix)
         """
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentConfig = classes["SubagentConfig"]
@@ -1688,7 +1693,7 @@ class TestSkillAllowedTools:
 
         final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
-        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search"), NamedTool("tool_search")]
+        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("web_search")]
         executor = SubagentExecutor(config=explicit_config, tools=tools, thread_id="test-thread")
 
         async def load_skills():
@@ -1703,9 +1708,35 @@ class TestSkillAllowedTools:
         assert "bash" in final_tool_names
         assert "read_file" in final_tool_names
         assert "web_search" in final_tool_names
-        # tool_search is a framework tool that should still be present
-        assert "tool_search" in final_tool_names
         assert "skipping skill allowed-tools filtering" in caplog.text
+
+    def test_apply_skill_allowed_tools_explicit_config_returns_copy_not_reference(self, classes):
+        """willem-bd review fix: when config.tools is set, _apply_skill_allowed_tools
+        must return a freshly-constructed list, not the internal self._base_tools
+        reference (the latter would allow callers to mutate executor state)."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentConfig = classes["SubagentConfig"]
+
+        explicit_config = SubagentConfig(
+            name="test-agent",
+            description="Test agent",
+            system_prompt="You are a test agent.",
+            max_turns=10,
+            timeout_seconds=60,
+            tools=["bash"],
+        )
+        tool_bash = NamedTool("bash")
+        executor = SubagentExecutor(config=explicit_config, tools=[tool_bash], thread_id="t")
+
+        skills = []
+        returned = executor._apply_skill_allowed_tools(skills)
+        assert [t.name for t in returned] == ["bash"]
+        # Reference identity check: returned list must be a NEW list, not the
+        # executor's internal _base_tools attribute.
+        assert returned is not executor._base_tools
+        # Sanity: mutating the returned list does not mutate executor state.
+        returned.append(NamedTool("surprise"))
+        assert [t.name for t in executor._base_tools] == ["bash"]
 
     @pytest.mark.anyio
     async def test_skill_load_failure_fails_without_creating_agent(self, classes, base_config, mock_agent):
