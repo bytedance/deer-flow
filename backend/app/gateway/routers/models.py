@@ -362,6 +362,11 @@ def _delete_model_from_config(model_name: str) -> None:
                 detail=f"Model '{model_name}' not found in configuration.",
             )
 
+        # Snapshot the original model list *before* filtering so that
+        # _sync_env_file can compute prev_env_refs from the full set.
+        original_raw_data: dict[str, Any] = dict(raw_data)
+        original_raw_data["models"] = list(existing_models)
+
         filtered = [
             e
             for e in existing_models
@@ -369,8 +374,14 @@ def _delete_model_from_config(model_name: str) -> None:
         ]
         raw_data["models"] = filtered
 
-        # Sync .env: remove orphaned env vars.
-        _sync_env_file(project_root, raw_data, [])
+        # Sync .env: pass the *original* config for prev_env_refs and the
+        # *surviving* models as incoming so their $VAR references are kept.
+        surviving = [
+            FullModelConfig(**e)
+            for e in filtered
+            if isinstance(e, dict)
+        ]
+        _sync_env_file(project_root, original_raw_data, surviving)
 
         # Write config.yaml atomically.
         AppConfig.write_config(config_path, raw_data)
