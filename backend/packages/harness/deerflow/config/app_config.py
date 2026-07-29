@@ -1,5 +1,7 @@
 import logging
 import os
+import tempfile
+import threading
 from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
@@ -50,6 +52,10 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 
 load_dotenv()
+
+# Serializes read-modify-write cycles on the main config.yaml file across
+# concurrent API requests (same pattern as ExtensionsConfig's write lock).
+config_yaml_write_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +421,44 @@ class AppConfig(BaseModel):
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result
+
+    @staticmethod
+    def write_config(config_path: Path, data: dict) -> None:
+        """Write config dict back to YAML file using atomic replace.
+
+        Stages the YAML to a temp file in the same directory, then atomically
+        replaces the target via ``os.replace``. On failure the temp file is
+        cleaned up. This mirrors the atomic-write pattern used by
+        ``persistence/agents/file.py`` and ``DeerFlowClient``.
+
+        Args:
+            config_path: Path to the config.yaml file to overwrite.
+            data: The complete config dict to write (should preserve
+                  ``$VAR`` references — do NOT resolve env vars before
+                  calling this).
+        """
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=config_path.parent,
+                suffix=".tmp",
+                delete=False,
+            ) as f:
+                yaml.dump(
+                    data,
+                    f,
+                    default_flow_style=False,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                tmp_path = Path(f.name)
+            tmp_path.replace(config_path)
+        except BaseException:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            raise
 
     @classmethod
     def _validate_acp_agents(
