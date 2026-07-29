@@ -154,7 +154,7 @@ decode them back to URIs.
 ## Smoke test (standalone, no gateway)
 
 ```python
-from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
+from deerflow.agents.memory.backends.openviking_embedded import OpenVikingMemoryManager
 
 m = OpenVikingMemoryManager.from_config(
     {"data_path": "./runtime/openviking-smoke", "user_space": "default",

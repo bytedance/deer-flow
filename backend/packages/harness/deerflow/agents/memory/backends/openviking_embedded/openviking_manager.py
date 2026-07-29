@@ -282,7 +282,10 @@ class OpenVikingMemoryManager(MemoryManager):
     # Per-thread content-hash sets are capped so the in-memory dedup dict
     # does not grow without bound in long-running multi-tenant deployments.
     _MAX_SEEN_PER_THREAD: int = 4096
-    _seen_msgs: dict[str, set[str]] = PrivateAttr(default_factory=dict)
+    # FIFO-ordered insert-tracking dicts (Python 3.7+ dict preserves insertion
+    # order) so eviction drops the *oldest* entries — the most recent 4096
+    # message hashes survive and dedup remains effective at high message counts.
+    _seen_msgs: dict[str, dict[str, int]] = PrivateAttr(default_factory=dict)
 
     # search() is overridden -- supports_search is auto-derived by __init_subclass__
 
@@ -529,7 +532,7 @@ class OpenVikingMemoryManager(MemoryManager):
         which is what prevents the duplicate-fact flood (the same conversation
         re-extracted on every debounced ``add``).
         """
-        seen = self._seen_msgs.setdefault(thread_id, set())
+        seen = self._seen_msgs.setdefault(thread_id, {})
         new: list[Any] = []
         for msg in messages:
             role = _message_role(msg)
@@ -539,14 +542,14 @@ class OpenVikingMemoryManager(MemoryManager):
             h = hashlib.sha256(f"{role}\x00{content}".encode()).hexdigest()
             if h in seen:
                 continue
-            seen.add(h)
+            seen[h] = 1
             new.append(msg)
-        # Cap per-thread dedup set so a long-running multi-tenant process
-        # doesn't accumulate unbounded memory.  The dedup is explicitly
-        # best-effort; residual duplicates are collapsed by OpenViking's
-        # consolidation.
-        if len(seen) > self._MAX_SEEN_PER_THREAD:
-            seen.clear()
+        # FIFO-evict oldest hashes so the most recent ``_MAX_SEEN_PER_THREAD``
+        # survive and dedup stays effective at high message counts.  Without
+        # this a long-running multi-tenant process accumulates unbounded memory.
+        while len(seen) > self._MAX_SEEN_PER_THREAD:
+            # pop first (oldest) item — Python 3.7+ dict preserves insertion order
+            seen.pop(next(iter(seen)))
         return new
 
     # ── Write ────────────────────────────────────────────────────────────
