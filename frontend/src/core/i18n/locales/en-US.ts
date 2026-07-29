@@ -743,6 +743,8 @@ export const enUS: Translations = {
         "Failed to read the selected memory file. Please choose a valid JSON export.",
       importSuccess: "Memory imported",
       manualFactSource: "Manual",
+      editAction: "Edit",
+      deleteAction: "Delete",
       addFact: "Add fact",
       addFactTitle: "Add memory fact",
       editFactTitle: "Edit memory fact",

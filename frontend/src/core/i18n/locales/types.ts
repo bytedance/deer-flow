@@ -622,6 +622,8 @@ export interface Translations {
       importInvalidFile: string;
       importSuccess: string;
       manualFactSource: string;
+      editAction: string;
+      deleteAction: string;
       addFact: string;
       addFactTitle: string;
       editFactTitle: string;

@@ -713,6 +713,8 @@ export const zhCN: Translations = {
       importInvalidFile: "读取记忆文件失败，请选择有效的 JSON 导出文件。",
       importSuccess: "记忆已导入",
       manualFactSource: "手动添加",
+      editAction: "编辑",
+      deleteAction: "删除",
       addFact: "添加事实",
       addFactTitle: "添加记忆事实",
       editFactTitle: "编辑记忆事实",

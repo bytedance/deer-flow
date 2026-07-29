@@ -457,6 +457,7 @@ function renderListSection(
                   editable={editable}
                   onEdit={onEdit}
                   onDelete={onDelete}
+                  t={t}
                 />
               </li>
             );
@@ -502,6 +503,7 @@ function renderCardsSection(
                     editable={editable}
                     onEdit={onEdit}
                     onDelete={onDelete}
+                    t={t}
                   />
                 </div>
                 <DisplayItemMeta item={item} t={t} />
@@ -534,7 +536,7 @@ function renderCardsSection(
 
 function renderTableSection(
   section: MemorySection,
-  _t: ReturnType<typeof useI18n>["t"],
+  t: ReturnType<typeof useI18n>["t"],
   onEdit: DisplayEditHandler,
   onDelete: DisplayDeleteHandler,
 ) {
@@ -584,6 +586,7 @@ function renderTableSection(
                           editable={editable}
                           onEdit={onEdit}
                           onDelete={onDelete}
+                          t={t}
                         />
                       </td>
                     ) : (
@@ -671,14 +674,18 @@ function DisplayItemActions({
   editable,
   onEdit,
   onDelete,
+  t,
 }: {
   item: DisplayItem;
   deletable: boolean;
   editable: boolean;
   onEdit: DisplayEditHandler;
   onDelete: DisplayDeleteHandler;
+  t: ReturnType<typeof useI18n>["t"];
 }) {
   if (!deletable && !editable) return null;
+  const editLabel = t.settings.memory.editAction;
+  const deleteLabel = t.settings.memory.deleteAction;
   return (
     <div className="flex shrink-0 items-center gap-1 self-start">
       {editable && (
@@ -687,8 +694,8 @@ function DisplayItemActions({
           size="icon"
           className="shrink-0"
           onClick={() => onEdit(item)}
-          title="Edit"
-          aria-label="Edit"
+          title={editLabel}
+          aria-label={editLabel}
         >
           <PenLineIcon className="h-4 w-4" />
         </Button>
@@ -699,8 +706,8 @@ function DisplayItemActions({
           size="icon"
           className="text-destructive hover:text-destructive shrink-0"
           onClick={() => onDelete(item)}
-          title="Delete"
-          aria-label="Delete"
+          title={deleteLabel}
+          aria-label={deleteLabel}
         >
           <Trash2Icon className="h-4 w-4" />
         </Button>
@@ -929,16 +936,6 @@ export function MemorySettingsPage() {
     return "";
   }
 
-  function _itemCategory(item: MemoryFact | DisplayItem): string {
-    if (typeof item.category === "string") return item.category;
-    return "context";
-  }
-
-  function _itemConfidence(item: MemoryFact | DisplayItem): number {
-    if (typeof item.confidence === "number") return item.confidence;
-    return 0.5;
-  }
-
   async function handleDeleteFact() {
     if (!factToDelete) return;
     const factId = _itemId(factToDelete);
@@ -961,10 +958,21 @@ export function MemorySettingsPage() {
 
   function openEditFactDialog(item: MemoryFact | DisplayItem) {
     setFactToEdit(item);
+    // Only pre-fill category/confidence from fields the item actually owns.
+    // Display items from some backends (e.g. OpenViking) don't carry these
+    // fields, and fabricating defaults here would silently corrupt metadata
+    // on save (the PATCH would move the file to memories/context/ etc.).
+    const itemRec = item as Record<string, unknown>;
+    const itemCategory =
+      typeof itemRec.category === "string" ? itemRec.category : "";
+    const itemConfidence =
+      typeof itemRec.confidence === "number"
+        ? String(itemRec.confidence)
+        : "";
     setFactForm({
       content: _itemContent(item),
-      category: _itemCategory(item),
-      confidence: String(_itemConfidence(item)),
+      category: itemCategory,
+      confidence: itemConfidence,
     });
     setFactEditorOpen(true);
   }
@@ -984,16 +992,21 @@ export function MemorySettingsPage() {
       return;
     }
 
-    const confidence = Number(factForm.confidence);
-    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-      toast.error(factValidationConfidence);
-      return;
+    // Validate confidence only when a value was actually entered.
+    const trimmedConfidence = factForm.confidence.trim();
+    let confidence: number | undefined;
+    if (trimmedConfidence) {
+      confidence = Number(trimmedConfidence);
+      if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+        toast.error(factValidationConfidence);
+        return;
+      }
     }
 
     const input: MemoryFactInput = {
       content: trimmedContent,
       category: factForm.category.trim() || "context",
-      confidence,
+      confidence: confidence ?? 0.5,
     };
 
     try {
@@ -1003,11 +1016,20 @@ export function MemorySettingsPage() {
           toast.error(factValidationContent);
           return;
         }
+        const trimmedCat = factForm.category.trim();
         const patchInput: MemoryFactPatchInput = {
           content: input.content,
-          category: input.category,
-          confidence: input.confidence,
         };
+        // Only include category/confidence in the PATCH if the form has
+        // actual values for them. Display items from backends like
+        // OpenViking don't guarantee these fields; including fabricated
+        // defaults would silently move the file or corrupt metadata.
+        if (trimmedCat) {
+          patchInput.category = trimmedCat;
+        }
+        if (confidence !== undefined) {
+          patchInput.confidence = confidence;
+        }
         await updateMemoryFact.mutateAsync({
           factId,
           input: patchInput,
