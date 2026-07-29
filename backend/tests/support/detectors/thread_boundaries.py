@@ -355,7 +355,19 @@ class BoundaryVisitor(ast.NodeVisitor):
                 self._record_import(node)
             elif isinstance(node, ast.ImportFrom):
                 self._record_import_from(node)
+        self._discover_executor_names(tree)
         self._discover_thread_helpers(tree)
+
+    def _discover_executor_names(self, tree: ast.Module) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                self._record_executor_targets(node.value, node.targets)
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                self._record_executor_targets(node.value, [node.target])
+            elif isinstance(node, ast.With):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self._record_executor_targets(item.context_expr, [item.optional_vars])
 
     def _record_import(self, node: ast.Import) -> None:
         for alias in node.names:

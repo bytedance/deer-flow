@@ -137,6 +137,32 @@ def test_scan_file_discovers_same_module_thread_helper_wrappers(tmp_path):
     assert helper.boundary_kind == detector.ASYNCIO_DEFAULT_EXECUTOR
 
 
+def test_scan_file_classifies_dedicated_executor_helper_wrappers(tmp_path):
+    source_file = _write_python(
+        tmp_path / "sample.py",
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor as Pool
+
+        pool = Pool(max_workers=1)
+
+        async def _worker(func, *args):
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(pool, func, *args)
+
+        async def caller():
+            return await _worker(str, "wrapped")
+        """,
+    )
+
+    findings = detector.scan_file(source_file, repo_root=tmp_path)
+    helper = next(finding for finding in findings if finding.category == "THREAD_HELPER_CALL")
+
+    assert helper.function == "caller"
+    assert helper.symbol == "_worker"
+    assert helper.boundary_kind == detector.DEDICATED_EXECUTOR
+
+
 def test_scan_file_identifies_sync_langchain_tool_fallbacks(tmp_path):
     source_file = _write_python(
         tmp_path / "sample.py",

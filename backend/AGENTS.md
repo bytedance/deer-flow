@@ -114,7 +114,8 @@ a stable `boundary_kind`: `asyncio_default_executor`, `dedicated_executor`,
 
 The AST inventory covers `asyncio.to_thread`, default and explicit
 `run_in_executor` submissions, imported aliases, simple same-module helper
-wrappers, `set_default_executor`, `ThreadPoolExecutor` construction/submission,
+wrappers (after pre-registering dedicated executor targets), `set_default_executor`,
+`ThreadPoolExecutor` construction/submission,
 additional event loops, synchronous LangChain tools, and direct
 `BaseChatModel` fallback inheritance. It remains read-only and does not alter
 executor routing or sizing.
