@@ -78,6 +78,41 @@ def compute_run_durations(runs) -> dict[str, int]:
     return durations
 
 
+def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> None:
+    """Attach each run's elapsed seconds to that run's final visible AI message only.
+
+    ``turn_duration`` is the run's wall-clock lifetime (``compute_run_durations``),
+    not model thinking time — it belongs to the run, not to individual messages.
+    Stamping every AI message made the UI repeat the same number once per
+    message and let tool-wait time read as thinking latency (#4152).
+    Middleware-caller messages (e.g. title generation) are skipped so the badge
+    lands on the assistant's actual final answer.
+
+    Accepts both message shapes that carry ``run_id``: event-store rows, which
+    wrap the message payload in a ``content`` dict, and flat serialized
+    checkpoint messages (``/history``), where the payload is the row itself.
+
+    The middleware skip is only effective on the event-store shape: checkpoint
+    messages replayed on ``/history`` never carry ``metadata.caller`` (they are
+    plain serialized LangChain messages), so this skip is inert there. That is
+    not a gap in practice — middleware writes (e.g. title generation) go to
+    thread metadata, not the ``messages`` channel, so no middleware message
+    reaches a checkpoint's ``messages`` list to begin with.
+    """
+    stamped: set[str] = set()
+    for msg in reversed(messages):
+        rid = msg.get("run_id")
+        if not rid or rid in stamped or rid not in run_durations:
+            continue
+        content = msg.get("content")
+        payload = content if isinstance(content, dict) else msg
+        metadata = msg.get("metadata") or {}
+        is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
+        if payload.get("type") == "ai" and not is_middleware:
+            payload.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
+            stamped.add(rid)
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -1102,14 +1137,7 @@ async def list_thread_messages(
     run_durations = compute_run_durations(runs)
 
     if run_durations:
-        for msg in messages:
-            content = msg.get("content", {})
-            if isinstance(content, dict) and content.get("type") == "ai":
-                rid = msg.get("run_id")
-                if rid and rid in run_durations:
-                    if "additional_kwargs" not in content:
-                        content["additional_kwargs"] = {}
-                    content["additional_kwargs"]["turn_duration"] = run_durations[rid]
+        stamp_turn_duration_on_last_ai(messages, run_durations)
 
     return messages
 
@@ -1355,16 +1383,8 @@ async def list_run_messages(
         record = await run_mgr.get(run_id)
         if record:
             durations = compute_run_durations([record])
-            duration = durations.get(run_id)
-            if duration is not None:
-                for msg in reversed(data):
-                    content = msg.get("content")
-                    metadata = msg.get("metadata", {})
-                    is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
-                    if isinstance(content, dict) and content.get("type") == "ai" and not is_middleware:
-                        if "additional_kwargs" not in content:
-                            content["additional_kwargs"] = {}
-                        content["additional_kwargs"]["turn_duration"] = duration
+            if durations:
+                stamp_turn_duration_on_last_ai(data, durations)
 
     return {"data": data, "has_more": has_more}
 

@@ -1312,26 +1312,11 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     )
 
 
-def _ai_message_lacks_duration(message: dict[str, Any]) -> bool:
-    additional_kwargs = message.get("additional_kwargs")
-    return message.get("type") == "ai" and (not isinstance(additional_kwargs, dict) or "turn_duration" not in additional_kwargs)
-
-
 def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
     raw_durations = metadata.get("run_durations") if isinstance(metadata, dict) else None
     if not isinstance(raw_durations, dict):
         return {}
     return {run_id: duration_seconds for run_id, duration_seconds in raw_durations.items() if valid_duration_entry(run_id, duration_seconds)}
-
-
-def _set_message_turn_duration(message: dict[str, Any], run_id: str, run_durations: dict[str, int]) -> None:
-    if message.get("type") != "ai" or run_id not in run_durations:
-        return
-    additional_kwargs = message.get("additional_kwargs")
-    if not isinstance(additional_kwargs, dict):
-        additional_kwargs = {}
-        message["additional_kwargs"] = additional_kwargs
-    additional_kwargs.setdefault("turn_duration", run_durations[run_id])
 
 
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
@@ -1381,11 +1366,14 @@ async def get_thread_history(
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
                     try:
+                        from app.gateway.routers.thread_runs import stamp_turn_duration_on_last_ai
+
                         # Human messages define turn boundaries. New checkpoints
                         # carry the completed turns' durations in metadata, so the
                         # messages channel stays unchanged.
                         checkpoint_run_durations = _checkpoint_run_durations(metadata)
                         current_turn_run_id = None
+                        turn_run_ids: set[str] = set()
                         for msg in serialized_msgs:
                             if msg.get("type") == "human":
                                 additional_kwargs = msg.get("additional_kwargs")
@@ -1399,12 +1387,21 @@ async def get_thread_history(
                                 continue
 
                             msg.setdefault("run_id", current_turn_run_id)
-                            _set_message_turn_duration(msg, current_turn_run_id, checkpoint_run_durations)
+                            if msg.get("type") == "ai":
+                                turn_run_ids.add(current_turn_run_id)
 
-                        # Legacy checkpoints without duration metadata are
-                        # correlated once via event-store + run-manager, then
-                        # upgraded by a metadata-only checkpoint write.
-                        if any(_ai_message_lacks_duration(msg) for msg in serialized_msgs):
+                        # Stamp each run's duration on its last AI message only,
+                        # same as the live message endpoints — never every AI
+                        # message in a multi-message turn (#4152).
+                        stamp_turn_duration_on_last_ai(serialized_msgs, checkpoint_run_durations)
+
+                        # Runs referenced by this checkpoint's AI messages but
+                        # absent from checkpoint metadata are either legacy
+                        # (never migrated) or just completed. Correlate once via
+                        # event-store + run-manager, then upgrade by a
+                        # metadata-only checkpoint write.
+                        missing_run_ids = turn_run_ids - set(checkpoint_run_durations)
+                        if missing_run_ids:
                             from app.gateway.deps import get_run_event_store, get_run_manager
                             from app.gateway.routers.thread_runs import compute_run_durations
                             from deerflow.runtime.runs.worker import persist_run_durations
@@ -1439,7 +1436,8 @@ async def get_thread_history(
                                     run_id = msg_to_run.get(msg.get("id")) or current_turn_run_id
                                     if run_id:
                                         msg["run_id"] = run_id
-                                        _set_message_turn_duration(msg, run_id, run_durations)
+
+                                stamp_turn_duration_on_last_ai(serialized_msgs, run_durations)
 
                                 # Intentional, best-effort write-on-read migration:
                                 # persist legacy metadata after the response so the
