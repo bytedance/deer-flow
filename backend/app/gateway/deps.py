@@ -550,6 +550,10 @@ get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_st
 get_feedback_service: Callable[[Request], FeedbackService] = _require("feedback_service", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
+# Same alias shape as ScheduleServiceDep: routes take the service without a
+# default argument, and swapping the provider is a one-line change here.
+FeedbackServiceDep = Annotated[FeedbackService, Depends(get_feedback_service)]
+
 
 def get_store(request: Request):
     """Return the global store (may be ``None`` if not configured)."""

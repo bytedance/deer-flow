@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_feedback_service
+from app.gateway.deps import FeedbackServiceDep, get_current_user
 from deerflow.domain.feedback import (
     DuplicateFeedbackError,
     Feedback,
@@ -109,10 +109,10 @@ async def upsert_feedback(
     run_id: str,
     body: RateRunRequest,
     request: Request,
+    service: FeedbackServiceDep,
 ) -> FeedbackResponse:
     """Set the current user's rating for a run (idempotent upsert)."""
     user_id = await get_current_user(request)
-    service = get_feedback_service(request)
     try:
         feedback = await service.rate_run(body.to_command(thread_id, run_id, user_id))
     except InvalidRatingError:
@@ -134,10 +134,10 @@ async def delete_run_feedback(
     thread_id: str,
     run_id: str,
     request: Request,
+    service: FeedbackServiceDep,
 ) -> dict[str, bool]:
     """Retract the current user's rating for a run."""
     user_id = await get_current_user(request)
-    service = get_feedback_service(request)
     retracted = await service.retract_run_rating(RetractRunRating(thread_id=thread_id, run_id=run_id, user_id=user_id))
     if not retracted:
         raise HTTPException(status_code=404, detail="No feedback found for this run")
