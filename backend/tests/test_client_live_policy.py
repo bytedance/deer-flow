@@ -85,6 +85,19 @@ def _assert_collection_skipped(result: subprocess.CompletedProcess[str], reason:
     assert all(node_id not in output for node_id in REPRESENTATIVE_LIVE_NODE_IDS)
 
 
+def _dry_run_make_target(target: str) -> str:
+    result = subprocess.run(
+        ["make", "-n", target],
+        cwd=BACKEND_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    return output
+
+
 def test_config_alone_does_not_enable_live_collection(tmp_path: Path) -> None:
     result = _collect_live_tests(tmp_path, config_exists=True, opt_in=False, ci=False)
 
@@ -112,12 +125,17 @@ def test_opt_in_without_config_reports_missing_config(tmp_path: Path) -> None:
 
 
 def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> None:
-    makefile = (BACKEND_ROOT / "Makefile").read_text(encoding="utf-8")
+    default_command = _dry_run_make_target("test")
+    live_command = _dry_run_make_target("test-live")
 
-    assert 'test:\n\tPYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" tests/ -v' in makefile
-    assert "test-live:" in makefile
-    assert f"{LIVE_OPT_IN}=1" in makefile
-    assert "pytest -m live tests/test_client_live.py -v -s" in makefile
+    assert 'pytest -m "not live"' in default_command
+    assert "tests/" in default_command
+    assert LIVE_OPT_IN not in default_command
+
+    assert f"{LIVE_OPT_IN}=1" in live_command
+    assert "pytest -m live" in live_command
+    assert "tests/" in live_command
+    assert "tests/test_client_live.py" not in live_command
 
 
 def test_live_marker_is_registered() -> None:
