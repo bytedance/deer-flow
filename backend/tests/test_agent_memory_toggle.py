@@ -282,3 +282,27 @@ def test_mode_tool_warning_skipped_for_agent_opt_out(monkeypatch, caplog) -> Non
     with caplog.at_level(logging.WARNING, logger=lead_agent_module.__name__):
         lead_agent_module.build_middlewares(runnable, model_name="safe-model", app_config=effective, memory_opt_out=True)
     assert "memory tools will not be registered" not in caplog.text
+
+
+def test_agent_memory_opt_out_flag_reads_the_agent_field() -> None:
+    """The flag answers "did the agent ask for no memory" and nothing else."""
+    from deerflow.agents.lead_agent.agent import agent_memory_opt_out
+
+    assert agent_memory_opt_out(AgentConfig(name="off", memory={"enabled": False})) is True
+    assert agent_memory_opt_out(AgentConfig(name="on", memory={"enabled": True})) is False
+    assert agent_memory_opt_out(AgentConfig(name="unset")) is False
+    assert agent_memory_opt_out(None) is False
+
+
+def test_agent_memory_opt_out_flag_does_not_care_about_fold_identity() -> None:
+    """Even when the fold returns a copy, a memory-on agent keeps the flag off.
+
+    This is the coupling the reviewer flagged: if apply_agent_memory_override
+    ever returns a defensive copy for other reasons, the flag must not flip.
+    """
+    from deerflow.agents.lead_agent.agent import agent_memory_opt_out
+
+    agent_on = AgentConfig(name="worker", memory={"enabled": True})
+    effective = apply_agent_memory_override(_app_config(enabled=True, mode="tool"), agent_on)
+    assert effective is not None  # fold ran; whatever it returned is irrelevant
+    assert agent_memory_opt_out(agent_on) is False

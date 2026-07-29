@@ -108,6 +108,17 @@ def _append_memory_tools_without_name_conflicts(tools: list) -> None:
         existing_names.add(memory_tool.name)
 
 
+def agent_memory_opt_out(agent_config: AgentConfig | None) -> bool:
+    """Whether the agent itself asked to run without memory (issue #3626).
+
+    Read from the agent's own ``memory`` field, not from whether
+    :func:`apply_agent_memory_override` happened to return a copy: the flag
+    must survive a future always-copy refactor of the fold.
+    """
+    memory_override = getattr(agent_config, "memory", None) if agent_config is not None else None
+    return memory_override is not None and not memory_override.enabled
+
+
 def apply_agent_memory_override(app_config: AppConfig, agent_config: AgentConfig | None) -> AppConfig:
     """Fold a custom agent's memory opt-out into the effective app config (issue #3626).
 
@@ -574,11 +585,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # A no-op for every other agent (returns the same object), so behavior is
     # unchanged unless an agent explicitly disables memory.
     resolved_app_config = apply_agent_memory_override(resolved_app_config, agent_config)
-    # The fold returns a copy exactly when it applied an opt-out (same object
-    # otherwise), so identity tells build_middlewares to skip the mode/enabled
-    # mismatch warning — that signal is for a misconfigured global config.yaml,
-    # not for a deliberate per-agent opt-out.
-    memory_opt_out = resolved_app_config is not app_config
+    # Read the opt-out straight from the agent's own config rather than the
+    # fold's return identity, so a future always-copy refactor of the helper
+    # cannot flip this flag. It tells build_middlewares to skip the
+    # mode/enabled mismatch warning — that signal is for a misconfigured
+    # global config.yaml, not for a deliberate per-agent opt-out.
+    memory_opt_out = agent_memory_opt_out(agent_config)
 
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
