@@ -597,10 +597,7 @@ class _StatefulRunRepo:
             row["run_id"] = kwargs["run_id"]
 
     async def has_active_runs(self, task_id: str) -> bool:
-        return any(
-            row["task_id"] == task_id and row["status"] in self._ACTIVE
-            for row in self.rows.values()
-        )
+        return any(row["task_id"] == task_id and row["status"] in self._ACTIVE for row in self.rows.values())
 
     async def mark_stale_active_runs(self, *, error: str) -> int:
         return 0

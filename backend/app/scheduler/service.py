@@ -204,12 +204,7 @@ class ScheduledTaskService:
                 "error": None,
             }
         except Exception as exc:
-            if (
-                launched_run_id is None
-                and self._is_overlap_conflict(exc)
-                and trigger == "scheduled"
-                and task.get("overlap_policy", "skip") == "skip"
-            ):
+            if launched_run_id is None and self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
                 # Pre-launch overlap conflict (e.g. same-thread multitask): no
                 # run was started, so recording a skip and releasing the slot is
                 # safe. Guarded by ``launched_run_id is None`` because a run that
@@ -250,8 +245,7 @@ class ScheduledTaskService:
                     )
                 except Exception:
                     logger.exception(
-                        "Scheduled task-run %s: post-launch bookkeeping failed; "
-                        "run %s is still live (task %s)",
+                        "Scheduled task-run %s: post-launch bookkeeping failed; run %s is still live (task %s)",
                         task_run_id,
                         launched_run_id,
                         task["id"],
