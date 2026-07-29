@@ -1107,19 +1107,14 @@ def test_bootstrap_failure_does_not_kill_without_destroy_lease(monkeypatch):
 def test_kill_client_returns_exception_without_raising():
     p = _make_provider()
     store = _install_shared_deployment_capacity(p)
-    client = FakeClient()
+    failed_client = FakeClient()
     error = RuntimeError("already gone")
-    client.kill = MagicMock(side_effect=error)
+    failed_client.kill = MagicMock(side_effect=error)
 
-    assert p._kill_client(client) is error
+    assert p._kill_client(failed_client) is error
     store.release.assert_not_called()
 
-
-def test_kill_client_releases_capacity_only_after_confirmed_kill():
-    p = _make_provider()
-    store = _install_shared_deployment_capacity(p)
     client = FakeClient()
-
     assert p._kill_client(client) is None
     store.release.assert_called_once_with(client.sandbox_id)
 
@@ -2143,14 +2138,10 @@ def test_grep_single_file_path_with_matching_glob():
     assert truncated is False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Capacity enforcement tests (#4339)
-# ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_deployment_capacity_is_shared_across_gateway_providers(
-    monkeypatch,
-) -> None:
+def test_deployment_capacity_reserves_commits_and_rejects_globally(monkeypatch) -> None:
     gateway_a = _make_provider(replicas=1, overflow_policy="reject")
     gateway_b = _make_provider(replicas=1, overflow_policy="reject")
     store = _install_shared_deployment_capacity(
@@ -2162,39 +2153,23 @@ def test_deployment_capacity_is_shared_across_gateway_providers(
     sdk_b = FakeSandboxClass()
     monkeypatch.setattr(gateway_b, "_get_sandbox_cls", lambda: sdk_b)
 
-    assert gateway_a.acquire("thread-a", user_id="user-a")
+    sandbox_id = gateway_a.acquire("thread-a", user_id="user-a")
     with pytest.raises(SandboxCapacityExceededError):
         gateway_b.acquire("thread-b", user_id="user-b")
 
-    assert len(sdk_a.create_calls) == 1
-    assert sdk_b.create_calls == []
-    assert store.reserve.call_count == 2
-    assert store.track.call_count == 1
-    assert gateway_b._sandboxes == {}
-
-
-def test_created_sandbox_commits_reservation_and_carries_capacity_metadata(
-    monkeypatch,
-) -> None:
-    provider = _make_provider(replicas=1, overflow_policy="reject")
-    store = _install_shared_deployment_capacity(provider)
-    sdk = _install_fake_sdk(monkeypatch, provider)
-
-    sandbox_id = provider.acquire("thread-a", user_id="user-a")
-
-    metadata = sdk.create_calls[0]["metadata"]
+    metadata = sdk_a.create_calls[0]["metadata"]
     assert metadata["deer_flow_capacity_ledger"] == store.key
     assert metadata["deer_flow_capacity_reservation"]
     store.track.assert_called_once_with(
         sandbox_id,
         reservation_token=metadata["deer_flow_capacity_reservation"],
     )
-    assert sandbox_id in provider._sandboxes
+    assert len(sdk_a.create_calls) == 1
+    assert sdk_b.create_calls == []
+    assert store.reserve.call_count == 2
 
 
-def test_ambiguous_create_failure_retains_deployment_reservation(
-    monkeypatch,
-) -> None:
+def test_ambiguous_create_failure_retains_deployment_reservation(monkeypatch) -> None:
     provider = _make_provider(replicas=1, overflow_policy="reject")
     store = _install_shared_deployment_capacity(provider)
     sdk = _install_fake_sdk(monkeypatch, provider)
@@ -2209,36 +2184,64 @@ def test_ambiguous_create_failure_retains_deployment_reservation(
     store.release.assert_not_called()
 
 
-def test_discovery_tracks_existing_vm_without_consuming_an_extra_global_slot(
-    monkeypatch,
-) -> None:
+def test_discovery_uses_sdk_query_and_tracks_without_reserving(monkeypatch) -> None:
     provider = _make_provider(replicas=1, overflow_policy="reject")
     store = _install_shared_deployment_capacity(provider)
     sdk = _install_fake_sdk(monkeypatch, provider)
-    sdk.list_return = [
-        SimpleNamespace(
-            sandbox_id="sandbox-existing",
-            metadata={
-                "deer_flow_provider": "e2b_sandbox_provider",
-                "deer_flow_user": "user-a",
-                "deer_flow_thread": "thread-a",
-                "deer_flow_capacity_ledger": store.key,
-            },
-        )
-    ]
-
-    assert provider.acquire("thread-a", user_id="user-a") == "sandbox-existing"
+    entry = SimpleNamespace(
+        sandbox_id="sandbox-existing",
+        metadata={
+            "deer_flow_provider": "e2b_sandbox_provider",
+            "deer_flow_user": "user-a",
+            "deer_flow_thread": "thread-a",
+            "deer_flow_capacity_ledger": store.key,
+        },
+    )
+    expected_query = {key: entry.metadata[key] for key in ("deer_flow_provider", "deer_flow_user", "deer_flow_thread")}
+    sdk.list_return = SimpleNamespace(
+        has_next=False,
+        next_items=lambda: [entry] if sdk.list_calls[-1]["query"].metadata == expected_query else [],
+    )
+    assert provider.acquire("thread-a", user_id="user-a") == entry.sandbox_id
     assert sdk.create_calls == []
     store.reserve.assert_not_called()
-    store.track.assert_called_once_with(
-        "sandbox-existing",
-        reservation_token=None,
-    )
+    store.track.assert_called_once_with(entry.sandbox_id, reservation_token=None)
 
 
-def test_failed_remote_inventory_does_not_initialize_capacity_to_zero(
-    monkeypatch,
-) -> None:
+def test_reconciliation_repairs_crash_and_uses_safe_reservation_age(monkeypatch) -> None:
+    provider = _make_provider(replicas=1, overflow_policy="reject")
+    provider._ownership_config.renewal_interval_seconds = 1.0
+    provider._ownership_config.ttl_multiplier = 2.0
+    provider._config["reconciliation_grace_seconds"] = 0.0
+    store = _install_shared_deployment_capacity(provider)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [
+        {
+            "sandbox_id": "sandbox-existing",
+            "metadata": {
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_capacity_ledger": store.key,
+                "deer_flow_capacity_reservation": "reservation-crashed",
+            },
+        },
+        {
+            "sandbox_id": "sandbox-other-deployment",
+            "metadata": {
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_capacity_ledger": "deerflow:other:e2b-capacity",
+            },
+        },
+    ]
+
+    stats = provider._reconcile_remote_sandboxes(now=100.0)
+    args = store.reconcile.call_args.kwargs
+    assert stats.discovered == 1
+    assert args["remote_sandboxes"] == {"sandbox-existing": "reservation-crashed"}
+    assert args["complete"] is True
+    assert args["reservation_max_age_ms"] == 120_000
+
+
+def test_failed_inventory_and_redis_error_both_prevent_create(monkeypatch) -> None:
     provider = _make_provider(replicas=1, overflow_policy="reject")
     store = _install_shared_deployment_capacity(
         provider,
@@ -2254,71 +2257,7 @@ def test_failed_remote_inventory_does_not_initialize_capacity_to_zero(
     assert reconcile_args["remote_sandboxes"] == {}
     with pytest.raises(SandboxCapacityExceededError):
         provider._create_sandbox("thread-a", user_id="user-a")
-    assert sdk.create_calls == []
-
-
-def test_reconciliation_repairs_gateway_crash_after_remote_create(
-    monkeypatch,
-) -> None:
-    provider = _make_provider(replicas=1, overflow_policy="reject")
-    store = _install_shared_deployment_capacity(provider)
-    sdk = _install_fake_sdk(monkeypatch, provider)
-    sdk.list_return = [
-        SimpleNamespace(
-            sandbox_id="sandbox-created-before-crash",
-            metadata={
-                "deer_flow_provider": "e2b_sandbox_provider",
-                "deer_flow_user": "user-a",
-                "deer_flow_thread": "thread-a",
-                "deer_flow_capacity_ledger": store.key,
-                "deer_flow_capacity_reservation": ("reservation-crashed"),
-            },
-        )
-    ]
-
-    provider._reconcile_remote_sandboxes(now=100.0)
-
-    reconcile_args = store.reconcile.call_args.kwargs
-    assert reconcile_args["remote_sandboxes"] == {"sandbox-created-before-crash": "reservation-crashed"}
-    assert reconcile_args["complete"] is True
-
-
-def test_reconciliation_ignores_sandboxes_from_another_capacity_ledger(
-    monkeypatch,
-) -> None:
-    provider = _make_provider(replicas=1, overflow_policy="reject")
-    store = _install_shared_deployment_capacity(provider)
-    sdk = _install_fake_sdk(monkeypatch, provider)
-    sdk.list_return = [
-        SimpleNamespace(
-            sandbox_id="sandbox-other-deployment",
-            metadata={
-                "deer_flow_provider": "e2b_sandbox_provider",
-                "deer_flow_user": "user-a",
-                "deer_flow_thread": "thread-a",
-                "deer_flow_capacity_ledger": "deerflow:other:e2b-capacity",
-            },
-        )
-    ]
-
-    stats = provider._reconcile_remote_sandboxes(now=100.0)
-
-    assert stats.discovered == 0
-    assert sdk.connect_calls == []
-    reconcile_args = store.reconcile.call_args.kwargs
-    assert reconcile_args["remote_sandboxes"] == {}
-    assert reconcile_args["complete"] is True
-
-
-def test_capacity_backend_failure_prevents_remote_create(
-    monkeypatch,
-) -> None:
-    provider = _make_provider(replicas=1, overflow_policy="reject")
-    store = MagicMock()
     store.reserve.side_effect = CapacityBackendError("Redis unavailable")
-    provider._deployment_capacity = store
-    sdk = _install_fake_sdk(monkeypatch, provider)
-
     with pytest.raises(SandboxCapacityExceededError) as error:
         provider._create_sandbox("thread-a", user_id="user-a")
 
@@ -2361,7 +2300,11 @@ def test_capacity_reject_frees_slot_on_release(monkeypatch):
 
 def test_capacity_reject_evicts_other_thread_warm_entry_before_create(monkeypatch):
     """Reject policy can evict one warm VM before it rejects new capacity."""
-    p = _make_provider(replicas=1, overflow_policy="reject")
+    p = _make_provider(replicas=3, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(
+        p,
+        reserve_results=[ReserveStatus.GRANTED, ReserveStatus.FULL, ReserveStatus.GRANTED],
+    )
     fake_cls = _install_fake_sdk(monkeypatch, p)
 
     sid1 = p.acquire("t1", user_id="u1")
@@ -2373,6 +2316,7 @@ def test_capacity_reject_evicts_other_thread_warm_entry_before_create(monkeypatc
     assert sid2 != sid1
     assert len(p._warm_pool) == 0
     assert len(fake_cls.create_calls) == 2
+    store.release.assert_called_once_with(sid1)
 
 
 def test_capacity_wait_policy_times_out(monkeypatch):

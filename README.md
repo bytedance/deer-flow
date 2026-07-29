@@ -904,23 +904,16 @@ Use `burst` with `burst_limit` to permit bounded extra VMs. The `wait` and
 `reject` policies use only `replicas`. The `reject` policy can remove one warm
 VM before it returns an error.
 
-With the default in-memory ownership store, `replicas` limits one Gateway
-process. When `sandbox.ownership.type: redis` is enabled, E2B uses one Redis
-capacity ledger shared by every Gateway worker with the same
-`sandbox.ownership.key_prefix`; `replicas` (plus `burst_limit` only for
-`burst`) is then a deployment-wide hard limit. Use a unique key prefix per
-deployment.
+With in-memory ownership, `replicas` limits one Gateway process. With Redis
+ownership, E2B shares one capacity Hash between workers using the same
+`sandbox.ownership.key_prefix`; `replicas` (plus a configured burst) is then a
+deployment-wide hard limit. Use one unique prefix and the same effective limit
+per deployment. To change the limit, stop its Gateways, delete the capacity
+Hash, and restart; mismatched workers fail closed.
 
-All workers in a deployment must use the same effective hard limit. Changing
-that limit requires a coordinated Gateway stop, deletion of the deployment's
-capacity Hash, and restart; reconciliation rebuilds the Hash from E2B before
-admission resumes. A mismatched worker fails closed instead of silently
-changing a live deployment's limit.
-
-The ledger counts remote VMs and in-flight creates. It repairs interrupted
-creates from E2B metadata and fails closed for new creates while Redis or the
-initial E2B inventory is unavailable. Run Redis with persistence, a
-non-evicting memory policy, and HA.
+The Hash counts remote VMs and in-flight creates, repairs interrupted creates
+from E2B metadata, and blocks new creates while Redis or initial inventory is
+unavailable. Run Redis with persistence, non-evicting memory, and HA.
 
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.

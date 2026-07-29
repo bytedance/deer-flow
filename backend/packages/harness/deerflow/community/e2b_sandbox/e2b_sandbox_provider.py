@@ -47,6 +47,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
@@ -86,6 +87,9 @@ DEFAULT_RECONCILIATION_ORPHAN_TTL_SECONDS = 3600.0
 DEFAULT_RECONCILIATION_MAX_PAGES = 10
 DEFAULT_RECONCILIATION_MAX_ITEMS = 200
 DEFAULT_RECONCILIATION_MAX_SECONDS = 15.0
+# Twice the E2B SDK's 60-second create request timeout. Short ownership lease
+# settings must not make an in-flight create look abandoned.
+MIN_CAPACITY_RESERVATION_SECONDS = 120.0
 # Hard upper bound for ``set_timeout`` (e2b currently caps at 24h on the
 # free plan; passing an excessive value is rejected by the control-plane).
 MAX_E2B_TIMEOUT = 24 * 60 * 60
@@ -708,9 +712,9 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             self._end_transition_locked()
 
-    def _stale_capacity_reservation_before_ms(self) -> int:
-        retention_seconds = compute_lease_ttl(self._ownership_config) + float(self._config["reconciliation_grace_seconds"])
-        return int((time.time() - retention_seconds) * 1_000)
+    def _capacity_reservation_max_age_ms(self) -> int:
+        configured = compute_lease_ttl(self._ownership_config) + float(self._config["reconciliation_grace_seconds"])
+        return int(max(configured, MIN_CAPACITY_RESERVATION_SECONDS) * 1_000)
 
     def _capacity_error(
         self,
@@ -733,6 +737,7 @@ class E2BSandboxProvider(SandboxProvider):
         sandbox_id: str,
         *,
         reservation_token: str | None = None,
+        required: bool = True,
     ) -> None:
         store = self._deployment_capacity
         if store is None:
@@ -743,30 +748,13 @@ class E2BSandboxProvider(SandboxProvider):
                 reservation_token=reservation_token,
             )
         except CapacityBackendError as error:
-            raise self._capacity_error(
-                f"Deployment-wide E2B capacity is unavailable; cannot safely track sandbox {sandbox_id}",
-                reason="capacity_backend",
-            ) from error
-
-    def _commit_deployment_reservation(
-        self,
-        reservation_token: str | None,
-        sandbox_id: str,
-    ) -> None:
-        store = self._deployment_capacity
-        if store is None or reservation_token is None:
-            return
-        try:
-            store.track(
-                sandbox_id,
-                reservation_token=reservation_token,
-            )
-        except CapacityBackendError as error:
-            # The reservation remains conservative capacity.  E2B metadata
-            # lets the next complete reconciliation repair this transition.
+            if required:
+                raise self._capacity_error(
+                    f"Deployment-wide E2B capacity is unavailable; cannot safely track sandbox {sandbox_id}",
+                    reason="capacity_backend",
+                ) from error
             logger.warning(
-                "Could not commit E2B capacity reservation %s to sandbox %s; reconciliation will retry: %s",
-                reservation_token,
+                "Could not track E2B sandbox %s in deployment capacity; reconciliation will retry: %s",
                 sandbox_id,
                 error,
             )
@@ -792,25 +780,79 @@ class E2BSandboxProvider(SandboxProvider):
         remote_id: str | None = None,
         remote_owned: bool = True,
     ) -> str | None:
-        """Acquire a capacity slot, blocking or raising as configured.
-
-        New creates reserve both the process-local lifecycle slot and the
-        deployment ledger.  Adopting an existing remote VM only tracks its id
-        in the deployment ledger, so ownership transfer cannot double-count
-        it.  Redis calls are never made while ``self._lock`` is held.
-
-        Raises:
-            SandboxCapacityExceededError: when the overflow policy is
-                ``reject`` or the wait timeout expires.
-        """
+        """Reserve local capacity, then deployment capacity for a new VM."""
+        store = self._deployment_capacity
         policy = self._config["overflow_policy"]
         timeout = float(self._config["acquire_timeout"])
         deadline = time.monotonic() + timeout
-        store = self._deployment_capacity
-        reservation_token = uuid.uuid4().hex if store is not None and remote_id is None else None
+        token = uuid.uuid4().hex if store is not None and remote_id is None else None
 
         while True:
-            local_reserved = False
+            self._reserve_local_capacity(
+                thread_id,
+                user_id,
+                remote_id=remote_id,
+                remote_owned=remote_owned,
+                deadline=deadline,
+            )
+            if store is None or remote_id is not None:
+                return token
+
+            assert token is not None
+            backend_error = None
+            try:
+                status = store.reserve(token)
+            except CapacityBackendError as error:
+                backend_error = error
+                status = None
+            if status is ReserveStatus.GRANTED:
+                return token
+            self._release_capacity()
+            if status is ReserveStatus.FULL and self._evict_oldest_warm() is not None:
+                continue
+
+            if policy != "wait":
+                if backend_error is not None:
+                    raise self._capacity_error(
+                        "Deployment-wide E2B capacity is unavailable",
+                        reason="capacity_backend",
+                    ) from backend_error
+                if status is ReserveStatus.NOT_READY:
+                    raise self._capacity_error(
+                        "Deployment-wide E2B capacity is initializing",
+                        reason="capacity_initializing",
+                    )
+                raise self._capacity_error("Deployment-wide E2B capacity is full")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise self._capacity_error(f"Timed out after {timeout}s waiting for deployment-wide E2B capacity")
+            with self._capacity_cond:
+                self._capacity_cond.wait(timeout=min(remaining, 1.0))
+
+    def _reserve_local_capacity(
+        self,
+        thread_id: str | None,
+        user_id: str,
+        *,
+        remote_id: str | None = None,
+        remote_owned: bool = True,
+        deadline: float | None = None,
+    ) -> None:
+        """Acquire the existing process-local lifecycle slot."""
+        policy = self._config["overflow_policy"]
+        timeout = float(self._config["acquire_timeout"])
+        deadline = deadline or time.monotonic() + timeout
+
+        while True:
+            with self._lock:
+                if self._shutdown_called:
+                    raise SandboxCapacityExceededError(
+                        "Sandbox provider is shutting down; cannot acquire capacity",
+                        replicas=int(self._config["replicas"]),
+                        retry_after_seconds=30.0,
+                        reason="shutdown",
+                    )
+
             with self._lock:
                 if self._shutdown_called:
                     raise SandboxCapacityExceededError(
@@ -825,46 +867,26 @@ class E2BSandboxProvider(SandboxProvider):
                     if remote_id is not None:
                         remote_ops = self._remote_ops_in_progress if remote_owned else self._unowned_remote_ops_in_progress
                         remote_ops.add(remote_id)
-                    local_reserved = True
+                    return
 
-            deployment_status: ReserveStatus | None = None
-            backend_error: CapacityBackendError | None = None
-            if local_reserved:
-                if store is None or remote_id is not None:
-                    return reservation_token
-                assert reservation_token is not None
-                try:
-                    deployment_status = store.reserve(reservation_token)
-                except CapacityBackendError as error:
-                    backend_error = error
-                if deployment_status is ReserveStatus.GRANTED:
-                    return reservation_token
-                self._release_capacity()
+            evicted = self._evict_oldest_warm()
+            if evicted is not None:
+                with self._lock:
+                    if self._shutdown_called:
+                        raise SandboxCapacityExceededError(
+                            "Sandbox provider shut down while acquiring capacity",
+                            replicas=int(self._config["replicas"]),
+                            retry_after_seconds=30.0,
+                            reason="shutdown",
+                        )
+                    if self._total_capacity_used_locked() < cap:
+                        self._reserved_slots += 1
+                        if remote_id is not None:
+                            remote_ops = self._remote_ops_in_progress if remote_owned else self._unowned_remote_ops_in_progress
+                            remote_ops.add(remote_id)
+                        return
 
-            if (not local_reserved or deployment_status is ReserveStatus.FULL) and self._evict_oldest_warm() is not None:
-                continue
-
-            remaining = deadline - time.monotonic()
-            if backend_error is not None:
-                if policy != "wait":
-                    raise self._capacity_error(
-                        "Deployment-wide E2B capacity is unavailable; creation is disabled to preserve the hard limit",
-                        reason="capacity_backend",
-                    ) from backend_error
-            elif deployment_status is ReserveStatus.NOT_READY:
-                if policy != "wait":
-                    raise self._capacity_error(
-                        "Deployment-wide E2B capacity is initializing from the remote inventory",
-                        reason="capacity_initializing",
-                    )
-            elif policy == "reject":
-                raise self._capacity_error(f"All {cap} sandbox capacity slots are in use and overflow_policy is 'reject'")
-            elif policy == "burst":
-                raise self._capacity_error(f"All {cap} sandbox capacity slots are in use (replicas={self._config['replicas']}, burst={self._config['burst_limit']})")
-
-            if remaining <= 0:
-                raise self._capacity_error(f"Timed out after {timeout}s waiting for a sandbox capacity slot (replicas={self._config['replicas']})")
-            with self._capacity_cond:
+            with self._lock:
                 if self._shutdown_called:
                     raise SandboxCapacityExceededError(
                         "Sandbox provider is shutting down; cannot acquire capacity",
@@ -872,7 +894,38 @@ class E2BSandboxProvider(SandboxProvider):
                         retry_after_seconds=30.0,
                         reason="shutdown",
                     )
-                self._capacity_cond.wait(timeout=min(remaining, 1.0))
+                used = self._total_capacity_used_locked()
+                cap = self._capacity_limit()
+
+                if used >= cap:
+                    if policy == "reject":
+                        raise SandboxCapacityExceededError(
+                            f"All {cap} sandbox capacity slots are in use and overflow_policy is 'reject'",
+                            active=len(self._sandboxes),
+                            warm=len(self._warm_pool),
+                            reserved=self._reserved_slots,
+                            replicas=int(self._config["replicas"]),
+                        )
+
+                    if policy == "burst":
+                        raise SandboxCapacityExceededError(
+                            f"All {cap} sandbox capacity slots are in use (replicas={self._config['replicas']}, burst={self._config['burst_limit']})",
+                            active=len(self._sandboxes),
+                            warm=len(self._warm_pool),
+                            reserved=self._reserved_slots,
+                            replicas=int(self._config["replicas"]),
+                        )
+
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise SandboxCapacityExceededError(
+                            f"Timed out after {timeout}s waiting for a sandbox capacity slot (replicas={self._config['replicas']}, active={len(self._sandboxes)}, warm={len(self._warm_pool)}, reserved={self._reserved_slots})",
+                            active=len(self._sandboxes),
+                            warm=len(self._warm_pool),
+                            reserved=self._reserved_slots,
+                            replicas=int(self._config["replicas"]),
+                        )
+                    self._capacity_cond.wait(timeout=min(remaining, 1.0))
 
     def _release_capacity(self) -> None:
         """Release a reserved slot (call on create failure or destroy)."""
@@ -971,9 +1024,10 @@ class E2BSandboxProvider(SandboxProvider):
             raise
 
         sandbox_id: str = getattr(client, "sandbox_id", None) or str(uuid.uuid4())[:8]
-        self._commit_deployment_reservation(
-            reservation_token,
+        self._track_deployment_sandbox(
             sandbox_id,
+            reservation_token=reservation_token,
+            required=False,
         )
         if not self._track_reserved_remote_op(sandbox_id):
             kill_error = self._kill_client(client)
@@ -1111,13 +1165,8 @@ class E2BSandboxProvider(SandboxProvider):
         """List E2B entries and report budget exhaustion and completeness."""
         sandbox_cls = self._get_sandbox_cls()
         try:
-            result = sandbox_cls.list(query={"metadata": metadata}, **self._common_kwargs())  # type: ignore[attr-defined]
-        except TypeError:
-            try:
-                result = sandbox_cls.list(metadata=metadata, **self._common_kwargs())  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.warning("E2B reconciliation list failed: %s", e)
-                return [], False, False
+            query = SandboxQuery(metadata=metadata)
+            result = sandbox_cls.list(query=query, **self._common_kwargs())  # type: ignore[attr-defined]
         except Exception as e:
             logger.warning("E2B reconciliation list failed: %s", e)
             return [], False, False
@@ -1260,8 +1309,21 @@ class E2BSandboxProvider(SandboxProvider):
         self._lease_thread.start()
         self._reconcile_thread.start()
 
-    def _reserve_reconciliation_capacity(self, sandbox_id: str) -> bool:
+    def _reserve_reconciliation_capacity(
+        self,
+        sandbox_id: str,
+        *,
+        reservation_token: str | None = None,
+    ) -> bool:
         """Reserve one local slot for adoption without blocking maintenance."""
+        try:
+            self._track_deployment_sandbox(
+                sandbox_id,
+                reservation_token=reservation_token,
+            )
+        except SandboxCapacityExceededError as error:
+            logger.warning("Could not track discovered E2B sandbox %s: %s", sandbox_id, error)
+            return False
         with self._lock:
             if self._shutdown_called or self._total_capacity_used_locked() >= self._capacity_limit():
                 return False
@@ -1297,7 +1359,7 @@ class E2BSandboxProvider(SandboxProvider):
                     expected_revision=capacity_revision,
                     remote_sandboxes=records,
                     complete=inventory_complete,
-                    stale_reservation_before_ms=(self._stale_capacity_reservation_before_ms()),
+                    reservation_max_age_ms=self._capacity_reservation_max_age_ms(),
                 )
                 if not applied:
                     logger.debug("E2B capacity inventory became stale during reconciliation; retrying on the next pass")
@@ -1354,25 +1416,10 @@ class E2BSandboxProvider(SandboxProvider):
                 already_local = canonical_id in self._sandboxes
             if already_local:
                 self._safe_close_client(canonical_client)
-            else:
-                try:
-                    self._track_deployment_sandbox(
-                        canonical_id,
-                        reservation_token=(self._capacity_reservation_from_metadata(canonical_metadata)),
-                    )
-                except SandboxCapacityExceededError as error:
-                    logger.warning(
-                        "Could not track discovered E2B sandbox %s in deployment capacity: %s",
-                        canonical_id,
-                        error,
-                    )
-                    self._safe_close_client(canonical_client)
-                    stats.deferred += 1
-                    canonical_client = None
-
-            if already_local or canonical_client is None:
-                pass
-            elif not self._reserve_reconciliation_capacity(canonical_id):
+            elif not self._reserve_reconciliation_capacity(
+                canonical_id,
+                reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
+            ):
                 self._safe_close_client(canonical_client)
                 stats.deferred += 1
             elif not self._claim_ownership(canonical_id):
@@ -1498,7 +1545,6 @@ class E2BSandboxProvider(SandboxProvider):
         except Exception as error:
             if _is_sandbox_gone_error(error):
                 self._release_deployment_sandbox(sandbox_id)
-            raise
             raise
         if self._client_alive(client):
             return client

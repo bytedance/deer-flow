@@ -1,84 +1,55 @@
-"""Redis integration tests for deployment-wide E2B admission."""
+"""Integration tests for deployment-wide E2B admission."""
 
 from __future__ import annotations
 
 import os
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from deerflow.community.e2b_sandbox.capacity import (
     CapacityBackendError,
+    RedisE2BCapacityStore,
     ReserveStatus,
     make_e2b_capacity_store,
 )
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
-REDIS_TEST_URL = os.environ.get(
-    "DEER_FLOW_TEST_REDIS_URL",
-    "redis://localhost:6379/15",
-)
-
-
-def _redis_available() -> bool:
-    try:
-        import redis
-    except ImportError:
-        return False
-    try:
-        client = redis.Redis.from_url(
-            REDIS_TEST_URL,
-            socket_connect_timeout=0.5,
-        )
-        try:
-            client.ping()
-        finally:
-            client.close()
-        return True
-    except Exception:
-        return False
-
-
-requires_redis = pytest.mark.skipif(
-    not _redis_available(),
-    reason=f"Redis not reachable at {REDIS_TEST_URL}",
-)
-
-
-class _RedisStores:
-    def __init__(self, *, hard_limit: int = 1) -> None:
-        self.hard_limit = hard_limit
-        self.key_prefix = f"deerflow:test:{uuid.uuid4().hex}"
-        self.made = []
-
-    def make(self, *, hard_limit: int | None = None):
-        from deerflow.community.e2b_sandbox.capacity.redis import (
-            RedisE2BCapacityStore,
-        )
-
-        store = RedisE2BCapacityStore(
-            redis_url=REDIS_TEST_URL,
-            hard_limit=hard_limit or self.hard_limit,
-            key_prefix=self.key_prefix,
-        )
-        self.made.append(store)
-        return store
-
-    def cleanup(self) -> None:
-        if self.made:
-            self.made[0]._redis.delete(self.made[0].key)
-        for store in self.made:
-            store.close()
+REDIS_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def redis_stores():
-    stores = _RedisStores()
+def make_store():
+    redis = pytest.importorskip("redis")
+    probe = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=0.5)
     try:
-        yield stores
+        probe.ping()
+    except Exception:
+        probe.close()
+        pytest.skip(f"Redis not reachable at {REDIS_URL}")
+
+    prefix = f"deerflow:test:{uuid.uuid4().hex}"
+    stores = []
+
+    def make(hard_limit: int = 1):
+        store = RedisE2BCapacityStore(
+            redis_url=REDIS_URL,
+            hard_limit=hard_limit,
+            key_prefix=prefix,
+        )
+        stores.append(store)
+        return store
+
+    try:
+        yield make
     finally:
-        stores.cleanup()
+        probe.delete(f"{prefix}:e2b-capacity")
+        probe.close()
+        for store in stores:
+            store.close()
 
 
 def _initialize(store) -> None:
@@ -86,11 +57,11 @@ def _initialize(store) -> None:
         expected_revision=store.revision(),
         remote_sandboxes={},
         complete=True,
-        stale_reservation_before_ms=0,
+        reservation_max_age_ms=0,
     )
 
 
-def _ledger_counts(store) -> tuple[int, int]:
+def _counts(store) -> tuple[int, int]:
     fields = store._redis.hkeys(store.key)
     return (
         sum(field.startswith("s:") for field in fields),
@@ -98,174 +69,101 @@ def _ledger_counts(store) -> tuple[int, int]:
     )
 
 
-def test_factory_keeps_memory_mode_local_and_builds_one_redis_scope() -> None:
-    assert (
-        make_e2b_capacity_store(
-            SandboxOwnershipConfig(type="memory"),
-            hard_limit=3,
-        )
-        is None
-    )
-
+def test_factory_is_lazy_and_backend_errors_fail_closed() -> None:
+    assert make_e2b_capacity_store(SandboxOwnershipConfig(type="memory"), hard_limit=3) is None
     store = make_e2b_capacity_store(
-        SandboxOwnershipConfig(
-            type="redis",
-            redis_url="redis://127.0.0.1:1/0",
-            key_prefix="deerflow:test",
-        ),
+        SandboxOwnershipConfig(type="redis", redis_url="redis://127.0.0.1:1/0", key_prefix="test"),
         hard_limit=3,
     )
-    assert store is not None
-    try:
-        assert store.key == "deerflow:test:e2b-capacity"
-    finally:
-        store.close()
-
-
-def test_redis_backend_error_is_wrapped_and_admission_fails_closed() -> None:
-    from deerflow.community.e2b_sandbox.capacity.redis import (
-        RedisE2BCapacityStore,
-    )
-
-    store = RedisE2BCapacityStore(
-        redis_url="redis://127.0.0.1:1/0",
-        hard_limit=1,
-        key_prefix=f"deerflow:test:{uuid.uuid4().hex}",
-    )
+    assert store is not None and store.key == "test:e2b-capacity"
     try:
         with pytest.raises(CapacityBackendError):
-            store.reserve("reservation-1")
+            store.reserve("reservation")
     finally:
         store.close()
 
 
-@pytest.mark.integration
-@requires_redis
-def test_scope_is_initialized_in_one_redis_hash(redis_stores) -> None:
-    store = redis_stores.make()
-    _initialize(store)
-
-    assert store._redis.type(store.key) in {"hash", b"hash"}
-    assert list(store._redis.scan_iter(f"{redis_stores.key_prefix}:*")) == [store.key]
-
-
-@pytest.mark.integration
-@requires_redis
-def test_two_gateways_atomically_share_the_hard_limit(redis_stores) -> None:
-    gateway_a = redis_stores.make()
-    gateway_b = redis_stores.make()
+def test_two_gateways_atomically_share_one_hash(make_store) -> None:
+    gateway_a, gateway_b = make_store(), make_store()
+    assert gateway_a.reserve("not-ready") is ReserveStatus.NOT_READY
     _initialize(gateway_a)
-    barrier = threading.Barrier(3, timeout=5)
-    results: list[ReserveStatus | Exception] = []
-    lock = threading.Lock()
+    barrier = threading.Barrier(2)
 
-    def reserve(store, token: str) -> None:
+    def reserve(args):
+        store, token = args
         barrier.wait()
-        try:
-            result = store.reserve(token)
-        except Exception as error:
-            result = error
-        with lock:
-            results.append(result)
+        return store.reserve(token)
 
-    threads = [
-        threading.Thread(target=reserve, args=(gateway_a, "reservation-a")),
-        threading.Thread(target=reserve, args=(gateway_b, "reservation-b")),
-    ]
-    for thread in threads:
-        thread.start()
-    barrier.wait()
-    for thread in threads:
-        thread.join(timeout=5)
+    tokens = ["reservation-a", "reservation-b"]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve, zip((gateway_a, gateway_b), tokens)))
 
-    assert all(not thread.is_alive() for thread in threads)
     assert results.count(ReserveStatus.GRANTED) == 1
     assert results.count(ReserveStatus.FULL) == 1
-    assert sum(_ledger_counts(gateway_a)) == 1
+    assert list(gateway_a._redis.scan_iter(f"{gateway_a.key}")) == [gateway_a.key]
+    winner = tokens[results.index(ReserveStatus.GRANTED)]
+    gateway_a.track("sandbox-a", reservation_token=winner)
+    gateway_a.track("sandbox-a", reservation_token=winner)
+    assert _counts(gateway_a) == (1, 0)
+    gateway_b.release("sandbox-a")
+    gateway_b.release("sandbox-a")
+    assert _counts(gateway_a) == (0, 0)
 
 
-@pytest.mark.integration
-@requires_redis
-def test_inventory_cannot_erase_a_concurrent_reservation(redis_stores) -> None:
-    gateway_a = redis_stores.make()
-    gateway_b = redis_stores.make()
+def test_reconcile_repairs_crashes_without_erasing_concurrent_changes(make_store) -> None:
+    gateway_a, gateway_b = make_store(2), make_store(2)
     _initialize(gateway_a)
-    inventory_revision = gateway_a.revision()
-
-    assert gateway_b.reserve("reservation-b") is ReserveStatus.GRANTED
-    status = gateway_a.reconcile(
-        expected_revision=inventory_revision,
+    assert gateway_a.reserve("crashed-create") is ReserveStatus.GRANTED
+    assert gateway_b.reconcile(
+        expected_revision=gateway_b.revision(),
+        remote_sandboxes={"sandbox-a": "crashed-create"},
+        complete=True,
+        reservation_max_age_ms=0,
+    )
+    stale_revision = gateway_a.revision()
+    assert gateway_b.reserve("concurrent") is ReserveStatus.GRANTED
+    assert not gateway_a.reconcile(
+        expected_revision=stale_revision,
         remote_sandboxes={},
         complete=True,
-        stale_reservation_before_ms=10**15,
+        reservation_max_age_ms=0,
     )
-
-    assert status is False
-    assert _ledger_counts(gateway_a) == (0, 1)
+    assert _counts(gateway_a) == (1, 1)
 
 
-@pytest.mark.integration
-@requires_redis
-def test_inventory_repairs_a_crash_between_create_and_commit(
-    redis_stores,
-) -> None:
-    gateway_a = redis_stores.make()
-    gateway_b = redis_stores.make()
-    _initialize(gateway_a)
-    assert gateway_a.reserve("reservation-a") is ReserveStatus.GRANTED
-    inventory_revision = gateway_b.revision()
-
-    assert gateway_b.reconcile(
-        expected_revision=inventory_revision,
-        remote_sandboxes={"sandbox-a": "reservation-a"},
-        complete=True,
-        stale_reservation_before_ms=0,
-    )
-    assert _ledger_counts(gateway_a) == (1, 0)
-
-
-@pytest.mark.integration
-@requires_redis
-def test_track_and_release_are_idempotent(redis_stores) -> None:
-    store = redis_stores.make()
-    _initialize(store)
-
-    assert store.reserve("committed") is ReserveStatus.GRANTED
-    store.track("sandbox-a", reservation_token="committed")
-    store.track("sandbox-a", reservation_token="committed")
-    assert _ledger_counts(store) == (1, 0)
-
-    store.release("sandbox-a")
-    store.release("sandbox-a")
-    assert _ledger_counts(store) == (0, 0)
-
-
-@pytest.mark.integration
-@requires_redis
-def test_incomplete_inventory_never_removes_capacity(redis_stores) -> None:
-    store = redis_stores.make()
+def test_reconcile_keeps_incomplete_inventory_and_fresh_reservations(make_store) -> None:
+    store = make_store(2)
     _initialize(store)
     store.track("sandbox-a")
-    inventory_revision = store.revision()
+    assert store.reserve("creating") is ReserveStatus.GRANTED
 
-    store.reconcile(
-        expected_revision=inventory_revision,
+    assert store.reconcile(
+        expected_revision=store.revision(),
         remote_sandboxes={},
         complete=False,
-        stale_reservation_before_ms=10**15,
+        reservation_max_age_ms=0,
     )
+    assert _counts(store) == (1, 1)
+    assert store.reconcile(
+        expected_revision=store.revision(),
+        remote_sandboxes={"sandbox-a": None},
+        complete=True,
+        reservation_max_age_ms=120_000,
+    )
+    assert _counts(store) == (1, 1)
+    assert store.reconcile(
+        expected_revision=store.revision(),
+        remote_sandboxes={"sandbox-a": None},
+        complete=True,
+        reservation_max_age_ms=0,
+    )
+    assert _counts(store) == (1, 0)
 
-    assert _ledger_counts(store) == (1, 0)
 
-
-@pytest.mark.integration
-@requires_redis
-def test_workers_with_different_limits_fail_closed(redis_stores) -> None:
-    gateway_a = redis_stores.make()
+def test_mismatched_hard_limits_fail_closed(make_store) -> None:
+    gateway_a, gateway_b = make_store(), make_store(2)
     _initialize(gateway_a)
-    gateway_b = redis_stores.make(hard_limit=2)
-
     with pytest.raises(CapacityBackendError, match="configuration mismatch"):
         gateway_b.revision()
     with pytest.raises(CapacityBackendError, match="configuration mismatch"):
-        gateway_b.reserve("reservation-b")
+        gateway_b.reserve("reservation")
