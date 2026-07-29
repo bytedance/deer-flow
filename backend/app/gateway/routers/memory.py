@@ -428,7 +428,7 @@ async def export_memory(http_request: Request) -> MemoryResponse:
     manager = await asyncio.to_thread(get_memory_manager)
     user_id = _resolve_memory_user_id(http_request)
     try:
-        memory_data = await asyncio.to_thread(manager.export_memory, user_id)
+        memory_data = await asyncio.to_thread(lambda: manager.export_memory(user_id=user_id))
     except NotImplementedError:
         memory_data = await _get_memory_or_501(manager, user_id, "export memory")
     return MemoryResponse(**memory_data)
