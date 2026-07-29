@@ -12,7 +12,20 @@ def query_parent_sales(
     summary_field: str = "parent_asin",
     length: int = 100,
 ) -> list[dict]:
-    """查询产品表现（父ASIN 级）。返回达成率/Sessions/CVR/Orders/销售额。"""
+    """查询产品表现（父ASIN 级）。
+
+    asinList 返回字段含：
+    - 销量: volume / order_items / amount
+    - 流量: sessions_total (Sessions-Total) / sessions (Browser) / sessions_mobile (Mobile)
+    - 转化: cvr (CVR, 直接返回) / volume_cvr / ad_cvr
+    - 环比: volume_chain_ratio / order_chain_ratio / amount_chain_ratio
+    - B2B: b2b_volume / b2b_amount / b2b_order_items
+    - 毛利: gross_profit (结算毛利润)
+    - 退款: return_amount
+
+    ⚠️ 达成率缺失：asinList 不返回 target（目标）字段，需"目标管理"分类 API，
+    当前未接入。T+1 数据，TTL=21600（6 小时）。
+    """
     params = {
         "offset": 0,
         "length": length,
