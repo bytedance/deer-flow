@@ -11,6 +11,7 @@ from deerflow.tui.view_state import (
     RunEnded,
     RunStarted,
     SystemMessage,
+    ThreadTitle,
     ToolResult,
     ToolStarted,
     UserSubmitted,
@@ -190,6 +191,20 @@ def test_clear_rows_empties_transcript():
     state = reduce(state, UserSubmitted("hi"))
     state = reduce(state, ClearRows())
     assert state.rows == ()
+
+
+def test_clear_rows_preserves_title_and_resets_streaming_tracking():
+    state = initial_state()
+    state = reduce(state, ThreadTitle("Existing thread title"))
+    state = reduce(state, RunStarted())
+    state = reduce(state, AssistantDelta(id="m1", text="partial"))
+
+    state = reduce(state, ClearRows())
+
+    assert state.rows == ()
+    assert state.title == "Existing thread title"
+    assert state.streaming_id is None
+    assert state.streaming_anonymous_row_index is None
 
 
 def test_reduce_is_pure_does_not_mutate_input_state():

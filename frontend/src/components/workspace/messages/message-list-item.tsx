@@ -1,16 +1,18 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
+  CheckIcon,
   FileIcon,
   Loader2Icon,
+  PencilIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
+  XIcon,
 } from "lucide-react";
 import {
   memo,
   useCallback,
   useMemo,
   useState,
-  useEffect,
   type ImgHTMLAttributes,
 } from "react";
 
@@ -24,8 +26,11 @@ import {
   Reasoning,
   ReasoningTrigger,
 } from "@/components/ai-elements/reasoning";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   deleteFeedback,
   upsertFeedback,
@@ -45,7 +50,6 @@ import {
   stripUploadedFilesTag,
   type FileInMessage,
 } from "@/core/messages/utils";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import { readReferenceMessageContexts } from "@/core/sidecar";
 import {
   parseSlashSkillReference,
@@ -60,6 +64,7 @@ import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
+import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
@@ -140,7 +145,10 @@ export function MessageListItem({
   threadId,
   artifactPaths = [],
   showCopyButton = true,
-  turnStartTime,
+  showWorkspaceChanges = false,
+  canEdit = false,
+  isEditPending = false,
+  onEditAndRegenerate,
 }: {
   className?: string;
   message: Message;
@@ -150,9 +158,51 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
-  turnStartTime?: number | null;
+  showWorkspaceChanges?: boolean;
+  canEdit?: boolean;
+  isEditPending?: boolean;
+  onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
+  const { t } = useI18n();
   const isHuman = message.type === "human";
+  const editableText = useMemo(
+    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
+    [isHuman, message],
+  );
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const trimmedDraft = draft.trim();
+  const editSubmitDisabled =
+    isEditPending ||
+    isSubmittingEdit ||
+    trimmedDraft.length === 0 ||
+    trimmedDraft === editableText.trim();
+
+  const startEditing = useCallback(() => {
+    setDraft(editableText);
+    setIsEditing(true);
+  }, [editableText]);
+  const cancelEditing = useCallback(() => {
+    setIsEditing(false);
+    setDraft("");
+  }, []);
+  const submitEdit = useCallback(async () => {
+    if (editSubmitDisabled || !onEditAndRegenerate) {
+      return;
+    }
+    setIsSubmittingEdit(true);
+    try {
+      const result = await onEditAndRegenerate(trimmedDraft);
+      if (result !== false) {
+        setIsEditing(false);
+        setDraft("");
+      }
+    } finally {
+      setIsSubmittingEdit(false);
+    }
+  }, [editSubmitDisabled, onEditAndRegenerate, trimmedDraft]);
+
   return (
     <AIElementMessage
       className={cn("group/conversation-message relative w-full", className)}
@@ -165,7 +215,19 @@ export function MessageListItem({
         threadId={threadId}
         artifactPaths={artifactPaths}
         runId={runId}
-        turnStartTime={turnStartTime}
+        showWorkspaceChanges={showWorkspaceChanges}
+        editState={
+          isHuman && isEditing
+            ? {
+                draft,
+                disabled: isEditPending || isSubmittingEdit,
+                submitDisabled: editSubmitDisabled,
+                onCancel: cancelEditing,
+                onDraftChange: setDraft,
+                onSubmit: submitEdit,
+              }
+            : undefined
+        }
       />
       {!isLoading && showCopyButton && (
         <MessageToolbar
@@ -178,6 +240,20 @@ export function MessageListItem({
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={getMessageCopyData(message)} />
+            {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
+              <Tooltip content={t.common.editAndRerun}>
+                <Button
+                  aria-label={t.common.editAndRerun}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  disabled={isEditPending || isSubmittingEdit}
+                  onClick={startEditing}
+                >
+                  <PencilIcon className="size-3" />
+                </Button>
+              </Tooltip>
+            )}
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
@@ -209,22 +285,42 @@ function MessageImage({
 }) {
   if (!src) return null;
 
-  const imgClassName = cn("overflow-hidden rounded-lg", `max-w-[${maxWidth}]`);
+  // `maxWidth` is applied inline rather than through a `max-w-[${maxWidth}]`
+  // class: Tailwind's JIT only generates utilities it can find as literal
+  // source tokens, so an interpolated arbitrary value would never be emitted.
+  const imgClassName = cn("overflow-hidden rounded-lg", props.className);
+  const imgStyle: React.CSSProperties = { maxWidth, ...props.style };
 
   if (typeof src !== "string") {
-    return <img className={imgClassName} src={src} alt={alt} {...props} />;
+    return (
+      <img
+        {...props}
+        className={imgClassName}
+        style={imgStyle}
+        src={src}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+      />
+    );
   }
 
   const url = resolveMessageImageURL(src, threadId, artifactPaths);
 
   return (
     <a href={url} target="_blank" rel="noopener noreferrer">
-      <img className={imgClassName} src={url} alt={alt} {...props} />
+      <img
+        {...props}
+        className={imgClassName}
+        style={imgStyle}
+        src={url}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+      />
     </a>
   );
 }
-
-const clientTurnDurations = new Map<string, number>();
 
 function HumanMessageText({ content }: { content: string }) {
   // `parseSlashSkillReference` is a pure regex gate (no data subscription), so
@@ -269,7 +365,8 @@ function MessageContent_({
   threadId,
   artifactPaths,
   runId,
-  turnStartTime,
+  showWorkspaceChanges = false,
+  editState,
 }: {
   className?: string;
   message: Message;
@@ -277,53 +374,27 @@ function MessageContent_({
   threadId: string;
   artifactPaths: readonly string[];
   runId?: string;
-  turnStartTime?: number | null;
+  showWorkspaceChanges?: boolean;
+  editState?: {
+    draft: string;
+    disabled: boolean;
+    submitDisabled: boolean;
+    onCancel: () => void;
+    onDraftChange: (value: string) => void;
+    onSubmit: () => void | Promise<void>;
+  };
 }) {
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
+  const { t } = useI18n();
   const isHuman = message.type === "human";
-  const rawTurnDuration = message.additional_kwargs?.turn_duration as
-    | number
-    | undefined;
-
-  const [cachedDuration, setCachedDuration] = useState<number | undefined>(
-    () =>
-      message.id
-        ? clientTurnDurations.get(`${threadId}:${message.id}`)
-        : undefined,
+  const getReasoningMessage = useCallback(
+    (isStreaming: boolean) =>
+      isStreaming ? (
+        <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
+      ) : (
+        t.runDuration.reasoning
+      ),
+    [t.runDuration.reasoning],
   );
-  const turnDuration = rawTurnDuration ?? cachedDuration;
-
-  useEffect(() => {
-    if (rawTurnDuration !== undefined && message.id) {
-      clientTurnDurations.set(`${threadId}:${message.id}`, rawTurnDuration);
-      setCachedDuration(rawTurnDuration);
-    }
-  }, [rawTurnDuration, message.id, threadId]);
-
-  const handleDurationChange = useCallback(
-    (d: number | undefined) => {
-      if (d !== undefined && message.id) {
-        clientTurnDurations.set(`${threadId}:${message.id}`, d);
-        setCachedDuration(d);
-      }
-    },
-    [message.id, threadId],
-  );
-
-  useEffect(() => {
-    return () => {
-      for (const key of clientTurnDurations.keys()) {
-        if (key.startsWith(`${threadId}:`)) {
-          clientTurnDurations.delete(key);
-        }
-      }
-    };
-  }, [threadId]);
-
-  const [wasLoading, setWasLoading] = useState(isLoading);
-  useEffect(() => {
-    if (isLoading) setWasLoading(true);
-  }, [isLoading]);
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -345,8 +416,11 @@ function MessageContent_({
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
     if (!Array.isArray(files) || files.length === 0) {
-      if (rawContent.includes("<uploaded_files>")) {
-        // If the content contains the <uploaded_files> tag, we return the parsed files from the content for backward compatibility.
+      if (
+        rawContent.includes("<current_uploads>") ||
+        rawContent.includes("<uploaded_files>")
+      ) {
+        // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
         return parseUploadedFiles(rawContent);
       }
       return null;
@@ -400,13 +474,8 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning
-          isStreaming={isLoading}
-          startTimeProp={turnStartTime}
-          duration={turnDuration}
-          onTurnDurationChange={handleDurationChange}
-        >
-          <ReasoningTrigger />
+        <Reasoning isStreaming={isLoading}>
+          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
           <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
         </Reasoning>
       </AIElementMessageContent>
@@ -433,11 +502,57 @@ function MessageContent_({
           />
         )}
         {filesList}
-        {contentToDisplay && (
+        {editState ? (
+          <div className="bg-background border-border flex w-full min-w-0 flex-col gap-2 rounded-lg border p-2 shadow-sm">
+            <Textarea
+              autoFocus
+              className="min-h-24 resize-y"
+              disabled={editState.disabled}
+              value={editState.draft}
+              onChange={(event) =>
+                editState.onDraftChange(event.currentTarget.value)
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  editState.onCancel();
+                }
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void editState.onSubmit();
+                }
+              }}
+            />
+            <div className="text-muted-foreground text-xs">
+              {t.common.editRerunWarning}
+            </div>
+            <div className="flex justify-end gap-1">
+              <Button
+                size="sm"
+                type="button"
+                variant="ghost"
+                disabled={editState.disabled}
+                onClick={editState.onCancel}
+              >
+                <XIcon className="size-3" />
+                {t.common.cancel}
+              </Button>
+              <Button
+                size="sm"
+                type="button"
+                disabled={editState.submitDisabled}
+                onClick={() => void editState.onSubmit()}
+              >
+                <CheckIcon className="size-3" />
+                {t.common.updateAndRerun}
+              </Button>
+            </div>
+          </div>
+        ) : contentToDisplay ? (
           <AIElementMessageContent className="w-full max-w-full">
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
-        )}
+        ) : null}
       </div>
     );
   }
@@ -445,29 +560,20 @@ function MessageContent_({
   return (
     <AIElementMessageContent className={className}>
       {filesList}
-      {!isHuman &&
-        (!!reasoningContent || wasLoading || turnDuration !== undefined) && (
-          <Reasoning
-            isStreaming={isLoading}
-            startTimeProp={turnStartTime}
-            duration={turnDuration}
-            onTurnDurationChange={handleDurationChange}
-          >
-            <ReasoningTrigger hasContent={!!reasoningContent} />
-            {reasoningContent && (
-              <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-            )}
-          </Reasoning>
-        )}
+      {reasoningContent && (
+        <Reasoning isStreaming={isLoading}>
+          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
+          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
+        </Reasoning>
+      )}
       <MarkdownContent
         content={contentToDisplay}
         isLoading={isLoading}
-        rehypePlugins={rehypePlugins}
         className="my-3"
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && (
+      {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}
@@ -611,6 +717,8 @@ function RichFileCard({
         <img
           src={fileUrl}
           alt={file.filename}
+          loading="lazy"
+          decoding="async"
           className="h-32 w-auto max-w-60 object-cover transition-transform group-hover:scale-105"
         />
       </a>

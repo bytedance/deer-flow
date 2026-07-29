@@ -4,6 +4,53 @@ import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
+function decodePathSegment(segment: string) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+function splitPathSuffix(src: string) {
+  const [path = ""] = src.split(/[?#]/, 1);
+  return {
+    path,
+    suffix: src.slice(path.length),
+  };
+}
+
+function encodeArtifactPath(filepath: string) {
+  return filepath
+    .split("/")
+    .map((segment) => encodeURIComponent(decodePathSegment(segment)))
+    .join("/");
+}
+
+export function buildWriteFileArtifactURL({
+  filepath,
+  messageId,
+  toolCallId,
+}: {
+  filepath: string;
+  messageId?: string;
+  toolCallId?: string;
+}) {
+  const url = new URL("write-file:/");
+  url.pathname = filepath.replaceAll("%", "%25");
+  if (messageId) {
+    url.searchParams.set("message_id", messageId);
+  }
+  if (toolCallId) {
+    url.searchParams.set("tool_call_id", toolCallId);
+  }
+  return url.toString();
+}
+
+function decodeRelativeArtifactPath(filepath: string) {
+  return filepath.split("/").map(decodePathSegment).join("/");
+}
+
 export function urlOfArtifact({
   filepath,
   threadId,
@@ -18,10 +65,12 @@ export function urlOfArtifact({
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath, threadId, download });
   }
+  const encodedThreadId = encodeURIComponent(threadId);
+  const encodedFilepath = encodeArtifactPath(filepath);
   if (isMock) {
-    return `${getBackendBaseURL()}/mock/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+    return `${getBackendBaseURL()}/mock/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${filepath}${download ? "?download=true" : ""}`;
+  return `${getBackendBaseURL()}/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
 }
 
 export function extractArtifactsFromThread(thread: {
@@ -34,7 +83,12 @@ export function resolveArtifactURL(absolutePath: string, threadId: string) {
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath: absolutePath, threadId });
   }
-  return `${getBackendBaseURL()}/api/threads/${threadId}/artifacts${absolutePath}`;
+  return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/artifacts${encodeArtifactPath(absolutePath)}`;
+}
+
+export function resolveMarkdownArtifactURL(src: string, threadId: string) {
+  const { path, suffix } = splitPathSuffix(src);
+  return `${resolveArtifactURL(path, threadId)}${suffix}`;
 }
 
 export function resolveMessageImageURL(
@@ -43,11 +97,12 @@ export function resolveMessageImageURL(
   artifactPaths: readonly string[],
 ) {
   if (src.startsWith("/mnt/")) {
-    return resolveArtifactURL(src, threadId);
+    return resolveMarkdownArtifactURL(src, threadId);
   }
 
-  const [relativePath = ""] = src.split(/[?#]/, 1);
+  const { path: relativePath, suffix } = splitPathSuffix(src);
   const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
+  const decodedNormalizedPath = decodeRelativeArtifactPath(normalizedPath);
   if (
     !normalizedPath ||
     normalizedPath.startsWith("/") ||
@@ -59,13 +114,13 @@ export function resolveMessageImageURL(
   }
 
   const matches = artifactPaths.filter((path) =>
-    path.endsWith(`/${normalizedPath}`),
+    path.endsWith(`/${decodedNormalizedPath}`),
   );
   if (matches.length !== 1) {
     return src;
   }
 
-  return `${resolveArtifactURL(matches[0]!, threadId)}${src.slice(relativePath.length)}`;
+  return `${resolveArtifactURL(matches[0]!, threadId)}${suffix}`;
 }
 
 function staticDemoArtifactURL({
@@ -77,6 +132,6 @@ function staticDemoArtifactURL({
   threadId: string;
   download?: boolean;
 }) {
-  const demoPath = filepath.replace(/^\/mnt\//, "/");
-  return `${getBackendBaseURL()}/demo/threads/${threadId}${demoPath}${download ? "?download=true" : ""}`;
+  const demoPath = encodeArtifactPath(filepath.replace(/^\/mnt\//, "/"));
+  return `${getBackendBaseURL()}/demo/threads/${encodeURIComponent(threadId)}${demoPath}${download ? "?download=true" : ""}`;
 }

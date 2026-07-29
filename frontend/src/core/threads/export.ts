@@ -30,6 +30,8 @@ export interface ExportOptions {
   includeHidden?: boolean;
 }
 
+export type ThreadExportFormat = "markdown" | "json";
+
 function visibleMessages(
   messages: Message[],
   options: ExportOptions,
@@ -221,4 +223,16 @@ export function exportThreadAsJSON(thread: AgentThread, messages: Message[]) {
   const json = formatThreadAsJSON(thread, messages);
   const filename = `${sanitizeFilename(titleOfThread(thread))}.json`;
   downloadAsFile(json, filename, "application/json;charset=utf-8");
+}
+
+export function exportThread(
+  thread: AgentThread,
+  messages: Message[],
+  format: ThreadExportFormat,
+) {
+  if (format === "markdown") {
+    exportThreadAsMarkdown(thread, messages);
+  } else {
+    exportThreadAsJSON(thread, messages);
+  }
 }

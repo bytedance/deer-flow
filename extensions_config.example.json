@@ -1,4 +1,5 @@
 {
+  "middlewares": [],
   "mcpInterceptors": [
     "deerflow.mcp.connector_interceptor:build_interceptor"
   ],

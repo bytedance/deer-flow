@@ -43,9 +43,9 @@ describe("MarkdownContent streaming code blocks", () => {
     expect(html).not.toContain('data-streaming-inline-code="true"');
   });
 
-  it("restores Streamdown highlighting after streaming finishes", () => {
+  it("restores Streamdown code rendering after streaming finishes", () => {
     const html = renderMarkdown(
-      ["```html", '<main class="report">Hello</main>', "```"].join("\n"),
+      ["```typescript", "const answer: number = 42;", "```"].join("\n"),
       false,
     );
 
@@ -81,6 +81,78 @@ describe("MarkdownContent streaming code blocks", () => {
 
     expect(html).toContain('data-custom-code="true"');
     expect(html).toContain("data-streaming-code-block");
+  });
+
+  it("does not paint an initial large streaming chunk all at once", () => {
+    const content = "x".repeat(120);
+
+    expect(renderMarkdown(content, true)).not.toContain(content);
+    expect(renderMarkdown(content, false)).toContain(content);
+  });
+});
+
+describe("MarkdownContent streaming animation", () => {
+  it("uses Streamdown animation only for newly streamed words", () => {
+    const html = renderMarkdown("Hello streaming world", true);
+
+    expect(html).toContain("data-sd-animate");
+    expect(html).toContain("--sd-animation:sd-fadeIn");
+    expect(html).toContain("--sd-duration:200ms");
+    expect(html).not.toContain("--sd-delay");
+    expect(html).not.toContain("animate-fade-in");
+  });
+
+  it("does not animate completed markdown", () => {
+    const html = renderMarkdown("Hello completed world", false);
+
+    expect(html).not.toContain("data-sd-animate");
+  });
+});
+
+describe("MarkdownContent streaming lists", () => {
+  it("hides a trailing empty ordered-list item until its content arrives", () => {
+    const html = renderMarkdown(["1. First", "", "2."].join("\n"), true);
+
+    expect(html).toContain('data-streaming-list-item="true"');
+    expect(html).toContain('data-streamdown="list-item" hidden=""');
+  });
+
+  it("hides a trailing empty unordered-list item until its content arrives", () => {
+    const html = renderMarkdown("-", true);
+
+    expect(html).toContain('data-streamdown="unordered-list"');
+    expect(html).toContain('data-streamdown="list-item" hidden=""');
+    expect(html).not.toContain('data-streaming-list-item="true"');
+  });
+
+  it("keeps a mid-list empty item visible so ordered counters stay stable", () => {
+    const html = renderMarkdown(
+      ["1. First", "2.", "3. Third"].join("\n"),
+      true,
+    );
+    const listItems = html.match(/<li[^>]*>/g);
+
+    expect(listItems).toHaveLength(3);
+    expect(listItems?.[1]).not.toContain("hidden");
+    expect(html).not.toContain('hidden=""');
+  });
+
+  it("marks nested list items without hiding existing content", () => {
+    const html = renderMarkdown(
+      ["1. Parent", "   - Nested child"].join("\n"),
+      true,
+    );
+
+    expect(html.match(/data-streaming-list-item="true"/g)).toHaveLength(2);
+    expect(html).not.toContain('hidden=""');
+  });
+
+  it("leaves completed list markup outside streaming treatment", () => {
+    const html = renderMarkdown(["1. First", "", "2."].join("\n"), false);
+
+    expect(html).toContain('data-streamdown="ordered-list"');
+    expect(html).not.toContain("data-streaming-list-item");
+    expect(html).not.toContain('hidden=""');
   });
 });
 

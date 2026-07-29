@@ -225,10 +225,19 @@ def test_config_deleted_after_init_is_not_stale(cache_globals, monkeypatch, tmp_
 
     The resolver is monkeypatched to keep pointing at the (now-missing) path,
     isolating ``_is_cache_stale``'s own stat-failure handling from
-    ``ExtensionsConfig.resolve_config_path``'s separate not-found contract for
-    explicit path/env-var configuration (that function raises
-    ``FileNotFoundError`` in that mode instead of returning ``None`` — a
-    distinct, pre-existing latent issue outside this module's scope).
+    ``ExtensionsConfig.resolve_config_path``'s own not-found contract for
+    explicit path/env-var configuration, which raises ``FileNotFoundError``
+    in that mode (an operator-asserted path going missing is a real
+    misconfiguration and must be loud for callers that load the config for
+    real use — PR #4275 review, fancyboi999 [P1]). ``_resolve_config_path``
+    just above is the narrow exception: it catches that specific
+    ``FileNotFoundError`` and treats it as "unconfigured" so this staleness
+    check keeps degrading to "not stale" instead of raising — see
+    ``test_extensions_config_env_var_missing_file_raises`` in
+    ``test_runtime_paths.py`` for the resolver-level raise contract, and
+    ``test_config_deleted_after_init_via_real_env_resolution_does_not_raise``
+    below for the same scenario this test isolates against, exercised through
+    the real resolver instead of a monkeypatch.
     """
     cfg = tmp_path / "extensions_config.json"
     _write_extensions_config(cfg, {"srv1": _server()})
@@ -242,4 +251,38 @@ def test_config_deleted_after_init_is_not_stale(cache_globals, monkeypatch, tmp_
         classmethod(lambda cls, config_path=None: cfg),
     )
 
+    assert cache_module._is_cache_stale() is False
+
+
+def test_config_deleted_after_init_via_real_env_resolution_does_not_raise(cache_globals, monkeypatch, tmp_path):
+    """End-to-end regression for the explicit-vs-search distinction raised by
+    fancyboi999 [P1] on PR #4275: when the extensions config path comes from
+    ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` (exactly how Docker dev/prod point at
+    it, per backend/AGENTS.md) and the file is deleted after a successful
+    init, ``_is_cache_stale()`` must not raise — even though
+    ``ExtensionsConfig.resolve_config_path()`` itself now (again) raises
+    ``FileNotFoundError`` for a missing explicit/env-var path, restoring loud
+    failure for callers that load the config for real use.
+
+    Unlike ``test_config_deleted_after_init_is_not_stale`` (which monkeypatches
+    ``ExtensionsConfig.resolve_config_path`` to isolate ``_is_cache_stale``'s
+    own None-handling from the resolver's own contract), this test exercises
+    the REAL resolver end to end. ``_resolve_config_path`` in this module is
+    the only thing standing between that raise and a crash here: it catches
+    ``FileNotFoundError`` locally and returns ``None``, so this hot,
+    per-request staleness check keeps degrading to "not stale" (serving
+    last-known-good cached tools) instead of propagating uncaught out of
+    ``get_cached_mcp_tools()``. Deleting the ``_resolve_config_path`` try/except
+    reproduces the original crash this test guards against.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _initialize_against(monkeypatch, cfg)  # sets DEER_FLOW_EXTENSIONS_CONFIG_PATH=cfg
+    assert cache_module._config_signature is not None  # guard: had a real signature
+
+    cfg.unlink()  # config deleted; env var still points at the now-missing path
+
+    # Must not raise, and must report "not stale" (fail-soft: keep serving the
+    # last-known-good MCP tools), matching the deliberate contract in
+    # test_config_deleted_after_init_is_not_stale above.
     assert cache_module._is_cache_stale() is False

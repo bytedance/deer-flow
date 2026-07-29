@@ -272,7 +272,9 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
     """Return the dashboard's headline counters."""
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
-    run_where = (RunRow.user_id == user_id,) if user_id else ()
+    run_where = (RunRow.operation_kind == "run",)
+    if user_id:
+        run_where += (RunRow.user_id == user_id,)
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
 
     pricing = _build_pricing_map()
@@ -347,7 +349,14 @@ async def console_runs(
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
 
-    stmt = select(RunRow, ThreadMetaRow.display_name).join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True).order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit + 1).offset(offset)
+    stmt = (
+        select(RunRow, ThreadMetaRow.display_name)
+        .join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True)
+        .where(RunRow.operation_kind == "run")
+        .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+        .limit(limit + 1)
+        .offset(offset)
+    )
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
     if status:
@@ -415,7 +424,7 @@ async def console_usage(
     start_local = today_local - timedelta(days=days - 1)
     window_start_utc = datetime.combine(start_local, time.min, tzinfo=UTC) - tz_delta
 
-    stmt = select(RunRow).where(RunRow.created_at >= window_start_utc)
+    stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.created_at >= window_start_utc)
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
 
