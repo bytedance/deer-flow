@@ -96,7 +96,8 @@ make stop       # Stop all services
 make install            # Install backend dependencies
 make dev                # Run Gateway API with reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
-make test               # Run all backend tests
+make test               # Run offline backend tests (excludes live external-API tests)
+make test-live          # Explicitly run live DeerFlowClient tests with real APIs
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
 make lint               # Lint with ruff
 make format             # Format code with ruff
@@ -1219,7 +1220,13 @@ Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and sk
 
 **Key difference from Gateway**: Upload accepts local `Path` objects instead of HTTP `UploadFile`, rejects directory paths before copying, and reuses a single worker when document conversion must run inside an active event loop. Artifact returns `(bytes, mime_type)` instead of HTTP Response. The new Gateway-only thread cleanup route deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; there is no matching `DeerFlowClient` method yet. `update_mcp_config()` and `update_skill()` automatically invalidate the cached agent.
 
-**Tests**: `tests/test_client.py` (77 unit tests including `TestGatewayConformance`), `tests/test_client_live.py` (live integration tests, requires config.yaml)
+**Tests**: `tests/test_client.py` (offline unit tests including
+`TestGatewayConformance`), `tests/test_client_live.py` (live integration tests,
+requires a root `config.yaml`, valid API credentials, and explicit opt-in via
+`make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`). The live suite calls real
+external APIs and may incur API costs or create local sandboxes, artifacts, and
+files. It is marked `live`, excluded from `make test`, and skipped in default
+CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
@@ -1230,18 +1237,26 @@ Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and sk
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
 
 - Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
-- Run the full suite before and after your change: `make test`
+- Run the full offline suite before and after your change: `make test`
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 
 ```bash
-# Run all tests
+# Run all offline tests
 make test
+
+# Explicit live integration tests (requires config.yaml and credentials;
+# calls real APIs and may create local side effects)
+make test-live
 
 # Run a specific test file
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
+
+Direct pytest collection or execution of `tests/test_client_live.py` remains
+skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
+default CI workflows.
 
 ### Running the Full Application
 

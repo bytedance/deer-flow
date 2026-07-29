@@ -454,8 +454,18 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-uv run pytest
+# Offline backend suite (live external-API tests are excluded)
+make test
+
+# Explicit real-API DeerFlowClient integration suite
+make test-live
 ```
+
+The live suite requires a valid root `config.yaml` and API credentials. It may
+incur API costs or create local sandboxes, artifacts, and files, so it is not
+part of default test runs or CI. Direct pytest invocation of
+`tests/test_client_live.py` also requires
+`DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 `make detect-blocking-io` statically scans backend business code for blocking
 IO that may run on the backend event loop and is not test-coverage-bound. It

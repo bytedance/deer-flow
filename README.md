@@ -1126,6 +1126,13 @@ DeerFlow has key high-privilege capabilities including **system command executio
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
+Backend `make test` is offline by default and excludes live external-API
+coverage. Maintainers can explicitly run the real `DeerFlowClient` integration
+suite with `cd backend && make test-live` after providing a valid root
+`config.yaml` and API credentials; this may incur API costs and create local
+sandboxes, artifacts, or files. Direct pytest runs additionally require
+`DEER_FLOW_RUN_LIVE_TESTS=1`.
+
 Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
 Backend blocking-IO diagnostics are available from the repository root with
 `make detect-blocking-io`: it statically scans backend business code for
