@@ -173,6 +173,16 @@ def _sync_env_file(
     """
     env_entries = _read_env_file(project_root)
 
+    # Build a mapping from model name → env var name for models in the
+    # raw (on-disk) config, so we can recover the previous $VAR reference
+    # when an incoming model sends the masked *** placeholder.
+    raw_name_to_env_var: dict[str, str] = {}
+    for raw_model in raw_config.get("models", []):
+        if isinstance(raw_model, dict):
+            raw_key = raw_model.get("api_key", "")
+            if isinstance(raw_key, str) and raw_key.startswith("$"):
+                raw_name_to_env_var[str(raw_model.get("name", ""))] = raw_key[1:]
+
     # Collect which $VAR names are referenced by the *incoming* models.
     incoming_env_refs: set[str] = set()
     for m in incoming_models:
@@ -184,6 +194,12 @@ def _sync_env_file(
             var_name = _derive_env_var_name(m.name)
             env_entries[var_name] = api_key
             incoming_env_refs.add(var_name)
+        elif api_key == _MASKED_VALUE:
+            # Masked round-trip — preserve the previous $VAR reference
+            # so it is not treated as orphaned and deleted from .env.
+            prev_var = raw_name_to_env_var.get(m.name)
+            if prev_var:
+                incoming_env_refs.add(prev_var)
 
     # Collect which $VAR names were referenced by the *previous* config.
     prev_env_refs: set[str] = set()
