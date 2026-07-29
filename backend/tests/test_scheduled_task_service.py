@@ -721,3 +721,68 @@ async def test_pre_launch_failure_still_releases_active_slot():
     first_row_id = run_repo.created[0]["run_record_id"]
     assert run_repo.rows[first_row_id]["status"] == "failed"
     assert run_repo.rows[first_row_id]["run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_launch_result_still_retains_active_slot():
+    """Defense-in-depth for the #4452 invariant.
+
+    If ``_launch_run`` returns a malformed result (e.g. missing ``run_id``),
+    the unpacking line raises AFTER a live run was already created. The
+    dispatch must still take the retention path (keep the row active so the
+    slot stays held and no duplicate launches) rather than the pre-launch
+    generic-failure path, which would mark the row ``failed`` and release
+    the slot while a run is in flight. Keyed off ``launch_succeeded``, not
+    ``launched_run_id is not None``.
+    """
+    launched: list[dict] = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        # Live run started, but the result payload is malformed.
+        return {"thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-4452-malformed",
+                "user_id": "user-1",
+                "thread_id": None,
+                "context_mode": "fresh_thread_per_run",
+                "assistant_id": "lead_agent",
+                "prompt": "do the thing",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "*/5 * * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "skip",
+            }
+        ]
+    )
+    run_repo = _StatefulRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    now = datetime.now(UTC)
+    task = dict(task_repo.rows[0])
+
+    first = await service.dispatch_task(task, now=now, trigger="scheduled")
+    # Launch succeeded, so the outcome is "launched" (a run is in flight)
+    # even though the result unpacking raised; run_id is unknown.
+    assert first["outcome"] == "launched"
+    assert first["run_id"] is None
+
+    # Second dispatch must observe the active slot still held (row stays in
+    # an active status, NOT "failed") and NOT launch a duplicate.
+    second = await service.dispatch_task(task, now=now, trigger="scheduled")
+    assert len(launched) == 1, launched
+    assert second["outcome"] in {"skipped", "conflict"}, second
+
+    first_row_id = run_repo.created[0]["run_record_id"]
+    assert run_repo.rows[first_row_id]["status"] == "running"

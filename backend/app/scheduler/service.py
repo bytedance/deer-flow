@@ -153,6 +153,12 @@ class ScheduledTaskService:
         # retain the launched run_id regardless of bookkeeping errors.
         launched_run_id: str | None = None
         launched_thread_id: str | None = None
+        # Flip immediately after _launch_run returns, before any further code
+        # that can raise (e.g. result["run_id"] on a malformed result). The
+        # retention branch keys off this flag, not `launched_run_id is not
+        # None`, so a launch that succeeded but whose result-unpacking raised
+        # still takes the retention path instead of the release-the-slot path.
+        launch_succeeded = False
         try:
             result = await self._launch_run(
                 thread_id=execution_thread_id,
@@ -165,6 +171,7 @@ class ScheduledTaskService:
                     "scheduled_trigger": trigger,
                 },
             )
+            launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
             next_at = next_run_at(
@@ -204,10 +211,10 @@ class ScheduledTaskService:
                 "error": None,
             }
         except Exception as exc:
-            if launched_run_id is None and self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
+            if not launch_succeeded and self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
                 # Pre-launch overlap conflict (e.g. same-thread multitask): no
                 # run was started, so recording a skip and releasing the slot is
-                # safe. Guarded by ``launched_run_id is None`` because a run that
+                # safe. Guarded by ``not launch_succeeded`` because a run that
                 # already launched must never be reclassified as a skip / failed.
                 return await self._finalize_skip(
                     task,
@@ -224,9 +231,9 @@ class ScheduledTaskService:
                 now=now,
             )
 
-            if launched_run_id is not None:
-                # _launch_run succeeded, so run ``launched_run_id`` is live even
-                # though post-launch bookkeeping raised. Keep the task-run row
+            if launch_succeeded:
+                # _launch_run succeeded, so a run is live even though
+                # post-launch bookkeeping raised. Keep the task-run row
                 # "running" so it keeps holding the task's single active slot
                 # (preventing a duplicate launch on the next dispatch) and
                 # persist the run_id on the parent task for recovery /
