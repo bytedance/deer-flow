@@ -125,12 +125,9 @@ def _persist_shared_skill_state(
     with projection_update:
         # The projection lock is cross-process, but the singleton cache is not.
         # Reload the latest disk state inside the lock before this RMW.
-        extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else ExtensionsConfig()
+        extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else ExtensionsConfig(mcp_servers={}, skills={})
         extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
-        config_data = {
-            "mcpServers": {name: server.model_dump() for name, server in extensions_config.mcp_servers.items()},
-            "skills": {name: {"enabled": skill_config.enabled} for name, skill_config in extensions_config.skills.items()},
-        }
+        config_data = extensions_config.model_dump(by_alias=True, exclude_unset=True)
         with config_path.open("w", encoding="utf-8") as stream:
             json.dump(config_data, stream, indent=2)
         reload_extensions_config()
@@ -358,10 +355,20 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+
+        def _read_history() -> list[dict] | None:
+            # Worker thread: storage construction, the existence probes, and the
+            # history-file read are blocking filesystem IO that must stay off the
+            # event loop. None signals 404 to the caller.
+            storage = _get_user_skill_storage(config)
+            if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+                return None
+            return storage.read_history(skill_name)
+
+        history = await asyncio.to_thread(_read_history)
+        if history is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillHistoryResponse(history=storage.read_history(skill_name))
+        return CustomSkillHistoryResponse(history=history)
     except HTTPException:
         raise
     except Exception as e:

@@ -135,6 +135,7 @@ class LocalSandboxProvider(SandboxProvider):
             _RESERVED_CONTAINER_PREFIXES = [
                 f"{container_path}/public",
                 f"{container_path}/custom",
+                f"{container_path}/integrations",
                 f"{container_path}/legacy",
                 _ACP_WORKSPACE_VIRTUAL_PREFIX,
                 _USER_DATA_VIRTUAL_PREFIX,
@@ -343,6 +344,11 @@ class LocalSandboxProvider(SandboxProvider):
                         PathMapping(
                             container_path=f"{skills_container_path}/legacy",
                             local_path=str(projection.legacy),
+                            read_only=True,
+                        ),
+                        PathMapping(
+                            container_path=f"{skills_container_path}/integrations",
+                            local_path=str(projection.integrations),
                             read_only=True,
                         ),
                     ]

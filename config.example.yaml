@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 26
+config_version: 31
 
 # ============================================================================
 # Logging
@@ -29,6 +29,23 @@ logging:
   enhance:
     enabled: false
     format: text
+
+# ============================================================================
+# Agent Extensions
+# ============================================================================
+# Optional AgentMiddleware classes loaded into the lead and subagent runtime
+# middleware chains after built-in runtime middlewares, but before the
+# safety/clarification tail. Missing packages, invalid classes, and broken
+# modules fail loudly at agent creation with an actionable import error.
+# The same zero-argument class list applies to both lead and subagent runtimes;
+# lead-only vs subagent-only configuration is not expressible yet. Treat these
+# files as trusted operator config because middleware classes execute code.
+# Uncomment this block to define middlewares in config.yaml. Leaving it commented
+# lets extensions_config.json remain the source of truth for extension packages.
+# extensions:
+#   middlewares:
+#     - my_company.deerflow_middlewares:DomainGuardMiddleware
+#     - my_company.deerflow_middlewares:LatencyStampingMiddleware
 
 # ============================================================================
 # Tracing / Observability (Monocle)
@@ -590,6 +607,8 @@ models:
   #   model: Qwen/Qwen3-32B
   #   api_key: $VLLM_API_KEY
   #   base_url: http://localhost:8000/v1
+  #   # Enable only when the endpoint reports cumulative usage on every stream chunk.
+  #   cumulative_stream_usage: true
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
@@ -631,6 +650,7 @@ tool_groups:
   - name: file:read
   - name: file:write
   - name: bash
+  - name: browser
 
 # ============================================================================
 # Tools Configuration
@@ -745,10 +765,16 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
-  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no API key)
+  # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
-  # ideal for JavaScript-heavy sites. Self-host (JWT auth is off by default, no key):
-  #   docker run -d -p 11235:11235 --shm-size=1g unclecode/crawl4ai:0.8.6
+  # ideal for JavaScript-heavy sites. Self-host it:
+  #   docker run -d -p 11235:11235 --shm-size=1g \
+  #     -e CRAWL4AI_API_TOKEN=$CRAWL4AI_TOKEN unclecode/crawl4ai:0.9.2
+  # Crawl4AI >= 0.9 is secure-by-default: a bearer token is REQUIRED on every request
+  # except GET /health, and a server started without CRAWL4AI_API_TOKEN binds 127.0.0.1
+  # only (so a container/remote DeerFlow cannot reach it at all). Set the same value in
+  # the server env and in `token:` below, or requests fail with HTTP 401.
+  # Use >= 0.8.7: earlier images, including 0.8.6, carry known pre-auth RCEs.
   # For Docker deployments, use the Docker service name instead of localhost.
   # NOTE: Only one web_fetch provider can be active at a time.
   # Comment out the Jina AI web_fetch entry below before enabling this one.
@@ -756,10 +782,10 @@ tools:
   #   group: web
   #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
   #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
+  #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
-  #   # token: $CRAWL4AI_TOKEN            # Bearer token (only if the server has JWT auth enabled)
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
@@ -772,7 +798,7 @@ tools:
   #   use: deerflow.community.browserless.tools:web_capture_tool
   #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
-  #   timeout_s: 30                         # Request timeout in seconds
+  #   timeout_s: 30                         # Request timeout in seconds (`timeout` also accepted)
   #   output_format: png                    # png, jpeg, or webp
   #   full_page: true                       # Capture entire page instead of viewport only
   #   viewport_width: 1280
@@ -783,6 +809,65 @@ tools:
   #   # best_attempt: true                  # Continue with current page state if waits time out
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+
+  # Agentic browser control (stateful navigate → observe → click/type loop).
+  # Unlike web_fetch/web_capture (read-only, stateless), these tools keep a live
+  # per-thread Playwright browser so the agent can interact with JavaScript-heavy
+  # pages, fill forms, and follow multi-step flows. Elements are addressed by the
+  # numeric [ref] index returned in each page snapshot.
+  #
+  # Requires the optional dependency, installed once per environment:
+  #   cd backend && uv sync --extra browser && uv run playwright install chromium
+  # make dev / Docker startup auto-detect an active browser_navigate entry and
+  # preserve the browser extra during dependency sync.
+  #
+  # Uncomment the whole block to enable. Launch and URL-policy settings are read
+  # canonically from browser_navigate and shared by every browser tool + Live.
+  # - name: browser_navigate
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_navigate_tool
+  #   headless: true                   # Set false only for local, trusted debugging
+  #   timeout_ms: 30000                # Per-action navigation/interaction timeout
+  #   viewport_width: 1280
+  #   viewport_height: 720
+  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
+  #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
+  #   #                                # existing Chrome prevents DeerFlow from
+  #   #                                # enforcing its subresource/redirect SSRF guard.
+  #   #                                # instead of launching a private headless one.
+  #   #                                # Start Chrome with --remote-debugging-port=9222
+  #   #                                # so you watch the agent drive your real browser
+  #   #                                # with your real login sessions. Local/trusted only;
+  #   #                                # never enable for an untrusted CDP endpoint.
+  #   #                                # Chrome must be version-matched to the bundled
+  #   #                                # Playwright; a much newer Chrome can reject the
+  #   #                                # CDP handshake. If so, use headless: false to launch
+  #   #                                # Playwright's own visible browser instead.
+  #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
+  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  # - name: browser_snapshot
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
+  # - name: browser_click
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_click_tool
+  # - name: browser_type
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_type_tool
+  # - name: browser_get_text
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_get_text_tool
+  #   max_chars: 8000                  # Truncation cap for browser_get_text output
+  # - name: browser_back
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_back_tool
+  # - name: browser_screenshot
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_screenshot_tool
+  # - name: browser_close
+  #   group: browser
+  #   use: deerflow.community.browser_automation.tools:browser_close_tool
 
   # Web fetch tool (uses Exa)
   # NOTE: Only one web_fetch provider can be active at a time.
@@ -967,6 +1052,7 @@ tool_output:
 
 suggestions:
   enabled: true
+  max_suggestions: 3
 
 
 # ============================================================================
@@ -1167,6 +1253,15 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Override whether the sandbox already sees the gateway's
+#   # thread workspace/uploads/outputs through shared mounts.
+#   # Omit this field to auto-detect from the backend (local containers: true;
+#   # remote/provisioner backends: false). Set true only when the deployment
+#   # guarantees both sides use the same thread user-data directories, such as
+#   # a correctly aligned shared PVC, NFS volume, hostPath, or bind mount.
+#   # true skips per-upload sandbox acquire/sync; false forces explicit sync.
+#   # thread_data_mounts: true
+#
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
 #   # mounts:
@@ -1185,6 +1280,54 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
+#
+#   # Optional: Cross-instance container ownership (issue #4206).
+#   #
+#   # Gateway instances share sandbox containers but each keeps its own in-memory
+#   # warm pool. Without shared ownership state, one instance's startup
+#   # reconciliation adopts a container another instance is actively using and
+#   # later idle-destroys it — tool calls then fail with 502 / connection refused.
+#   #
+#   # Single gateway instance? Leave this out; `memory` is the default and the
+#   # cross-instance kill cannot happen.
+#   #
+#   # MULTIPLE gateway instances / workers sharing one container backend
+#   # (load-balanced deployments, Docker Compose) MUST set type: redis. Docker
+#   # Compose already sets DEER_FLOW_STREAM_BRIDGE_REDIS_URL, which is taken as
+#   # proof the deployment is multi-instance, so redis ownership is inferred even
+#   # if this section is omitted.
+#   #
+#   # The redis ownership store requires the optional `redis` extra. It is
+#   # auto-detected from this section on `make dev` and always installed in the
+#   # Docker image. To install it manually:
+#   #     cd backend && uv sync --all-packages --extra redis
+#   #
+#   # ownership:
+#   #   type: memory                 # single gateway instance only
+#   #
+#   # ownership:
+#   #   type: redis                  # required for multi-instance / load-balanced
+#   #   redis_url: redis://redis:6379/0
+#   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
+#   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
+#   #                                # single missed renewal cannot expire a live
+#   #                                # owner). Liveness is deliberately independent
+#   #                                # of idle_timeout: renewal keeps running even
+#   #                                # at idle_timeout: 0.
+#   #   key_prefix: deerflow:sandbox:owner
+#   #
+#   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
+#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
+#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
+#   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   #
+#   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
+#   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling
+#   # instance adopt a live owner's container: a lapsed lease is indistinguishable
+#   # from a dead owner, so one TTL of adoption grace is the whole safety margin.
+#   # Size the TTL against your Redis availability target (HA Redis keeps this
+#   # window out of reach).
 
 # Option 3: BoxLite micro-VM Sandbox
 # Runs each sandbox as a BoxLite micro-VM. Released boxes stay in an in-process
@@ -1229,6 +1372,27 @@ sandbox:
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
 #   # environment variable, not sandbox.image from this config file.
 
+# Option 5: Tenki cloud microVM Sandbox
+# Runs each sandbox as an isolated Tenki cloud microVM. Released sandboxes stay
+# in an in-process warm pool and are reclaimed by the same user/thread without a
+# cold start. Requires the optional SDK: pip install "deerflow-harness[tenki]".
+# sandbox:
+#   use: deerflow.community.tenki:TenkiSandboxProvider
+#   # api_key: $TENKI_API_KEY        # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
+#   # base_url: https://tenki.cloud  # optional; SDK default when omitted
+#   # image: my-base-image           # optional; Tenki account default base image when omitted
+#   # project_id: proj_...           # optional; auto-selected if the account has exactly one
+#   # workspace_id: ws_...           # optional; auto-selected if the account has exactly one
+#   # cpu_cores: 2                   # optional per-sandbox vCPUs
+#   # memory_mb: 2048                # optional per-sandbox memory
+#   # replicas: 3                    # active + warm microVM cap per gateway process
+#   # idle_timeout: 600              # warm microVM idle seconds before terminate; 0 disables
+#   # max_duration: 14400            # Tenki sandbox lifetime in seconds; 0 uses the account default
+#   # sticky: false                  # pin the microVM to its host (only matters with pause/resume)
+#   # home_dir: /home/tenki          # writable dir backing /mnt/user-data
+#   # environment:                   # injected into every command (and as create-time env)
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
@@ -1272,13 +1436,13 @@ sandbox:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
-#       # skills: []            # No skills for bash agent
+#       # skills: []            # No discoverable/activatable skills for bash agent
 #
 #   # Custom subagent types: define specialized agents with their own prompts,
 #   # tools, skills, and model configuration. Custom agents are available via
@@ -1295,7 +1459,7 @@ sandbox:
 #   #       - bash
 #   #       - read_file
 #   #       - write_file
-#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #     skills:                 # Skill discovery/activation allowlist (null = all, [] = none)
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
@@ -1320,6 +1484,7 @@ sandbox:
 #     description: Claude Code for implementation, refactoring, and debugging
 #     model: null
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY  # $VAR resolves from host environment
 #
@@ -1396,7 +1561,11 @@ title:
 summarization:
   enabled: true
 
-  # Model to use for summarization (null = use default model)
+  # Model to use for summarization.
+  #   null = summarize with the model the run actually uses (the lead run's model, a
+  #          subagent's own model, or a thread's custom-agent model), NOT models[0].
+  #   set  = that model generates; if its provider fails, compaction falls back to the
+  #          run's own model so a broken summary provider cannot disable compaction.
   # Recommended: Use a lightweight, cost-effective model like "gpt-4o-mini" or similar
   model_name: null
 
@@ -1458,7 +1627,7 @@ summarization:
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
-#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
@@ -1497,7 +1666,7 @@ memory:
   # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
   shutdown_flush_timeout_seconds: 30.0
   # Memory backend selector. Either a registered backend name (matching a
-  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / mem0 / noop)
   # or a dotted import path to a MemoryManager subclass.
   manager_class: deermem
   # Memory operation mode:
@@ -1505,15 +1674,49 @@ memory:
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
-  # memory_search/add/update/delete go through the active backend; backends
-  # without fact-CRUD return a JSON error instead of crashing.)
+  # Normally only one mode runs at a time. A backend that needs conversation-
+  # level extraction may retain passive writes in tool mode while still
+  # exposing query-aware search (mem0 does this). Tool calls go through the
+  # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  #
+  # OpenViking HTTP example (replace this DeerMem backend_config block when
+  # manager_class is openviking; OpenViking currently supports middleware mode):
+  #
+  # backend_config:
+  #   base_url: http://openviking:1933
+  #   auth_mode: trusted
+  #   account: deerflow
+  #   api_key_env: OPENVIKING_API_KEY
+  #   max_connections: 100
+  #   max_keepalive_connections: 20
+  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
+  #   startup_policy: fail_fast
+  #   failure_policy:
+  #     read: fail_open
+  #     write: log_and_drop
+  #   retrieval:
+  #     top_k: 8
+  #     score_threshold: 0.25
+  #     max_injection_chars: 12000
+  #
+  # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
+  # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
+  # optional Compose overlay uses the internal http://openviking:1933 address.
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
+    storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
+    strict_user_scope: false    # set true in authenticated deployments after all callers propagate user_id
+    manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
+    file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
+    retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
     debounce_seconds: 30 # Wait time before processing queued updates
+    # Backpressure cap on pending items. 0 = unlimited. At the cap, new
+    # non-signal updates are rejected (QueueFull); signal updates are always
+    # admitted so important memories are never shed.
+    queue_max_depth: 1000
     model:                      # LLM for memory extraction; omit all fields = no extraction (non-LLM ops still work; an update raises)
       # provider: openai
       # model: gpt-4o-mini
@@ -1561,6 +1764,20 @@ memory:
     consolidation_min_facts: 8         # min facts in one category to trigger review (3-30)
     consolidation_max_groups_per_cycle: 3  # max groups merged per update cycle (1-10)
     consolidation_max_sources: 8       # max source facts per consolidation group (2-20)
+    # extraction_callback is a host-injected post-extraction observability hook
+    # (token usage, facts accepted/rejected, rejection rate). The factory
+    # injects a logging default; set programmatically to emit a Langfuse span.
+    # Message processing (externalized patterns / prompt templates):
+    #   patterns_dir        - dir with correction.yaml / reinforcement.yaml overriding
+    #                         the bundled signal-detection patterns. None (default) =
+    #                         bundled core/message_patterns/. When explicitly set, both
+    #                         files must exist (typos or missing mounts raise an error).
+    #   prompts_dir         - dir with custom memory-extraction prompt templates
+    #                         (memory_update.chat.yaml, staleness_review.yaml,
+    #                         consolidation.yaml, fact_extraction.yaml). None (default)
+    #                         = bundled core/prompts/. Supports per-agent subdirectories.
+    # patterns_dir: ""            # empty = bundled defaults
+    # prompts_dir: ""             # empty = bundled defaults
 
 # ============================================================================
 # Custom Agent Management API
@@ -1577,6 +1794,7 @@ agents_api:
 skill_evolution:
   enabled: false # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
+  security_fail_closed: true # Moderation model unavailable: true blocks all writes; false allows non-executable content with a warning (executable is always blocked)
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
@@ -1652,6 +1870,51 @@ database:
   sqlite_dir: .deer-flow/data
 
 # ============================================================================
+# Inbound webhook dedupe storage (cross-pod redelivery dedup — issue #4120)
+# ============================================================================
+# Where the ChannelManager records inbound webhook dedupe state.
+#
+# backend: auto     -- (default) Postgres whenever database.backend=postgres,
+#                       including multi-replica K8s where each pod runs a single
+#                       worker but shares one DB. Otherwise an in-process memory
+#                       store (single-DB, single-pod).
+#                       NOTE: multi-replica deployments must use a Postgres DB;
+#                       if database.backend is sqlite/memory, 'auto' falls back to
+#                       the per-pod memory store and cross-pod dedupe is disabled.
+# backend: memory   -- In-process store only. Per-pod: a webhook redelivered to
+#                       a DIFFERENT replica is NOT deduped. Not recommended for
+#                       multi-worker deployments (logs a startup WARNING).
+# backend: postgres -- Share dedupe state across pods via the application DB.
+#                       REQUIRED for any multi-replica deployment. If
+#                       database.backend is not 'postgres', a WARNING is logged and
+#                       the store falls back to the in-process memory store.
+#
+# dedupe_storage:
+#   backend: auto
+
+  # Recycle app ORM PostgreSQL connections before the environment's idle cutoff.
+  pool_recycle: 300
+  # App ORM PostgreSQL command timeout. Set to null to disable it or raise it
+  # for intentionally long commands.
+  command_timeout: 30
+  # Restart required. Use one value across every process sharing this database.
+  # full: current full-message checkpoints; delta: DeltaChannel for messages.
+  checkpoint_channel_mode: full
+  # Delta-mode tuning (only applies when checkpoint_channel_mode is delta).
+  # Restart required, like the mode itself: the cadence is compiled into each
+  # graph's channel table. All processes sharing this database must agree.
+  # snapshot_frequency: full messages snapshot every N per-step writes
+  # (higher = smaller checkpoints, slower materialization).
+  checkpoint_delta:
+    snapshot_frequency: 10
+  # Size caps for the compiled checkpoint graph caches (per process).
+  # Hot-reloadable, no restart needed: the value is re-read on each eviction
+  # check and only changes when a cache evicts, never graph semantics.
+  checkpoint_graph_cache:
+    # Gateway thread-state accessor graphs (per assistant/mode/cadence).
+    accessor_graph_max: 64
+
+# ============================================================================
 # Run Events Configuration
 # ============================================================================
 # Storage backend for run events (messages + execution traces).
@@ -1668,6 +1931,29 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+
+# ============================================================================
+# Agent Storage Configuration
+# ============================================================================
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
+# separate from `database` (run/thread/event data) and from agent memory.
+# Restart-required (the backend is captured at Gateway lifespan startup).
+#
+# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
+#                   Single-node only: an agent created on one node is invisible
+#                   to other nodes without a shared mount.
+# backend: db    -- A row per agent in the shared SQL persistence layer, so every
+#                   node sees the same agents. Requires database.backend to be
+#                   'sqlite' or 'postgres' (rejected at startup on 'memory').
+#
+# Switching an existing install to 'db'? Import the on-disk agents once with:
+#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# The source files are left in place, so reverting to 'file' is a clean rollback.
+#
+# agent_storage:
+#   backend: file
+agent_storage:
+  backend: file
 
 # ============================================================================
 # Scheduled Tasks Configuration
@@ -1709,6 +1995,11 @@ scheduler:
 # grace_seconds if your environment cannot keep clocks within a few seconds;
 # the trade-off is longer recovery latency for genuinely dead workers
 # (lease_seconds + grace_seconds from last heartbeat to reclaim).
+#
+# The owning worker itself does NOT use grace_seconds as extra execution time.
+# If renewal cannot be confirmed before lease_seconds expires, it cancels the
+# local run and suppresses durable finalization; grace_seconds only delays when
+# a peer may reclaim the expired row.
 
 run_ownership:
   lease_seconds: 30           # Seconds before a run lease expires if not renewed.
@@ -1730,12 +2021,14 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256
+#   queue_maxsize: 256           # data events retained per run. A reconnect
+#                                # older than this window receives SSE `gap`.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # events retained per run (redis stream MAXLEN)
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
@@ -1844,6 +2137,7 @@ run_ownership:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
 #     allowed_users: []               # empty = allow all
+#     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
 #     enabled: false
@@ -1950,9 +2244,28 @@ run_ownership:
 # Authorization Configuration
 # ============================================================================
 # Fine-grained resource authorization (RBAC and beyond). Disabled by default;
-# every authenticated user has access to all resources. Schema is present but
-# inert; the built-in RBAC provider and runtime wiring arrive in subsequent phases.
+# every authenticated user has access to all resources.
 # See RFC: https://github.com/bytedance/deer-flow/issues/4063
+#
+# authorization:
+#   enabled: true
+#   fail_closed: true            # block on provider error / unresolved identity
+#   default_role: user           # applied when user_role is None; built-in RBAC requires this role below
+#   provider:
+#     use: deerflow.authz.rbac:RbacAuthorizationProvider
+#     config:
+#       # A known role with no policy for a resource is unrestricted for it.
+#       # Define both `tools` and `routes` wherever access should be constrained.
+#       roles:
+#         admin:
+#           tools: {allow: "*"}
+#           routes: {allow: "*"}
+#         user:
+#           tools: {allow: "*", deny: ["update_agent"]}
+#           routes: {allow: "*"}
+#         guest:
+#           tools: {allow: ["web_search", "read_file"]}
+#           routes: {allow: ["threads:read", "runs:read"]}
 authorization:
   enabled: false
 
@@ -1974,6 +2287,49 @@ authorization:
 #   recovery_timeout_sec: 60
 
 # ============================================================================
+# LLM Call Concurrency Configuration
+# ============================================================================
+# Cap the number of concurrently in-flight LLM calls process-wide. A provider
+# burst-rate (limit_burst_rate) error fires on the *slope* of the request rate,
+# not on a static quota - so the morning peak (e.g. 08:30) ramping from ~0 to
+# full throttle in seconds gets rejected even when total RPM is within budget.
+# Capping concurrency caps that slope. Retries alone make it worse (they add
+# demand inside the very burst being throttled); pair this cap with the
+# decorrelated-jitter backoff already built into the LLM error-handling
+# middleware, and ideally an nginx `limit_req` at the ingress.
+#
+# 0 disables the cap (default) - existing deployments see no behavior change.
+#
+# Per-process, not per-cluster: the cap bounds in-flight LLM calls within ONE
+# gateway process. With GATEWAY_WORKERS > 1 the aggregate cap across the
+# deployment is effectively `max_concurrent_calls * GATEWAY_WORKERS`, and a
+# multi-node rollout multiplies it further - size the per-process value with
+# that in mind (and pair it with an nginx `limit_req` at the ingress for a
+# true cluster-wide slope cap).
+#
+# Startup-only: the cap is captured at the first LLM run and frozen for the
+# process lifetime. Editing `max_concurrent_calls` here takes effect only after
+# a gateway restart; the other `llm_call.*` knobs below remain hot-reloadable.
+# Freezing the cap avoids the downscale and config-freshness races that a
+# runtime-mutable, process-wide/cross-loop limiter would otherwise hit (a
+# lowered cap could keep admitting queued waiters, or a stale config snapshot
+# constructed after a fresher one could restore a higher cap).
+
+# llm_call:
+#   # Max concurrently in-flight LLM calls across the whole process (default: 0 = disabled)
+#   max_concurrent_calls: 0
+#   # Max LLM call attempts for retriable transient errors, 1 = no retry (default: 3)
+#   retry_max_attempts: 3
+#   # Base delay (ms) for the decorrelated-jitter retry backoff (default: 1000)
+#   retry_base_delay_ms: 1000
+#   # Hard cap (ms) on any single retry backoff delay (default: 8000)
+#   retry_cap_delay_ms: 8000
+#   # Backoff base (ms) used ONLY for burst-rate (limit_burst_rate) 429s - higher
+#   # than retry_base_delay_ms so the single burst retry lands after the throttle
+#   # window subsides. Ignored when the provider sends Retry-After (default: 5000)
+#   burst_retry_base_delay_ms: 5000
+
+# ============================================================================
 # SSO / OIDC Authentication (optional)
 # ============================================================================
 # Enable SSO login via any OIDC-compatible provider (Keycloak, Google, Azure AD, Okta, etc.).
@@ -1991,7 +2347,24 @@ authorization:
 #   2. Add Valid Redirect URI: http://localhost:8001/api/v1/auth/callback/keycloak
 #   3. Add Web Origin: http://localhost:8001 (or your frontend origin)
 
+# ============================================================================
+# Local (email/password) authentication
+# ============================================================================
+# Self-registration via POST /api/v1/auth/register is open by default: anyone
+# who can reach the Gateway may create a regular user account.
+#
+# The OIDC provisioning policy below (allowed_email_domains, require_verified_email,
+# auto_create_users) is enforced only in the SSO callback. It does NOT constrain local
+# registration, so on an SSO-provisioned deployment leaving this open lets a visitor
+# create an account outside that policy. Set allow_registration: false there.
+#
+# The first admin account is always created through /initialize regardless of this
+# setting, so turning it off cannot lock you out of a fresh install.
+
 # auth:
+#   local:
+#     allow_registration: false
+#
 #   oidc:
 #     enabled: true
 #     # Base URL of the frontend, used for redirects after SSO callback.

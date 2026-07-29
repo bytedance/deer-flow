@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
+# Adapter-owned bytes may use this transient key while crossing the channel
+# boundary. ChannelManager consumes and removes it before persisting metadata.
+INBOUND_FILE_CONTENT_KEY = "_content"
 
 
 # ---------------------------------------------------------------------------

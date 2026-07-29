@@ -12,6 +12,7 @@ from deerflow.config import get_paths
 from .diff import compare_snapshots, get_changed_paths
 from .scanner import scan_workspace_roots
 from .types import (
+    WORKSPACE_CHANGES_EVENT_CATEGORY,
     WORKSPACE_CHANGES_EVENT_TYPE,
     WORKSPACE_CHANGES_METADATA_KEY,
     WorkspaceChangeLimits,
@@ -147,13 +148,13 @@ async def record_workspace_changes(
 
         payload = result.to_dict()
         summary = result.summary
-        changed_file_count = summary.created + summary.modified + summary.deleted
+        changed_file_count = summary.created + summary.modified + summary.deleted + summary.symlink_created
         content = f"{changed_file_count} file{'s' if changed_file_count != 1 else ''} changed +{summary.additions} -{summary.deletions}"
         return await event_store.put(
             thread_id=thread_id,
             run_id=run_id,
             event_type=WORKSPACE_CHANGES_EVENT_TYPE,
-            category="workspace",
+            category=WORKSPACE_CHANGES_EVENT_CATEGORY,
             content=content,
             metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
         )

@@ -5,10 +5,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 
+import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  loadRememberLoginPreference,
+  saveRememberLoginPreference,
+} from "@/core/auth/remember-login";
 import {
   canCreateRegularAccount,
   fetchSetupStatus,
@@ -59,6 +64,7 @@ export default function LoginPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
   const [isLogin, setIsLogin] = useState(true);
   const [ssoProviders, setSsoProviders] = useState<
     { id: string; display_name: string; type: string }[]
@@ -66,7 +72,10 @@ export default function LoginPage() {
   const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(
     null,
   );
-  const [setupStatusChecked, setSetupStatusChecked] = useState(false);
+  const [setupStatusPhase, setSetupStatusPhase] = useState<
+    "checking" | "ready" | "unavailable"
+  >("checking");
+  const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
@@ -87,10 +96,15 @@ export default function LoginPage() {
   const nextParam = searchParams.get("next");
   const redirectPath = validateNextParam(nextParam) ?? "/workspace";
   const regularSignupAllowed = canCreateRegularAccount({
-    checked: setupStatusChecked,
+    // A failed probe must not expose registration while the system's setup
+    // state is unknown. Existing users can still sign in normally.
+    checked: setupStatusPhase === "ready",
     status: setupStatus,
   });
   const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
+  const showSetupStatusUnavailable =
+    setupStatusPhase === "unavailable" ||
+    (setupStatusAttempt > 0 && setupStatusPhase === "checking");
 
   // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
@@ -99,14 +113,25 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, redirectPath, router]);
 
-  // Fetch setup state and SSO providers
+  useEffect(() => {
+    const preference = loadRememberLoginPreference();
+    setRememberMe(preference.rememberMe);
+    if (preference.email) {
+      setEmail(preference.email);
+    }
+  }, []);
+
+  // Fetch setup state independently so retrying a slow Gateway does not also
+  // refetch unrelated auth-provider configuration.
   useEffect(() => {
     let cancelled = false;
+    setSetupStatusPhase("checking");
 
     void fetchSetupStatus()
       .then((data) => {
         if (cancelled) return;
         setSetupStatus(data);
+        setSetupStatusPhase("ready");
         if (data.needs_setup) {
           setIsLogin(true);
         }
@@ -114,13 +139,19 @@ export default function LoginPage() {
       .catch(() => {
         if (!cancelled) {
           setSetupStatus(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSetupStatusChecked(true);
+          setSetupStatusPhase("unavailable");
         }
       });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setupStatusAttempt]);
+
+  // SSO providers are static for the page lifetime and should not be coupled to
+  // setup-status retries.
+  useEffect(() => {
+    let cancelled = false;
 
     void fetch("/api/v1/auth/providers")
       .then((r) => r.json())
@@ -159,8 +190,12 @@ export default function LoginPage() {
         ? "/api/v1/auth/login/local"
         : "/api/v1/auth/register";
       const body = isLogin
-        ? `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`
-        : JSON.stringify({ email, password });
+        ? new URLSearchParams({
+            password,
+            remember_me: String(rememberMe),
+            username: email,
+          })
+        : JSON.stringify({ email, password, remember_me: rememberMe });
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
@@ -184,6 +219,8 @@ export default function LoginPage() {
         }
         return;
       }
+
+      saveRememberLoginPreference({ email, rememberMe });
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
@@ -213,6 +250,34 @@ export default function LoginPage() {
             {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
+
+        {showSetupStatusUnavailable && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="border-l-2 border-amber-500 ps-3 text-sm"
+          >
+            <p className="font-medium">{t.login.serviceUnavailableTitle}</p>
+            <p className="text-muted-foreground mt-1">
+              {t.login.serviceUnavailableDescription}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              disabled={setupStatusPhase === "checking"}
+              onClick={() => {
+                setSetupStatusPhase("checking");
+                setSetupStatusAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {setupStatusPhase === "checking"
+                ? t.login.pleaseWait
+                : t.login.retry}
+            </Button>
+          </div>
+        )}
 
         {systemNeedsAdminSetup && (
           <div className="border-l-2 border-blue-500 ps-3 text-sm">
@@ -258,6 +323,11 @@ export default function LoginPage() {
             />
           </div>
 
+          <RememberSessionOption
+            checked={rememberMe}
+            onCheckedChange={setRememberMe}
+          />
+
           {error && <p className="text-sm text-red-500">{error}</p>}
 
           <Button type="submit" className="w-full" disabled={loading}>
@@ -296,7 +366,7 @@ export default function LoginPage() {
                 className="w-full"
                 disabled={loading}
                 onClick={() => {
-                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}`;
+                  window.location.href = `/api/v1/auth/oauth/${provider.id}?next=${encodeURIComponent(redirectPath)}&remember_me=${String(rememberMe)}`;
                 }}
               >
                 {t.login.continueWith(provider.display_name)}

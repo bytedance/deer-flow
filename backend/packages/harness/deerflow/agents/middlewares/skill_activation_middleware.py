@@ -17,6 +17,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.events.catalog import (
+    MIDDLEWARE_SKILL_ACTIVATION_TAG,
+    MIDDLEWARE_SKILL_SECRETS_TAG,
+)
 from deerflow.runtime.secret_context import (
     _SECRETS_BINDING_AUDIT_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
@@ -294,7 +298,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_activation",
+                MIDDLEWARE_SKILL_ACTIVATION_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="activate",
@@ -306,7 +310,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 },
             )
         except Exception:
-            logger.debug("Failed to record slash skill activation audit event", exc_info=True)
+            logger.warning("Failed to record slash skill activation audit event", exc_info=True)
 
     def _prepare_model_request(self, request: ModelRequest, *, hook: str) -> tuple[ModelRequest | AIMessage | None, _Activation | None]:
         run_context = self._run_context(request)
@@ -533,14 +537,14 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return
         try:
             journal.record_middleware(
-                "skill_secrets",
+                MIDDLEWARE_SKILL_SECRETS_TAG,
                 name="SkillActivationMiddleware",
                 hook=hook,
                 action="bind_secrets",
                 changes=audit_state,
             )
         except Exception:
-            logger.debug("Failed to record skill secret binding audit event", exc_info=True)
+            logger.warning("Failed to record skill secret binding audit event", exc_info=True)
 
     @staticmethod
     def _make_activation_message(target: HumanMessage, activation_content: str) -> HumanMessage:

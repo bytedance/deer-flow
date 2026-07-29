@@ -171,6 +171,23 @@ def test_per_user_toggle_removes_custom_skill_before_returning(projection_env) -
     assert not (projected.custom / "demo-skill").exists()
 
 
+def test_managed_integration_projection_is_filtered_per_user(projection_env) -> None:
+    env = projection_env
+    integration_root = env.paths.integration_skills_dir()
+    _write_skill(integration_root / "lark-cli", "lark-doc")
+
+    alice_projection = rebuild_skill_projections(env.storage)
+    alice_skill = alice_projection.integrations / "lark-cli" / "lark-doc" / "SKILL.md"
+    assert alice_skill.is_file()
+
+    env.storage.set_skill_enabled_state("lark-doc", False)
+    assert not alice_skill.exists()
+
+    bob_storage = UserScopedSkillStorage("bob", host_path=str(env.skills_root), app_config=env.config)
+    bob_projection = rebuild_skill_projections(bob_storage)
+    assert (bob_projection.integrations / "lark-cli" / "lark-doc" / "SKILL.md").is_file()
+
+
 def test_disabling_custom_skill_hides_only_target_while_rebuilding(projection_env, monkeypatch) -> None:
     env = projection_env
     env.storage.write_custom_skill("alpha", "SKILL.md", _skill_content("alpha"))
@@ -245,6 +262,7 @@ def test_mutation_failure_clears_projection_scope(projection_env) -> None:
 
     assert list(projected.custom.iterdir()) == []
     assert list(projected.legacy.iterdir()) == []
+    assert list(projected.integrations.iterdir()) == []
     assert not manifest.exists()
 
 

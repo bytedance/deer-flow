@@ -544,6 +544,36 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path / "home")
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "public").mkdir(parents=True)
+        (skills_dir / "custom").mkdir()
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: skills_dir,
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            )
+        )
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=config),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+        ):
+            alice = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
+            bob = LocalSandboxProvider._build_thread_path_mappings("thread-b", user_id="bob")
+
+        alice_integrations = next(mapping for mapping in alice if mapping.container_path == "/mnt/skills/integrations")
+        bob_integrations = next(mapping for mapping in bob if mapping.container_path == "/mnt/skills/integrations")
+        assert alice_integrations.local_path == str(paths.user_integration_skills_view_dir("alice"))
+        assert bob_integrations.local_path == str(paths.user_integration_skills_view_dir("bob"))
+        assert alice_integrations.local_path != bob_integrations.local_path
+        assert alice_integrations.read_only is True
+        assert bob_integrations.read_only is True
+
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()

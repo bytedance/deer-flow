@@ -43,6 +43,7 @@ class SkillProjectionPaths:
     public: Path
     custom: Path
     legacy: Path
+    integrations: Path
 
 
 def get_skill_projection_paths(storage: SkillStorage) -> SkillProjectionPaths:
@@ -55,11 +56,13 @@ def get_skill_projection_paths(storage: SkillStorage) -> SkillProjectionPaths:
             public=paths.public_skills_view_dir,
             custom=paths.skills_view_dir / "custom",
             legacy=paths.skills_view_dir / "legacy",
+            integrations=paths.skills_view_dir / "integrations",
         )
     return SkillProjectionPaths(
         public=paths.public_skills_view_dir,
         custom=paths.user_custom_skills_view_dir(user_id),
         legacy=paths.user_legacy_skills_view_dir(user_id),
+        integrations=paths.user_integration_skills_view_dir(user_id),
     )
 
 
@@ -259,10 +262,13 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
         state = {"extensions": _extensions_state()}
     elif scope == "user":
         user_custom_root = storage.get_user_custom_root()
+        integration_root = storage.get_user_integrations_root()
         _update_tree_digest(digest, user_custom_root, "custom")
         _update_tree_digest(digest, host_root / SkillCategory.CUSTOM.value, "legacy")
-        # CUSTOM/LEGACY visibility is the intersection of the per-user state
-        # and the global extensions default, so both belong in this signature.
+        _update_tree_digest(digest, integration_root, "integrations")
+        # CUSTOM/LEGACY/INTEGRATION visibility is the intersection of the
+        # per-user state and the global extensions default, so both belong in
+        # this signature.
         state = {
             "extensions": _extensions_state(),
             "user": storage._read_skill_states(),
@@ -375,13 +381,18 @@ def _rebuild_user_locked(storage: SkillStorage, paths: SkillProjectionPaths) -> 
                 _by_relative_path(enabled_user_skills, SkillCategory.LEGACY),
                 _category_boundaries(all_user_skills, SkillCategory.LEGACY),
             )
+            _replace_category(
+                paths.integrations,
+                _by_relative_path(enabled_user_skills, SkillCategory.INTEGRATION),
+                _category_boundaries(all_user_skills, SkillCategory.INTEGRATION),
+            )
             after = _source_signature(storage, "user")
             if before == after:
                 _write_manifest(scope_root, after)
                 return
         raise RuntimeError("User skills changed repeatedly while rebuilding the sandbox projection")
     except Exception:
-        _clear_projection_scope(scope_root, paths.custom, paths.legacy)
+        _clear_projection_scope(scope_root, paths.custom, paths.legacy, paths.integrations)
         raise
 
 
@@ -439,10 +450,10 @@ def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
             try:
                 manifest = _read_manifest(paths.custom.parent)
                 signature = _source_signature(storage, "user")
-                if not paths.custom.is_dir() or not paths.legacy.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
+                if not paths.custom.is_dir() or not paths.legacy.is_dir() or not paths.integrations.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
                     _rebuild_user_locked(storage, paths)
             except Exception:
-                _clear_projection_scope(paths.custom.parent, paths.custom, paths.legacy)
+                _clear_projection_scope(paths.custom.parent, paths.custom, paths.legacy, paths.integrations)
                 raise
     return paths
 
@@ -475,6 +486,7 @@ def skill_projection_mutation(
         category_roots = {
             SkillCategory.CUSTOM: paths.custom,
             SkillCategory.LEGACY: paths.legacy,
+            SkillCategory.INTEGRATION: paths.integrations,
         }
 
         def rebuild() -> None:

@@ -1,8 +1,8 @@
-"""End-to-end tests for three-way skills mount across sandbox providers.
+"""End-to-end tests for enabled-only skill mounts across sandbox providers.
 
-Verifies that (a) public, (b) per-user custom, and (c) legacy global-custom
-skills all resolve to correct container paths that the sandbox providers
-actually mount — covering ``LocalSandboxProvider`` and
+Verifies that public, per-user custom, legacy global-custom, and managed
+integration skills all resolve to correct container paths that the sandbox
+providers actually mount — covering ``LocalSandboxProvider`` and
 ``AioSandboxProvider`` (DooD / local-backend path).
 
 Includes a full-pipeline test that exercises the actual path the model
@@ -105,8 +105,9 @@ class TestThreeWayMountEndToEnd:
             public=paths.public_skills_view_dir,
             custom=paths.user_custom_skills_view_dir("user-1"),
             legacy=paths.user_legacy_skills_view_dir("user-1"),
+            integrations=paths.user_integration_skills_view_dir("user-1"),
         )
-        for root in (projection.public, projection.custom, projection.legacy):
+        for root in (projection.public, projection.custom, projection.legacy, projection.integrations):
             root.mkdir(parents=True, exist_ok=True)
 
         with (
@@ -130,6 +131,16 @@ class TestThreeWayMountEndToEnd:
             idx = _local_mounts(provider, "thread-1", user_id="user-1")
         assert "/mnt/skills/custom" in idx
         assert Path(idx["/mnt/skills/custom"].local_path) == paths.user_custom_skills_view_dir("user-1")
+
+    def test_local_managed_integrations_use_per_user_projection(self, skills_fs):
+        cfg = _build_config(skills_fs["root"])
+        paths = Paths(base_dir=skills_fs["users_dir"].parent)
+        with patch("deerflow.config.get_app_config", return_value=cfg), patch("deerflow.config.paths.get_paths", return_value=paths):
+            provider = LocalSandboxProvider()
+            idx = _local_mounts(provider, "thread-1", user_id="user-1")
+        assert "/mnt/skills/integrations" in idx
+        assert Path(idx["/mnt/skills/integrations"].local_path) == paths.user_integration_skills_view_dir("user-1")
+        assert idx["/mnt/skills/integrations"].read_only is True
 
     def test_local_legacy_mounted_for_user_without_custom(self, skills_fs):
         cfg = _build_config(skills_fs["root"])
@@ -352,6 +363,10 @@ class TestThreeWayMountEndToEnd:
         assert "/mnt/skills/custom" in mount_entries
         assert "dst=/mnt/skills/custom" in mount_entries["/mnt/skills/custom"]
         assert "users/noob/skills_view/custom" in mount_entries["/mnt/skills/custom"]
+
+        assert "/mnt/skills/integrations" in mount_entries
+        assert "dst=/mnt/skills/integrations" in mount_entries["/mnt/skills/integrations"]
+        assert "users/noob/skills_view/integrations" in mount_entries["/mnt/skills/integrations"]
 
         # noob has no per-user custom → legacy is mounted
         assert "/mnt/skills/legacy" in mount_entries

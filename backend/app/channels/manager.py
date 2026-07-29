@@ -10,6 +10,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -19,7 +20,9 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
     InboundMessageType,
@@ -37,6 +40,7 @@ from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
@@ -72,12 +76,53 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
-INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
-INBOUND_DEDUPE_MAX_ENTRIES = 4096
+# Inbound-redelivery dedup window. The dedupe state lives in
+# ``self._inbound_dedupe_store``: the default in-process Memory store is
+# local to this Gateway process (a recorded key survives only for the store's
+# TTL / entry cap and is gone across a restart), while a Postgres-backed store
+# is shared across pods. 10 minutes is a deliberately bounded window: long
+# enough to absorb a near-term redelivery of the same event — whether a
+# provider's own automatic retry or an operator resend — without keeping a
+# growing ledger.
+#
+# For GitHub specifically: GitHub does NOT automatically retry or redeliver
+# a failed delivery (non-2xx response, timeout, or connection error) — it
+# is simply recorded as failed. See GitHub's own documentation:
+# https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
+# Every redelivery of the same ``X-GitHub-Delivery`` GUID is therefore an
+# explicit action — the repo/App "Redeliver" button, the REST API, or an
+# operator's own scheduled recovery script polling the failed-deliveries
+# endpoint (the pattern GitHub's own docs recommend) — never an automatic
+# GitHub-side retry. This TTL exists to absorb exactly those explicit
+# near-term replays.
+#
+# At the boundary: a manual redelivery (e.g. GitHub's "Redeliver" button)
+# clicked *after* the TTL has elapsed, or any redelivery following a Gateway
+# restart, is no longer recognized as a duplicate — the key has already been
+# evicted, or never existed in the new process — so the agent runs again
+# and may repeat a real side effect (e.g. a duplicate PR comment on
+# GitHub). This is parity with every other IM channel's dedupe (same
+# mechanism, same TTL), not a channel-specific gap. True idempotency against
+# a late/manual redelivery would require persisting the dedupe key in
+# ``ChannelStore`` instead, which is not implemented here.
+# Follow-up buffering for busy fire_and_forget threads (issue #4121 Slice 2).
+# A ConflictError on a channel opted into ChannelRunPolicy.buffer_followups_on_busy
+# buffers the triggering message per-thread instead of only logging it; a
+# background watcher drains the buffer into a coalesced follow-up run once the
+# busy run's StreamBridge stream reaches END_SENTINEL. See _buffer_followup,
+# _drain_followups_for_thread, and _watch_run_and_drain_followups below.
+FOLLOWUP_BUFFER_MAX_PER_THREAD = 20
+FOLLOWUP_DRAIN_BATCH_SIZE = 10
+FOLLOWUP_BLOCK_TAG = "followups-while-busy"
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
 INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
+# Providers that persist connection.workspace_id = chat_id (telegram / feishu /
+# wechat upsert_connection). Unbound inbound has no connection, so msg.workspace_id
+# is unset; chat_id is still the tenant scope and is safe for the dedupe key.
+# Slack is intentionally excluded: its channel ids are not globally unique.
+CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
@@ -190,12 +235,82 @@ class _SerializedThreadRunState:
     waiters: int = 0
 
 
+@dataclass(slots=True)
+class _FollowupEntry:
+    """One inbound message's text, buffered because its thread was busy.
+
+    Routing/policy identity (channel_name, metadata, owner headers) for the
+    eventual drained run comes from a separate ``carrier_msg`` — see
+    ``ChannelManager._drain_followups_for_thread`` — not from a per-entry
+    message, since every buffered entry for one thread_id shares that
+    identity already (thread_id is itself derived deterministically from
+    (repo, number, agent_name) for GitHub). Only the text needs to survive
+    per entry.
+    """
+
+    dedupe_key: str
+    text: str
+
+
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
     if exc is None:
         return False
     if isinstance(exc, ConflictError):
         return True
     return "already running a task" in str(exc)
+
+
+def _followup_dedupe_key(msg: InboundMessage) -> str:
+    """Best-effort stable identifier for a buffered follow-up comment.
+
+    Mirrors ``_inbound_dedupe_key``'s provider-id preference order (a GitHub
+    webhook delivery id first, then the generic provider-message-id metadata
+    keys), but scoped to one thread's follow-up buffer rather than the
+    global cross-channel inbound dedupe map, and always returns a usable key
+    — falling back to an object-identity key — since the follow-up buffer
+    must still accept an entry even when a provider omits every known id
+    field (unlike ``_inbound_dedupe_key``, which returns ``None`` to skip
+    dedupe entirely in that case).
+    """
+    metadata = msg.metadata or {}
+    gh = metadata.get("github")
+    if isinstance(gh, dict):
+        delivery_id = gh.get("delivery_id")
+        if delivery_id:
+            return f"github:delivery:{delivery_id}"
+
+    for key in INBOUND_DEDUPE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value:
+            return f"{key}:{value}"
+
+    raw_message = metadata.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = raw_message.get(key)
+            if value:
+                return f"{key}:{value}"
+
+    # No stable provider id available: fall back to a per-message key so the
+    # entry is still buffered (just never deduped against a redelivery).
+    return f"__no_id__:{id(msg)}:{msg.created_at}"
+
+
+def _format_followup_block(entries: list[_FollowupEntry]) -> str:
+    """Coalesce buffered follow-up entries into one templated input block."""
+    lines = [
+        f"<{FOLLOWUP_BLOCK_TAG}>",
+        "The following messages arrived on this thread while a previous run was still in progress. They were queued and are now delivered together as one turn:",
+        "",
+    ]
+    for idx, entry in enumerate(entries, start=1):
+        escaped_text = escape(entry.text, quote=False).replace(
+            "\n",
+            "\n   ",
+        )
+        lines.append(f"{idx}. {escaped_text}")
+    lines.append(f"</{FOLLOWUP_BLOCK_TAG}>")
+    return "\n".join(lines)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -504,10 +619,15 @@ def _unknown_command_reply(command: str | None = None) -> str:
     return f"Unknown command. Available commands: {available}"
 
 
-def _human_input_message(content: str, *, original_content: str | None = None) -> dict[str, Any]:
+def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "human", "content": content}
-    if original_content is not None and original_content != content:
-        message["additional_kwargs"] = {ORIGINAL_USER_CONTENT_KEY: original_content}
+    if original_content is not None and original_content != content or files:
+        additional_kwargs: dict[str, Any] = {}
+        if original_content is not None and original_content != content:
+            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
+        if files:
+            additional_kwargs["files"] = files
+        message["additional_kwargs"] = additional_kwargs
     return message
 
 
@@ -712,15 +832,21 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
             filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
 
-            try:
-                data = await file_reader(f, client)
-            except Exception:
-                logger.exception(
-                    "[Manager] failed to read inbound file: channel=%s, file=%s",
-                    msg.channel_name,
-                    f.get("url") or filename or idx,
-                )
-                continue
+            inline_content = f.pop(INBOUND_FILE_CONTENT_KEY, None)
+            if isinstance(inline_content, bytes):
+                data = inline_content
+            elif isinstance(inline_content, (bytearray, memoryview)):
+                data = bytes(inline_content)
+            else:
+                try:
+                    data = await file_reader(f, client)
+                except Exception:
+                    logger.exception(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                        msg.channel_name,
+                        f.get("url") or filename or idx,
+                    )
+                    continue
 
             if data is None:
                 logger.warning(
@@ -768,33 +894,6 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     return created
 
 
-def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
-    lines = [
-        "<uploaded_files>",
-        "The following files were uploaded in this message:",
-        "",
-    ]
-    if not files:
-        lines.append("(empty)")
-    else:
-        for f in files:
-            filename = f.get("filename", "")
-            size = int(f.get("size") or 0)
-            size_kb = size / 1024 if size else 0
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-            path = f.get("path", "")
-            is_image = bool(f.get("is_image"))
-            file_kind = "image" if is_image else "file"
-            lines.append(f"- {filename} ({size_str})")
-            lines.append(f"  Type: {file_kind}")
-            lines.append(f"  Path: {path}")
-            lines.append("")
-    lines.append("Use `read_file` for text-based files and documents.")
-    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
-    lines.append("</uploaded_files>")
-    return "\n".join(lines)
-
-
 class ChannelManager:
     """Core dispatcher that bridges IM channels to the DeerFlow agent.
 
@@ -816,6 +915,8 @@ class ChannelManager:
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        inbound_dedupe_store: InboundDedupeStore | None = None,
+        get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -827,6 +928,14 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
+        # threaded in from app.py's lifespan via start_channel_service() ->
+        # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
+        # launch_run closure over `app` in the same lifespan function). None
+        # when not wired (e.g. a ChannelManager constructed directly in
+        # tests) — follow-up buffering still works, but no watcher is
+        # spawned to auto-drain it (see _maybe_spawn_followup_watcher).
+        self._get_stream_bridge = get_stream_bridge
         self._client = None  # lazy init — langgraph_sdk async client
         self._channel_metadata_synced: set[str] = set()
         # Per-conversation locks so concurrent inbound messages for the same
@@ -839,11 +948,30 @@ class ChannelManager:
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
+        # Distinct from self._running: that flag is also False before the
+        # very first start() (so tests that call internal drain/handler
+        # methods directly without going through start()/stop() keep
+        # working unchanged). self._stopped tracks specifically whether
+        # stop() has run, for the follow-up drain guard below.
+        self._stopped = False
         self._task: asyncio.Task | None = None
-        # Insertion order == chronological (keys are never re-inserted), so an
-        # OrderedDict lets us evict expired/overflow entries from the front in
-        # O(k) instead of scanning all entries on every inbound message.
-        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
+        # Inbound webhook dedupe store. Defaults to the in-process Memory store
+        # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
+        # duplicate deliveries landing on different pods are collapsed.
+        self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
+        # Per-thread follow-up buffers for busy fire_and_forget channels that
+        # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
+        # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
+        # oldest-first, mirroring the dedupe store's shape but scoped
+        # per-thread with a hard cap instead of a global TTL (see
+        # _buffer_followup / _enforce_followup_cap).
+        self._followup_buffers: dict[str, OrderedDict[str, _FollowupEntry]] = {}
+        # Background watcher tasks spawned by _maybe_spawn_followup_watcher,
+        # tracked so stop() can cancel+await them instead of leaving them as
+        # orphaned fire-and-forget tasks that could still fire a follow-up
+        # run after this manager has been shut down. Discarded via the same
+        # task's done-callback (see _maybe_spawn_followup_watcher).
+        self._followup_watcher_tasks: set[asyncio.Task] = set()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -897,6 +1025,271 @@ class ChannelManager:
         state.waiters -= 1
         if state.waiters == 0 and not state.lock.locked():
             self._serialized_thread_runs.pop((channel_name, thread_id), None)
+
+    # -- follow-up buffering for busy fire_and_forget threads (issue #4121) --
+
+    def _resolve_stream_bridge(self) -> StreamBridge | None:
+        """Resolve the current StreamBridge via the injected accessor, if any."""
+        if self._get_stream_bridge is None:
+            return None
+        try:
+            return self._get_stream_bridge()
+        except Exception:
+            logger.exception("[Manager] get_stream_bridge callable raised; follow-up watch disabled for this run")
+            return None
+
+    def _enforce_followup_cap(self, thread_id: str, buffer: OrderedDict[str, _FollowupEntry]) -> None:
+        """Drop the OLDEST buffered entries once *buffer* exceeds the per-thread cap.
+
+        Dropping the oldest (rather than the newest, incoming) entry means a
+        thread that is deep enough in the backlog to hit the cap still keeps
+        the most recent activity — a better signal for the eventual coalesced
+        turn than the stalest queued comment. No reaction/acknowledgment is
+        sent on drop (out of scope for this slice); a WARNING is logged so
+        operators can see it in gateway.log.
+        """
+        while len(buffer) > FOLLOWUP_BUFFER_MAX_PER_THREAD:
+            dropped_key, _ = buffer.popitem(last=False)
+            logger.warning(
+                "[Manager] follow-up buffer overflow for thread_id=%s (cap=%d); dropped oldest buffered comment (dedupe_key=%s)",
+                thread_id,
+                FOLLOWUP_BUFFER_MAX_PER_THREAD,
+                dropped_key,
+            )
+
+    def _buffer_followup(self, thread_id: str, msg: InboundMessage) -> None:
+        """Append *msg* to thread_id's follow-up buffer (ConflictError path).
+
+        Dedupe mirrors ``_is_duplicate_inbound``'s OrderedDict idiom, scoped
+        per-thread instead of global: a redelivered webhook for a comment
+        already buffered (same dedupe key) is a no-op instead of a second
+        entry.
+        """
+        key = _followup_dedupe_key(msg)
+        buffer = self._followup_buffers.setdefault(thread_id, OrderedDict())
+        if key in buffer:
+            logger.info(
+                "[Manager] duplicate follow-up ignored for thread_id=%s (dedupe_key=%s)",
+                thread_id,
+                key,
+            )
+            return
+
+        buffer[key] = _FollowupEntry(dedupe_key=key, text=msg.text)
+        self._enforce_followup_cap(thread_id, buffer)
+        logger.info(
+            "[Manager] buffered follow-up for busy thread_id=%s (dedupe_key=%s, buffered=%d)",
+            thread_id,
+            key,
+            len(buffer),
+        )
+
+    def _pop_followup_batch(self, thread_id: str, *, limit: int) -> list[_FollowupEntry]:
+        """Pop up to *limit* buffered entries FIFO (oldest first)."""
+        buffer = self._followup_buffers.get(thread_id)
+        if not buffer:
+            return []
+
+        batch: list[_FollowupEntry] = []
+        for _ in range(min(limit, len(buffer))):
+            _, entry = buffer.popitem(last=False)
+            batch.append(entry)
+
+        if not buffer:
+            self._followup_buffers.pop(thread_id, None)
+        return batch
+
+    def _requeue_followups(self, thread_id: str, entries: list[_FollowupEntry]) -> None:
+        """Put a popped batch back at the front of the buffer (oldest-first).
+
+        Used when the drain's own ``runs.create`` call itself fails —
+        including the ``ConflictError`` edge case where something this
+        manager did not create (a manual Web UI turn, a scheduled run) is
+        occupying the thread. The entries are not lost: the next time *any*
+        run this manager creates on this thread completes, its watcher will
+        attempt another drain and find them still buffered.
+        """
+        if not entries:
+            return
+
+        existing = self._followup_buffers.get(thread_id, OrderedDict())
+        merged: OrderedDict[str, _FollowupEntry] = OrderedDict()
+        for entry in entries:
+            merged[entry.dedupe_key] = entry
+        for key, entry in existing.items():
+            merged.setdefault(key, entry)
+
+        self._enforce_followup_cap(thread_id, merged)
+        self._followup_buffers[thread_id] = merged
+
+    def _maybe_spawn_followup_watcher(
+        self,
+        thread_id: str,
+        run_result: Any,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Spawn a background watcher for a just-created run, if wired up.
+
+        No-ops (spawns nothing) when no ``get_stream_bridge`` accessor was
+        threaded in — e.g. a ``ChannelManager`` constructed directly without
+        going through ``start_channel_service()`` — so tests and any
+        not-yet-wired deployment never see a dangling background task for
+        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
+        so an unexpected watcher failure is surfaced in the logs instead of
+        silently vanishing. The task is also tracked in
+        ``self._followup_watcher_tasks`` (discarded via its own done-callback)
+        so ``stop()`` can cancel+await any watcher still in flight instead of
+        leaving it to fire a follow-up run after shutdown.
+        """
+        if self._get_stream_bridge is None:
+            return
+
+        run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
+        if not run_id:
+            logger.warning(
+                "[Manager] runs.create returned no run_id for thread_id=%s; cannot watch for follow-up drain",
+                thread_id,
+            )
+            return
+
+        task = asyncio.create_task(self._watch_run_and_drain_followups(thread_id, run_id, carrier_msg))
+        self._followup_watcher_tasks.add(task)
+        task.add_done_callback(self._followup_watcher_tasks.discard)
+        task.add_done_callback(self._log_task_error)
+
+    async def _watch_run_and_drain_followups(
+        self,
+        thread_id: str,
+        run_id: str,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Watch *run_id* until it ends, then attempt to drain thread_id's buffer.
+
+        Subscribes to the StreamBridge the same way existing consumers do
+        (``entry is END_SENTINEL``, see ``app/gateway/services.py``). Runs
+        for as long as the underlying run does — GitHub coding runs
+        routinely take several minutes, so this deliberately does not apply
+        an artificial timeout, mirroring why the dispatch path itself uses
+        ``runs.create`` instead of ``runs.wait`` in the first place. Draining
+        is a no-op when the buffer is empty, which is the common case (most
+        runs never hit a busy-thread conflict).
+        """
+        stream_bridge = self._resolve_stream_bridge()
+        if stream_bridge is None:
+            logger.warning(
+                "[Manager] no stream bridge available; cannot watch run_id=%s for thread_id=%s follow-up drain (any buffered follow-ups will be drained by a later watched run on this thread)",
+                run_id,
+                thread_id,
+            )
+            return
+
+        try:
+            async for entry in stream_bridge.subscribe(run_id):
+                if entry is END_SENTINEL:
+                    break
+        except Exception:
+            logger.exception(
+                "[Manager] error watching run_id=%s for thread_id=%s follow-up drain",
+                run_id,
+                thread_id,
+            )
+            return
+
+        client = self._get_client()
+        await self._drain_followups_for_thread(client, thread_id, carrier_msg)
+
+    async def _drain_followups_for_thread(
+        self,
+        client,
+        thread_id: str,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Coalesce up to one batch of buffered follow-ups into a fresh run.
+
+        ``carrier_msg`` supplies routing/policy identity (channel_name,
+        metadata, owner headers) for the drained run — it is safe to reuse
+        across an entire drain chain because every buffered entry for one
+        thread_id shares that identity (thread_id itself is derived
+        deterministically from (repo, number, agent_name) for GitHub).
+
+        A batch larger than ``FOLLOWUP_DRAIN_BATCH_SIZE`` is intentionally
+        NOT drained in one shot: only the oldest batch is popped here, and
+        the run created for it is itself watched (via
+        ``_maybe_spawn_followup_watcher``), so a deeper backlog chains into
+        another drain cycle once this run ends, rather than growing one
+        unbounded coalesced input block.
+
+        If anything from here through ``runs.create`` fails — resolving run
+        params, applying channel policy, or ``runs.create`` itself
+        (including ``ConflictError`` from something this manager did not
+        create racing onto the same thread) — the popped batch is requeued
+        (not lost) and this coroutine returns without raising or looping:
+        the next run this manager successfully creates and watches on this
+        thread will attempt the drain again.
+
+        No-ops if the manager has already been ``stop()``-ped: a watcher
+        task that slips past its own cancellation and reaches this point
+        after shutdown must not fire a brand new run into a stopped manager.
+        (Deliberately keyed on ``self._stopped``, not ``self._running`` —
+        the latter is also ``False`` before the very first ``start()``,
+        which would otherwise make this guard fire for callers that invoke
+        the drain directly without going through the dispatch lifecycle.)
+        """
+        if self._stopped:
+            logger.info(
+                "[Manager] skipping follow-up drain for thread_id=%s; manager is stopped",
+                thread_id,
+            )
+            return
+
+        entries = self._pop_followup_batch(thread_id, limit=FOLLOWUP_DRAIN_BATCH_SIZE)
+        if not entries:
+            return
+
+        logger.info(
+            "[Manager] draining %d buffered follow-up(s) for thread_id=%s",
+            len(entries),
+            thread_id,
+        )
+        try:
+            # Everything from here through runs.create is covered by the
+            # same except below: a pre-create failure (e.g. the target agent
+            # config was removed mid-run, or channel-policy/credential
+            # resolution raises) must requeue the popped batch exactly like
+            # a runs.create failure does — none of these steps get to
+            # silently drop entries that were already popped off the buffer.
+            assistant_id, run_config, run_context = self._resolve_run_params(carrier_msg, thread_id)
+            await self._apply_channel_policy(carrier_msg, run_context)
+
+            human_message = _human_input_message(_format_followup_block(entries))
+            run_kwargs: dict[str, Any] = {
+                "input": {"messages": [human_message]},
+                "config": run_config,
+                "context": run_context,
+                "multitask_strategy": "reject",
+            }
+            if owner_headers := _owner_headers(carrier_msg):
+                run_kwargs["headers"] = owner_headers
+
+            result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+        except Exception as exc:
+            if _is_thread_busy_error(exc):
+                logger.warning(
+                    "[Manager] follow-up drain hit a busy thread_id=%s (a run this manager did not create is active); re-buffering %d entries",
+                    thread_id,
+                    len(entries),
+                )
+            else:
+                logger.exception(
+                    "[Manager] follow-up drain failed for thread_id=%s; re-buffering %d entries",
+                    thread_id,
+                    len(entries),
+                )
+            self._requeue_followups(thread_id, entries)
+            return
+
+        self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
 
     async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
         await self.bus.publish_outbound(
@@ -1100,6 +1493,7 @@ class ChannelManager:
         if self._running:
             return
         self._running = True
+        self._stopped = False
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
         self._task = asyncio.create_task(self._dispatch_loop())
         logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
@@ -1107,6 +1501,7 @@ class ChannelManager:
     async def stop(self) -> None:
         """Stop the dispatch loop."""
         self._running = False
+        self._stopped = True
         if self._task:
             self._task.cancel()
             try:
@@ -1114,6 +1509,25 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        # Follow-up watchers are long-lived background tasks (they await a
+        # run's full stream, which can take minutes) started outside the
+        # dispatch loop, so cancelling self._task above does not touch them.
+        # Left unmanaged, one still subscribed to a run that ends AFTER this
+        # point would drain its buffer and fire a brand new runs.create()
+        # into a manager that has already been stopped.
+        watcher_tasks = list(self._followup_watcher_tasks)
+        for task in watcher_tasks:
+            task.cancel()
+        for task in watcher_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[Manager] follow-up watcher task raised during stop()")
+        self._followup_watcher_tasks.clear()
+
         logger.info("ChannelManager stopped")
 
     # -- dispatch loop -----------------------------------------------------
@@ -1134,7 +1548,7 @@ class ChannelManager:
             # answer. Provider adapters may emit ack side-effects (a "Working on
             # it…" reply, an "eyes" reaction) before publish_inbound, so those are
             # intentionally not deduped here.
-            if self._is_duplicate_inbound(msg):
+            if await self._is_duplicate_inbound(msg):
                 continue
             logger.info(
                 "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
@@ -1170,41 +1584,38 @@ class ChannelManager:
         # Fail closed: without a workspace/team/guild identifier we cannot tell two
         # workspaces apart (e.g. Slack channel ids are not globally unique), so
         # skip dedupe rather than risk collapsing distinct workspaces' messages.
-        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid")
+        # Both fallbacks are appended last and gated on every earlier source being
+        # absent, so they can only turn "no key" into a key — never change one.
+        # A conversation_id not reused across a provider's own redelivery would
+        # degrade to today's no-dedupe behaviour, never collapse two conversations
+        # (chat_id and message_id stay in the tuple). conversation_id covers
+        # DingTalk (group + P2P); chat-scoped providers fall back to chat_id.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or metadata.get("conversation_id")
+        if not workspace_id and msg.channel_name in CHAT_SCOPED_WORKSPACE_CHANNELS:
+            workspace_id = msg.chat_id or None
         if not workspace_id:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
-    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+    async def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
         key = self._inbound_dedupe_key(msg)
         if key is None:
             return False
 
-        now = time.monotonic()
-        # Entries are in chronological insertion order, so expired ones cluster at
-        # the front: pop from the front until we hit a still-live entry.
-        while self._recent_inbound_events:
-            _, oldest_at = next(iter(self._recent_inbound_events.items()))
-            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
-                self._recent_inbound_events.popitem(last=False)
-            else:
-                break
-        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
-            self._recent_inbound_events.popitem(last=False)
-
-        if key in self._recent_inbound_events:
+        # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
+        # and capacity bounds; try_record returns True when the key was already
+        # present (i.e. this is a duplicate delivery to drop).
+        is_duplicate = await self._inbound_dedupe_store.try_record(key)
+        if is_duplicate:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-            return True
+        return is_duplicate
 
-        self._recent_inbound_events[key] = now
-        return False
-
-    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+    async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
         """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
@@ -1214,7 +1625,7 @@ class ChannelManager:
         """
         key = self._inbound_dedupe_key(msg)
         if key is not None:
-            self._recent_inbound_events.pop(key, None)
+            await self._inbound_dedupe_store.release(key)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1269,7 +1680,7 @@ class ChannelManager:
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
-            self._release_inbound_dedupe_key(msg)
+            await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -1584,9 +1995,7 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        if uploaded:
-            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
-        human_message = _human_input_message(msg.text, original_content=original_text)
+        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -1628,13 +2037,27 @@ class ChannelManager:
                 len(msg.text or ""),
             )
             try:
-                await client.runs.create(thread_id, assistant_id, **run_kwargs)
+                # Capturing the return value is new (issue #4121 Slice 2):
+                # it carries ``run_id``, which the follow-up watcher below
+                # needs to subscribe to this run's StreamBridge stream. When
+                # ``buffer_followups_on_busy`` is off this is otherwise
+                # behaviorally identical to the previous bare ``await``.
+                result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
             except Exception as exc:
                 if _is_thread_busy_error(exc):
                     logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    if policy.buffer_followups_on_busy:
+                        self._buffer_followup(thread_id, msg)
+                    else:
+                        # Swallowed like the generic handler would not be: release the
+                        # key so the provider's redelivery can retry once the thread
+                        # frees, instead of being dropped for the dedupe TTL.
+                        await self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 raise
+            if policy.buffer_followups_on_busy:
+                self._maybe_spawn_followup_watcher(thread_id, result, msg)
             return
 
         logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
@@ -1647,6 +2070,9 @@ class ChannelManager:
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                # Same reason as the fire-and-forget branch above: this error is
+                # handled here rather than re-raised, so release explicitly.
+                await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -1818,6 +2244,12 @@ class ChannelManager:
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
+            if stream_error is not None:
+                # This path swallows its own errors, so _handle_message's generic
+                # handler never runs and never releases the key. Release only
+                # after publishing the final outbound so a provider redelivery
+                # cannot overtake this attempt's terminal reply.
+                await self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 

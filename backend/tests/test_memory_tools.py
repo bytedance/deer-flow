@@ -92,16 +92,23 @@ class _MockManager:
             raise self._raise_on_delete
         return {"facts": []}
 
-    # Tool uses getattr+callable to probe these; shadow with None to simulate a
-    # backend that does not expose fact CRUD (e.g. noop) -- getattr() returns
-    # None and the tool's callable() check fails gracefully.
+    # fact-CRUD ops are tier-3 hooks that raise NotImplementedError when
+    # unsupported (the tool catches it -> JSON error). Simulate an unsupported
+    # backend by replacing each op with a raiser (no more None/hasattr probing).
     def _drop_fact_ops(self):
         if not self._supports_create:
-            self.create_fact = None
+            self.create_fact = self._unsupported("create_fact")
         if not self._supports_update:
-            self.update_fact = None
+            self.update_fact = self._unsupported("update_fact")
         if not self._supports_delete:
-            self.delete_fact = None
+            self.delete_fact = self._unsupported("delete_fact")
+
+    @staticmethod
+    def _unsupported(name):
+        def _raise(*args, **kwargs):
+            raise NotImplementedError(f"{name} not supported by _MockManager")
+
+        return _raise
 
 
 def _install_manager(monkeypatch, manager):
@@ -409,6 +416,20 @@ class TestModeGating:
         assert MemoryMiddleware not in middleware_types
         assert "memory_add" in tool_names
 
+    def test_mem0_tool_mode_keeps_passive_write_middleware(self):
+        """mem0 has search tools but no fact CRUD, so tool mode must retain
+        the per-turn middleware write path that feeds server-side extraction."""
+        from deerflow.agents.factory import _assemble_from_features
+        from deerflow.agents.features import RuntimeFeatures
+        from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+        from deerflow.config.memory_config import MemoryConfig
+
+        config = MemoryConfig(enabled=True, mode="tool", manager_class="mem0")
+        chain, extra_tools = _assemble_from_features(RuntimeFeatures(memory=True, memory_config=config), name="test-agent")
+
+        assert MemoryMiddleware in [type(m) for m in chain]
+        assert "memory_search" in [tool.name for tool in extra_tools]
+
     def test_middleware_mode_appends_middleware_not_tools(self, monkeypatch):
         """When mode=middleware (default), MemoryMiddleware IS in the chain
         and memory tools are NOT in extra_tools."""
@@ -487,6 +508,7 @@ class TestModeGating:
     def test_lead_agent_deduplicates_memory_tools_after_appending(self, monkeypatch):
         """Configured tools should not duplicate tool-mode memory tools."""
         from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.config.authorization_config import AuthorizationConfig
         from deerflow.config.memory_config import MemoryConfig
 
         monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
@@ -498,7 +520,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("memory_search"), _NamedTool("bash")])
@@ -508,6 +530,8 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
+            authorization=AuthorizationConfig(enabled=False),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)
@@ -519,6 +543,7 @@ class TestModeGating:
     def test_lead_agent_preserves_non_memory_duplicate_tool_names(self, monkeypatch):
         """Memory-tool collision handling should not drop unrelated duplicate tools."""
         from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.config.authorization_config import AuthorizationConfig
         from deerflow.config.memory_config import MemoryConfig
 
         monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
@@ -530,7 +555,7 @@ class TestModeGating:
         monkeypatch.setattr(
             lead_agent_module,
             "load_agent_config",
-            lambda name: SimpleNamespace(model=None, skills=None, tool_groups=None),
+            lambda name, *, user_id=None: SimpleNamespace(model=None, skills=None, tool_groups=None),
         )
         monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
         monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [_NamedTool("bash"), _NamedTool("bash")])
@@ -540,6 +565,8 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            database=SimpleNamespace(checkpoint_channel_mode="full"),
+            authorization=AuthorizationConfig(enabled=False),
         )
 
         agent_kwargs = lead_agent_module._make_lead_agent({"configurable": {"agent_name": "test-agent"}}, app_config=app_config)

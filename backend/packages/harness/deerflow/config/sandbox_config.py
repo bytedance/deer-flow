@@ -1,4 +1,48 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+SandboxOwnershipType = Literal["memory", "redis"]
+SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
+
+
+class SandboxOwnershipConfig(BaseModel):
+    """Configuration for cross-instance sandbox container ownership (#4206).
+
+    Gateway instances share sandbox containers but each keeps its own in-memory
+    warm pool. Without shared ownership state, one instance's reconciliation
+    adopts another's live container and later idle-destroys it. This selects
+    where that ownership state lives.
+    """
+
+    type: SandboxOwnershipType = Field(
+        default="memory",
+        description=(
+            "Sandbox ownership store backend. 'memory' keeps ownership in-process (single-instance deployments only, where cross-instance adoption cannot occur). "
+            "'redis' shares ownership across gateway instances and is required for load-balanced / multi-worker deployments that share a container backend."
+        ),
+    )
+    redis_url: str | None = Field(
+        default=None,
+        description="Redis URL for the redis ownership type. If omitted, DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
+    )
+    renewal_interval_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "How often an owning instance refreshes its leases. The lease TTL is derived from this (interval x ttl_multiplier), so ownership liveness is independent of sandbox.idle_timeout: "
+            "renewal keeps running even when idle cleanup is disabled (idle_timeout: 0)."
+        ),
+    )
+    ttl_multiplier: float = Field(
+        default=4.0,
+        ge=2,
+        description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
+    )
+    key_prefix: str = Field(
+        default="deerflow:sandbox:owner",
+        description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
+    )
 
 
 class VolumeMountConfig(BaseModel):
@@ -30,9 +74,10 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider and BoxliteProvider shared options:
+    AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
-        replicas: Maximum active + warm sandboxes/VMs per gateway process (default: 3). When the limit is reached, warm/least-recently-used sandboxes are evicted to make room; active sandboxes are not forcibly stopped.
+        replicas: Positive provider capacity per gateway process. Each provider
+            defines which lifecycle states count toward this limit.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
@@ -43,6 +88,12 @@ class SandboxConfig(BaseModel):
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         mounts: List of volume mounts to share directories with the container
+        thread_data_mounts: Override whether thread data is already visible to
+            the sandbox through shared mounts. Omit to auto-detect from the backend.
+
+    AioSandboxProvider and E2BSandboxProvider shared options:
+        ownership: Cross-instance sandbox ownership store (memory | redis). Multi-instance
+            deployments sharing a sandbox backend need redis; see SandboxOwnershipConfig.
     """
 
     use: str = Field(
@@ -63,7 +114,22 @@ class SandboxConfig(BaseModel):
     )
     replicas: int | None = Field(
         default=None,
-        description="Maximum active + warm sandboxes/VMs per gateway process (default: 3). Warm/least-recently-used entries are evicted to make room; active sandboxes are not forcibly stopped.",
+        gt=0,
+        description="Positive provider capacity per gateway process. Each provider defines which lifecycle states count toward this limit.",
+    )
+    overflow_policy: SandboxOverflowPolicy = Field(
+        default="wait",
+        description="E2B capacity policy. Use wait, reject, or burst.",
+    )
+    acquire_timeout: int = Field(
+        default=30,
+        gt=0,
+        description="Seconds that E2B wait policy waits for capacity.",
+    )
+    burst_limit: int = Field(
+        default=0,
+        ge=0,
+        description="Extra E2B capacity slots when overflow_policy is burst.",
     )
     container_prefix: str | None = Field(
         default=None,
@@ -78,9 +144,20 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
     )
+    ownership: SandboxOwnershipConfig | None = Field(
+        default=None,
+        description=(
+            "AioSandboxProvider/E2BSandboxProvider: where cross-instance sandbox ownership is tracked (#4206, #4341). Omitted = memory (single-instance). "
+            "Multi-worker / load-balanced gateways sharing one sandbox backend must set type: redis, or peers can adopt and destroy each other's live sandboxes."
+        ),
+    )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
+    )
+    thread_data_mounts: bool | None = Field(
+        default=None,
+        description=("AioSandboxProvider: override whether /mnt/user-data is already visible through shared mounts. Omitted uses backend auto-detection; true skips explicit upload synchronization; false forces it."),
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
