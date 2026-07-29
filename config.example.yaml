@@ -1627,7 +1627,7 @@ summarization:
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
-#   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking) or dotted path
+#   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking/openviking_embedded) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):

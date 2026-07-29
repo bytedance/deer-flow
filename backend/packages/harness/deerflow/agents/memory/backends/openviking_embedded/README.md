@@ -38,7 +38,7 @@ The `plugin.yaml` in this folder declares `openviking` as the external
 dependency. The factory auto-installs it on first selection (no `uv sync
 --extra` needed, and deps land outside the venv so `uv sync` never wipes
 them). Just set `memory.allow_lazy_installs: true` in `config.yaml` and
-select `manager_class: openviking` -- the rest is automatic.
+select `manager_class: openviking_embedded` -- the rest is automatic.
 
 If you prefer the pyproject-extra path:
 ```bash
@@ -46,7 +46,7 @@ uv sync --extra openviking   # optional; plugin.yaml is the recommended path
 ```
 
 The `import openviking` inside the backend is lazy, so deerflow starts fine
-without the extra; only selecting `manager_class: openviking` without the extra
+without the extra; only selecting `manager_class: openviking_embedded` without the extra
 installed raises a clear `ImportError` (wrapped as `MemoryManagerError`).
 
 ## Configure OpenViking's providers
@@ -99,7 +99,7 @@ In your `config.yaml` (copy from `config.example.yaml`):
 memory:
   enabled: true
   injection_enabled: true
-  manager_class: openviking
+  manager_class: openviking_embedded
   mode: middleware
   backend_config:
     # OpenViking store directory (passed as OpenViking(path=...)). Empty =
