@@ -115,7 +115,7 @@ class MemoryConfig(BaseModel):
             "Opt-in: when true, a memory backend whose `plugin.yaml` declares "
             "external pip dependencies will auto-install them (via `uv pip install "
             "--target <runtime_home>/memory_deps/<name>/`) on first selection, so "
-            "`manager_class: openviking` works without a manual `uv sync --extra`. "
+            "`manager_class: openviking_embedded` works without a manual `uv sync --extra`. "
             "Default false (supply-chain safety: backend folders can declare "
             "arbitrary PyPI packages). When false and a dep is missing, the "
             "factory raises a `MemoryManagerError` with the exact install command."

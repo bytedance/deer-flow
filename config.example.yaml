@@ -1679,7 +1679,7 @@ memory:
   # error with the install command.
   # allow_lazy_installs: true
   # Switching to the OpenViking backend (set allow_lazy_installs: true first):
-  #   manager_class: openviking
+  #   manager_class: openviking_embedded
   #   backend_config:
   #     data_path: ""        # OpenViking store dir; empty = {runtime_home}/openviking
   #     user_space: "default"

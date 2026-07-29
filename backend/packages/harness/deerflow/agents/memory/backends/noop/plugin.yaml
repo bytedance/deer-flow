@@ -15,7 +15,7 @@
 # dep at module top-level (before it is installed), the scan fails. Always
 # import external deps inside `model_post_init` or `_ensure_ready`, never at
 # module level.  See `noop_manager.py` (which imports nothing external) and
-# `openviking/openviking_manager.py` (which imports `openviking` lazily).
+# `openviking_embedded/openviking_manager.py` (which imports `openviking` lazily).
 
 name: noop
 description: "Do-nothing backend for tests and benchmarks; no external deps."

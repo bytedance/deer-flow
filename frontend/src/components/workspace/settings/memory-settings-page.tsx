@@ -282,7 +282,8 @@ function upperFirst(str: string) {
 function _displayCellValue(value: unknown): string {
   if (value == null) return "-";
   if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number" || typeof value === "boolean")
+    return String(value);
   try {
     return JSON.stringify(value);
   } catch {
@@ -292,9 +293,7 @@ function _displayCellValue(value: unknown): string {
 
 // ── Display-driven rendering (backend returns what to show) ─────────────────
 
-function buildDisplaySections(
-  memory: UserMemory,
-): MemorySection[] | null {
+function buildDisplaySections(memory: UserMemory): MemorySection[] | null {
   // If the backend provides a `display` field (even with empty sections),
   // use display mode -- only fall back when display is absent entirely
   // (backend doesn't support the display contract).
@@ -321,7 +320,8 @@ function filterDisplaySections(
       if (section.items?.length) {
         const matchedItems = section.items.filter((item) =>
           Object.values(item).some(
-            (v) => typeof v === "string" && v.toLowerCase().includes(normalized),
+            (v) =>
+              typeof v === "string" && v.toLowerCase().includes(normalized),
           ),
         );
         if (matchedItems.length > 0) {
@@ -376,7 +376,9 @@ function SectionWrapper({
   children: React.ReactNode;
 }) {
   const accent =
-    SECTION_ACCENT_ROTATION[(section.order ?? 0) % SECTION_ACCENT_ROTATION.length];
+    SECTION_ACCENT_ROTATION[
+      (section.order ?? 0) % SECTION_ACCENT_ROTATION.length
+    ];
   return (
     <div
       key={section.id}
@@ -384,7 +386,7 @@ function SectionWrapper({
     >
       <div className="mb-2 flex items-center gap-2">
         <h3 className="text-sm font-semibold">{section.title}</h3>
-        <span className="text-muted-foreground bg-muted rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+        <span className="text-muted-foreground bg-muted rounded px-1.5 py-0.5 text-[10px] tracking-wide uppercase">
           {section.type}
         </span>
       </div>
@@ -408,9 +410,7 @@ function renderContentSection(
           {body}
         </SafeStreamdown>
       ) : (
-        <div className="text-muted-foreground text-xs italic">
-          (empty)
-        </div>
+        <div className="text-muted-foreground text-xs italic">(empty)</div>
       )}
     </SectionWrapper>
   );
@@ -434,14 +434,13 @@ function renderListSection(
           {items.map((item, i) => {
             const content =
               typeof item.content === "string" ? item.content : "";
-            const itemId =
-              typeof item.id === "string" ? item.id : `item-${i}`;
+            const itemId = typeof item.id === "string" ? item.id : `item-${i}`;
             const deletable = item.deletable === true;
             const editable = item.editable === true;
             return (
               <li
                 key={itemId}
-                className="flex flex-col gap-1.5 rounded border border-border/60 p-2 sm:flex-row sm:items-start sm:justify-between"
+                className="border-border/60 flex flex-col gap-1.5 rounded border p-2 sm:flex-row sm:items-start sm:justify-between"
               >
                 <div className="min-w-0 space-y-1 [overflow-wrap:anywhere]">
                   <DisplayItemMeta item={item} t={t} />
@@ -490,16 +489,13 @@ function renderCardsSection(
             const tags: string[] = Array.isArray(item.tags)
               ? item.tags.filter((t): t is string => typeof t === "string")
               : [];
-            const itemId =
-              typeof item.id === "string" ? item.id : `card-${i}`;
+            const itemId = typeof item.id === "string" ? item.id : `card-${i}`;
             const deletable = item.deletable === true;
             const editable = item.editable === true;
             return (
-              <div key={itemId} className="rounded border border-border/60 p-2">
+              <div key={itemId} className="border-border/60 rounded border p-2">
                 <div className="mb-1 flex items-start justify-between gap-2">
-                  {title && (
-                    <h4 className="text-xs font-semibold">{title}</h4>
-                  )}
+                  {title && <h4 className="text-xs font-semibold">{title}</h4>}
                   <DisplayItemActions
                     item={item}
                     deletable={deletable}
@@ -558,14 +554,14 @@ function renderTableSection(
   if (hasActions) columns.push("_actions");
   return (
     <SectionWrapper section={section}>
-      <div className="overflow-x-auto rounded border border-border/60">
+      <div className="border-border/60 overflow-x-auto rounded border">
         <table className="w-full text-xs">
           <thead className="bg-muted/60 border-b">
             <tr>
               {columns.map((col) => (
                 <th
                   key={col}
-                  className="whitespace-nowrap px-2 py-1.5 text-left font-medium"
+                  className="px-2 py-1.5 text-left font-medium whitespace-nowrap"
                 >
                   {col === "_actions" ? "" : col}
                 </th>
@@ -574,8 +570,7 @@ function renderTableSection(
           </thead>
           <tbody>
             {items.map((item, i) => {
-              const rid =
-                typeof item.id === "string" ? item.id : `row-${i}`;
+              const rid = typeof item.id === "string" ? item.id : `row-${i}`;
               const deletable = item.deletable === true;
               const editable = item.editable === true;
               return (
@@ -625,8 +620,7 @@ function DisplayItemMeta({
     typeof item.confidence === "number" ? item.confidence : undefined;
   const createdAt =
     typeof item.createdAt === "string" ? item.createdAt : undefined;
-  const source =
-    typeof item.source === "string" ? item.source : undefined;
+  const source = typeof item.source === "string" ? item.source : undefined;
 
   if (!category && confidence == null && !createdAt && !source) return null;
 
@@ -635,7 +629,7 @@ function DisplayItemMeta({
     t.settings.memory.markdown.table.confidenceLevel[confidenceKey];
 
   return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+    <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
       {category && (
         <span>
           {t.settings.memory.markdown.table.category}: {upperFirst(category)}
@@ -728,9 +722,9 @@ export function MemorySettingsPage() {
   const [factToDelete, setFactToDelete] = useState<
     MemoryFact | DisplayItem | null
   >(null);
-  const [factToEdit, setFactToEdit] = useState<
-    MemoryFact | DisplayItem | null
-  >(null);
+  const [factToEdit, setFactToEdit] = useState<MemoryFact | DisplayItem | null>(
+    null,
+  );
   const [factEditorOpen, setFactEditorOpen] = useState(false);
   const [factForm, setFactForm] = useState<FactFormState>(
     DEFAULT_FACT_FORM_STATE,
@@ -1052,7 +1046,9 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 && !usesDisplaySections ? (
+            {isMemorySummaryEmpty(memory) &&
+            memory.facts.length === 0 &&
+            !usesDisplaySections ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
@@ -1068,28 +1064,31 @@ export function MemorySettingsPage() {
                   className="min-w-0 flex-1 sm:max-w-md"
                 />
                 {!usesDisplaySections && (
-                <ToggleGroup
-                  type="single"
-                  value={filter}
-                  onValueChange={(value) => {
-                    if (value) setFilter(value as MemoryViewFilter);
-                  }}
-                  variant="outline"
-                  className="shrink-0 self-start sm:ml-auto sm:self-auto"
-                >
-                  <ToggleGroupItem value="all" className="whitespace-nowrap">
-                    {filterAll}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
-                    {filterFacts}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem
-                    value="summaries"
-                    className="whitespace-nowrap"
+                  <ToggleGroup
+                    type="single"
+                    value={filter}
+                    onValueChange={(value) => {
+                      if (value) setFilter(value as MemoryViewFilter);
+                    }}
+                    variant="outline"
+                    className="shrink-0 self-start sm:ml-auto sm:self-auto"
                   >
-                    {filterSummaries}
-                  </ToggleGroupItem>
-                </ToggleGroup>
+                    <ToggleGroupItem value="all" className="whitespace-nowrap">
+                      {filterAll}
+                    </ToggleGroupItem>
+                    <ToggleGroupItem
+                      value="facts"
+                      className="whitespace-nowrap"
+                    >
+                      {filterFacts}
+                    </ToggleGroupItem>
+                    <ToggleGroupItem
+                      value="summaries"
+                      className="whitespace-nowrap"
+                    >
+                      {filterSummaries}
+                    </ToggleGroupItem>
+                  </ToggleGroup>
                 )}
               </div>
 
@@ -1144,7 +1143,8 @@ export function MemorySettingsPage() {
                 {usesDisplaySections ? (
                   /* Display-driven sections (backend native format) */
                   <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-                    {filteredDisplaySections && filteredDisplaySections.length > 0 ? (
+                    {filteredDisplaySections &&
+                    filteredDisplaySections.length > 0 ? (
                       filteredDisplaySections.map((section) =>
                         renderDisplaySection(
                           section,
