@@ -55,6 +55,33 @@ def _deermem_with_fake_llm(backend_config=None, payload=None, callbacks=None) ->
     return dm
 
 
+def test_add_swallows_queue_full_so_backpressure_does_not_break_caller(deermem_data_dir, caplog) -> None:
+    """Regression: QueueFull raised under backpressure is caught in
+    DeerMem.add (the backend owns the queue, so it owns the degradation) so
+    memory backpressure degrades to "update skipped" instead of propagating into
+    MemoryMiddleware.after_agent and breaking the agent run -- peer middlewares
+    self-guard the same way."""
+    import logging
+
+    dm = _deermem_with_fake_llm(backend_config={"storage_path": str(deermem_data_dir), "queue_max_depth": 1})
+    # Stop the debounce timer so enqueued items stay pending (the cap persists
+    # across the second add instead of being drained by a timer fire).
+    dm._queue._schedule_timer = lambda *a, **k: None
+
+    conv = [HumanMessage("Please explain quantum computing in detail"), AIMessage("Quantum computing uses qubits and superposition.")]
+    # First add fills the queue to its depth cap (non-signal, new key).
+    dm.add("thread-A", conv, agent_name="lead_agent", user_id="u")
+    assert dm._queue.pending_count == 1
+
+    # Second add for a different key hits the cap -> QueueFull internally. It
+    # must be caught: no exception escapes DeerMem.add.
+    with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deer_mem"):
+        dm.add("thread-B", conv, agent_name="lead_agent", user_id="u")
+    assert "rejected under backpressure" in caplog.text
+    # thread-B was rejected (not enqueued); only thread-A remains.
+    assert dm._queue.pending_count == 1
+
+
 def test_di_construction_owns_dependencies():
     dm = DeerMem(backend_config={"max_facts": 50, "storage_path": "/tmp/x"})
     assert dm._config.max_facts == 50
@@ -104,6 +131,46 @@ def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):
     )
     assert "x" in dm.get_context(user_id="u")
     assert dm.get_memory(user_id="u")["facts"][0]["content"] == "x"
+
+
+def test_get_context_injects_facts_only_in_middleware_mode(deermem_data_dir):
+    backend_config = {
+        "storage_path": str(deermem_data_dir),
+        "retrieval_adapter": "",
+        "token_counting": "char",
+    }
+    middleware = DeerMem(backend_config=backend_config, mode="middleware")
+    middleware.import_memory(
+        {
+            "user": {
+                "workContext": {"summary": "Works on DeerFlow memory."},
+            },
+            "history": {
+                "recentMonths": {"summary": "Recently redesigned storage."},
+            },
+            "facts": [
+                {
+                    "id": "fact_tool_only",
+                    "content": "Use FTS5 for active fact recall.",
+                    "category": "constraint",
+                    "confidence": 0.9,
+                    "source": "manual",
+                }
+            ],
+        },
+        user_id="u",
+    )
+
+    middleware_context = middleware.get_context(user_id="u")
+    tool_context = DeerMem(backend_config=backend_config, mode="tool").get_context(user_id="u")
+
+    assert "Works on DeerFlow memory." in middleware_context
+    assert "Recently redesigned storage." in middleware_context
+    assert "Use FTS5 for active fact recall." in middleware_context
+    assert "Works on DeerFlow memory." in tool_context
+    assert "Recently redesigned storage." in tool_context
+    assert "Use FTS5 for active fact recall." not in tool_context
+    assert "Facts:" not in tool_context
 
 
 def test_import_without_agent_name_persists_facts_in_default_markdown_bucket(deermem_data_dir):

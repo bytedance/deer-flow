@@ -24,6 +24,8 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 Status = Literal["ok", "warn", "fail", "skip"]
+PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 
 
 def _supports_color() -> bool:
@@ -165,18 +167,41 @@ def check_node() -> CheckResult:
 
 
 def check_pnpm() -> CheckResult:
-    candidates = [["pnpm"], ["pnpm.cmd"]]
-    if shutil.which("corepack"):
-        candidates.append(["corepack", "pnpm"])
-    for cmd in candidates:
-        if shutil.which(cmd[0]):
-            out = _run([*cmd, "-v"]) or ""
-            return CheckResult("pnpm", "ok", out)
-    return CheckResult(
-        "pnpm",
-        "fail",
-        fix="npm install -g pnpm   (or: corepack enable)",
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
+            cwd=FRONTEND_DIR,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+        )
+    except OSError as exc:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            f"Unable to run pnpm resolver: {exc}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0:
+        detail = "\n".join(part for part in (stderr, stdout) if part)
+        return CheckResult(
+            "pnpm",
+            "fail",
+            detail or f"pnpm resolver exited with status {result.returncode}",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    if not stdout:
+        return CheckResult(
+            "pnpm",
+            "fail",
+            stderr or "pnpm resolver returned no version",
+            fix="Install pnpm, or install Corepack and ensure it is on PATH",
+        )
+    return CheckResult("pnpm", "ok", stdout)
 
 
 def check_uv() -> CheckResult:

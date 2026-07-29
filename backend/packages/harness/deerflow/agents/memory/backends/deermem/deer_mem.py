@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
@@ -33,14 +34,15 @@ from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruption
 from .deermem.config import DeerMemConfig
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
-    detect_correction,
-    detect_reinforcement,
+    SIGNAL_NAMES,
+    detect_signals,
     filter_messages_for_memory,
+    filter_trivial,
     load_patterns,
 )
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
 from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
-from .deermem.core.queue import MemoryUpdateQueue
+from .deermem.core.queue import MemoryUpdateQueue, QueueFull
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
@@ -100,8 +102,7 @@ class DeerMem(MemoryManager):
     _llm: Any = PrivateAttr(default=None)
     _updater: Any = PrivateAttr(default=None)
     _queue: Any = PrivateAttr(default=None)
-    _correction_patterns: Any = PrivateAttr(default=None)
-    _reinforcement_patterns: Any = PrivateAttr(default=None)
+    _trivial_patterns: Any = PrivateAttr(default=None)
 
     # DeerMem implements search() (case-insensitive substring over stored facts),
     # so it is valid for mode="tool" (the base invariant validator requires this
@@ -121,13 +122,22 @@ class DeerMem(MemoryManager):
         # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
         # or bundled defaults = pre-externalization behavior). Loaded once at
         # construction and reused by ``_prepare_update``'s detect_* calls.
-        self._correction_patterns = load_patterns("correction", patterns_dir=self._config.patterns_dir)
-        self._reinforcement_patterns = load_patterns("reinforcement", patterns_dir=self._config.patterns_dir)
+        # Pre-load trivial + signal patterns at construction so a misconfigured
+        # patterns_dir (missing / invalid yaml) surfaces at startup, not on the
+        # first update. Compiled patterns are cached by load_patterns.
+        self._trivial_patterns = load_patterns("trivial", patterns_dir=self._config.patterns_dir)
+        for _signal_name in SIGNAL_NAMES:
+            load_patterns(_signal_name, patterns_dir=self._config.patterns_dir)
         # host_llm (host-injected default model) takes precedence over build_llm(model)
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
         self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir, callbacks=self.callbacks)
+        # Retrieval is derived data. The first search for a scope lazily
+        # rebuilds it; Gateway warm-up performs the full rebuild off-loop.
+        self._retrieval_lock = threading.RLock()
+        self._retrieval_warmed_scopes: set[tuple[str | None, str | None]] = set()
+        self._retrieval_fully_warmed = False
         # Validate the *global* explicit prompt templates at construction so a
         # misconfigured prompts_dir surfaces at startup rather than as a silent
         # dropped update. Per-agent overrides ({prompts_dir}/{agent}/*.yaml)
@@ -168,7 +178,7 @@ class DeerMem(MemoryManager):
         ``model_post_init`` (shared with direct construction).
         """
         config_dict = dict(backend_config or {})
-        for key in ("should_keep_hidden_message", "trace_context_manager"):
+        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
         if "host_llm" not in config_dict:
@@ -207,16 +217,25 @@ class DeerMem(MemoryManager):
         prepared = self._prepare_update(messages)
         if prepared is None:
             return
-        filtered, correction_detected, reinforcement_detected = prepared
-        self._queue.add(
-            thread_id=thread_id,
-            messages=filtered,
-            agent_name=_resolve_agent_name(agent_name),
-            user_id=user_id,
-            trace_id=trace_id,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        filtered, signals = prepared
+        # DeerMem owns the queue, so it owns the backpressure degradation: a
+        # QueueFull here is logged + dropped so memory backpressure degrades to
+        # "update skipped" rather than propagating into
+        # MemoryMiddleware.after_agent and breaking the agent run (peer
+        # middlewares self-guard the same way). The dropped update is re-fed
+        # next turn (the middleware passes the full conversation each cycle, and
+        # the watermark does not advance on a non-enqueued turn).
+        try:
+            self._queue.add(
+                thread_id=thread_id,
+                messages=filtered,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+                trace_id=trace_id,
+                signals=signals,
+            )
+        except QueueFull as e:
+            logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
     def add_nowait(
         self,
@@ -234,37 +253,44 @@ class DeerMem(MemoryManager):
         prepared = self._prepare_update(messages)
         if prepared is None:
             return
-        filtered, correction_detected, reinforcement_detected = prepared
-        self._queue.add_nowait(
-            thread_id=thread_id,
-            messages=filtered,
-            agent_name=_resolve_agent_name(agent_name),
-            user_id=user_id,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        filtered, signals = prepared
+        # Defense-in-depth: the emergency path always admits under backpressure
+        # (see _enqueue_locked), so QueueFull is not expected here -- but the
+        # emergency flush is invoked from summarization_hook, so a propagated
+        # exception would break summarization. Catch + log to be safe.
+        try:
+            self._queue.add_nowait(
+                thread_id=thread_id,
+                messages=filtered,
+                agent_name=_resolve_agent_name(agent_name),
+                user_id=user_id,
+                signals=signals,
+            )
+        except QueueFull as e:
+            logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 
     def _prepare_update(
         self,
         messages: list[Any],
-    ) -> tuple[list[Any], bool, bool] | None:
+    ) -> tuple[list[Any], frozenset[str]] | None:
         """Filter to user+final-AI messages, require both, detect signals.
 
-        Returns ``(filtered, correction_detected, reinforcement_detected)``
-        or ``None`` when there is no meaningful conversation (missing a user
-        or an assistant turn).
+        Returns ``(filtered, signals)`` where ``signals`` is the set of signal
+        classes detected in the recent turns, or ``None`` when there is no
+        meaningful conversation (missing a user or an assistant turn, or every
+        turn dropped as a trivial pure-acknowledgment).
         """
         filtered = filter_messages_for_memory(
             messages,
             should_keep_hidden_message=self._config.should_keep_hidden_message,
         )
+        filtered = filter_trivial(filtered, patterns=self._trivial_patterns)
         user_messages = [m for m in filtered if getattr(m, "type", None) == "human"]
         assistant_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
         if not user_messages or not assistant_messages:
             return None
-        correction_detected = detect_correction(filtered, patterns=self._correction_patterns)
-        reinforcement_detected = not correction_detected and detect_reinforcement(filtered, patterns=self._reinforcement_patterns)
-        return filtered, correction_detected, reinforcement_detected
+        signals = detect_signals(filtered, patterns_dir=self._config.patterns_dir)
+        return filtered, frozenset(signals)
 
     # ── Read ─────────────────────────────────────────────────────────────
     def get_context(
@@ -276,12 +302,18 @@ class DeerMem(MemoryManager):
     ) -> str:
         """Load memory and format it for injection (plain text, no wrap).
 
+        Middleware mode injects the selected agent's facts together with the
+        user-global summaries. Tool mode injects only those global summaries;
+        facts stay behind ``memory_search`` so they are not duplicated in the
+        prompt and a later retrieval result.
+
         Format parameters come from DeerMem's own ``DeerMemConfig`` (set at
         construction from ``backend_config``). The ``enabled``/
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
         call site (``_get_memory_context``); this returns only the body.
         """
-        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
@@ -299,39 +331,97 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Case-insensitive substring search over stored facts.
+        """Search through the configured retrieval adapter.
 
-        Stand-in for the planned BM25+vector+MMR retrieval
-        (``core/retrieval.py``): returns facts whose ``content`` contains the
-        query, ranked by confidence desc, capped at ``top_k``. ``category``
-        filters BEFORE the ``top_k`` slice so a category-scoped search is not
-        starved by higher-confidence facts in other categories. Sufficient for
-        the tool-driven memory mode; upgrade to semantic retrieval later
-        without changing call sites.
+        Retrieval errors never make canonical memory unavailable: the existing
+        case-insensitive substring path remains the last-resort fallback.
         """
         if not query or not query.strip() or top_k <= 0:
             return []
-        query_lower = query.strip().lower()
-        search_facts = getattr(self._storage, "search_facts", None)
         resolved_agent_name = _resolve_agent_name(agent_name)
-        scopes = [{"userId": user_id, "agentName": resolved_agent_name}]
-        indexed = (
-            search_facts(
-                query,
-                scopes=scopes,
-                top_k=top_k,
-                mode="hybrid",
-                filters={"category": category} if category else None,
+        indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+        if indexed:
+            return indexed
+        return self._substring_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+
+    def _fts5_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        user_id: str | None,
+        agent_name: str | None,
+        category: str | None,
+    ) -> list[dict[str, Any]]:
+        """Return adapter results in the public fact shape (compatibility helper)."""
+        agent_name = _resolve_agent_name(agent_name)
+        search_facts = getattr(self._storage, "search_facts", None)
+        scopes = [{"userId": user_id, "agentName": agent_name}]
+        try:
+            self._ensure_retrieval_scopes(scopes)
+            indexed = (
+                search_facts(
+                    query,
+                    scopes=scopes,
+                    top_k=top_k,
+                    mode="hybrid",
+                    filters={"category": category} if category else None,
+                )
+                if callable(search_facts)
+                else []
             )
-            if callable(search_facts)
-            else []
-        )
+        except Exception:
+            logger.exception("Memory retrieval adapter failed; using substring fallback")
+            indexed = []
         if indexed:
             return [_compat_document({"facts": [result.get("fact", result)]})["facts"][0] for result in indexed]
-        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=resolved_agent_name, user_id=user_id))
+
+        return []
+
+    def _substring_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        user_id: str | None,
+        agent_name: str | None,
+        category: str | None,
+    ) -> list[dict[str, Any]]:
+        query_lower = query.strip().lower()
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=agent_name, user_id=user_id))
         matched = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and query_lower in fact["content"].lower() and (category is None or fact.get("category") == category)]
         matched.sort(key=_coerce_source_confidence, reverse=True)
         return _compat_document({"facts": matched[:top_k]})["facts"]
+
+    def _ensure_retrieval_scopes(self, scopes: list[dict[str, str | None]]) -> None:
+        """Lazily rebuild every requested scope when warm-up was skipped."""
+        if not hasattr(self, "_retrieval_lock"):
+            self._retrieval_lock = threading.RLock()
+        if not hasattr(self, "_retrieval_warmed_scopes"):
+            self._retrieval_warmed_scopes = set()
+        if not hasattr(self, "_retrieval_fully_warmed"):
+            self._retrieval_fully_warmed = False
+        rebuild = getattr(self._storage, "rebuild_index", None)
+        if not callable(rebuild):
+            return
+        with self._retrieval_lock:
+            if self._retrieval_fully_warmed:
+                return
+            status = getattr(self._storage, "retrieval_status", lambda: {"configured": True})()
+            if not status.get("configured", True):
+                self._retrieval_warmed_scopes.update((scope.get("userId"), scope.get("agentName")) for scope in scopes)
+                return
+            for scope in scopes:
+                key = (scope.get("userId"), scope.get("agentName"))
+                if key in self._retrieval_warmed_scopes:
+                    continue
+                try:
+                    result = rebuild([scope])
+                except Exception:
+                    logger.exception("Failed to lazily rebuild memory retrieval index for scope %r", key)
+                    continue
+                if result.get("supported") and not result.get("fatal"):
+                    self._retrieval_warmed_scopes.add(key)
 
     # ── Manage ───────────────────────────────────────────────────────────
     def get_memory(
@@ -388,9 +478,13 @@ class DeerMem(MemoryManager):
         """
         return self._queue.flush_sync(timeout)
 
-    # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ─
+    def close(self) -> None:
+        """Close derived retrieval resources after pending updates drain."""
+        self._storage.close()
+
+    # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ──
     def warm(self) -> bool:
-        """Pre-warm DeerMem-specific resources (the tiktoken encoding cache).
+        """Pre-warm DeerMem's token-counting resources.
 
         Overrides the base tier-3 hook (default None = nothing to warm). The
         Gateway lifespan calls ``manager.warm()`` directly off the event loop;
@@ -403,6 +497,29 @@ class DeerMem(MemoryManager):
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")
             return True
         return warm_tiktoken_cache()
+
+    def warm_retrieval(self) -> bool:
+        """Rebuild the complete derived retrieval index before serving traffic."""
+        rebuild = getattr(self._storage, "rebuild_index", None)
+        if not callable(rebuild):
+            return True
+        try:
+            result = rebuild()
+            index_ok = not bool(result.get("fatal"))
+            failed = int(result.get("failed") or 0)
+            if failed and index_ok:
+                logger.warning(
+                    "Memory retrieval index rebuilt with %d fact(s) skipped",
+                    failed,
+                )
+            if index_ok:
+                with self._retrieval_lock:
+                    self._retrieval_fully_warmed = True
+                    self._retrieval_warmed_scopes.clear()
+            return index_ok
+        except Exception:
+            logger.exception("Failed to rebuild memory retrieval index during warm-up")
+            return False
 
     def reload_memory(
         self,

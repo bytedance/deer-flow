@@ -111,6 +111,24 @@ Artifacts (under the running repo's owner, where `<date>` is `YYYYMMDD`):
 The chart version is patched in-workflow only - `Chart.yaml` and `values.yaml`
 in the repo are never modified.
 
+## lark-cli sandbox images
+
+The two optional Lark sandbox runtime images — `lark-cli-init` (Pattern A) and
+`lark-cli-broker` (Pattern B) — are **not** part of the `v*` release. They track
+the upstream `larksuite/cli` version, so they publish independently via
+`.github/workflows/lark-cli-images.yaml`:
+
+- Trigger with `workflow_dispatch` (a `lark_cli_version` input, e.g. `v1.0.65`)
+  or by pushing a `lark-cli-v*` tag (the version is read from after the prefix).
+- Builds multi-arch (`linux/amd64,linux/arm64`) and pushes
+  `ghcr.io/<owner>/deer-flow-{lark-cli-init,lark-cli-broker}:<lark-cli-version>`.
+- Gated on `github.repository == 'bytedance/deer-flow'`; not tied to the
+  `verify-versions` gate (its version is the lark-cli release, not the DeerFlow
+  release), and it never touches `latest`.
+
+Both features stay opt-in: the provisioner ignores them until
+`LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` point at a published tag.
+
 ## Version gate
 
 Both publishing workflows call `.github/workflows/verify-versions.yml` as their

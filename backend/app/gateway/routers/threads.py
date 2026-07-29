@@ -25,18 +25,27 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_checkpointer, get_run_manager
+from app.gateway.checkpoint_lineage import (
+    CheckpointLineageError,
+    CheckpointParentMissingError,
+    find_checkpoint_before_message,
+    find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
+)
+from app.gateway.deps import get_checkpointer, get_run_event_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     build_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
+    reserve_checkpoint_write,
 )
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
 from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -50,11 +59,13 @@ from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     build_goal_state,
     ensure_thread_checkpoint,
-    goal_thread_lock,
     read_thread_goal,
     write_thread_goal,
 )
+from deerflow.runtime.journal import build_branch_history_seed_events
+from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import valid_duration_entry
+from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.time import coerce_iso, now_iso
@@ -88,7 +99,16 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
+# Thread-scoped runtime channels a branch must NOT inherit from its parent:
+# ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to the
+# *parent* thread, so copying it would make the branch read/write the parent's
+# workspace (bypassing the per-branch user-data clone) and release the
+# parent's sandbox after its first run; the branch lazily acquires its own
+# sandbox keyed by its own thread_id instead. ``thread_data`` is recomputed
+# from the branch's thread_id by ThreadDataMiddleware on every run.
+_BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
+_BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -96,6 +116,11 @@ def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not metadata:
         return metadata or {}
     return {k: v for k, v in metadata.items() if k not in _SERVER_RESERVED_METADATA_KEYS}
+
+
+def _is_pin_metadata_patch(metadata: dict[str, Any]) -> bool:
+    """Return True for the narrow pin/unpin PATCH shape."""
+    return set(metadata) == {THREAD_PINNED_METADATA_KEY} and isinstance(metadata.get(THREAD_PINNED_METADATA_KEY), bool)
 
 
 def _message_id(message: Any) -> str | None:
@@ -158,13 +183,26 @@ def _matches_branch_target(messages: list[Any], target_message_ids: set[str]) ->
     return not any(_is_branch_visible_message(message) for message in messages[target_end_index + 1 :])
 
 
+def _branch_target_human_message(messages: list[Any], target_message_ids: set[str]) -> Any | None:
+    index_by_id = {_message_id(message): index for index, message in enumerate(messages) if _message_id(message)}
+    if not target_message_ids.issubset(index_by_id.keys()):
+        return None
+    target_start_index = min(index_by_id[message_id] for message_id in target_message_ids)
+    return next(
+        (message for message in reversed(messages[:target_start_index]) if _message_type(message) == "human" and _is_branch_visible_message(message)),
+        None,
+    )
+
+
 async def _find_branch_checkpoint(
     accessor: Any,
     config: dict[str, Any],
     target_message_ids: set[str],
 ) -> Any:
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
+            if is_duration_only_checkpoint(snapshot):
+                continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
     except _CHECKPOINT_MODE_ERRORS as exc:
@@ -183,7 +221,9 @@ async def _branch_targets_latest_turn(
 ) -> bool:
     """Return whether the target turn is the final visible turn."""
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_SCAN_LIMIT):
+        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
+            if is_duration_only_checkpoint(snapshot):
+                continue
             messages = _checkpoint_messages(snapshot)
             if not messages:
                 continue
@@ -196,6 +236,57 @@ async def _branch_targets_latest_turn(
             exc_info=True,
         )
     return False
+
+
+async def _find_branch_replay_base(
+    accessor: Any,
+    config: dict[str, Any],
+    snapshot: Any,
+    target_human_id: str,
+) -> Any | None:
+    """Resolve a replay base while preserving unlinked legacy histories."""
+
+    try:
+        return await find_checkpoint_before_message(
+            accessor,
+            snapshot,
+            target_human_id,
+            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
+        )
+    except CheckpointParentMissingError:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.debug(
+            "Could not resolve parent lineage for branch thread %s; falling back to history scan",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+    except CheckpointLineageError as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.warning(
+            "Rejected unsafe checkpoint lineage for branch thread %s",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+        raise HTTPException(status_code=409, detail="This turn can no longer be branched from.") from exc
+
+    try:
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except Exception as exc:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
+
+    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id)
+    if not target_found:
+        logger.warning(
+            "Could not locate branch user message %s in chronological history for thread %s",
+            sanitize_log_param(target_human_id),
+            sanitize_log_param(config.get("configurable", {}).get("thread_id", "")),
+        )
+    return replay_base
 
 
 def _ignore_branch_user_data(directory: str, names: list[str]) -> set[str]:
@@ -259,7 +350,14 @@ class ThreadDeleteResponse(BaseModel):
     message: str
 
 
-class ThreadResponse(BaseModel):
+class _MetadataRedactingResponse(BaseModel):
+    @field_validator("metadata", mode="before", check_fields=False)
+    @classmethod
+    def _redact_legacy_metadata_secret(cls, value: Any) -> Any:
+        return redact_metadata_secrets(value)
+
+
+class ThreadResponse(_MetadataRedactingResponse):
     """Response model for a single thread."""
 
     thread_id: str = Field(description="Unique thread identifier")
@@ -312,7 +410,7 @@ class ThreadSearchRequest(BaseModel):
         return v
 
 
-class ThreadStateResponse(BaseModel):
+class ThreadStateResponse(_MetadataRedactingResponse):
     """Response model for thread state."""
 
     values: dict[str, Any] = Field(default_factory=dict, description="Current channel values")
@@ -366,6 +464,7 @@ class ThreadCompactRequest(BaseModel):
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
     agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 
 class ThreadCompactResponse(BaseModel):
@@ -381,7 +480,7 @@ class ThreadCompactResponse(BaseModel):
     total_tokens: int = 0
 
 
-class HistoryEntry(BaseModel):
+class HistoryEntry(_MetadataRedactingResponse):
     """Single checkpoint history entry."""
 
     checkpoint_id: str
@@ -415,6 +514,9 @@ class ThreadBranchResponse(BaseModel):
     parent_checkpoint_id: str
     branched_from_message_id: str
     workspace_clone_mode: str
+    # "seeded" | "skipped_empty" | "failed" — whether the parent history was
+    # copied into the branch's run-event feed (see branch_thread).
+    history_seed_mode: str
 
 
 # ---------------------------------------------------------------------------
@@ -696,6 +798,16 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     parent_checkpoint_id = _checkpoint_id(snapshot)
     if not parent_checkpoint_id:
         raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
+    target_human = _branch_target_human_message(_checkpoint_messages(snapshot), target_message_ids)
+    target_human_id = _message_id(target_human)
+    if not target_human_id:
+        raise HTTPException(status_code=409, detail="This turn can no longer be branched from.")
+    replay_base_tuple = await _find_branch_replay_base(
+        source_accessor,
+        source_config,
+        snapshot,
+        target_human_id,
+    )
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -736,20 +848,41 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
     branch_reducer_fields = graph_reducer_channels(getattr(branch_accessor, "graph", None))
     if branch_reducer_fields is None:
         branch_reducer_fields = THREAD_STATE_REDUCER_FIELDS
-    branch_values = {}
-    for key, value in dict(snapshot.values).items():
-        if key in branch_reducer_fields:
-            branch_values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
-        else:
-            branch_values[key] = value
-    new_config.setdefault("metadata", {}).update(
-        {
-            **branch_metadata,
-            "source": "branch",
-        }
-    )
+
+    def branch_values(source_snapshot: Any) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for key, value in dict(source_snapshot.values).items():
+            if key in _BRANCH_EXCLUDED_CHANNELS:
+                continue
+            if key in branch_reducer_fields:
+                values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
+            else:
+                values[key] = value
+        return values
+
+    # Stamp both synthetic checkpoints with the branch-creation time because
+    # serializers fall back to metadata when snapshot.created_at is absent.
+    checkpoint_metadata_updates = {
+        **branch_metadata,
+        "source": "branch",
+        "updated_at": now,
+        "created_at": now,
+    }
+    new_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
     try:
-        await branch_accessor.aupdate(new_config, branch_values, as_node="branch")
+        head_config = new_config
+        if replay_base_tuple is not None:
+            head_config = await branch_accessor.aupdate(
+                new_config,
+                branch_values(replay_base_tuple),
+                as_node="branch",
+            )
+            head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
+        await branch_accessor.aupdate(
+            head_config,
+            branch_values(snapshot),
+            as_node="branch",
+        )
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
     except Exception:
@@ -768,6 +901,29 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
+    # The thread feed (GET /messages, /messages/page) reads the run-event
+    # store, not checkpoints, and a fresh branch has no run_events — so the
+    # inherited history would vanish from the UI as soon as the branch's
+    # first run refreshes the feed (#4380 problem 2). Seed the branch's
+    # run_events from the same checkpoint snapshot the branch was created
+    # from. Best-effort: on failure the branch stays usable, with history
+    # visible only through the checkpoint overlay until it is re-branched.
+    try:
+        seed_events = build_branch_history_seed_events(
+            _checkpoint_messages(snapshot),
+            thread_id=new_thread_id,
+            run_id_prefix=f"branch-seed-{new_thread_id}",
+            parent_thread_id=thread_id,
+        )
+        if seed_events:
+            await get_run_event_store(request).put_batch(seed_events)
+            history_seed_mode = "seeded"
+        else:
+            history_seed_mode = "skipped_empty"
+    except Exception:
+        logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
+        history_seed_mode = "failed"
+
     if branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:
@@ -778,6 +934,7 @@ async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Requ
         parent_checkpoint_id=parent_checkpoint_id,
         branched_from_message_id=body.message_id,
         workspace_clone_mode=workspace_clone_mode,
+        history_seed_mode=history_seed_mode,
     )
 
 
@@ -830,13 +987,17 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     # ``body.metadata`` already stripped by ``ThreadPatchRequest._strip_reserved``.
+    # Pin/unpin is not conversation activity, so it must not bump ``updated_at``.
+    # Other metadata PATCH callers keep the public endpoint's existing recency
+    # contract unless they get their own explicit no-touch API surface.
+    touch = not _is_pin_metadata_patch(body.metadata)
     try:
-        await thread_store.update_metadata(thread_id, body.metadata)
+        await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
 
-    # Re-read to get the merged metadata + refreshed updated_at
+    # Re-read to get the merged metadata and the store's timestamp decision.
     record = await thread_store.get(thread_id) or record
     return ThreadResponse(
         thread_id=thread_id,
@@ -922,13 +1083,17 @@ async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Requ
     this endpoint creates the missing thread checkpoint on demand.
     """
     checkpointer = get_checkpointer(request)
-    await _ensure_thread_for_goal(thread_id, request)
     try:
         goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
-        async with goal_thread_lock(thread_id):
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            await _ensure_thread_for_goal(thread_id, request)
             await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to set goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
@@ -941,8 +1106,10 @@ async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespo
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
     try:
-        async with goal_thread_lock(thread_id):
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Clear the goal after the run finishes.") from None
     except LookupError:
         return ThreadGoalResponse(goal=None)
     except Exception:
@@ -968,7 +1135,6 @@ def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactRes
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
     """Manually summarize old thread context while preserving the visible history."""
-    run_manager = get_run_manager(request)
     # Compaction writes only base-schema channels (messages + summary_text);
     # every other channel — including middleware-contributed ones — is carried
     # forward by checkpoint fork inheritance, so the base-schema mutation
@@ -983,9 +1149,7 @@ async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Re
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
-        async with goal_thread_lock(thread_id):
-            if await run_manager.has_inflight(thread_id):
-                raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.")
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             result = await compact_thread_context(
                 accessor,
                 thread_id,
@@ -993,7 +1157,10 @@ async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Re
                 force=body.force,
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
+                model_name=body.model_name,
             )
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except ContextCompactionDisabled:
@@ -1101,12 +1268,15 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
         reducer_fields = THREAD_STATE_REDUCER_FIELDS
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
-        updated_config = await accessor.aupdate(
-            read_config,
-            updates,
-            as_node=mutation_node,
-        )
-        snapshot = await accessor.aget(updated_config)
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            updated_config = await accessor.aupdate(
+                read_config,
+                updates,
+                as_node=mutation_node,
+            )
+            snapshot = await accessor.aget(updated_config)
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Update state after the run finishes.") from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
@@ -1142,26 +1312,11 @@ async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, re
     )
 
 
-def _ai_message_lacks_duration(message: dict[str, Any]) -> bool:
-    additional_kwargs = message.get("additional_kwargs")
-    return message.get("type") == "ai" and (not isinstance(additional_kwargs, dict) or "turn_duration" not in additional_kwargs)
-
-
 def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
     raw_durations = metadata.get("run_durations") if isinstance(metadata, dict) else None
     if not isinstance(raw_durations, dict):
         return {}
     return {run_id: duration_seconds for run_id, duration_seconds in raw_durations.items() if valid_duration_entry(run_id, duration_seconds)}
-
-
-def _set_message_turn_duration(message: dict[str, Any], run_id: str, run_durations: dict[str, int]) -> None:
-    if message.get("type") != "ai" or run_id not in run_durations:
-        return
-    additional_kwargs = message.get("additional_kwargs")
-    if not isinstance(additional_kwargs, dict):
-        additional_kwargs = {}
-        message["additional_kwargs"] = additional_kwargs
-    additional_kwargs.setdefault("turn_duration", run_durations[run_id])
 
 
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
@@ -1211,11 +1366,14 @@ async def get_thread_history(
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
                     try:
+                        from app.gateway.routers.thread_runs import stamp_turn_duration_on_last_ai
+
                         # Human messages define turn boundaries. New checkpoints
                         # carry the completed turns' durations in metadata, so the
                         # messages channel stays unchanged.
                         checkpoint_run_durations = _checkpoint_run_durations(metadata)
                         current_turn_run_id = None
+                        turn_run_ids: set[str] = set()
                         for msg in serialized_msgs:
                             if msg.get("type") == "human":
                                 additional_kwargs = msg.get("additional_kwargs")
@@ -1229,12 +1387,21 @@ async def get_thread_history(
                                 continue
 
                             msg.setdefault("run_id", current_turn_run_id)
-                            _set_message_turn_duration(msg, current_turn_run_id, checkpoint_run_durations)
+                            if msg.get("type") == "ai":
+                                turn_run_ids.add(current_turn_run_id)
 
-                        # Legacy checkpoints without duration metadata are
-                        # correlated once via event-store + run-manager, then
-                        # upgraded by a metadata-only checkpoint write.
-                        if any(_ai_message_lacks_duration(msg) for msg in serialized_msgs):
+                        # Stamp each run's duration on its last AI message only,
+                        # same as the live message endpoints — never every AI
+                        # message in a multi-message turn (#4152).
+                        stamp_turn_duration_on_last_ai(serialized_msgs, checkpoint_run_durations)
+
+                        # Runs referenced by this checkpoint's AI messages but
+                        # absent from checkpoint metadata are either legacy
+                        # (never migrated) or just completed. Correlate once via
+                        # event-store + run-manager, then upgrade by a
+                        # metadata-only checkpoint write.
+                        missing_run_ids = turn_run_ids - set(checkpoint_run_durations)
+                        if missing_run_ids:
                             from app.gateway.deps import get_run_event_store, get_run_manager
                             from app.gateway.routers.thread_runs import compute_run_durations
                             from deerflow.runtime.runs.worker import persist_run_durations
@@ -1269,7 +1436,8 @@ async def get_thread_history(
                                     run_id = msg_to_run.get(msg.get("id")) or current_turn_run_id
                                     if run_id:
                                         msg["run_id"] = run_id
-                                        _set_message_turn_duration(msg, run_id, run_durations)
+
+                                stamp_turn_duration_on_last_ai(serialized_msgs, run_durations)
 
                                 # Intentional, best-effort write-on-read migration:
                                 # persist legacy metadata after the response so the

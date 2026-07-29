@@ -30,15 +30,15 @@ DeerFlow ships with two built-in subagents:
 
 A general-purpose reasoning and execution agent. Suitable for delegating complex subtasks that require multi-step reasoning, web search, file operations, and artifact production.
 
-- **Default timeout**: 900 seconds (15 minutes)
-- **Default max turns**: 160
+- **Default timeout**: 1800 seconds (30 minutes)
+- **Default max turns**: 150
 
 ### bash
 
 A subagent specialized for command-line task execution inside the sandbox. Suitable for scripting, data processing, file transformation, and environment setup tasks.
 
-- **Default timeout**: 900 seconds (15 minutes)
-- **Default max turns**: 80
+- **Default timeout**: 1800 seconds (30 minutes)
+- **Default max turns**: 60
 - **Availability**: only exposed when the sandbox's `bash` tool is available (either `allow_host_bash: true` or a container sandbox is configured)
 
 ## Delegation flow
@@ -57,32 +57,45 @@ The runtime then:
 
 1. Looks up the subagent configuration from the registry, applying any `config.yaml` overrides.
 2. Creates a new agent invocation with the subagent's own prompt and tools.
-3. Runs the subagent to completion (or until timeout / max turns).
+3. Runs the subagent to completion — bounded by `max_turns`, the `timeout`, and a **middleware guard chain** that mirrors the Lead Agent's (loop detection, token budget, summarization). See [Runaway guards](#runaway-guards) below.
 4. Returns the subagent's final output to the Lead Agent as the tool result.
 
 ## Configuration
 
-Subagent timeouts and max turns are controlled through the `subagents:` section in `config.yaml`:
+Subagent timeouts, max turns, and the per-run token budget are controlled through the `subagents:` section in `config.yaml`:
 
 ```yaml
 subagents:
-  # Default timeout in seconds for all subagents (default: 900 = 15 minutes)
-  timeout_seconds: 900
+  # Default timeout in seconds for all subagents (default: 1800 = 30 minutes)
+  timeout_seconds: 1800
 
-  # Optional: override max turns for all subagents
+  # Optional: override max turns for all subagents.
+  # Built-in defaults: general-purpose=150, bash=60. Leave unset to keep them.
   # max_turns: 120
+
+  # Per-run token ceiling — a backstop against a subagent burning tokens on
+  # trivial work. At the hard-stop the in-flight turn is capped (tool calls
+  # stripped, finish_reason forced to "stop") so the run completes naturally;
+  # the result is stamped completed + subagent_stop_reason=token_capped so the
+  # lead/UI can tell a budget-capped run from a clean one (#3875).
+  token_budget:
+    enabled: true
+    max_tokens: 2000000 # generous default — lower it to tighten cost controls
+    warn_threshold: 0.7 # log a warning once this fraction of the budget is spent
 
   # Optional: per-agent overrides
   agents:
     general-purpose:
       timeout_seconds: 1800 # 30 minutes for complex tasks
       max_turns: 160
+      # token_budget:        # per-agent override of the global token_budget above
+      #   max_tokens: 3000000
     bash:
       timeout_seconds: 300 # 5 minutes for quick commands
       max_turns: 80
 ```
 
-Per-agent overrides take priority over the global `timeout_seconds` and `max_turns` settings.
+Per-agent overrides take priority over the global `timeout_seconds`, `max_turns`, and `token_budget` settings.
 
 ## Delegation limits
 
@@ -93,6 +106,16 @@ The `SubagentLimitMiddleware` controls how many subagents the Lead Agent can inv
 - `max_total_subagents`: optional per-request total cap for one run; defaults to `subagents.max_total_per_run` from `config.yaml` (default: 6, valid range: 1-50)
 
 If the agent tries to call more subagents than the limits allow, the middleware trims the excess calls. When the total cap is exhausted, it stops new `task` calls for that run and lets the agent synthesize from already collected results.
+
+## Runaway guards
+
+A subagent runs its own agent loop, so it needs the same runaway backstops the Lead Agent has. The subagent middleware chain mirrors three Lead Agent guards (#3875):
+
+- **`LoopDetectionMiddleware`** — breaks a subagent that repeats the same tool call without making progress. Subagents disallow `task`, so only the tool-loop heuristic can fire here. A hard-stop stamps the result `completed` + `subagent_stop_reason=loop_capped`, symmetric to the token budget below. Controlled by the existing `loop_detection` config.
+- **`TokenBudgetMiddleware`** — enforces the per-run `subagents.token_budget` ceiling. When the budget is hit the in-flight turn is capped (a final answer is forced) and the result is stamped `completed` + `subagent_stop_reason=token_capped` so the Lead Agent can tell a capped completion from a clean one. Reaching `max_turns` is likewise surfaced as `turn_capped`.
+- **`SummarizationMiddleware`** — compacts a long subagent transcript the same way it compacts the Lead Agent's, gated on the same `summarization.enabled` switch so a single config covers both chains.
+
+These guards engage in addition to the `max_turns` and `timeout` limits. The default `max_tokens` for the token budget is coupled to `summarization.enabled` — 1M when compaction is on, 2M when off — but an explicit `subagents.token_budget.max_tokens` (global or per-agent) always wins, so flipping the summarization switch never silently changes a value you pinned.
 
 ## ACP agents (external agents)
 

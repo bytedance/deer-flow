@@ -6,11 +6,12 @@ read from the global ``{base_dir}/skills/public/`` (read-only).
 
 Layout::
 
-    <host_root>/public/<name>/SKILL.md            ← global, read-only
-    <user_custom_root>/<name>/SKILL.md             ← per-user, read-write
-    <user_custom_root>/.history/<name>.jsonl       ← per-user history
-    <user_skills_root>/_skill_states.json          ← per-user enabled state
-    <global_custom_root>/<name>/SKILL.md           ← legacy fallback, read-only
+    <host_root>/public/<name>/SKILL.md                   ← global, read-only
+    <user_custom_root>/<name>/SKILL.md                   ← per-user, read-write
+    <integrations_root>/<provider>/<name>/SKILL.md       ← global, read-only
+    <user_custom_root>/.history/<name>.jsonl             ← per-user history
+    <user_skills_root>/_skill_states.json                ← per-user enabled state
+    <global_custom_root>/<name>/SKILL.md                 ← legacy fallback, read-only
 
 Fallback: when a user has no custom skills yet, global ``skills/custom/``
 skills are yielded as ``SkillCategory.LEGACY`` (read-only) so they are
@@ -82,6 +83,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         self._user_id = _validate_user_id(user_id)
         paths = get_paths()
         self._user_custom_root: Path = paths.user_custom_skills_dir(self._user_id)
+        self._integrations_root: Path = paths.integration_skills_dir()
         self._user_skills_root: Path = paths.user_skills_dir(self._user_id)
         self._global_custom_root: Path = self._host_root / SkillCategory.CUSTOM.value
         self._skill_states_file: Path = self._user_skills_root / "_skill_states.json"
@@ -256,8 +258,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
         is_global_custom_fallback = (self._global_custom_root / normalized_name / SKILL_MD_FILE).exists()
         if is_global_public:
             raise ValueError(f"'{name}' is a built-in skill. Use the skill_manage tool to create your own version — it will shadow the built-in one.")
+        is_integration = any((candidate / SKILL_MD_FILE).exists() for candidate in self._integrations_root.glob(f"*/{normalized_name}") if candidate.is_dir())
         if is_global_custom_fallback:
             raise ValueError(f"'{name}' is a legacy shared skill (not editable). To customise it, create your own version with the same name — it will shadow the shared one.")
+        if is_integration:
+            raise ValueError(f"'{name}' is a managed integration skill and cannot be edited. Create a custom skill with another name if you need a modified workflow.")
         raise FileNotFoundError(f"Custom skill '{name}' not found.")
 
     def _iter_skill_files(self) -> Iterable[tuple[SkillCategory, Path, Path]]:
@@ -271,7 +276,17 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 dir_names.clear()
                 yield SkillCategory.PUBLIC, public_path, Path(current_root) / SKILL_MD_FILE
 
-        # 2. Custom skills: prefer user-level directory
+        # 2. Managed integration skills: globally installed, read-only. Their
+        # enabled state is still merged from this user's _skill_states.json.
+        integration_path = self._integrations_root
+        if integration_path.exists() and integration_path.is_dir():
+            for current_root, dir_names, file_names in os.walk(integration_path, followlinks=True):
+                dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
+                if SKILL_MD_FILE not in file_names:
+                    continue
+                yield SkillCategory.INTEGRATION, integration_path, Path(current_root) / SKILL_MD_FILE
+
+        # 3. Custom skills: prefer user-level directory
         user_custom_exists = False
         user_custom_path = self._user_custom_root
         if user_custom_path.exists() and user_custom_path.is_dir():
@@ -283,7 +298,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 user_custom_exists = True
                 yield SkillCategory.CUSTOM, user_custom_path, Path(current_root) / SKILL_MD_FILE
 
-        # 3. Fallback: if user has no custom skills, load from global custom
+        # 4. Fallback: if user has no custom skills, load from global custom
         #    as LEGACY (read-only) so legacy skills are visible but not
         #    editable/deletable by the user. LEGACY skills are mounted at
         #    /mnt/skills/legacy/<name>/ in the sandbox so their supporting
@@ -370,22 +385,39 @@ class UserScopedSkillStorage(LocalSkillStorage):
         """Host path to this user's custom skills root directory."""
         return self._user_custom_root
 
+    def get_integrations_root(self) -> Path:
+        """Host path to the global managed integration skills root directory."""
+        return self._integrations_root
+
+    def get_user_integrations_root(self) -> Path:
+        """Compatibility alias for :meth:`get_integrations_root`."""
+        return self.get_integrations_root()
+
     # ------------------------------------------------------------------
-    # Path validation — accept per-user custom root as well as global root
+    # Path validation — accept public, per-user custom, and integration roots
     # ------------------------------------------------------------------
 
     def validate_skill_file_path(self, skill_file: Path) -> Path:
-        """Accept files under *either* the global root or the per-user custom root.
+        """Accept files under the public, per-user custom, or integration root.
 
-        Custom skills live in ``_user_custom_root`` which is not a sub-path
-        of ``_host_root``, so the default implementation's single-root check
-        would reject them.  This override allows both roots.
+        Custom and managed integration skills live outside ``_host_root``, so
+        the default implementation's single-root check would reject them.
         """
         resolved_file = skill_file.resolve()
-        for allowed_root in (self._host_root.resolve(), self._user_custom_root.resolve()):
+        allowed_roots = (
+            self._host_root.resolve(),
+            self._user_custom_root.resolve(),
+            self._integrations_root.resolve(),
+        )
+        for allowed_root in allowed_roots:
             try:
                 resolved_file.relative_to(allowed_root)
                 return resolved_file
             except ValueError:
                 continue
-        raise ValueError(f"Resolved skill file {resolved_file} must stay within either the global skills root ({self._host_root.resolve()}) or the per-user custom root ({self._user_custom_root.resolve()}).")
+        raise ValueError(
+            f"Resolved skill file {resolved_file} must stay within the global skills root "
+            f"({self._host_root.resolve()}), the per-user custom root "
+            f"({self._user_custom_root.resolve()}), or the managed integration skills root "
+            f"({self._integrations_root.resolve()})."
+        )

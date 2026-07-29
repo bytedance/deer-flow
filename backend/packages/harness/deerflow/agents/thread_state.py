@@ -1,17 +1,35 @@
 import copy
+import uuid
 from collections.abc import Mapping, Sequence
 from functools import cache
-from typing import Annotated, Any, NotRequired, TypedDict, get_type_hints
+from typing import Annotated, Any, NotRequired, TypedDict, cast, get_type_hints
 
 from langchain.agents import AgentState
-from langchain_core.messages import AnyMessage
+from langchain_core.messages import (
+    AnyMessage,
+    BaseMessageChunk,
+    RemoveMessage,
+    convert_to_messages,
+    message_chunk_to_message,
+)
 from langgraph.channels import DeltaChannel
-from langgraph.graph.message import add_messages
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
-from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
+
+
+def _resolve_snapshot_frequency(snapshot_frequency: int | None) -> int:
+    """Resolve the effective cadence: explicit value, else process-frozen,
+    else default. Imported lazily — ``deerflow.runtime.__init__`` reaches this
+    module via ``checkpoint_state``, so a top-level import would cycle."""
+    if snapshot_frequency is not None:
+        return snapshot_frequency
+    from deerflow.runtime.checkpoint_mode import resolve_checkpoint_snapshot_frequency
+
+    return resolve_checkpoint_snapshot_frequency()
 
 
 class SandboxState(TypedDict):
@@ -258,17 +276,102 @@ class ThreadState(AgentState):
     summary_text: NotRequired[str | None]
 
 
+def _normalize_messages(value: Any) -> list[AnyMessage]:
+    values = value if isinstance(value, list) else [value]
+    messages = [message_chunk_to_message(cast(BaseMessageChunk, message)) for message in convert_to_messages(values)]
+    for message in messages:
+        if message.id is None:
+            message.id = str(uuid.uuid4())
+    return messages
+
+
+def _index_messages(
+    messages: list[AnyMessage | None],
+) -> tuple[dict[str, int], dict[str, list[int]]]:
+    latest_position: dict[str, int] = {}
+    positions_by_id: dict[str, list[int]] = {}
+    for position, message in enumerate(messages):
+        if message is None:
+            continue
+        message_id = cast(str, message.id)
+        latest_position[message_id] = position
+        positions_by_id.setdefault(message_id, []).append(position)
+    return latest_position, positions_by_id
+
+
+def _raise_null_write(has_messages: bool) -> None:
+    # ``add_messages(left, None)`` reports only ``left`` when the accumulated
+    # message list is non-empty; with an empty list, it reports only ``right``.
+    received = "left" if has_messages else "right"
+    raise ValueError(f"Must specify non-null arguments for both 'left' and 'right'. Only received: '{received}'.")
+
+
 def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list[AnyMessage]:
-    result = list(state)
+    """Fold DeltaChannel writes with ``add_messages`` semantics in linear time.
+
+    LangGraph's private ``_messages_delta_reducer`` is also linear, but does
+    not preserve the public reducer's full coercion, ID, removal, and
+    ``REMOVE_ALL_MESSAGES`` behavior.
+    """
+    if not writes:
+        return list(state)
+    if writes[0] is None:
+        _raise_null_write(bool(state))
+
+    messages: list[AnyMessage | None] = _normalize_messages(state)
+    latest_position, positions_by_id = _index_messages(messages)
+
     for write in writes:
-        result = list(add_messages(result, write))
-    return result
+        if write is None:
+            _raise_null_write(bool(latest_position))
+        normalized_write = _normalize_messages(write)
+        remove_all_idx = None
+        for position, message in enumerate(normalized_write):
+            if isinstance(message, RemoveMessage) and message.id == REMOVE_ALL_MESSAGES:
+                remove_all_idx = position
+
+        if remove_all_idx is not None:
+            messages = list(normalized_write[remove_all_idx + 1 :])
+            latest_position, positions_by_id = _index_messages(messages)
+            continue
+
+        ids_to_remove: set[str] = set()
+        for message in normalized_write:
+            message_id = cast(str, message.id)
+            existing_position = latest_position.get(message_id)
+            if existing_position is not None:
+                if isinstance(message, RemoveMessage):
+                    ids_to_remove.add(message_id)
+                else:
+                    ids_to_remove.discard(message_id)
+                    messages[existing_position] = message
+                continue
+
+            if isinstance(message, RemoveMessage):
+                raise ValueError(f"Attempting to delete a message with an ID that doesn't exist ('{message_id}')")
+
+            position = len(messages)
+            messages.append(message)
+            latest_position[message_id] = position
+            positions_by_id[message_id] = [position]
+
+        for message_id in ids_to_remove:
+            for position in positions_by_id.pop(message_id):
+                messages[position] = None
+            del latest_position[message_id]
+
+    return [message for message in messages if message is not None]
 
 
-DELTA_MESSAGES_FIELD = Annotated[
-    list[AnyMessage],
-    DeltaChannel(merge_message_writes, snapshot_frequency=1000),
-]
+def delta_messages_field(snapshot_frequency: int = DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY) -> Any:
+    """Messages field annotation with a ``DeltaChannel`` at the given cadence."""
+    return Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=snapshot_frequency),
+    ]
+
+
+DELTA_MESSAGES_FIELD = delta_messages_field()
 
 
 class DeltaThreadState(ThreadState):
@@ -290,26 +393,48 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
 )
 
 
-def get_thread_state_schema(mode: CheckpointChannelMode) -> type:
-    return DeltaThreadState if mode == "delta" else ThreadState
+def get_thread_state_schema(mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
+    if mode != "delta":
+        return ThreadState
+    return _delta_thread_state_schema(_resolve_snapshot_frequency(snapshot_frequency))
 
 
 @cache
-def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode) -> type:
+def _delta_thread_state_schema(snapshot_frequency: int) -> type:
+    """Delta thread schema keyed by cadence; the default keeps the static
+    ``DeltaThreadState`` identity so existing type checks keep holding."""
+    if snapshot_frequency == DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY:
+        return DeltaThreadState
+    annotations = get_type_hints(ThreadState, include_extras=True)
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
+    return TypedDict(
+        f"DeltaThreadState_f{snapshot_frequency}",
+        annotations,
+        total=getattr(ThreadState, "__total__", True),
+    )
+
+
+def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
     if mode == "full":
         return schema
+    return _adapt_state_schema_for_delta(schema, _resolve_snapshot_frequency(snapshot_frequency))
+
+
+@cache
+def _adapt_state_schema_for_delta(schema: type, snapshot_frequency: int) -> type:
     annotations = get_type_hints(schema, include_extras=True)
-    annotations["messages"] = DELTA_MESSAGES_FIELD
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
     return TypedDict(
-        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}",
+        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}_f{snapshot_frequency}",
         annotations,
         total=getattr(schema, "__total__", True),
     )
 
 
-def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode) -> list[Any]:
+def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> list[Any]:
     if mode == "full":
         return list(middleware)
+    resolved_frequency = _resolve_snapshot_frequency(snapshot_frequency)
     normalized = []
     for item in middleware:
         schema = getattr(item, "state_schema", None)
@@ -317,6 +442,6 @@ def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: Checkpoi
             normalized.append(item)
             continue
         adapted = copy.copy(item)
-        adapted.state_schema = adapt_state_schema_for_mode(schema, mode)
+        adapted.state_schema = adapt_state_schema_for_mode(schema, mode, resolved_frequency)
         normalized.append(adapted)
     return normalized

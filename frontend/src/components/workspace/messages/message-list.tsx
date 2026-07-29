@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
   type MouseEvent,
+  type ReactNode,
 } from "react";
 import { toast } from "sonner";
 
@@ -23,10 +24,6 @@ import {
   ConversationContent,
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
 import { Button } from "@/components/ui/button";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
@@ -37,6 +34,10 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
+import {
+  getMessageRunId,
+  getRunDurationDisplaysByGroupIndex,
+} from "@/core/messages/run-duration";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -49,6 +50,7 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getBranchableAssistantGroupIds,
+  getLatestEditableTurn,
   getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
@@ -58,6 +60,7 @@ import {
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
 } from "@/core/messages/utils";
+import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
 import {
   buildMessageSidecarContext,
   type SidecarContext,
@@ -88,6 +91,7 @@ import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
+import { RunActivity, RunDuration } from "./run-duration";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 
@@ -120,6 +124,16 @@ function sameMessageIdentity(previous: Message, next: Message) {
   return previousKey !== null && previousKey === nextKey;
 }
 
+function sameRunDurationMetadata(previous: Message, next: Message) {
+  return (
+    getMessageRunId(previous) === getMessageRunId(next) &&
+    Object.is(
+      previous.additional_kwargs?.turn_duration,
+      next.additional_kwargs?.turn_duration,
+    )
+  );
+}
+
 function canReuseMessageGroup(
   previous: ThreadMessageGroup | undefined,
   next: ThreadMessageGroup,
@@ -135,7 +149,8 @@ function canReuseMessageGroup(
   return previous.messages.every(
     (message, index) =>
       next.messages[index] !== undefined &&
-      sameMessageIdentity(message, next.messages[index]),
+      sameMessageIdentity(message, next.messages[index]) &&
+      sameRunDurationMetadata(message, next.messages[index]),
   );
 }
 
@@ -166,7 +181,9 @@ function useStableMessageGroups(
   const previousGroupsRef = useRef<ThreadMessageGroup[]>([]);
   const previousIsLoadingRef = useRef(false);
   return useMemo(() => {
-    const nextGroups = getMessageGroups(messages);
+    const nextGroups = getMessageGroups(messages, {
+      isCurrentTurnLoading: isLoading,
+    });
     const previousGroups = previousGroupsRef.current;
     const activeGroupIndex =
       isLoading || previousIsLoadingRef.current ? nextGroups.length - 1 : -1;
@@ -319,9 +336,11 @@ export function MessageList({
   loadMoreHistory,
   isHistoryLoading,
   onRegenerateMessage,
+  onEditAndRegenerateMessage,
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
+  canEdit = false,
   canBranch = false,
   enableSidecarActions = true,
   sidecarSurface = false,
@@ -340,7 +359,11 @@ export function MessageList({
   onRegenerateMessage?: (
     messageId: string,
     supersededMessageIds: string[],
-  ) => void | Promise<void>;
+  ) => boolean | void | Promise<boolean | void>;
+  onEditAndRegenerateMessage?: (
+    messageId: string,
+    replacementText: string,
+  ) => boolean | Promise<boolean>;
   onSubmitHumanInput?: (
     request: HumanInputRequest,
     response: HumanInputResponse,
@@ -350,6 +373,7 @@ export function MessageList({
     messageIds: string[],
   ) => void | Promise<void>;
   canRegenerate?: boolean;
+  canEdit?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
@@ -360,19 +384,50 @@ export function MessageList({
   const sidecar = useMaybeSidecar();
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
-  const [turnStartTime, setTurnStartTime] = useState<number | null>(null);
+  const messages = thread.messages;
+  const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const browserView = useMaybeBrowserView();
+  const pushBrowserFrame = browserView?.pushFrame;
+  const messageCount = messages.length;
+  // The backend exposes no live start timestamp, so a mid-run mount measures
+  // from mount until authoritative persisted turn_duration replaces it.
+  const [turnStartTime, setTurnStartTime] = useState<number | null>(() =>
+    thread.isLoading ? Date.now() : null,
+  );
+  const turnStartTimeRef = useRef(turnStartTime);
+  const [clientDurationsByGroupId, setClientDurationsByGroupId] = useState<
+    ReadonlyMap<string, number>
+  >(() => new Map());
   const prevIsLoading = useRef(thread.isLoading);
 
   useEffect(() => {
     if (thread.isLoading && !prevIsLoading.current) {
-      setTurnStartTime(Date.now());
+      const now = Date.now();
+      turnStartTimeRef.current = now;
+      setTurnStartTime(now);
+    } else if (!thread.isLoading && prevIsLoading.current) {
+      const startTime = turnStartTimeRef.current;
+      const lastAssistantGroup = [...groupedMessages]
+        .reverse()
+        .find((group) => group.type !== "human" && group.id);
+      if (startTime !== null && lastAssistantGroup?.id && !thread.error) {
+        const duration = Math.max(
+          0,
+          Math.floor((Date.now() - startTime) / 1000),
+        );
+        const key = `${threadId}:${lastAssistantGroup.id}`;
+        setClientDurationsByGroupId((current) => {
+          const next = new Map(current);
+          next.set(key, duration);
+          return next;
+        });
+      }
+      turnStartTimeRef.current = null;
+      setTurnStartTime(null);
     }
     prevIsLoading.current = thread.isLoading;
-  }, [thread.isLoading]);
-  const messages = thread.messages;
-  const browserView = useMaybeBrowserView();
-  const pushBrowserFrame = browserView?.pushFrame;
-  const messageCount = messages.length;
+  }, [groupedMessages, thread.error, thread.isLoading, threadId]);
+
   useEffect(() => {
     // Only the primary chat surface drives the shared browser panel. The
     // sidecar renders a different thread's messages against the same
@@ -410,7 +465,6 @@ export function MessageList({
     // repeatedly scan long history looking for the last browser frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messageCount, pushBrowserFrame, sidecarSurface]);
-  const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<
     string | null
   >(null);
@@ -420,6 +474,7 @@ export function MessageList({
   const [branchingMessageId, setBranchingMessageId] = useState<string | null>(
     null,
   );
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const hasActiveAssistantText = useMemo(() => {
     let lastHumanIndex = -1;
     for (let i = groupedMessages.length - 1; i >= 0; i--) {
@@ -437,6 +492,32 @@ export function MessageList({
   const lastGroupIndex = groupedMessages.length - 1;
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
+  const runDurationDisplaysByGroupIndex = useMemo(
+    () => getRunDurationDisplaysByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
+  const workspaceChangeAnchorGroupIndices = useMemo(
+    () => getWorkspaceChangeAnchorGroupIndices(groupedMessages),
+    [groupedMessages],
+  );
+  useEffect(() => {
+    setClientDurationsByGroupId((current) => {
+      let next: Map<string, number> | undefined;
+      runDurationDisplaysByGroupIndex.forEach((displays, groupIndex) => {
+        const groupId = groupedMessages[groupIndex]?.id;
+        if (displays.length === 0 || !groupId) {
+          return;
+        }
+        const key = `${threadId}:${groupId}`;
+        if (!current.has(key)) {
+          return;
+        }
+        next ??= new Map(current);
+        next.delete(key);
+      });
+      return next ?? current;
+    });
+  }, [groupedMessages, runDurationDisplaysByGroupIndex, threadId]);
   const tokenDebugSteps = useMemo(
     () =>
       tokenUsageInlineMode === "step_debug"
@@ -584,6 +665,15 @@ export function MessageList({
     () => getBranchableAssistantGroupIds(groupedMessages, thread.isLoading),
     [groupedMessages, thread.isLoading],
   );
+  const latestEditableTurn = useMemo(
+    () => getLatestEditableTurn(groupedMessages, thread.isLoading),
+    [groupedMessages, thread.isLoading],
+  );
+  const latestEditableHumanMessageId = latestEditableTurn?.humanMessage.id;
+  const replayActionBusy =
+    regeneratingMessageId != null ||
+    branchingMessageId != null ||
+    editingMessageId != null;
 
   const clearSelectionToolbar = useCallback(() => {
     setSelectionToolbar(null);
@@ -753,7 +843,9 @@ export function MessageList({
                   type="button"
                   variant="ghost"
                   disabled={
-                    !canBranch || branchingMessageId === actionTarget.id
+                    !canBranch ||
+                    replayActionBusy ||
+                    branchingMessageId === actionTarget.id
                   }
                   onClick={() => {
                     const targetId = actionTarget.id;
@@ -787,7 +879,9 @@ export function MessageList({
                   type="button"
                   variant="ghost"
                   disabled={
-                    !canRegenerate || regeneratingMessageId === actionTarget.id
+                    !canRegenerate ||
+                    replayActionBusy ||
+                    regeneratingMessageId === actionTarget.id
                   }
                   onClick={() => {
                     const targetId = actionTarget.id;
@@ -822,6 +916,7 @@ export function MessageList({
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
+      replayActionBusy,
       t.common.branch,
       t.common.regenerate,
     ],
@@ -886,6 +981,47 @@ export function MessageList({
     return <MessageListSkeleton />;
   }
 
+  const withRunDuration = (
+    group: (typeof groupedMessages)[number],
+    groupIndex: number,
+    content: ReactNode,
+  ) => {
+    const persistedDisplays = runDurationDisplaysByGroupIndex[groupIndex] ?? [];
+    const clientDuration =
+      !thread.error && group.id
+        ? clientDurationsByGroupId.get(`${threadId}:${group.id}`)
+        : undefined;
+    const displays =
+      persistedDisplays.length > 0
+        ? persistedDisplays
+        : clientDuration !== undefined
+          ? [
+              {
+                runId: `client:${group.id}`,
+                durationSeconds: clientDuration,
+              },
+            ]
+          : [];
+
+    if (!content && displays.length === 0) {
+      return null;
+    }
+
+    return (
+      <div
+        key={`duration-group:${group.id ?? groupIndex}`}
+        className="flex w-full flex-col gap-2"
+      >
+        {content}
+        {displays.map((display) => (
+          <RunDuration
+            key={display.runId}
+            durationSeconds={display.durationSeconds}
+          />
+        ))}
+      </div>
+    );
+  };
   return (
     <>
       <Conversation
@@ -906,9 +1042,10 @@ export function MessageList({
               thread.isLoading && groupIndex === lastGroupIndex;
 
             if (group.type === "human" || group.type === "assistant") {
-              return (
+              return withRunDuration(
+                group,
+                groupIndex,
                 <div
-                  key={group.id}
                   data-assistant-turn={
                     group.type === "assistant" ? "" : undefined
                   }
@@ -933,10 +1070,38 @@ export function MessageList({
                             : undefined
                         }
                         showCopyButton={group.type !== "assistant"}
-                        turnStartTime={
-                          groupIndex === groupedMessages.length - 1
-                            ? turnStartTime
-                            : null
+                        showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
+                          groupIndex,
+                        )}
+                        canEdit={
+                          group.type === "human" &&
+                          Boolean(msg.id) &&
+                          msg.id === latestEditableHumanMessageId &&
+                          canEdit &&
+                          !replayActionBusy &&
+                          Boolean(onEditAndRegenerateMessage)
+                        }
+                        isEditPending={editingMessageId === msg.id}
+                        onEditAndRegenerate={
+                          group.type === "human" &&
+                          msg.id &&
+                          onEditAndRegenerateMessage
+                            ? async (replacementText) => {
+                                const targetId = msg.id;
+                                if (!targetId) {
+                                  return false;
+                                }
+                                setEditingMessageId(targetId);
+                                try {
+                                  return await onEditAndRegenerateMessage(
+                                    targetId,
+                                    replacementText,
+                                  );
+                                } finally {
+                                  setEditingMessageId(null);
+                                }
+                              }
+                            : undefined
                         }
                       />
                     );
@@ -979,7 +1144,7 @@ export function MessageList({
                         branchableAssistantGroupIds.has(group.id),
                       group.id === latestAssistantGroupId,
                     )}
-                </div>
+                </div>,
               );
             } else if (group.type === "assistant:clarification") {
               const message = group.messages[0];
@@ -996,8 +1161,10 @@ export function MessageList({
                 const pending = pendingHumanInputRequestIds.has(
                   humanInputRequest.request_id,
                 );
-                return (
-                  <div key={group.id} className="w-full">
+                return withRunDuration(
+                  group,
+                  groupIndex,
+                  <div className="w-full">
                     <HumanInputCard
                       answeredResponse={answeredResponse}
                       disabled={
@@ -1024,13 +1191,15 @@ export function MessageList({
                       messages: group.messages,
                       turnUsageMessages,
                     })}
-                  </div>
+                  </div>,
                 );
               }
 
               if (hasContent(message)) {
-                return (
-                  <div key={group.id} className="w-full">
+                return withRunDuration(
+                  group,
+                  groupIndex,
+                  <div className="w-full">
                     <MarkdownContent
                       content={extractContentFromMessage(message)}
                       isLoading={thread.isLoading}
@@ -1039,10 +1208,10 @@ export function MessageList({
                       messages: group.messages,
                       turnUsageMessages,
                     })}
-                  </div>
+                  </div>,
                 );
               }
-              return null;
+              return withRunDuration(group, groupIndex, null);
             } else if (group.type === "assistant:present-files") {
               const files: string[] = [];
               for (const message of group.messages) {
@@ -1051,8 +1220,10 @@ export function MessageList({
                   files.push(...presentFiles);
                 }
               }
-              return (
-                <div className="w-full" key={group.id}>
+              return withRunDuration(
+                group,
+                groupIndex,
+                <div className="w-full">
                   {group.messages[0] && hasContent(group.messages[0]) && (
                     <MarkdownContent
                       content={extractContentFromMessage(group.messages[0])}
@@ -1065,7 +1236,7 @@ export function MessageList({
                     messages: group.messages,
                     turnUsageMessages,
                   })}
-                </div>
+                </div>,
               );
             } else if (group.type === "assistant:subagent") {
               const tasks = new Set<Subtask>();
@@ -1152,22 +1323,23 @@ export function MessageList({
                   );
                 }
               }
-              return (
-                <div
-                  key={"subtask-group-" + group.id}
-                  className="relative z-1 flex flex-col gap-2"
-                >
+              return withRunDuration(
+                group,
+                groupIndex,
+                <div className="relative z-1 flex flex-col gap-2">
                   {results}
                   {renderTokenUsage({
                     messages: group.messages,
                     turnUsageMessages,
                     debugMessageIds: subagentDebugMessageIds,
                   })}
-                </div>
+                </div>,
               );
             }
-            return (
-              <div key={"group-" + group.id} className="w-full">
+            return withRunDuration(
+              group,
+              groupIndex,
+              <div className="w-full">
                 <MessageGroup
                   messages={group.messages}
                   isLoading={groupIsLoading}
@@ -1183,14 +1355,12 @@ export function MessageList({
                   turnUsageMessages,
                   inlineDebug: false,
                 })}
-              </div>
+              </div>,
             );
           })}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
-              <Reasoning isStreaming={true} startTimeProp={turnStartTime}>
-                <ReasoningTrigger hasContent={false} />
-              </Reasoning>
+              <RunActivity startTime={turnStartTime} />
             </div>
           )}
           <div style={{ height: `${paddingBottom}px` }} />

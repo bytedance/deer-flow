@@ -138,6 +138,7 @@ def test_upload_files_skips_acquire_when_thread_data_is_mounted(tmp_path):
 
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
+    provider.acquire_async = AsyncMock()
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -150,6 +151,7 @@ def test_upload_files_skips_acquire_when_thread_data_is_mounted(tmp_path):
     assert result.success is True
     assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
     provider.acquire.assert_not_called()
+    provider.acquire_async.assert_not_awaited()
     provider.get.assert_not_called()
 
 

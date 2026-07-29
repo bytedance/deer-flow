@@ -9,7 +9,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from deerflow.agents.middlewares import skill_activation_middleware as middleware_module
 from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware, is_slash_skill_activation_reminder
+from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.paths import Paths
 from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES, parse_slash_skill_reference, resolve_slash_skill
+from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -139,6 +142,49 @@ def test_skill_activation_middleware_injects_hidden_human_context_for_model_call
     assert "<user_request>\nanalyze uploads/foo.csv\n</user_request>" in activation_msg.content
     assert user_msg.content == original.content
     assert request.state["messages"] == [original]
+
+
+def test_skill_activation_middleware_reads_public_skill_from_real_user_scoped_storage(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "public" / "ppt-generation"
+    skill_dir.mkdir(parents=True)
+    skill_content = "---\nname: ppt-generation\ndescription: Create presentations\n---\n\n# Presentation workflow\n"
+    (skill_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
+
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+    )
+    extensions_config = ExtensionsConfig()
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls, config_path=None: extensions_config))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions_config)
+    storage = UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=app_config)
+    monkeypatch.setattr(middleware_module, "get_or_new_user_skill_storage", lambda user_id, **kwargs: storage)
+
+    middleware = SkillActivationMiddleware(
+        app_config=app_config,
+        user_id="test-user",
+        slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    original = HumanMessage(content="/ppt-generation Create a simple deck", id="msg-real-storage")
+    request = _make_model_request([original])
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert isinstance(result, AIMessage)
+    activation_msg, user_msg = captured["messages"]
+    assert is_slash_skill_activation_reminder(activation_msg)
+    assert "Presentation workflow" in activation_msg.content
+    assert user_msg is original
 
 
 def test_skill_activation_middleware_does_not_duplicate_existing_activation(monkeypatch, tmp_path):
@@ -505,7 +551,7 @@ def test_skill_activation_middleware_async_records_activation_audit_event(monkey
     assert kwargs["changes"]["content_hash"] == hashlib.sha256(b"# Data Analysis\nUse pandas.").hexdigest()
 
 
-def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch, tmp_path):
+def test_skill_activation_middleware_warns_and_ignores_activation_audit_errors(monkeypatch, tmp_path, caplog):
     skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\nUse pandas.")
     monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
 
@@ -517,10 +563,12 @@ def test_skill_activation_middleware_ignores_activation_audit_errors(monkeypatch
     def handler(model_request: ModelRequest):
         return AIMessage(content="ok")
 
-    result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
+    with caplog.at_level("WARNING"):
+        result = middleware.wrap_model_call(_make_model_request([original], runtime=runtime), handler)
 
     assert isinstance(result, AIMessage)
     assert result.content == "ok"
+    assert "Failed to record slash skill activation audit event" in caplog.text
 
 
 def test_skill_activation_middleware_activates_only_latest_real_user_message(monkeypatch, tmp_path):
