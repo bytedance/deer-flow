@@ -11,6 +11,15 @@ import type { MessageGroup } from "./utils";
  *
  * Returns group indices rather than message ids because terminal assistant
  * groups hold exactly one message and that message's id may be absent.
+ *
+ * Candidates are restricted to `assistant` groups, unlike
+ * `getRunDurationDisplaysByGroupIndex`, which accepts a run's last group of any
+ * type. The asymmetry is load-bearing rather than an oversight: run duration is
+ * rendered by `MessageList` around every group, while this card is rendered by
+ * `MessageListItem`, which `MessageList` invokes only for `human`/`assistant`
+ * groups. Anchoring a run that ends in an `assistant:processing` group would
+ * pick a position that never renders and silently drop the card, so do not
+ * unify the two helpers.
  */
 export function getWorkspaceChangeAnchorGroupIndices(
   groups: MessageGroup[],
