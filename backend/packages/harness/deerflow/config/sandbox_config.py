@@ -76,8 +76,9 @@ class SandboxConfig(BaseModel):
 
     AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
-        replicas: Positive provider capacity per gateway process. Each provider
-            defines which lifecycle states count toward this limit.
+        replicas: Positive provider capacity. E2B shares it across Gateway
+            workers when ownership uses Redis; other modes/providers keep
+            process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
@@ -115,7 +116,7 @@ class SandboxConfig(BaseModel):
     replicas: int | None = Field(
         default=None,
         gt=0,
-        description="Positive provider capacity per gateway process. Each provider defines which lifecycle states count toward this limit.",
+        description=("Positive provider capacity. E2B enforces it deployment-wide when sandbox ownership uses Redis; otherwise accounting is per Gateway process. Each provider defines which lifecycle states count."),
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",

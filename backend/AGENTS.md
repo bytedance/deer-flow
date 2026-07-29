@@ -616,8 +616,16 @@ that cannot tell sibling branches apart.
   The `wait` policy fails the turn after `acquire_timeout`. The runtime does not
   retry the turn automatically. E2B acquisition uses a bounded executor.
   Waiting calls do not consume the default asyncio executor. The `reject`
-  policy can evict one warm VM before it returns an error. `replicas` limits
-  one Gateway process. It does not provide multi-process capacity control.
+  policy can evict one warm VM before it returns an error. With memory
+  ownership, `replicas` limits one Gateway process. With Redis ownership, one
+  Hash ledger under `<ownership.key_prefix>:e2b-capacity`
+  counts confirmed E2B VMs plus in-flight creates for every Gateway sharing
+  that key prefix, so `replicas` (plus a bounded burst) is deployment-wide.
+  Admission and reservation/commit/release transitions use Lua; a missing or
+  unavailable ledger fails closed until a complete E2B inventory initializes
+  it. Reservation tokens in E2B metadata repair a Gateway crash between remote
+  creation and Redis commit. Complete inventory application is revision-CAS
+  guarded, while incomplete inventories never remove ledger entries.
   Uncertain cleanup keeps a tombstone slot. Shutdown tracks owned remote
   operation IDs. Discovery can find a VM from another Gateway. Shutdown closes
   an unowned discovery client without destroying its VM. Release ends its
