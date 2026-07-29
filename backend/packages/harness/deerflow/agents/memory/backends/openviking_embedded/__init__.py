@@ -18,11 +18,12 @@ entities / profile / ...) and stores them as files under
 not raw transcripts. ``add`` returns immediately when ``wait_on_write: false``;
 ``add_nowait`` (the summarization-flush path) blocks until extraction finishes.
 
-Heavy ``openviking`` dependency is an **optional extra** (``deerflow-harness[openviking]``);
-the ``import openviking`` is lazy (inside ``model_post_init``) so this backend
-registers/scans fine without the extra installed. Selecting
-``manager_class: openviking_embedded`` without the extra raises a clear
-ImportError at construction.
+Heavy ``openviking`` dependency is **auto-installed** via ``plugin.yaml`` when
+``memory.allow_lazy_installs: true`` is set (deps land outside the venv so
+``uv sync`` never wipes them). The ``import openviking`` is lazy (inside
+``model_post_init``) so this backend registers/scans fine without the dependency
+installed. Selecting ``manager_class: openviking_embedded`` without it raises a
+clear ImportError at construction.
 """
 
 from .openviking_manager import OpenVikingMemoryManager
