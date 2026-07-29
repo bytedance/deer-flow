@@ -36,6 +36,7 @@ class Resolution:
 BUILTIN_COMMANDS: tuple[Command, ...] = (
     Command("help", "Show commands and keybindings"),
     Command("new", "Start a fresh thread"),
+    Command("clear", "Clear the transcript display"),
     Command("threads", "Open the thread switcher"),
     Command("switch", "Open the thread switcher"),
     Command("resume", "Resume a thread by id or title"),
@@ -54,6 +55,17 @@ BUILTIN_COMMANDS: tuple[Command, ...] = (
 )
 
 _BUILTIN_NAMES = frozenset(c.name for c in BUILTIN_COMMANDS)
+
+
+def format_command_help() -> str:
+    """One-line summary of every built-in slash command, for ``/help``.
+
+    Derived from :data:`BUILTIN_COMMANDS` so the help text can never drift out
+    of sync with the registry (and, therefore, the picker). Adding a built-in
+    surfaces it in ``/help`` automatically.
+    """
+    names = "  ".join(f"/{command.name}" for command in BUILTIN_COMMANDS)
+    return f"Commands:  {names}"
 
 
 def build_registry(skills: list[dict]) -> list[Command]:

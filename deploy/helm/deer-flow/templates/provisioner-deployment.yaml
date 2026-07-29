@@ -51,11 +51,18 @@ spec:
               value: {{ .Values.provisioner.sandboxImage | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
-            # NODE_HOST: the address the gateway uses to reach sandbox NodePorts.
-            # When `provisioner.nodeHost` is set, use it; otherwise default to this
-            # pod's node IP via the downward API. A NodePort is exposed on every
-            # node, so <node-IP>:<NodePort> routes from the gateway on most clusters.
-            # Override only when pod->node-IP traffic is blocked by the CNI/policy.
+            # Service type for per-sandbox Services. ClusterIP (default) routes the
+            # gateway->sandbox hop over cluster DNS; NodePort is the compose/hybrid
+            # escape hatch (gateway not in K8s), which needs NODE_HOST below.
+            - name: SANDBOX_SERVICE_TYPE
+              value: {{ .Values.provisioner.sandboxServiceType | default "ClusterIP" | quote }}
+            {{- if eq (default "ClusterIP" .Values.provisioner.sandboxServiceType) "NodePort" }}
+            # NODE_HOST: address the gateway uses to reach sandbox NodePorts
+            # (NodePort mode only). When `provisioner.nodeHost` is set, use it;
+            # otherwise default to this pod's node IP via the downward API. A
+            # NodePort is exposed on every node, so <node-IP>:<NodePort> routes
+            # from the gateway on most clusters. Override only when pod->node-IP
+            # traffic is blocked by the CNI/policy.
             - name: NODE_HOST
               {{- if .Values.provisioner.nodeHost }}
               value: {{ .Values.provisioner.nodeHost | quote }}
@@ -64,6 +71,7 @@ spec:
                 fieldRef:
                   fieldPath: status.hostIP
               {{- end }}
+            {{- end }}
             # PVC mode — sandbox Pods mount the same PVCs the gateway uses.
             {{- if .Values.persistence.home.enabled }}
             - name: USERDATA_PVC_NAME

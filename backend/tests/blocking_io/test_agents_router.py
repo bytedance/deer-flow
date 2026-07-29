@@ -21,7 +21,14 @@ from pathlib import Path
 
 import pytest
 
-from app.gateway.routers.agents import AgentCreateRequest, create_agent_endpoint, delete_agent
+from app.gateway.routers.agents import (
+    AgentCreateRequest,
+    check_agent_name,
+    create_agent_endpoint,
+    delete_agent,
+    get_agent,
+    list_agents,
+)
 from deerflow.config.agents_api_config import load_agents_api_config_from_dict
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -60,5 +67,28 @@ async def test_delete_agent_does_not_block_event_loop(tmp_path: Path, monkeypatc
         await delete_agent("loop-test-agent")
 
         assert not await asyncio.to_thread(agent_dir.exists)
+    finally:
+        load_agents_api_config_from_dict({})
+
+
+async def test_read_endpoints_do_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+    # list/get/check read through the sync agent store; on the db backend each is
+    # a DB round trip. They must offload via asyncio.to_thread, or the strict
+    # Blockbuster gate raises BlockingError here (finding: reads on the loop).
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        await create_agent_endpoint(AgentCreateRequest(name="loop-read-agent", soul="You are a test agent."))
+
+        listed = await list_agents()
+        assert any(a.name == "loop-read-agent" for a in listed.agents)
+
+        got = await get_agent("loop-read-agent")
+        assert got.name == "loop-read-agent"
+
+        check = await check_agent_name("loop-read-agent")
+        assert check["available"] is False
+        assert (await check_agent_name("never-created-agent"))["available"] is True
     finally:
         load_agents_api_config_from_dict({})

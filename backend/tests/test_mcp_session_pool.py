@@ -591,6 +591,59 @@ async def test_session_pool_tool_forwards_interceptor_headers():
 
 
 @pytest.mark.asyncio
+async def test_session_pool_interceptor_reads_request_scoped_secret():
+    """Interceptors can read request-scoped secrets from LangGraph context."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        x: int = Field(..., description="x")
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    async def secret_header_interceptor(request, handler):
+        from langgraph.config import get_config
+
+        secrets = (get_config().get("context") or {}).get("secrets") or {}
+        return await handler(request.override(headers={"Authorization": f"Bearer {secrets['MCP_AUTH_TOKEN']}"}))
+
+    with (
+        patch("langchain_mcp_adapters.sessions.create_session", return_value=mock_cm),
+        patch(
+            "langgraph.config.get_config",
+            return_value={"context": {"secrets": {"MCP_AUTH_TOKEN": "nested-secret"}}},
+        ),
+    ):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "srv",
+            {"transport": "stdio", "command": "x", "args": []},
+            tool_interceptors=[secret_header_interceptor],
+        )
+        await wrapped.coroutine(runtime=None, x=1)
+
+    mock_session.call_tool.assert_awaited_once_with(
+        "act",
+        {"x": 1},
+        meta={"headers": {"Authorization": "Bearer nested-secret"}},
+    )
+
+
+@pytest.mark.asyncio
 async def test_session_pool_tool_no_headers_omits_meta():
     """When no interceptor sets headers, the pooled call must not pass a ``meta``
     kwarg (falls back to the plain two-argument ``call_tool``).

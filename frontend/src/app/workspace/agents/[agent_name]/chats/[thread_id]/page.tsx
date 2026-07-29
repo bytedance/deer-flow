@@ -92,6 +92,7 @@ export default function AgentChatPage() {
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -209,6 +210,11 @@ export default function AgentChatPage() {
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
+  const handleEditAndRegenerate = useCallback(
+    (messageId: string, replacementText: string) =>
+      editAndRegenerateMessage(threadId, messageId, replacementText),
+    [editAndRegenerateMessage, threadId],
+  );
 
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
@@ -307,6 +313,16 @@ export default function AgentChatPage() {
                     !thread.isLoading
                   }
                   onRegenerateMessage={handleRegenerate}
+                  canEdit={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading &&
+                    !hasGoal &&
+                    !hasOpenHumanInputCard
+                  }
+                  onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={
                     isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                       ? undefined
@@ -363,6 +379,9 @@ export default function AgentChatPage() {
                     )}
                     isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
+                    draftThreadId={isNewThread ? "new" : threadId}
+                    draftAgentName={agent_name}
+                    defaultModelName={agent?.model}
                     autoFocus={isWelcomeMode}
                     status={
                       thread.error
@@ -382,7 +401,6 @@ export default function AgentChatPage() {
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading ||
-                      hasOpenHumanInputCard ||
                       (!isNewThread && isHistoryLoading)
                     }
                     onContextChange={(context) =>

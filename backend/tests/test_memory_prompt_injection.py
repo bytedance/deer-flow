@@ -6,9 +6,9 @@ import pytest
 
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import (
     FACT_EXTRACTION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
     _coerce_confidence,
     format_memory_for_injection,
+    load_prompt_messages,
 )
 
 
@@ -846,7 +846,19 @@ def test_format_memory_includes_cognitive_style() -> None:
 
 
 def test_cognitive_fact_category_is_documented_and_rendered() -> None:
-    assert "cognitive|goal|correction" in MEMORY_UPDATE_PROMPT
+    messages = load_prompt_messages(
+        "memory_update",
+        {
+            "current_memory": "{}",
+            "conversation": "",
+            "correction_hint": "",
+            "staleness_review_section": "",
+            "consolidation_section": "",
+        },
+    )
+    memory_update_prompt = messages[0].content
+    assert isinstance(memory_update_prompt, str)
+    assert "cognitive|goal|correction" in memory_update_prompt
     assert "cognitive|goal|correction" in FACT_EXTRACTION_PROMPT
     assert "- cognitive:" in FACT_EXTRACTION_PROMPT
 

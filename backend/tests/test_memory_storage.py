@@ -71,7 +71,7 @@ class TestNormalizeMemoryData:
         assert fact["category"] == "cognitive"
         assert fact["confidence"] == 0.0
         assert fact["createdAt"] == ""
-        assert fact["source"] == ""
+        assert fact["source"] == "unknown"
 
 
 class TestMemoryStorageInterface:
@@ -95,11 +95,11 @@ class TestFileMemoryStorage:
         assert storage._get_memory_file_path(None) == tmp_path / "memory.json"
 
     def test_get_memory_file_path_agent(self, tmp_path, monkeypatch):
-        """Legacy per-agent path lives under the DeerMem root ($DEERMEM_DATA_DIR)."""
+        """Agent facts share the user's global summary JSON path."""
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         storage = FileMemoryStorage(DeerMemConfig())
         path = storage._get_memory_file_path("test-agent")
-        assert path == tmp_path / "agents" / "test-agent" / "memory.json"
+        assert path == tmp_path / "memory.json"
 
     @pytest.mark.parametrize("invalid_name", ["", "../etc/passwd", "agent/name", "agent\\name", "agent name", "agent@123", "agent_name"])
     def test_validate_agent_name_invalid(self, invalid_name):
@@ -118,9 +118,10 @@ class TestFileMemoryStorage:
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         storage = FileMemoryStorage(DeerMemConfig())
-        result = storage.save({"version": "1.0", "facts": [{"content": "test fact"}]})
+        result = storage.save({"version": "1.0", "facts": []})
         assert result is True
         assert memory_file.exists()
+        assert "facts" not in memory_file.read_text(encoding="utf-8")
 
     def test_save_does_not_mutate_caller_dict(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
@@ -138,16 +139,18 @@ class TestFileMemoryStorage:
         memory_file.parent.mkdir(parents=True, exist_ok=True)
         import json as _json
 
-        memory_file.write_text(_json.dumps({"version": "1.0", "facts": [{"content": "original"}]}))
+        memory_file.write_text(_json.dumps({"version": "2.0", "user": {"workContext": {"summary": "original"}}, "history": {}}))
         storage = FileMemoryStorage(DeerMemConfig())
         cached = storage.load()
-        assert cached["facts"][0]["content"] == "original"
+        assert cached["user"]["workContext"]["summary"] == "original"
 
         with patch("builtins.open", side_effect=OSError("disk full")):
-            result = storage.save({"version": "1.0", "facts": [{"content": "mutated"}]})
+            changed = create_empty_memory()
+            changed["user"]["workContext"]["summary"] = "mutated"
+            result = storage.save(changed)
         assert result is False
         after = storage.load()
-        assert after["facts"][0]["content"] == "original"
+        assert after["user"]["workContext"]["summary"] == "original"
 
     def test_cache_thread_safety(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
@@ -177,13 +180,13 @@ class TestFileMemoryStorage:
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
         memory_file = tmp_path / "memory.json"
         memory_file.parent.mkdir(parents=True, exist_ok=True)
-        memory_file.write_text('{"version": "1.0", "facts": [{"content": "initial fact"}]}')
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "initial"}}, "history": {}}')
         storage = FileMemoryStorage(DeerMemConfig())
         memory1 = storage.load()
-        assert memory1["facts"][0]["content"] == "initial fact"
-        memory_file.write_text('{"version": "1.0", "facts": [{"content": "updated fact"}]}')
+        assert memory1["user"]["workContext"]["summary"] == "initial"
+        memory_file.write_text('{"version": "2.0", "user": {"workContext": {"summary": "updated"}}, "history": {}}')
         memory2 = storage.reload()
-        assert memory2["facts"][0]["content"] == "updated fact"
+        assert memory2["user"]["workContext"]["summary"] == "updated"
 
 
 class TestCreateStorage:
@@ -231,22 +234,17 @@ def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
     assert loaded["user"]["workContext"]["summary"] == "work"
 
 
-def test_cache_hit_returns_already_normalized_memory(tmp_path) -> None:
+def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
     memory_file = tmp_path / "memory.json"
     memory_file.write_text(
         '{"version":"1.0","lastUpdated":"","user":{},"history":{},"facts":[{"content":"Legacy cached fact"}]}',
         encoding="utf-8",
     )
 
-    with patch(
-        "deerflow.agents.memory.backends.deermem.deermem.core.storage.normalize_memory_data",
-        wraps=normalize_memory_data,
-    ) as normalize:
-        storage = _storage_at(memory_file)
-        first = storage.load()
-        calls_after_first_load = normalize.call_count
-        second = storage.load()
+    storage = _storage_at(memory_file)
+    first = storage.load()
+    second = storage.load()
 
-    assert normalize.call_count == calls_after_first_load
-    assert second is first
-    assert second["facts"][0]["id"] == first["facts"][0]["id"]
+    assert second == first
+    assert second is not first
+    assert second["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}

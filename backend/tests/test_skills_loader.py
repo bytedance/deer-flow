@@ -63,6 +63,27 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     assert team_skill.get_container_file_path() == "/mnt/skills/custom/team/helper/SKILL.md"
 
 
+def test_load_skills_stops_at_skill_package_boundary(tmp_path: Path):
+    """SKILL.md files inside an existing skill package are support data, not skills."""
+    skills_root = tmp_path / "skills"
+
+    _write_skill(skills_root / "public" / "reviewer", "reviewer", "Reviews skills")
+    _write_skill(
+        skills_root / "public" / "reviewer" / "evals" / "fixtures" / "injection",
+        "injection-example",
+        "Calibration fixture",
+    )
+    _write_skill(
+        skills_root / "public" / "reviewer" / "examples" / "helper",
+        "nested-example",
+        "Nested package example",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    assert {skill.name for skill in skills} == {"reviewer"}
+
+
 def test_load_skills_skips_hidden_directories(tmp_path: Path):
     """Hidden directories should be excluded from recursive discovery."""
     skills_root = tmp_path / "skills"

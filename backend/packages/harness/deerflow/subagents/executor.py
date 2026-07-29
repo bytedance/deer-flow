@@ -2,12 +2,11 @@
 
 import asyncio
 import atexit
-import html
 import logging
 import os
 import threading
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -18,15 +17,18 @@ from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
+from langchain_core.callbacks.base import BaseCallbackManager
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
+from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.step_events import capture_new_step_messages
@@ -360,6 +362,44 @@ def _submit_to_isolated_loop_in_context(
     )
 
 
+def _copy_isolated_subagent_context() -> Context:
+    """Copy ambient context without loop-bound parent graph callbacks.
+
+    LangGraph keeps the current runnable config in a ``ContextVar``. Crossing
+    into the persistent subagent loop must retain checkpoint lineage, runtime
+    metadata, user identity, and tracing context. LangGraph merges inherited
+    and explicit callbacks, so merely supplying the subagent collector is
+    insufficient: loop-bound application callbacks such as the parent
+    ``RunJournal`` would still run on the isolated loop. Framework streaming
+    callbacks are intentionally preserved so namespaced child token frames
+    continue to reach the parent stream.
+    """
+    context = copy_context()
+    inherited_config = context.get(var_child_runnable_config)
+    if inherited_config is None or "callbacks" not in inherited_config:
+        return context
+
+    callbacks = inherited_config.get("callbacks")
+    if isinstance(callbacks, BaseCallbackManager):
+        isolated_callbacks = callbacks.copy()
+        isolated_callbacks.handlers = [handler for handler in callbacks.handlers if not getattr(handler, "deerflow_loop_bound", False)]
+        isolated_callbacks.inheritable_handlers = [handler for handler in callbacks.inheritable_handlers if not getattr(handler, "deerflow_loop_bound", False)]
+    elif isinstance(callbacks, (list, tuple)):
+        isolated_callbacks = [handler for handler in callbacks if not getattr(handler, "deerflow_loop_bound", False)]
+    elif getattr(callbacks, "deerflow_loop_bound", False):
+        isolated_callbacks = None
+    else:
+        isolated_callbacks = callbacks
+
+    isolated_config = inherited_config.copy()
+    if isolated_callbacks:
+        isolated_config["callbacks"] = isolated_callbacks
+    else:
+        isolated_config.pop("callbacks", None)
+    context.run(var_child_runnable_config.set, isolated_config)
+    return context
+
+
 def _filter_tools(
     all_tools: list[BaseTool],
     allowed: list[str] | None,
@@ -409,6 +449,8 @@ class SubagentExecutor:
         oauth_id: str | None = None,
         run_id: str | None = None,
         channel_user_id: str | None = None,
+        is_internal: bool = False,
+        authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
     ):
         """Initialize the executor.
@@ -460,6 +502,11 @@ class SubagentExecutor:
         # chats share one thread across senders, so delegated bash commands
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
+        # Authorization identity propagated from the parent runtime context.
+        # is_internal is written unconditionally (including False) so the
+        # subagent's GuardrailMiddleware sees the same provenance as the lead.
+        self.is_internal = is_internal
+        self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
 
         self._base_tools = _filter_tools(
@@ -468,6 +515,10 @@ class SubagentExecutor:
             config.disallowed_tools,
         )
         self.tools = self._base_tools
+        # Populated from the same per-user, config-filtered registry used to
+        # build the prompt. Runtime skill activation/policy middleware receives
+        # this exact set so a subagent cannot activate an undisclosed skill.
+        self._available_skill_names: set[str] = set()
         # Guard middlewares that expose ``consume_stop_reason`` (currently
         # ``TokenBudgetMiddleware`` and ``LoopDetectionMiddleware``), captured in
         # ``_create_agent`` so ``_aexecute`` can read each after the run and
@@ -510,7 +561,12 @@ class SubagentExecutor:
             "lazy_init": True,
             "deferred_setup": deferred_setup,
             "agent_name": self.config.name,
+            "available_skills": self._available_skill_names,
+            "user_id": self.user_id or DEFAULT_USER_ID,
         }
+        authz_provider = getattr(self, "_authz_provider", None)
+        if authz_provider is not None:
+            middleware_kwargs["authorization_provider"] = authz_provider
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -558,10 +614,14 @@ class SubagentExecutor:
             return []
 
         try:
-            from deerflow.skills.storage import get_or_new_skill_storage
+            from deerflow.skills.storage import get_or_new_user_skill_storage
 
             storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
-            storage = await asyncio.to_thread(get_or_new_skill_storage, **storage_kwargs)
+            storage = await asyncio.to_thread(
+                get_or_new_user_skill_storage,
+                self.user_id or DEFAULT_USER_ID,
+                **storage_kwargs,
+            )
             # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
             all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
@@ -579,43 +639,6 @@ class SubagentExecutor:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
 
-    def _apply_skill_allowed_tools(self, skills: list[Skill]) -> list[BaseTool]:
-        return filter_tools_by_skill_allowed_tools(self._base_tools, skills)
-
-    async def _load_skill_messages(self, skills: list[Skill]) -> list[SystemMessage]:
-        """Load skill content as conversation items based on config.skills.
-
-        Aligned with Codex's pattern: each subagent loads its own skills
-        per-session and injects them as conversation items (developer messages),
-        not as system prompt text. The config.skills whitelist controls which
-        skills are loaded:
-        - None: load all enabled skills
-        - []: no skills
-        - ["skill-a", "skill-b"]: only these skills
-
-        Returns:
-            List of SystemMessages containing skill content.
-        """
-        if not skills:
-            return []
-
-        # Read each skill's SKILL.md content and create conversation items
-        messages = []
-        for skill in skills:
-            try:
-                content = await asyncio.to_thread(skill.skill_file.read_text, encoding="utf-8")
-                content = content.strip()
-                if content:
-                    # name/body are untrusted (installable ``.skill`` archive); escape
-                    # both so the body cannot forge a framework tag, matching the
-                    # slash-activation sibling (name quote=True attribute, body quote=False).
-                    messages.append(SystemMessage(content=f'<skill name="{html.escape(skill.name, quote=True)}">\n{html.escape(content, quote=False)}\n</skill>'))
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded skill: {skill.name}")
-            except Exception:
-                logger.debug(f"[trace={self.trace_id}] Failed to read skill {skill.name}", exc_info=True)
-
-        return messages
-
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
 
@@ -624,8 +647,8 @@ class SubagentExecutor:
 
         Returns:
             ``(state, final_tools, deferred_setup)``. ``final_tools`` is the
-            policy-filtered tool list with the ``tool_search`` tool appended when
-            deferral applies; ``deferred_setup`` is consumed by ``_create_agent``
+            authorized tool list with discovery helpers appended when their
+            deferral modes apply; ``deferred_setup`` is consumed by ``_create_agent``
             so the agent build and the injected ``<available-deferred-tools>``
             section share one catalog/hash.
         """
@@ -634,33 +657,93 @@ class SubagentExecutor:
         # re-enter this package during its own initialization.
         from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
-        # Load skills as conversation items (Codex pattern)
+        # Skills are discoverable metadata until explicitly slash-activated or
+        # loaded through read_file. Their allowed-tools declarations are applied
+        # dynamically by SkillToolPolicyMiddleware, not eagerly here.
         skills = await self._load_skills()
-        filtered_tools = self._apply_skill_allowed_tools(skills)
-        # Assemble deferred tool_search AFTER policy filtering (fail-closed),
-        # mirroring the lead path so subagents stop binding full MCP schemas.
+        self._available_skill_names = {skill.name for skill in skills}
+
+        resolved_app_config = self.app_config or get_app_config()
+
+        from deerflow.skills.describe import build_skill_search_setup, get_skill_index_prompt_section
+
+        skill_setup = build_skill_search_setup(
+            skills,
+            enabled=resolved_app_config.skills.deferred_discovery,
+            container_base_path=resolved_app_config.skills.container_path,
+        )
+
+        # Apply authorization Layer 1: filter tools before deferred assembly
+        # so denied tools can never enter the DeferredToolCatalog.
+        from deerflow.authz.tool_filter import apply_tool_authorization
+
+        authz_context = {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
+        authorization_candidates = [*self._base_tools]
+        if skill_setup.describe_skill_tool is not None:
+            authorization_candidates.append(skill_setup.describe_skill_tool)
+        configured_tool_ids = {id(tool) for tool in self._base_tools}
+        authorized_tools, self._authz_provider = apply_tool_authorization(
+            authorization_candidates,
+            context=authz_context,
+            app_config=resolved_app_config,
+        )
+        configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
+        late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+
+        # Assemble deferred tool_search after the subagent's name allow/deny and
+        # authorization filters, mirroring the lead path so subagents stop
+        # binding full MCP schemas.
         # The generated tool_search helper is intentionally not subject to the
         # subagent's name-level allow/deny (config.tools / disallowed_tools):
-        # its catalog is built from the already-filtered list, so it can never
-        # surface a tool the policy denied. This matches the lead agent.
-        enabled = (self.app_config or get_app_config()).tool_search.enabled
-        final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
-        skill_messages = await self._load_skill_messages(skills)
+        # its catalog is built from that already-filtered list. Active skill
+        # policy is applied later by middleware to both schema visibility and
+        # execution, so promotion cannot widen an active skill's authority.
+        final_tools, deferred_setup = assemble_deferred_tools(
+            configured_tools,
+            enabled=resolved_app_config.tool_search.enabled,
+        )
+        final_tools.extend(late_tools)
 
-        # Combine system_prompt and skills into a single SystemMessage.
+        # Combine the system prompt and skill discovery metadata into a single
+        # SystemMessage. Full SKILL.md bodies are loaded only when activated.
         # Some LLM APIs reject multiple SystemMessages with
         # "System message must be at the beginning."
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
-        for skill_msg in skill_messages:
-            system_parts.append(skill_msg.content)
+        if skills:
+            if skill_setup.skill_names:
+                skills_section = get_skill_index_prompt_section(
+                    skill_names=skill_setup.skill_names,
+                    container_base_path=resolved_app_config.skills.container_path,
+                )
+            else:
+                # Reuse the lead agent's metadata renderer in legacy discovery
+                # mode so both agent types describe the same skill catalog.
+                from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
+
+                skills_section = await asyncio.to_thread(
+                    get_skills_prompt_section,
+                    self._available_skill_names,
+                    app_config=resolved_app_config,
+                    user_id=self.user_id or DEFAULT_USER_ID,
+                )
+            if skills_section:
+                system_parts.append(skills_section)
         # Name the deferred MCP tools in the prompt; their schemas stay withheld
         # until tool_search promotes them. Empty set -> "" -> appends nothing.
         deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
         if deferred_section:
             system_parts.append(deferred_section)
-        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(filtered_tools, deferred_names=deferred_setup.deferred_names)
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
         if mcp_routing_hints_section:
             system_parts.append(mcp_routing_hints_section)
 
@@ -785,6 +868,10 @@ class SubagentExecutor:
             context["run_id"] = self.run_id
             if self.channel_user_id:
                 context["channel_user_id"] = self.channel_user_id
+            # Authorization identity: is_internal written unconditionally
+            # (including False); attributes copied again on write-back.
+            context["is_internal"] = self.is_internal
+            context["authz_attributes"] = dict(self.authz_attributes)
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
@@ -940,7 +1027,7 @@ class SubagentExecutor:
         from being tied to a short-lived loop that gets closed per execution.
         """
         future: Future[SubagentResult] | None = None
-        parent_context = copy_context()
+        parent_context = _copy_isolated_subagent_context()
         try:
             future = _submit_to_isolated_loop_in_context(
                 parent_context,
@@ -1036,7 +1123,7 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[task_id] = result
 
-        parent_context = copy_context()
+        parent_context = _copy_isolated_subagent_context()
 
         # Submit to scheduler pool
         def run_task():

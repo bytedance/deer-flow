@@ -1,12 +1,12 @@
 import logging
 
-import yaml
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from deerflow.config.agents_config import validate_agent_name
+from deerflow.config.agents_config import SOUL_FILENAME, validate_agent_name
 from deerflow.config.paths import get_paths
+from deerflow.persistence.agents import get_agent_store
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -48,39 +48,30 @@ def setup_agent(
         )
 
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
-    agent_dir = None
-    is_new_dir = False
 
     try:
         agent_name = validate_agent_name(agent_name)
-        paths = get_paths()
         if agent_name:
-            # Custom agents are persisted under the current user's bucket so
-            # different users do not see each other's agents.
+            # Custom agents are persisted under the current user's bucket (via
+            # the configured store — file or db) so different users, and
+            # different nodes, resolve the same agent. setup is idempotent, so
+            # this is an upsert.
             user_id = resolve_runtime_user_id(runtime)
-            agent_dir = paths.user_agent_dir(user_id, agent_name)
-        else:
-            # Default agent (no agent_name): SOUL.md lives at the global base dir.
-            agent_dir = paths.base_dir
-        is_new_dir = not agent_dir.exists()
-        agent_dir.mkdir(parents=True, exist_ok=True)
-
-        if agent_name:
-            # If agent_name is provided, we are creating a custom agent in the agents/ directory
             config_data: dict = {"name": agent_name}
             if description:
                 config_data["description"] = description
             if skills is not None:
                 config_data["skills"] = skills
+            get_agent_store().update(agent_name, config_data, soul, user_id=user_id)
+        else:
+            # Default agent (no agent_name): SOUL.md lives at the global base
+            # dir. It is not a custom-agent record, so it stays file-based
+            # regardless of the agent-storage backend.
+            paths = get_paths()
+            paths.base_dir.mkdir(parents=True, exist_ok=True)
+            (paths.base_dir / SOUL_FILENAME).write_text(soul, encoding="utf-8")
 
-            config_file = agent_dir / "config.yaml"
-            with open(config_file, "w", encoding="utf-8") as f:
-                yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True)
-
-        soul_file = agent_dir / "SOUL.md"
-        soul_file.write_text(soul, encoding="utf-8")
-
-        logger.info(f"[agent_creator] Created agent '{agent_name}' at {agent_dir}")
+        logger.info(f"[agent_creator] Created agent '{agent_name}'")
         return Command(
             update={
                 "created_agent_name": agent_name,
@@ -89,10 +80,5 @@ def setup_agent(
         )
 
     except Exception as e:
-        import shutil
-
-        if agent_name and is_new_dir and agent_dir is not None and agent_dir.exists():
-            # Cleanup the custom agent directory only if it was newly created during this call
-            shutil.rmtree(agent_dir)
         logger.error(f"[agent_creator] Failed to create agent '{agent_name}': {e}", exc_info=True)
         return Command(update={"messages": [ToolMessage(content=f"Error: {e}", tool_call_id=runtime.tool_call_id)]})

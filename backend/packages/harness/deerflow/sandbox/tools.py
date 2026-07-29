@@ -23,6 +23,7 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -163,6 +164,7 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     /mnt/skills/public/bootstrap/SKILL.md → "bootstrap"
     /mnt/skills/custom/my-skill/SKILL.md → "my-skill"
     /mnt/skills/legacy/my-skill/references/... → "my-skill"
+    /mnt/skills/integrations/lark-cli/lark-doc/SKILL.md → "lark-doc"
     /mnt/skills/public/bootstrap/ → "bootstrap"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
@@ -173,15 +175,21 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     relative = path[len(skills_prefix) :].lstrip("/")
     if not relative:
         return None
-    # Expected patterns: "public/<name>/...", "custom/<name>/...", "legacy/<name>/..."
+    # Expected patterns: "public/<name>/...", "custom/<name>/...",
+    # "legacy/<name>/...", "integrations/<provider>/<name>/..."
     # or "<name>/..." (direct skill access). Empty segments are dropped so a
     # directory entry ("public/", as `ls` emits for dirs) is still recognized as
     # a category root rather than yielding an empty skill name.
     parts = [part for part in relative.split("/") if part]
     if len(parts) >= 2 and parts[0] in ("public", "custom", "legacy"):
         return parts[1]
-    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy"):
+    if len(parts) >= 3 and parts[0] == "integrations":
+        return parts[2]
+    if len(parts) == 1 and parts[0] in ("public", "custom", "legacy", "integrations"):
         # Category root like /mnt/skills/custom — not a skill path.
+        return None
+    if len(parts) == 2 and parts[0] == "integrations":
+        # Provider root like /mnt/skills/integrations/lark-cli.
         return None
     if len(parts) >= 1:
         # Direct path like /mnt/skills/my-skill/SKILL.md
@@ -215,6 +223,8 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
             category = "custom"
         elif relative.startswith("legacy/"):
             category = "legacy"
+        elif relative.startswith("integrations/"):
+            category = "integrations"
         else:
             # Try to infer from storage
             effective_uid = user_id or get_effective_user_id()
@@ -307,7 +317,7 @@ def _resolve_skills_path(path: str) -> str:
 
     relative = path[len(skills_container) :].lstrip("/")
 
-    # Per-user custom skills: resolve to user-specific directory.
+    # Per-user custom and globally managed integration skills.
     # ``skill_manage_tool`` writes custom skills to the per-user directory,
     # and ``LocalSandboxProvider._build_thread_path_mappings`` mounts
     # ``/mnt/skills/custom`` to that same per-user dir.  Without this
@@ -326,6 +336,22 @@ def _resolve_skills_path(path: str) -> str:
         if custom_relative:
             return str(user_custom_dir / custom_relative)
         return str(user_custom_dir)
+
+    if relative == "integrations" or relative.startswith("integrations/"):
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        integrations_dir = paths.integration_skills_dir()
+        integrations_relative = relative[len("integrations") :].lstrip("/")
+        if not integrations_relative:
+            return str(integrations_dir)
+        # Defense-in-depth: even though _reject_path_traversal runs upstream for
+        # sandbox callers, confirm the resolved path stays within the global
+        # integration dir so a lexical ``../`` cannot escape it here.
+        resolved = (integrations_dir / integrations_relative).resolve()
+        if not resolved.is_relative_to(integrations_dir.resolve()):
+            raise PermissionError("Access denied: path traversal detected")
+        return str(integrations_dir / integrations_relative)
 
     return _join_path_preserving_style(skills_host, relative)
 
@@ -758,11 +784,11 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     """Mask host absolute paths from local sandbox output using virtual paths.
 
     Handles user-data paths (per-thread), skills paths (global + per-user
-    custom), and ACP workspace paths (per-thread).
+    custom + managed integrations), and ACP workspace paths (per-thread).
     """
     # Build the ordered (host_base, virtual_base) source list. Order is
     # preserved from the original implementation: skills, then per-user
-    # custom skills, then ACP workspace, then user-data mappings (longest
+    # custom/integration skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
     sources: list[tuple[str, str]] = []
@@ -782,9 +808,13 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
 
         user_id = get_effective_user_id()
         user_custom_dir = get_paths().user_custom_skills_dir(user_id)
+        integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
             sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+        if integrations_dir.exists():
+            skills_container = _get_skills_container_path()
+            sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
@@ -1300,7 +1330,9 @@ def is_local_sandbox(runtime: Runtime | None) -> bool:
         return False
     if runtime.state is None:
         return False
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only classification: the id is only matched, so a fork-restored
+    # wrapper is safe to discard here (nothing gets released on this path).
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         return False
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1323,7 +1355,9 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime not available")
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
-    sandbox_state = runtime.state.get("sandbox")
+    # Read-only lookup: this only resolves the provider entry, and ownership
+    # (release) stays with after_agent's short-circuit on the wrapped state.
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is None:
         raise SandboxRuntimeError("Sandbox state not initialized in runtime")
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -1363,7 +1397,10 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Tool runtime state not available")
 
     # Check if sandbox already exists in state
-    sandbox_state = runtime.state.get("sandbox")
+    # Discarding fork_restored is safe: after_agent short-circuits on the
+    # still-wrapped state before the context-based release branch, so this
+    # reuse path never releases the parent sandbox.
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
@@ -1410,7 +1447,9 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
-    sandbox_state = runtime.state.get("sandbox")
+    # Same discard as the sync path above: the reuse path never releases,
+    # because after_agent short-circuits on the still-wrapped state first.
+    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
@@ -1610,9 +1649,10 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
+# Gateway accepts this identity only from internally authenticated channel
+# requests, but embedded runtimes can still construct context directly. Bound
+# the value defensively: real platform ids are tens of chars; anything past
+# this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
 
@@ -1696,6 +1736,35 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
+_LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
+
+
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+    """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
+
+    Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
+    config/data directories. Agent conversations invoke ``lark-cli`` through the
+    sandbox, so lark commands must receive those same directories or they see an
+    unrelated unauthenticated profile. Keep this scoped to commands that
+    actually call ``lark-cli`` so ordinary bash calls do not switch AIO into the
+    env-bearing execution path.
+
+    In broker mode (Pattern B, issue #4338) a sidecar owns the credentials, so
+    the overlay carries only the broker URL + runtime PATH — the config/data
+    directories are never injected into the sandbox.
+    """
+    if not _LARK_CLI_COMMAND_RE.search(command):
+        return None
+    try:
+        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+
+        broker = sandbox_paths and sandbox_lark_broker_active()
+        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
+    except Exception:
+        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
+        return None
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1722,8 +1791,11 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
+        if lark_cli_env:
+            injected_env = {**(injected_env or {}), **lark_cli_env}
         if is_local_sandbox(runtime):
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
@@ -1936,12 +2008,12 @@ def grep_tool(
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
 ) -> str:
-    """Search for matching lines inside text files under a root directory.
+    """Search for matching lines inside a text file or files under a root directory.
 
     Args:
         description: Explain why you are searching file contents in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         pattern: The string or regex pattern to search for.
-        path: The **absolute** root directory to search under.
+        path: The **absolute** file or root directory to search.
         glob: Optional glob filter for candidate files, for example `**/*.py`.
         literal: Whether to treat `pattern` as a plain string. Default is False.
         case_sensitive: Whether matching is case-sensitive. Default is False.
@@ -2278,11 +2350,11 @@ def str_replace_tool(
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
         with get_file_operation_lock(sandbox, path):
             content = sandbox.read_file(path)
-            if not content:
-                if not old_str:
-                    return "OK"
-                return f"Error: String to replace not found in file: {requested_path}"
-            if old_str not in content:
+            if not old_str:
+                # A no-op edit. str.replace("", new_str) would insert new_str at
+                # every character boundary, so this cannot fall through.
+                return "OK"
+            if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
                 content = content.replace(old_str, new_str)

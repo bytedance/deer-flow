@@ -200,6 +200,11 @@ class LocalContainerBackend(SandboxBackend):
     - Support for volume mounts and environment variables
     """
 
+    # Wall clock for a single `stop`. Comfortably above the runtime's own default
+    # SIGKILL escalation (10s for docker/podman), so this only fires when the
+    # daemon itself is wedged rather than truncating a slow-but-progressing stop.
+    _STOP_TIMEOUT_SECONDS = 120.0
+
     def __init__(
         self,
         *,
@@ -266,6 +271,8 @@ class LocalContainerBackend(SandboxBackend):
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
         user_id: str | None = None,
+        provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new container and return its connection info.
 
@@ -275,6 +282,10 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
             user_id: User bucket already reflected in extra_mounts. Accepted for
                 interface compatibility with remote backends.
+            provision_lark_cli_runtime: Ignored — the local backend provisions the
+                lark-cli runtime via the Gateway-download bind mount in extra_mounts.
+            provision_lark_cli_broker: Ignored — the local backend has no sandbox
+                boundary to protect, so it keeps the credential-mount overlay.
 
         Returns:
             SandboxInfo with container details.
@@ -282,7 +293,7 @@ class LocalContainerBackend(SandboxBackend):
         Raises:
             RuntimeError: If the container fails to start.
         """
-        del user_id
+        del user_id, provision_lark_cli_runtime, provision_lark_cli_broker
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still
@@ -603,15 +614,30 @@ class LocalContainerBackend(SandboxBackend):
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
 
     def _stop_container(self, container_id: str) -> None:
-        """Stop a container (--rm ensures automatic removal)."""
+        """Stop a container (--rm ensures automatic removal).
+
+        The timeout bounds the worst case independently of the ownership layer.
+        The teardown lease keeps a peer from re-acquiring the container while
+        this runs, but that exclusion is a lease and can lapse (a store outage
+        longer than the TTL); an unbounded ``docker stop`` against a wedged
+        daemon could then outlive it and land on a peer's live container — #4206.
+        Bounding the stop caps how long that exposure can last even when the
+        store is perfectly healthy.
+        """
         try:
             subprocess.run(
                 [self._runtime, "stop", container_id],
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=self._STOP_TIMEOUT_SECONDS,
             )
             logger.info(f"Stopped container {container_id} using {self._runtime}")
+        except subprocess.TimeoutExpired:
+            # Deliberately not swallowed like a CalledProcessError: the container
+            # may still be running, so the caller must not report a clean stop.
+            logger.error(f"Timed out after {self._STOP_TIMEOUT_SECONDS}s stopping container {container_id} using {self._runtime}")
+            raise
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
 

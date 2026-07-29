@@ -94,6 +94,24 @@ def _reset_skill_storage_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _reset_frozen_checkpoint_channel_mode(monkeypatch):
+    """Reset the process-global frozen checkpoint channel mode between tests.
+
+    Production treats ``checkpoint_channel_mode`` (and the delta
+    ``snapshot_frequency`` frozen alongside it) as restart-required: the
+    first client/app freezes it for the process. The test suite builds many
+    clients and apps with different modes in one process, so the freeze must
+    not leak across tests. Mirrors the per-test ``monkeypatch.setattr``
+    resets already used in test_client.py / test_lead_agent_model_resolution.py.
+    """
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _restore_title_config_singleton():
     """Reset ``_title_config`` to its pristine default after every test.
 

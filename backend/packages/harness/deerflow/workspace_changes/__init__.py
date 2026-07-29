@@ -1,5 +1,5 @@
 from .api import get_workspace_changes_response
-from .diff import compare_snapshots, get_changed_paths
+from .diff import compare_snapshots, get_changed_output_paths, get_changed_paths
 from .recorder import capture_workspace_snapshot, record_workspace_changes
 from .scanner import scan_workspace_roots
 from .types import (
@@ -26,6 +26,7 @@ __all__ = [
     "WorkspaceSnapshot",
     "capture_workspace_snapshot",
     "compare_snapshots",
+    "get_changed_output_paths",
     "get_changed_paths",
     "get_workspace_changes_response",
     "record_workspace_changes",

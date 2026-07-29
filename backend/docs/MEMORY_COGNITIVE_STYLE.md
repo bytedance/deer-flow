@@ -24,7 +24,7 @@ Extend the existing memory pipeline:
 | `user.cognitiveStyle.summary` | 2–4 sentence paragraph: reasoning & collaboration habits |
 | `facts[]` with `category: cognitive` | Atomic, confidence-ranked supplements |
 | `normalize_memory_data()` | Backward-compatible fill for older sections and fact metadata |
-| `MEMORY_UPDATE_PROMPT` | LLM sets `cognitiveStyle.shouldUpdate` only when new signals are clear |
+| `core/prompts/memory_update.chat.yaml` | LLM sets `cognitiveStyle.shouldUpdate` only when new signals are clear |
 | `format_memory_for_injection()` | Injects as `Thinking Style:` under User Context |
 
 **Non-goals (this change):**
@@ -56,17 +56,17 @@ So: conversations **trigger** the memory job often; **cognitiveStyle text change
 
 ## Adding a new memory field (schema evolution)
 
-When extending `memory.json` (new `user.*` or `history.*` section, or fact category), keep **read**, **import**, and **API** paths aligned so older exports still work.
+When extending the global summary JSON (`user.*` / `history.*`) or the per-agent Markdown fact schema, keep **read**, **import**, migration, and **API** paths aligned so older exports still work.
 
 | Step | Location |
 |------|----------|
 | 1. Backend normalize | `deerflow/agents/memory/backends/deermem/deermem/core/storage.py` — add keys to `normalize_memory_data()` / fact normalization; update `create_empty_memory()` |
 | 2. Frontend normalize | `frontend/src/core/memory/import-memory.ts` — add section keys and normalize recoverable legacy fact metadata before narrowing to `UserMemory` |
 | 3. Types & API models | `frontend/src/core/memory/types.ts`, `backend/app/gateway/routers/memory.py` (`UserContext` / `HistoryContext`) |
-| 4. Updater prompt | `deerflow/agents/memory/backends/deermem/deermem/core/prompt.py` — `MEMORY_UPDATE_PROMPT` section + injection in `format_memory_for_injection()`; if adding a **fact category**, also sync `FACT_EXTRACTION_PROMPT` JSON union and `Categories:` list |
+| 4. Updater prompt | `core/prompts/memory_update.chat.yaml` and `core/prompts/fact_extraction.yaml`; add injection rendering in `core/prompt.py::format_memory_for_injection()`. Fact categories must also be added to `storage.py::CORE_CATEGORIES` |
 | 5. Settings UI & i18n | `memory-settings-page.tsx`, `en-US.ts` / `zh-CN.ts` |
 | 6. Tests | Backend: legacy sections and facts in `tests/test_memory_storage.py` / `tests/test_memory_normalize.py` / `tests/test_deermem_self_contained.py`. Frontend: import and API-read behavior in `tests/unit/core/memory/` |
-| 7. Import path | Settings import must use `normalizeMemoryPayload()` — **do not** require the new field in a strict-only type guard |
+| 7. Import path | Keep the stable export envelope strict (`version`, `lastUpdated`, object `user`/`history`, array `facts`), then normalize additive fields inside that valid envelope |
 
 **Avoid:** normalizing only sections while leaving legacy fact metadata unchecked, or making one unrecoverable fact fail the entire background API read. User-initiated imports remain strict for facts without usable content; API reads drop only those unrecoverable entries.
 
@@ -116,8 +116,8 @@ Manual:
 
 ### 实现范围
 
-- 扩展 `memory.json` schema，`normalize_memory_data()` 兼容旧 section 和缺少元数据的旧 facts
-- `MEMORY_UPDATE_PROMPT` 输出 `cognitiveStyle.shouldUpdate`；可选 `category: cognitive` 的 facts
+- 扩展全局 summary JSON 与 per-agent Markdown fact schema，`normalize_memory_data()` 兼容旧 section 和缺少元数据的旧 facts
+- `core/prompts/memory_update.chat.yaml` 输出 `cognitiveStyle.shouldUpdate`；可选 `category: cognitive` 的 facts
 - 复用现有 MemoryManager → DeerMem → 防抖队列 → Updater → 注入链路，不新增子系统
 
 ### 更新频率

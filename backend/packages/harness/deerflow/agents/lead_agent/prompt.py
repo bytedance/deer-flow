@@ -5,6 +5,7 @@ import html
 import logging
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,19 @@ _enabled_skills_refresh_version = 0
 _enabled_skills_refresh_event = threading.Event()
 
 
+@dataclass
+class _EnabledSkillsRefreshHandle:
+    version: int
+    event: threading.Event = field(default_factory=threading.Event)
+    error: Exception | None = None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self.event.wait(timeout=timeout)
+
+
+_enabled_skills_refresh_waiters: list[_EnabledSkillsRefreshHandle] = []
+
+
 def _load_enabled_skills_sync() -> list[Skill]:
     return list(get_or_new_skill_storage().load_skills(enabled_only=True))
 
@@ -63,33 +77,41 @@ def _refresh_enabled_skills_cache_worker() -> None:
         with _enabled_skills_lock:
             target_version = _enabled_skills_refresh_version
 
+        refresh_error = None
         try:
             skills = _load_enabled_skills_sync()
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to load enabled skills for prompt injection")
-            skills = []
+            skills = None
+            refresh_error = exc
 
         with _enabled_skills_lock:
             if _enabled_skills_refresh_version == target_version:
-                _enabled_skills_cache = skills
+                if refresh_error is None:
+                    assert skills is not None
+                    _enabled_skills_cache = skills
                 _enabled_skills_refresh_active = False
                 _enabled_skills_refresh_event.set()
+                completed_waiters = [waiter for waiter in _enabled_skills_refresh_waiters if waiter.version <= target_version]
+                _enabled_skills_refresh_waiters[:] = [waiter for waiter in _enabled_skills_refresh_waiters if waiter.version > target_version]
+                for waiter in completed_waiters:
+                    waiter.error = refresh_error
+                    waiter.event.set()
                 return
 
             # A newer invalidation happened while loading. Keep the worker alive
             # and loop again so the cache always converges on the latest version.
-            _enabled_skills_cache = None
 
 
 def _ensure_enabled_skills_cache() -> threading.Event:
     global _enabled_skills_refresh_active
 
     with _enabled_skills_lock:
+        if _enabled_skills_refresh_active:
+            return _enabled_skills_refresh_event
         if _enabled_skills_cache is not None:
             _enabled_skills_refresh_event.set()
             return _enabled_skills_refresh_event
-        if _enabled_skills_refresh_active:
-            return _enabled_skills_refresh_event
         _enabled_skills_refresh_active = True
         _enabled_skills_refresh_event.clear()
 
@@ -97,21 +119,22 @@ def _ensure_enabled_skills_cache() -> threading.Event:
     return _enabled_skills_refresh_event
 
 
-def _invalidate_enabled_skills_cache() -> threading.Event:
-    global _enabled_skills_cache, _enabled_skills_refresh_active, _enabled_skills_refresh_version
+def _invalidate_enabled_skills_cache() -> _EnabledSkillsRefreshHandle:
+    global _enabled_skills_refresh_active, _enabled_skills_refresh_version
 
     _get_cached_skills_prompt_section.cache_clear()
     with _enabled_skills_lock:
-        _enabled_skills_cache = None
         _enabled_skills_by_config_cache.clear()
         _enabled_skills_refresh_version += 1
+        refresh_handle = _EnabledSkillsRefreshHandle(version=_enabled_skills_refresh_version)
+        _enabled_skills_refresh_waiters.append(refresh_handle)
         _enabled_skills_refresh_event.clear()
         if _enabled_skills_refresh_active:
-            return _enabled_skills_refresh_event
+            return refresh_handle
         _enabled_skills_refresh_active = True
 
     _start_enabled_skills_refresh_thread()
-    return _enabled_skills_refresh_event
+    return refresh_handle
 
 
 def prime_enabled_skills_cache() -> None:
@@ -171,18 +194,20 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
                 # next eviction cycle.
                 _enabled_skills_by_config_cache.move_to_end(cache_key)
                 return list(cached_skills)
+        load_version = _enabled_skills_refresh_version
 
     if user_id:
         skills = list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))
     else:
         skills = list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     with _enabled_skills_lock:
-        _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
-        # Evict the least-recently-used entries when we exceed the cap.
-        # The cap is intentionally small (256) so a long-running process
-        # cannot leak one entry per distinct (config, user) pair seen.
-        while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
-            _enabled_skills_by_config_cache.popitem(last=False)
+        if _enabled_skills_refresh_version == load_version:
+            _enabled_skills_by_config_cache[cache_key] = (app_config, skills)
+            # Evict the least-recently-used entries when we exceed the cap.
+            # The cap is intentionally small (256) so a long-running process
+            # cannot leak one entry per distinct (config, user) pair seen.
+            while len(_enabled_skills_by_config_cache) > _ENABLED_SKILLS_BY_CONFIG_CACHE_MAXSIZE:
+                _enabled_skills_by_config_cache.popitem(last=False)
     return list(skills)
 
 
@@ -210,7 +235,12 @@ def clear_skills_system_prompt_cache() -> None:
 
 
 async def refresh_skills_system_prompt_cache_async() -> None:
-    await asyncio.to_thread(_invalidate_enabled_skills_cache().wait)
+    refresh_handle = _invalidate_enabled_skills_cache()
+    refreshed = await asyncio.to_thread(refresh_handle.wait, _ENABLED_SKILLS_REFRESH_WAIT_TIMEOUT_SECONDS)
+    if not refreshed:
+        raise TimeoutError("Timed out waiting for enabled skills cache refresh")
+    if refresh_handle.error is not None:
+        raise RuntimeError("Enabled skills cache refresh failed") from refresh_handle.error
 
 
 def invalidate_user_skill_cache(user_id: str) -> None:
@@ -584,14 +614,16 @@ You: "Deploying to staging..." [proceed]
 {subagent_section}
 
 <working_directory existed="true">
-- User uploads: `/mnt/user-data/uploads` - Files uploaded by the user (automatically listed in context)
+- Current uploads: `/mnt/user-data/uploads` - Files uploaded in the current run are listed in `<current_uploads>`
+- Historical uploads: `/mnt/user-data/uploads` - Files from earlier turns. Use `list_uploaded_files` to discover which historical files exist. If you know the filename, access it directly with `read_file` or `grep`.
 - User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
 - Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
 
 **File Management:**
-- Uploaded files are automatically listed in the <uploaded_files> section before each request
+- Newly uploaded files in this run are listed in the `<current_uploads>` section before your first response
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
+- Files uploaded in previous turns are NOT automatically listed. Use `list_uploaded_files` to discover them on demand — it returns filenames, sizes, and optionally document outlines
 - All temporary work happens in `/mnt/user-data/workspace`
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
@@ -695,20 +727,28 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        user_id: Explicit user bucket. When omitted, resolves the current
+            Gateway or standalone LangGraph Server identity.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    config = None
     try:
         from deerflow.agents.memory import get_memory_manager
-        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.runtime.user_context import resolve_runtime_user_id
 
         if app_config is None:
             from deerflow.config.memory_config import get_memory_config
@@ -721,7 +761,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_content = get_memory_manager().get_context(
-            user_id=get_effective_user_id(),
+            user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
         )
 
@@ -732,8 +772,13 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 {memory_content}
 </memory>
 """
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to load memory context")
+        from deerflow.agents.memory import MemoryManagerError
+
+        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+            raise
         return ""
 
 
@@ -857,9 +902,9 @@ def get_skills_prompt_section(
     return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None) -> str:
+def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name)
+    soul = load_agent_soul(agent_name, user_id=user_id)
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -962,8 +1007,8 @@ def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
         return ""
 
     return """<memory_tool_system>
-Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
-- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+Memory is running in tool mode. When present, the injected <memory> block contains only global user and history summaries; agent facts are not injected automatically. Use the memory tools to keep durable user memory accurate:
+- Call `memory_search` whenever prior preferences, constraints, corrections, or durable context may be relevant. Do not assume an absent fact does not exist until you have searched with an appropriate query.
 - Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
 - Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
 - Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
@@ -1042,7 +1087,7 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
+        soul=get_agent_soul(agent_name, user_id=user_id),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

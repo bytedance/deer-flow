@@ -125,6 +125,31 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
     assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "suggest_agent"}
 
 
+def test_generate_suggestions_respects_configured_max(monkeypatch):
+    req = suggestions.SuggestionsRequest(
+        messages=[
+            suggestions.SuggestionMessage(role="user", content="Hi"),
+            suggestions.SuggestionMessage(role="assistant", content="Hello"),
+        ],
+        n=4,
+        model_name=None,
+    )
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=MagicMock(content='["Q1", "Q2", "Q3", "Q4"]'))
+    monkeypatch.setattr(oneshot_llm, "create_chat_model", lambda **kwargs: fake_model)
+
+    result = asyncio.run(
+        suggestions.generate_suggestions.__wrapped__(
+            "t1",
+            req,
+            request=None,
+            config=SimpleNamespace(suggestions=SimpleNamespace(enabled=True, max_suggestions=2)),
+        )
+    )
+
+    assert result.suggestions == ["Q1", "Q2"]
+
+
 def test_generate_suggestions_injects_deerflow_trace_metadata_when_langfuse_enabled(monkeypatch):
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
@@ -248,8 +273,10 @@ def test_get_suggestions_config():
     mock_config_true = SimpleNamespace(suggestions=SimpleNamespace(enabled=True))
     result_true = asyncio.run(suggestions.get_suggestions_config(config=mock_config_true))
     assert result_true.enabled is True
+    assert result_true.max_suggestions == 3
 
     # Test when disabled
-    mock_config_false = SimpleNamespace(suggestions=SimpleNamespace(enabled=False))
+    mock_config_false = SimpleNamespace(suggestions=SimpleNamespace(enabled=False, max_suggestions=4))
     result_false = asyncio.run(suggestions.get_suggestions_config(config=mock_config_false))
     assert result_false.enabled is False
+    assert result_false.max_suggestions == 4
