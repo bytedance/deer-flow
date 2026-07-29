@@ -115,7 +115,11 @@ describe("GatewayOfflineBanner logout recovery (#3001)", () => {
     const logoutCall = await waitFor(() => {
       const logoutCalls = calls.filter((c) => c.url.includes("/auth/logout"));
       expect(logoutCalls).toHaveLength(1);
-      return logoutCalls[0];
+      const call = logoutCalls[0];
+      if (!call) {
+        throw new Error("expected exactly one /auth/logout call");
+      }
+      return call;
     });
 
     expect(logoutCall.url).toBe("/api/v1/auth/logout");
