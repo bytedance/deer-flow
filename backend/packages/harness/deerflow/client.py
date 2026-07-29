@@ -1459,6 +1459,12 @@ class DeerFlowClient:
             "injection_enabled": config.injection_enabled,
             "shutdown_flush_timeout_seconds": config.shutdown_flush_timeout_seconds,
             "manager_class": config.manager_class,
+            "retrieval_strategy": config.retrieval_strategy,
+            "retrieval_relevance_weight": config.retrieval_relevance_weight,
+            "retrieval_confidence_weight": config.retrieval_confidence_weight,
+            "retrieval_diversity_weight": config.retrieval_diversity_weight,
+            "retrieval_top_k": config.retrieval_top_k,
+            "retrieval_duplicate_threshold": config.retrieval_duplicate_threshold,
             "backend_config": config.backend_config,
         }
 

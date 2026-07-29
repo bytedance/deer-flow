@@ -25,6 +25,7 @@ from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.paths import Paths
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
@@ -2080,12 +2081,7 @@ class TestMemoryManagement:
         assert result == data
 
     def test_get_memory_config(self, client):
-        config = MagicMock()
-        config.enabled = True
-        config.mode = "middleware"
-        config.injection_enabled = True
-        config.manager_class = "deermem"
-        config.backend_config = {}
+        config = MemoryConfig(enabled=True, mode="middleware", injection_enabled=True, manager_class="deermem")
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=config):
             result = client.get_memory_config()
@@ -2094,12 +2090,7 @@ class TestMemoryManagement:
         assert result["manager_class"] == "deermem"
 
     def test_get_memory_status(self, client):
-        config = MagicMock()
-        config.enabled = True
-        config.mode = "middleware"
-        config.injection_enabled = True
-        config.manager_class = "deermem"
-        config.backend_config = {}
+        config = MemoryConfig(enabled=True, mode="middleware", injection_enabled=True, manager_class="deermem")
 
         data = {"version": "1.0", "facts": []}
         mock_mgr = MagicMock()
@@ -2881,12 +2872,7 @@ class TestScenarioMemoryWorkflow:
             ],
         }
 
-        config = MagicMock()
-        config.enabled = True
-        config.mode = "middleware"
-        config.injection_enabled = True
-        config.manager_class = "deermem"
-        config.backend_config = {}
+        config = MemoryConfig(enabled=True, mode="middleware", injection_enabled=True, manager_class="deermem")
 
         mock_mgr = MagicMock()
         mock_mgr.get_memory.side_effect = [initial_data, updated_data]
@@ -3261,12 +3247,7 @@ class TestGatewayConformance:
         assert ThreadGoalResponse(**client.clear_goal("t-goal")).goal is None
 
     def test_get_memory_config(self, client):
-        mem_cfg = MagicMock()
-        mem_cfg.enabled = True
-        mem_cfg.mode = "middleware"
-        mem_cfg.injection_enabled = True
-        mem_cfg.manager_class = "deermem"
-        mem_cfg.backend_config = {}
+        mem_cfg = MemoryConfig(enabled=True, mode="middleware", injection_enabled=True, manager_class="deermem")
 
         with patch("deerflow.config.memory_config.get_memory_config", return_value=mem_cfg):
             result = client.get_memory_config()
@@ -3276,12 +3257,7 @@ class TestGatewayConformance:
         assert parsed.manager_class == "deermem"
 
     def test_get_memory_status(self, client):
-        mem_cfg = MagicMock()
-        mem_cfg.enabled = True
-        mem_cfg.mode = "middleware"
-        mem_cfg.injection_enabled = True
-        mem_cfg.manager_class = "deermem"
-        mem_cfg.backend_config = {}
+        mem_cfg = MemoryConfig(enabled=True, mode="middleware", injection_enabled=True, manager_class="deermem")
 
         memory_data = {
             "version": "1.0",

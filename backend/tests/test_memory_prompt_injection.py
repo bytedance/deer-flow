@@ -820,3 +820,186 @@ def test_format_memory_tolerates_non_string_summary() -> None:
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
     assert "Current Focus: 12345" in result
+
+
+# ---------------------------------------------------------------------------
+# Issue #4495 relevance-aware retrieval - prompt injection integration tests
+# ---------------------------------------------------------------------------
+
+
+def _activate_relevance(monkeypatch) -> None:
+    """Provide a relevance config without mutating the process singleton."""
+    from deerflow.config.memory_config import MemoryConfig
+
+    config = MemoryConfig(
+        retrieval_strategy="relevance",
+        retrieval_relevance_weight=0.6,
+        retrieval_confidence_weight=0.4,
+        retrieval_diversity_weight=0.0,
+    )
+    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+
+
+def test_relevance_boosts_contextually_relevant_fact_over_high_confidence_irrelevant(monkeypatch) -> None:
+    """With strategy='relevance', a fact whose tokens match the user context
+    must rank above a fact with higher confidence but zero lexical overlap
+    with the current conversation. Locks in the scenario in the issue body:
+    a general communication preference (high conf) must not displace project
+    DB-migration conventions (low conf, on-topic for the request)."""
+    # Count tokens as chars so budget math is deterministic.
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+    _activate_relevance(monkeypatch)
+
+    memory_data = {
+        # User context summary provides the "current conversation context"
+        # that prompt.py reads for ranking.
+        "user": {
+            "workContext": {
+                "summary": ("Working on the Postgres migration for DeerFlow. Use Alembic with transactional DDL and write a rollback script."),
+            }
+        },
+        "facts": [
+            {
+                "content": "User prefers friendly, conversational responses with emoji.",
+                "category": "preference",
+                "confidence": 0.95,
+            },
+            {
+                "content": "Database migrations must use Alembic with transactional DDL and a rollback script.",
+                "category": "knowledge",
+                "confidence": 0.55,
+            },
+        ],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+    # The migration fact appears BEFORE the preference fact.
+    migration_idx = result.index("Database migrations")
+    pref_idx = result.index("User prefers friendly")
+    assert migration_idx < pref_idx
+
+
+def test_legacy_strategy_still_ranks_by_confidence_only(monkeypatch) -> None:
+    """strategy='legacy' is the default. Even in the presence of strong user
+    context, the high-confidence irrelevant fact must still rank above the
+    low-confidence relevant fact (original semantics preserved)."""
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+    from deerflow.config.memory_config import MemoryConfig
+
+    config = MemoryConfig(retrieval_strategy="legacy")
+    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+
+    memory_data = {
+        "user": {"workContext": {"summary": "postgres migration, alembic, DDL"}},
+        "facts": [
+            {
+                "content": "User prefers friendly responses",
+                "category": "preference",
+                "confidence": 0.95,
+            },
+            {
+                "content": "Database migrations use Alembic transactional DDL",
+                "category": "knowledge",
+                "confidence": 0.55,
+            },
+        ],
+    }
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+    friendly_idx = result.index("User prefers friendly")
+    migration_idx = result.index("Database migrations use")
+    # Confidence order preserved.
+    assert friendly_idx < migration_idx
+
+
+def test_relevance_strategy_first_context_empty_graceful_degrade(monkeypatch) -> None:
+    """When user/history sections are empty (first turn), retrieval context is
+    the empty string. Relevance scores collapse to 0, which is equivalent to
+    confidence-only ranking. The composite score still orders correctly
+    (higher confidence first)."""
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+    _activate_relevance(monkeypatch)
+
+    memory_data = {
+        "facts": [
+            {"content": "Low confidence fact content", "category": "knowledge", "confidence": 0.3},
+            {"content": "High confidence fact content", "category": "knowledge", "confidence": 0.9},
+        ],
+    }
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+    assert result.index("High confidence fact") < result.index("Low confidence fact")
+
+
+def test_diversity_penalty_suppresses_near_duplicate_facts(monkeypatch) -> None:
+    """With diversity_weight>0, two near-identical facts must not both rank at
+    the top; instead one is penalised and a third dissimilar fact can slip
+    through with a higher composite score.
+
+    We use the exact mechanism: diversity_weight=0.25 so the diversity term
+    has real influence. Two facts with 80% token overlap should push the
+    later-ranked duplicate below a distinct fact."""
+    monkeypatch.setattr(
+        "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
+        lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
+    )
+    from deerflow.config.memory_config import MemoryConfig
+
+    config = MemoryConfig(
+        retrieval_strategy="relevance",
+        retrieval_relevance_weight=0.55,
+        retrieval_confidence_weight=0.20,
+        retrieval_diversity_weight=0.25,
+        retrieval_duplicate_threshold=0.6,
+    )
+    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+
+    memory_data = {
+        "user": {"workContext": {"summary": "python debugging postgres connection"}},
+        "facts": [
+            {"content": "Python postgres connection uses psycopg2 pool", "category": "knowledge", "confidence": 0.9},
+            # Duplicate of first fact (token overlap > 0.6 threshold)
+            {"content": "Python postgres connection uses psycopg2 connection pool", "category": "knowledge", "confidence": 0.85},
+            # Dissimilar, lower confidence but unique signal
+            {"content": "Enable SQLAlchemy echo pool for debugging connection leaks", "category": "knowledge", "confidence": 0.6},
+        ],
+    }
+    result = format_memory_for_injection(memory_data, max_tokens=500)
+    # The unique debugging fact MUST appear before the duplicate if the
+    # duplicate is actually penalised. We accept either duplicate at position 1
+    # + debug at position 2, or (better) debug at 2 and only one duplicate at 1.
+    psycopg_line_count = result.count("psycopg2")
+    debug_pos = result.find("debugging connection leaks")
+    duplicate_pos = result.find("psycopg2 connection pool")
+    if duplicate_pos != -1:
+        # If the second duplicate made it through at all, the unique debugging
+        # line must come before it (since debug received no diversity penalty
+        # and both duplicates share the penalty slot).
+        assert debug_pos < duplicate_pos
+    # Sanity: debugging line itself is visible (it is unique, no penalty).
+    assert "debugging connection leaks" in result
+    assert psycopg_line_count >= 1
+
+
+def test_rank_facts_for_context_returns_shallow_copies() -> None:
+    """rank_facts_for_context must never mutate the caller's fact dicts, and
+    must return fresh dict objects even if the order is unchanged."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import rank_facts_for_context
+
+    original_fact = {"content": "hello world", "category": "knowledge", "confidence": 0.5}
+    facts = [original_fact]
+    ranked = rank_facts_for_context(facts, context="hello", strategy="relevance")
+    assert len(ranked) == 1
+    # Shallow copy: same content, not same object.
+    assert ranked[0] is not original_fact
+    assert ranked[0]["content"] == original_fact["content"]
+    # Mutating the returned fact does not touch the caller's fact.
+    ranked[0]["category"] = "mutated"
+    assert original_fact["category"] == "knowledge"

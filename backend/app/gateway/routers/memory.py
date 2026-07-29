@@ -191,6 +191,15 @@ class MemoryConfigResponse(BaseModel):
     injection_enabled: bool = Field(..., description="Whether memory is injected into the system prompt (call-site gate).")
     shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
     manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
+    retrieval_strategy: Literal["legacy", "relevance"] = Field(
+        ...,
+        description=("Fact ranking strategy for prompt injection and memory_search. 'legacy' = confidence-only (original semantics); 'relevance' = weighted lexical relevance + confidence + optional near-duplicate diversification."),
+    )
+    retrieval_relevance_weight: float = Field(..., description="Normalised weight of the lexical relevance term in the composite rank. 3 weights sum to 1.0 at runtime.")
+    retrieval_confidence_weight: float = Field(..., description="Normalised weight of the fact-confidence term in the composite rank.")
+    retrieval_diversity_weight: float = Field(..., description="Normalised weight of the greedy near-duplicate penalty. 0.0 disables diversification entirely.")
+    retrieval_top_k: int | None = Field(..., description="Optional global cap on ranked facts applied before token-budget selection (prompt injection) and before call-site top_k (memory_search).")
+    retrieval_duplicate_threshold: float = Field(..., description="Normalised Dice overlap threshold above which two facts are considered near-duplicate for the diversification penalty.")
     backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
 
 
@@ -477,6 +486,12 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         injection_enabled=config.injection_enabled,
         shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
         manager_class=config.manager_class,
+        retrieval_strategy=config.retrieval_strategy,
+        retrieval_relevance_weight=config.retrieval_relevance_weight,
+        retrieval_confidence_weight=config.retrieval_confidence_weight,
+        retrieval_diversity_weight=config.retrieval_diversity_weight,
+        retrieval_top_k=config.retrieval_top_k,
+        retrieval_duplicate_threshold=config.retrieval_duplicate_threshold,
         backend_config=config.backend_config,
     )
 
@@ -505,6 +520,12 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             injection_enabled=config.injection_enabled,
             shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
             manager_class=config.manager_class,
+            retrieval_strategy=config.retrieval_strategy,
+            retrieval_relevance_weight=config.retrieval_relevance_weight,
+            retrieval_confidence_weight=config.retrieval_confidence_weight,
+            retrieval_diversity_weight=config.retrieval_diversity_weight,
+            retrieval_top_k=config.retrieval_top_k,
+            retrieval_duplicate_threshold=config.retrieval_duplicate_threshold,
             backend_config=config.backend_config,
         ),
         data=MemoryResponse(**memory_data),

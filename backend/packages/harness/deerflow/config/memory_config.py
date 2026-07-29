@@ -3,22 +3,39 @@
 DeerMem-private fields live in ``backends/deermem/config.py`` (``DeerMemConfig``),
 reached via ``backend_config`` (a dict the factory passes to the backend's
 ``__init__``). This module holds ONLY the host-shared fields every backend /
-call site / factory reads: ``enabled`` / ``injection_enabled`` /
+call site / factory reads: ``enabled`` / ``mode`` / ``injection_enabled`` /
 ``shutdown_flush_timeout_seconds`` / ``manager_class`` / ``backend_config``.
-Keeping the shared schema slim is what
-makes backends swappable and portable (DeerMem's knobs do not leak onto the
-shared contract).
+Keeping the shared schema slim is what makes backends swappable and portable
+(DeerMem's knobs do not leak onto the shared contract).
 """
 
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
 # Host-shared MemoryConfig fields (read by every backend / call site / factory).
-_SHARED_FIELDS = frozenset({"enabled", "mode", "injection_enabled", "shutdown_flush_timeout_seconds", "manager_class", "backend_config"})
+_SHARED_FIELDS = frozenset(
+    {
+        "enabled",
+        "mode",
+        "injection_enabled",
+        "shutdown_flush_timeout_seconds",
+        "manager_class",
+        "backend_config",
+        # Issue #4495 retrieval-strategy fields: host-shared because they drive
+        # both the DeerMem backend *and* prompt.py's prompt-injection ranking
+        # (which is backend-agnostic code).
+        "retrieval_strategy",
+        "retrieval_relevance_weight",
+        "retrieval_confidence_weight",
+        "retrieval_diversity_weight",
+        "retrieval_top_k",
+        "retrieval_duplicate_threshold",
+    }
+)
 
 # DeerMem-private fields that used to live at the top level of `memory:` in
 # config.yaml (pre-abstraction). On load they are auto-migrated into
@@ -99,6 +116,75 @@ class MemoryConfig(BaseModel):
             "storage backend)."
         ),
     )
+    # ── Issue #4495: relevance-aware retrieval strategy ──────────────────
+
+    retrieval_strategy: Literal["legacy", "relevance"] = Field(
+        default="legacy",
+        description=(
+            "Fact ranking strategy applied to BOTH (a) the `memory_search` tool/backend "
+            "search and (b) prompt-injection fact selection. "
+            "'legacy' = confidence-descending only (original DeerFlow semantics; fully "
+            "backward-compatible; no token-cost change). "
+            "'relevance' = lexical-relevance + confidence-weighted composite score with "
+            "optional near-duplicate diversification. Deterministic, pure-token-based. "
+            "No vector DB, no embedding API, no changes to persisted format."
+        ),
+    )
+    retrieval_relevance_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Relative weight of the lexical relevance term in the composite rank. "
+            "Weights are *ratio* weights and are normalised to sum to 1 at call time, "
+            "so `60,40` and `0.6,0.4` both yield the same ranking. Only used when "
+            "`retrieval_strategy='relevance'`. Default 0.6 => relevance slightly beats "
+            "confidence (matches the score laid out in `docs/MEMORY_IMPROVEMENTS.md` §Planned scoring)."
+        ),
+    )
+    retrieval_confidence_weight: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=100.0,
+        description="Relative weight of the fact-confidence term in the composite rank. Only used when `retrieval_strategy='relevance'`.",
+    )
+    retrieval_diversity_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Relative weight of the greedy near-duplicate penalty. 0.0 disables "
+            "diversification entirely (no dedup, backward-compatible token reuse). "
+            "Values >0 penalise facts whose token-overlap with already-selected facts "
+            "exceeds `retrieval_duplicate_threshold`. Typical range for noticeable "
+            "dedup is 0.15–0.3. Only used when `retrieval_strategy='relevance'`."
+        ),
+    )
+    retrieval_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional hard cap on the number of ranked facts BEFORE token-budget "
+            "selection in prompt injection, and BEFORE the existing top_k slice in "
+            "memory_search. Applied after category filtering + composite ranking. "
+            "`None` (default) = no hard cap; existing token-budget / call-site top_k "
+            "semantics are unchanged. Lets operators trim tail noise without touching "
+            "`max_injection_tokens` or the caller's own `top_k`."
+        ),
+    )
+    retrieval_duplicate_threshold: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "For strategy='relevance' AND `diversity_weight>0`: normalised Dice "
+            "similarity threshold above which two facts are considered near-duplicate "
+            "and the later-ranked one is penalised/skipped. 0.7 = 70%+ shared tokens "
+            "triggers dedup. Lower = more aggressive dedup. 1.0 = identical tokens "
+            "only. Typical range 0.55–0.85."
+        ),
+    )
+
     backend_config: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -109,6 +195,33 @@ class MemoryConfig(BaseModel):
             "they do not belong on the shared `MemoryConfig` schema."
         ),
     )
+
+    @model_validator(mode="after")
+    def _normalize_retrieval_weights(self) -> "MemoryConfig":
+        """Normalise retrieval weights to a finite ratio.
+
+        The three retrieval weights (*relevance*, *confidence*, *diversity*) are
+        ratio weights, not absolute percentage weights. After Pydantic's numeric
+        coercions, clamp each to ``>=0`` and, if their sum is strictly positive,
+        divide by the sum so downstream code can rely on them summing to 1.0 and
+        never producing NaN composites. If every weight is zero (the operator
+        explicitly disabled everything) fall back to confidence-only =
+        relevance 0 / confidence 1 / diversity 0, which is equivalent to the
+        legacy strategy.
+        """
+        rw = max(0.0, float(self.retrieval_relevance_weight))
+        cw = max(0.0, float(self.retrieval_confidence_weight))
+        dw = max(0.0, float(self.retrieval_diversity_weight))
+        total = rw + cw + dw
+        if total <= 0.0:
+            object.__setattr__(self, "retrieval_relevance_weight", 0.0)
+            object.__setattr__(self, "retrieval_confidence_weight", 1.0)
+            object.__setattr__(self, "retrieval_diversity_weight", 0.0)
+        else:
+            object.__setattr__(self, "retrieval_relevance_weight", rw / total)
+            object.__setattr__(self, "retrieval_confidence_weight", cw / total)
+            object.__setattr__(self, "retrieval_diversity_weight", dw / total)
+        return self
 
 
 def should_use_memory_tools(config: MemoryConfig) -> bool:

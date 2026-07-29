@@ -8,8 +8,9 @@ import math
 import re
 import threading
 import time
+from collections import Counter
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -336,6 +337,285 @@ def _coerce_confidence(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
+# ── Issue #4495: relevance-aware retrieval & diversification ─────────────
+
+# Tokeniser: Unicode word boundary + split on non-word/digit runs plus any
+# punctuation chars that commonly separate technical tokens (-, _, ., /, :, =).
+# Purely lexicographic, no language model needed.
+_TOKEN_SPLIT_RE = re.compile(r"[\s\-_./:=!@#$%^&*()\[\]{};\"'`<>?,\\|+~]+")
+
+# Minimal stopwords — intentionally tiny. Purely removes "the/a/an/is/in/on/..."
+# which contribute nothing to relevance and artificially inflate overlap.
+# Not locale-aware; callers with non-English queries still work, just with a
+# slightly noisier score (which is backward-compatible, since legacy has zero
+# lexical ranking at all).
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "if",
+        "then",
+        "else",
+        "is",
+        "be",
+        "are",
+        "was",
+        "were",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "with",
+        "by",
+        "at",
+        "as",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "you",
+        "he",
+        "she",
+        "they",
+        "we",
+        "us",
+        "do",
+        "does",
+        "did",
+        "not",
+        "no",
+        "can",
+        "has",
+        "have",
+        "had",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "from",
+        "into",
+        "than",
+        "so",
+        "too",
+        "very",
+    }
+)
+
+
+def _tokenise(text: str) -> list[str]:
+    """Deterministically tokenise *text* into a sorted list of lower-case non-stopwords.
+
+    Rules (intentionally simple so downstream scores are predictable by an
+    operator inspecting a query/fact pair):
+    1. Lower-case.
+    2. Split via :data:`_TOKEN_SPLIT_RE` on whitespace + a small set of common
+       technical punctuation so ``DB=postgresql``, ``a/b``, ``foo-bar`` all
+       tokenise cleanly.
+    3. Drop empty tokens, tokens shorter than 2 chars, and stopwords.
+    4. Return the *sorted* list of surviving tokens. Sorting is so two
+       semantically-equivalent token sets produce identical inputs to
+       :func:`_dice_similarity` regardless of original word order (which
+       makes the score permutation-invariant, as required for a pure
+       similarity metric).
+    """
+    if not isinstance(text, str):
+        return []
+    raw_tokens = [t for t in _TOKEN_SPLIT_RE.split(text.lower()) if t and len(t) >= 2]
+    return sorted(t for t in raw_tokens if t not in _STOPWORDS)
+
+
+def _dice_similarity(tokens_a: list[str], tokens_b: list[str]) -> float:
+    """Dice similarity between two pre-tokenised lists.
+
+    Dice = ``2 * |A ∩ B| / (|A| + |B|)``. Returns 0.0 on empty inputs.
+    Using raw counts (not sets) because token frequency *does* carry signal
+    for technical phrases where one side repeats a keyword. But since we
+    count per-token via Counter intersection (min counts), duplicates are
+    handled smoothly without double-counting.
+    """
+    if not tokens_a or not tokens_b:
+        return 0.0
+    ca = Counter(tokens_a)
+    cb = Counter(tokens_b)
+    overlap = sum(min(ca[t], cb[t]) for t in ca if t in cb)
+    total = sum(ca.values()) + sum(cb.values())
+    if total <= 0:
+        return 0.0
+    return min(1.0, (2.0 * overlap) / total)
+
+
+def _composite_score(
+    *,
+    relevance: float,
+    confidence: float,
+    diversity_penalty: float,
+    relevance_weight: float,
+    confidence_weight: float,
+    diversity_weight: float,
+) -> float:
+    """Weighted composite rank score.
+
+    All weights are caller-normalised to sum to 1.0 (see
+    :class:`MemoryConfig._normalize_retrieval_weights`). ``diversity_penalty``
+    is a value in ``[0, 1]`` where 1.0 means the fact is *fully penalised*
+    (i.e. it is a near-duplicate of every previously-selected fact). The
+    contribution of the penalty term is
+    ``diversity_weight * (1 - diversity_penalty)`` so higher penalty → lower
+    composite score and the fact drops out naturally.
+
+    Score is guaranteed to live in ``[0, 1]`` because every input is
+    clamped and the weights sum to 1.
+    """
+    r = max(0.0, min(1.0, float(relevance)))
+    c = max(0.0, min(1.0, float(confidence)))
+    dp = max(0.0, min(1.0, float(diversity_penalty)))
+    score = relevance_weight * r + confidence_weight * c + diversity_weight * (1.0 - dp)
+    return max(0.0, min(1.0, score))
+
+
+def rank_facts_for_context(
+    facts: list[dict[str, Any]],
+    *,
+    context: str,
+    strategy: Literal["legacy", "relevance"] = "legacy",
+    relevance_weight: float = 0.6,
+    confidence_weight: float = 0.4,
+    diversity_weight: float = 0.0,
+    duplicate_threshold: float = 0.7,
+    top_k: int | None = None,
+) -> list[dict[str, Any]]:
+    """Rank *facts* for prompt-injection or memory_search.
+
+    Strategy 'legacy'
+        Pure confidence-descending sort. Mirrors original DeerFlow semantics
+        exactly so no existing test shifts its output. ``context``, the
+        weights, ``duplicate_threshold`` and ``top_k`` are all ignored.
+
+    Strategy 'relevance'
+        Compute the composite score per fact and sort by it descending. When
+        ``diversity_weight > 0`` apply a *second greedy pass* over the
+        highest-composite ranked candidates: for each candidate in turn, if
+        its Dice overlap with **any** already-selected fact exceeds
+        ``duplicate_threshold``, impose a diversity penalty scaled to the
+        *worst* overlap observed (so a fact duplicating N selected ones is
+        penalised more than a fact duplicating only one). After penalties,
+        candidates are re-sorted, then sliced to ``top_k`` (if set).
+
+    Returns a **new list** of fact dicts (shallow copies of *facts*) in the
+    resulting order. We never mutate *facts* or its members in place.
+    """
+    if not facts:
+        return []
+
+    if strategy == "legacy":
+        sorted_facts = sorted(
+            facts,
+            key=lambda f: _coerce_confidence(f.get("confidence"), default=0.0),
+            reverse=True,
+        )
+        return [dict(f) for f in sorted_facts]
+
+    # ── 'relevance' strategy below ────────────────────────────────────────
+
+    context_tokens = _tokenise(context)
+
+    # Compute base composite (no diversity penalty yet) per fact. We also
+    # retain tokens so the diversity pass does not re-tokenise.
+    enriched: list[tuple[float, list[str], dict[str, Any]]] = []
+    for fact in facts:
+        fact_content = fact.get("content") or ""
+        fact_tokens = _tokenise(fact_content)
+        rel = _dice_similarity(context_tokens, fact_tokens)
+        conf = _coerce_confidence(fact.get("confidence"), default=0.0)
+        base = _composite_score(
+            relevance=rel,
+            confidence=conf,
+            diversity_penalty=0.0,
+            relevance_weight=relevance_weight,
+            confidence_weight=confidence_weight,
+            diversity_weight=diversity_weight,
+        )
+        enriched.append((base, fact_tokens, dict(fact)))
+
+    # Sort by base composite descending. Tiebreak deterministically: higher
+    # confidence first, then longer content (more signal), then the raw
+    # string content so two otherwise identical facts still have a stable
+    # order (no sort-based flakiness in tests).
+    enriched.sort(
+        key=lambda item: (
+            item[0],
+            _coerce_confidence(item[2].get("confidence"), default=0.0),
+            len(str(item[2].get("content") or "")),
+            str(item[2].get("content") or ""),
+        ),
+        reverse=True,
+    )
+
+    if diversity_weight > 0.0 and duplicate_threshold > 0.0:
+        selected_tokens: list[list[str]] = []
+        re_ranked: list[tuple[float, list[str], dict[str, Any]]] = []
+        for base, fact_tokens, fact_dict in enriched:
+            # Worst overlap = max Dice overlap against any selected fact.
+            worst_overlap = 0.0
+            for sel_toks in selected_tokens:
+                sim = _dice_similarity(fact_tokens, sel_toks)
+                if sim > worst_overlap:
+                    worst_overlap = sim
+            if worst_overlap > duplicate_threshold:
+                penalty = (worst_overlap - duplicate_threshold) / max(1e-9, (1.0 - duplicate_threshold))
+            else:
+                penalty = 0.0
+            # Re-score with the penalty. We only touch the diversity term.
+            new_rel = _dice_similarity(context_tokens, fact_tokens)
+            new_conf = _coerce_confidence(fact_dict.get("confidence"), default=0.0)
+            final_score = _composite_score(
+                relevance=new_rel,
+                confidence=new_conf,
+                diversity_penalty=min(1.0, penalty),
+                relevance_weight=relevance_weight,
+                confidence_weight=confidence_weight,
+                diversity_weight=diversity_weight,
+            )
+            # Selection rule: only mark this fact "selected" for the
+            # overlap oracle when its final score still reaches the
+            # midpoint of the weight range (roughly equivalent to "this
+            # fact still contributes more signal than pure noise"). If
+            # the penalty tanked it below the threshold we let it keep
+            # its score but don't let it block further facts from being
+            # considered duplicates of *it* (otherwise a single very
+            # highly-penalised near-duplicate blocks the fact it was
+            # penalised for).
+            if final_score > 0.5 * (relevance_weight + confidence_weight):
+                selected_tokens.append(fact_tokens)
+            re_ranked.append((final_score, fact_tokens, fact_dict))
+        re_ranked.sort(
+            key=lambda item: (
+                item[0],
+                _coerce_confidence(item[2].get("confidence"), default=0.0),
+                len(str(item[2].get("content") or "")),
+                str(item[2].get("content") or ""),
+            ),
+            reverse=True,
+        )
+        enriched = re_ranked
+
+    if top_k is not None and top_k > 0:
+        enriched = enriched[:top_k]
+
+    return [fact_dict for _, _, fact_dict in enriched]
+
+
 def _format_fact_line(fact: dict[str, Any]) -> str | None:
     """Build a single formatted fact line, or return ``None`` for invalid facts.
 
@@ -433,7 +713,13 @@ def _fallback_format_facts(
     max_tokens: int,
     use_tiktoken: bool,
 ) -> tuple[str, list[str]] | tuple[None, None]:
-    """Confidence-only ranking used when the primary path raises an exception.
+    """Confidence-first ranking used when the primary path raises.
+
+    On exception we *cannot* reliably rely on ``get_memory_config()`` having
+    a healthy state (the exception may have come from inside the config
+    layer). Therefore the fallback deliberately sticks to the original
+    pure-confidence sort: small, deterministic, no IO. The primary path's
+    strategy-aware ranking lives in ``format_memory_for_injection`` only.
 
     Returns a tuple ``(section_text, fact_lines)`` where ``section_text`` is the
     formatted ``"Facts:\\n..."`` section string (without any leading inter-section
@@ -586,12 +872,33 @@ def format_memory_for_injection(
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
 
         try:
-            # Partition valid facts into guaranteed vs regular groups.
-            # Use the *raw* category field (no ``or "context"`` default) so
-            # a category-less legacy fact is never silently promoted into
-            # a guaranteed pool whose operator configured
-            # ``guaranteed_categories=["context"]``.  Missing-category facts
-            # always fall through to the regular path.
+            # Resolve retrieval config once. Lazy import avoids a top-level
+            # import cycle: memory_config imports app_config which ultimately
+            # touches prompt.py at runtime.
+            from deerflow.config.memory_config import get_memory_config
+
+            mem_cfg = get_memory_config()
+            strategy: Literal["legacy", "relevance"] = mem_cfg.retrieval_strategy
+            rw = float(mem_cfg.retrieval_relevance_weight)
+            cw = float(mem_cfg.retrieval_confidence_weight)
+            dw = float(mem_cfg.retrieval_diversity_weight)
+            top_k = mem_cfg.retrieval_top_k
+            dup_thr = float(mem_cfg.retrieval_duplicate_threshold)
+
+            # For relevance ranking we use the user+history summary strings
+            # (if present) joined with the text of the facts themselves as
+            # the "current conversational context". This is *exactly* the
+            # same text that the prompt injector has already built above,
+            # so no information leak / expansion occurs: the relevance
+            # signal only contains information DeerFlow would have injected
+            # anyway. When those sections are empty (first-turn bootstrap)
+            # the empty context string collapses relevance scores to 0,
+            # which is identical to confidence-only ranking by construction
+            # (because relevance_weight * 0 + confidence_weight * conf =
+            # proportional-to-conf only). That means the relevance path
+            # gracefully degrades at first turn.
+            retrieval_context = base_text
+
             def _confidence_key(fact: dict[str, Any]) -> float:
                 return _coerce_confidence(fact.get("confidence"), default=0.0)
 
@@ -604,19 +911,51 @@ def format_memory_for_injection(
                     cat = raw.strip()
                     return bool(cat) and cat in effective_guaranteed
 
-                guaranteed = sorted(
-                    [f for f in valid_facts if _category_match(f)],
-                    key=_confidence_key,
-                    reverse=True,
+                guaranteed_candidates = [f for f in valid_facts if _category_match(f)]
+                regular_candidates = [f for f in valid_facts if not _category_match(f)]
+
+                # Guaranteed-category facts are ranked first by the same
+                # strategy (so ordering within the guaranteed bucket is
+                # correct for mixed preference / correction etc. scenarios)
+                # but diversification is *disabled* for the guaranteed
+                # bucket: operator declared these categories as
+                # "must-inject", so duplicating a correction fact two
+                # different ways is safer than dropping either.
+                guaranteed = rank_facts_for_context(
+                    guaranteed_candidates,
+                    context=retrieval_context,
+                    strategy=strategy,
+                    relevance_weight=rw,
+                    confidence_weight=cw,
+                    diversity_weight=0.0,
+                    duplicate_threshold=dup_thr,
+                    top_k=None,
                 )
-                regular = sorted(
-                    [f for f in valid_facts if not _category_match(f)],
-                    key=_confidence_key,
-                    reverse=True,
+                # Regular facts apply the full configured strategy including
+                # diversification, since these are where near-duplicates
+                # waste the most prompt tokens.
+                regular = rank_facts_for_context(
+                    regular_candidates,
+                    context=retrieval_context,
+                    strategy=strategy,
+                    relevance_weight=rw,
+                    confidence_weight=cw,
+                    diversity_weight=dw,
+                    duplicate_threshold=dup_thr,
+                    top_k=top_k,
                 )
             else:
                 guaranteed = []
-                regular = sorted(valid_facts, key=_confidence_key, reverse=True)
+                regular = rank_facts_for_context(
+                    valid_facts,
+                    context=retrieval_context,
+                    strategy=strategy,
+                    relevance_weight=rw,
+                    confidence_weight=cw,
+                    diversity_weight=dw,
+                    duplicate_threshold=dup_thr,
+                    top_k=top_k,
+                )
 
             # ── Phase 1: select guaranteed lines ──────────────────────────
             header_cost = _count_tokens(facts_header, use_tiktoken=use_tiktoken)

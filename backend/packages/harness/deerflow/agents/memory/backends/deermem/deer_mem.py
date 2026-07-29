@@ -41,7 +41,13 @@ from .deermem.core.message_processing import (
     load_patterns,
 )
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
-from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
+from .deermem.core.prompt import (
+    format_memory_for_injection,
+    load_prompt,
+    load_prompt_messages,
+    rank_facts_for_context,
+    warm_tiktoken_cache,
+)
 from .deermem.core.queue import MemoryUpdateQueue, QueueFull
 from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
@@ -387,11 +393,62 @@ class DeerMem(MemoryManager):
         agent_name: str | None,
         category: str | None,
     ) -> list[dict[str, Any]]:
+        # Lazy import to break the prompt.py → memory_config import cycle at
+        # module-load time.
+        from deerflow.config.memory_config import get_memory_config
+
+        mem_cfg = get_memory_config()
+        strategy = mem_cfg.retrieval_strategy
+        rw = float(mem_cfg.retrieval_relevance_weight)
+        cw = float(mem_cfg.retrieval_confidence_weight)
+        dw = float(mem_cfg.retrieval_diversity_weight)
+        dup_thr = float(mem_cfg.retrieval_duplicate_threshold)
+
         query_lower = query.strip().lower()
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=agent_name, user_id=user_id))
-        matched = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and query_lower in fact["content"].lower() and (category is None or fact.get("category") == category)]
-        matched.sort(key=_coerce_source_confidence, reverse=True)
-        return _compat_document({"facts": matched[:top_k]})["facts"]
+        raw_candidates = memory_data.get("facts", []) if isinstance(memory_data, dict) else []
+
+        # Category filtering happens before ranking/top_k for both strategies.
+        # Legacy keeps the original full-substring match. Relevance ranks every
+        # fact in the requested category; pre-filtering it by the entire query
+        # string would make multi-token lexical ranking return no candidates.
+        category_candidates = [fact for fact in raw_candidates if isinstance(fact.get("content"), str) and (category is None or fact.get("category") == category)]
+
+        if strategy == "legacy":
+            substring_matches = [fact for fact in category_candidates if query_lower in fact["content"].lower()]
+            filtered_sorted = sorted(substring_matches, key=_coerce_source_confidence, reverse=True)
+            return _compat_document({"facts": filtered_sorted[:top_k]})["facts"]
+
+        if not category_candidates:
+            return []
+
+        # Strategy 'relevance': rank using composite score + optional dedup.
+        # The query string itself is the retrieval context here (no broader
+        # conversational context is available inside the backend's search
+        # call). This matches prompt injection's use of the same function
+        # with the broader user/history text as context — the function is
+        # context-agnostic and only depends on the caller passing a string.
+        #
+        # For memory_search we apply the configured retrieval_top_k *before*
+        # the call-site top_k if retrieval_top_k is set and lower (so the
+        # operator's global cap wins). Otherwise use call-site top_k.
+        eff_top_k = top_k
+        if mem_cfg.retrieval_top_k is not None and mem_cfg.retrieval_top_k < top_k:
+            eff_top_k = mem_cfg.retrieval_top_k
+
+        ranked = rank_facts_for_context(
+            category_candidates,
+            context=query,
+            strategy=strategy,
+            relevance_weight=rw,
+            confidence_weight=cw,
+            diversity_weight=dw,
+            duplicate_threshold=dup_thr,
+            top_k=eff_top_k,
+        )
+        # rank_facts_for_context returns shallow copies; the caller expects
+        # the same raw dict shape so slice directly to caller-requested top_k.
+        return _compat_document({"facts": ranked[:top_k]})["facts"]
 
     def _ensure_retrieval_scopes(self, scopes: list[dict[str, str | None]]) -> None:
         """Lazily rebuild every requested scope when warm-up was skipped."""
