@@ -946,6 +946,10 @@ class OpenVikingMemoryManager(MemoryManager):
         except Exception as exc:
             logger.debug("rm(%s) skipped: %s", self._memories_base, exc)
         self._safe_mkdir(self._memories_base)
+        # Clear the dedup gate so the next add() in a cached thread
+        # re-extracts instead of seeing every prior hash still resident
+        # and silently returning empty.
+        self._seen_msgs.clear()
         return _empty_memory()
 
     def import_memory(
