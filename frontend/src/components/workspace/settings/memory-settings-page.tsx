@@ -966,9 +966,7 @@ export function MemorySettingsPage() {
     const itemCategory =
       typeof itemRec.category === "string" ? itemRec.category : "";
     const itemConfidence =
-      typeof itemRec.confidence === "number"
-        ? String(itemRec.confidence)
-        : "";
+      typeof itemRec.confidence === "number" ? String(itemRec.confidence) : "";
     setFactForm({
       content: _itemContent(item),
       category: itemCategory,
