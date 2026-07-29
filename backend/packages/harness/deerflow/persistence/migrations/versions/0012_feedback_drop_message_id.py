@@ -4,8 +4,8 @@ Feedback is bound to a run, not to a single message: nothing ever wrote or
 read ``message_id`` (no API field, no frontend usage, no query), so the
 column is redundant design and the domain aggregate no longer carries it.
 
-Revision ID: 0011_feedback_drop_message_id
-Revises: 0010_feedback_tags
+Revision ID: 0012_feedback_drop_message_id
+Revises: 0011_feedback_tags
 Create Date: 2026-07-29
 """
 
@@ -17,8 +17,8 @@ import sqlalchemy as sa
 
 from deerflow.persistence.migrations._helpers import safe_add_column, safe_drop_column
 
-revision: str = "0011_feedback_drop_message_id"
-down_revision: str | Sequence[str] | None = "0010_feedback_tags"
+revision: str = "0012_feedback_drop_message_id"
+down_revision: str | Sequence[str] | None = "0011_feedback_tags"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

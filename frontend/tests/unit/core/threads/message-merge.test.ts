@@ -7,6 +7,7 @@ import {
   buildVisibleHistoryMessages,
   areOptimisticMessagesConfirmed,
   computeSummarizationTransientMessages,
+  countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
@@ -385,6 +386,58 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   expect(mergeMessages([], [serverHuman], visibleOptimistic)).toEqual([
     serverHuman,
   ]);
+});
+
+test("edit replay of the only turn hides the optimistic copy once the server human arrives", () => {
+  // The runtime re-keys the first user message of a thread, so the persisted
+  // replacement never matches the optimistic id and only the count can confirm
+  // it. Masking the superseded turn drops the live count to zero first.
+  const supersededHuman = {
+    id: "human-1__user",
+    type: "human",
+    content: "introduce Li Bai",
+  } as Message;
+  const optimisticHuman = {
+    id: "replacement-1",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+  const serverHuman = {
+    id: "replacement-1__user",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+
+  const baseline = countHumanMessagesExcludingSuperseded(
+    [supersededHuman],
+    ["human-1__user", "ai-1"],
+  );
+  expect(baseline).toBe(0);
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 0)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 1)).toEqual(
+    [],
+  );
+  expect(mergeMessages([], [serverHuman], [])).toEqual([serverHuman]);
+});
+
+test("countHumanMessagesExcludingSuperseded keeps turns the replay does not supersede", () => {
+  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
+  const supersededHuman = {
+    id: "human-2",
+    type: "human",
+    content: "two",
+  } as Message;
+  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
+
+  expect(
+    countHumanMessagesExcludingSuperseded(
+      [keptHuman, ai, supersededHuman],
+      ["human-2", "ai-2"],
+    ),
+  ).toBe(1);
 });
 
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {

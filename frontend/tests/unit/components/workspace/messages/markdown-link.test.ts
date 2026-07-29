@@ -78,6 +78,19 @@ describe("MarkdownLink rendering", () => {
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
+  it("renders citation labels when children are React element arrays", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        MarkdownLink,
+        { href: "https://example.com/report" },
+        createElement("span", { key: "prefix" }, "citation:"),
+        createElement("span", { key: "title" }, "Test Source"),
+      ),
+    );
+    expect(html).not.toContain("citation:");
+    expect(html).toContain("Test Source");
+  });
+
   it("renders a scheme-less relative href as a navigable anchor", () => {
     const tests = ["report.md", "./report.md", "../assets/chart.png"];
     for (const href of tests) {

@@ -21,6 +21,26 @@ class EditReplayVisibility:
     hidden_attempt_run_ids: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class LeaseRenewal:
+    """Result of renewing a run lease.
+
+    ``cancel_action`` carries a durable cancellation request to the owning
+    worker without transferring lease ownership.
+    """
+
+    renewed: bool
+    cancel_action: str | None = None
+
+
+@dataclass(frozen=True)
+class StatusFinalization:
+    """Result of completing a run only if cancellation has not won."""
+
+    finalized: bool
+    cancel_action: str | None = None
+
+
 class RunStore(abc.ABC):
     @abc.abstractmethod
     async def put(
@@ -216,6 +236,57 @@ class RunStore(abc.ABC):
     ) -> bool:
         """Renew the lease on an active run. Returns ``False`` when no row matched."""
         pass
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        """Renew ownership and return any durable cancellation request.
+
+        The default wraps the legacy ``update_lease`` method and returns no
+        cancellation action, so third-party stores remain source-compatible
+        without adding a background read. Stores that support multi-process
+        cancellation must override this method to renew and observe the
+        request atomically.
+        """
+        renewed = await self.update_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+        return LeaseRenewal(renewed=renewed)
+
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+        """Persist the first cancellation action for an active run.
+
+        Implementations must update only ``pending`` or ``running`` rows and
+        return the winning action, or ``None`` when no active row matched.
+        """
+        raise NotImplementedError
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Atomically finalize an active run unless cancellation won.
+
+        The compatibility default is safe for stores that do not implement
+        durable cancellation.
+        """
+        updated = await self.update_status(
+            run_id,
+            status,
+            error=error,
+            stop_reason=stop_reason,
+        )
+        return StatusFinalization(finalized=updated is not False)
 
     @abc.abstractmethod
     async def claim_for_takeover(

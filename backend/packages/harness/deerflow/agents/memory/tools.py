@@ -3,10 +3,10 @@
 Exposes memory_search, memory_add, memory_update, memory_delete as
 LangChain @tool functions the model can call directly.
 
-When memory.mode == "tool", these tools are registered on the agent
-instead of appending MemoryMiddleware.  The model gains agency over
-its own persistent memory: it decides what to remember, when to
-search, and when to update or remove stale facts.
+When memory.mode == "tool", these tools are registered on the agent. Most
+backends omit MemoryMiddleware so the model drives persistence; a backend that
+sets ``requires_passive_writes_in_tool_mode`` retains conversation writes while
+the tools provide query-aware recall.
 
 Backend-agnostic: every tool goes through the ``MemoryManager`` ABC
 (:func:`get_memory_manager`) -- ``search``/``get_memory`` are tier-2 methods;

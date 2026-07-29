@@ -178,6 +178,12 @@ def build_branch_history_seed_events(
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
+    # Subagents may execute on a persistent event loop in another thread. This
+    # handler owns loop-local tasks and a store/pool created for the parent run,
+    # so the isolated-loop context copier must not inherit it. LangGraph's own
+    # stream callbacks remain inheritable and keep child token frames flowing.
+    deerflow_loop_bound = True
+
     # Every callback only updates in-memory run state or schedules async IO.
     # Keeping callbacks on the run's event-loop thread serializes mutations
     # from parallel tool calls and prevents cancelled executor callbacks from

@@ -727,20 +727,28 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        user_id: Explicit user bucket. When omitted, resolves the current
+            Gateway or standalone LangGraph Server identity.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    config = None
     try:
         from deerflow.agents.memory import get_memory_manager
-        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.runtime.user_context import resolve_runtime_user_id
 
         if app_config is None:
             from deerflow.config.memory_config import get_memory_config
@@ -753,7 +761,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_content = get_memory_manager().get_context(
-            user_id=get_effective_user_id(),
+            user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
         )
 
@@ -764,8 +772,13 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 {memory_content}
 </memory>
 """
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to load memory context")
+        from deerflow.agents.memory import MemoryManagerError
+
+        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+            raise
         return ""
 
 
@@ -889,9 +902,9 @@ def get_skills_prompt_section(
     return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None) -> str:
+def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name)
+    soul = load_agent_soul(agent_name, user_id=user_id)
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -994,8 +1007,8 @@ def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
         return ""
 
     return """<memory_tool_system>
-Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
-- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+Memory is running in tool mode. When present, the injected <memory> block contains only global user and history summaries; agent facts are not injected automatically. Use the memory tools to keep durable user memory accurate:
+- Call `memory_search` whenever prior preferences, constraints, corrections, or durable context may be relevant. Do not assume an absent fact does not exist until you have searched with an appropriate query.
 - Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
 - Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
 - Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
@@ -1074,7 +1087,7 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
+        soul=get_agent_soul(agent_name, user_id=user_id),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

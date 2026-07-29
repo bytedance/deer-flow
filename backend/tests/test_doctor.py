@@ -23,6 +23,50 @@ class TestCheckPython:
 
 
 # ---------------------------------------------------------------------------
+# check_pnpm
+# ---------------------------------------------------------------------------
+
+
+class TestCheckPnpm:
+    def test_uses_shared_runner_from_frontend(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return doctor.subprocess.CompletedProcess(cmd, 0, stdout="10.26.2\n", stderr="")
+
+        monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+        result = doctor.check_pnpm()
+
+        expected_runner = doctor.Path(doctor.__file__).with_name("pnpm.py")
+        assert result.status == "ok"
+        assert result.detail == "10.26.2"
+        assert captured["cmd"] == [sys.executable, str(expected_runner), "-v"]
+        assert captured["kwargs"]["cwd"] == expected_runner.parent.parent / "frontend"
+        assert captured["kwargs"]["shell"] is False
+        assert captured["kwargs"]["check"] is False
+
+    def test_runner_failure_is_reported_as_failure(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return doctor.subprocess.CompletedProcess(
+                cmd,
+                42,
+                stdout="",
+                stderr="Error: pnpm command failed with exit status 42.\n",
+            )
+
+        monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+        result = doctor.check_pnpm()
+
+        assert result.status == "fail"
+        assert "exit status 42" in result.detail
+        assert result.fix is not None
+
+
+# ---------------------------------------------------------------------------
 # check_config_exists
 # ---------------------------------------------------------------------------
 

@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import checkpoint_bench_common as common  # noqa: E402
 
@@ -404,7 +406,7 @@ async def _run_phase(case: ProductionCase, saver: Any, timing: _TimingSaver, wor
                 "backend": "sqlite",
                 "sqlite_dir": str(work_dir),
                 "checkpoint_channel_mode": case.mode,
-                "checkpoint_delta_snapshot_frequency": case.snapshot_frequency or 1000,
+                "checkpoint_delta": {"snapshot_frequency": case.snapshot_frequency or DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY},
             },
         }
     )

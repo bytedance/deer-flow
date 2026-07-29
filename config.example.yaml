@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 30
+config_version: 31
 
 # ============================================================================
 # Logging
@@ -607,6 +607,8 @@ models:
   #   model: Qwen/Qwen3-32B
   #   api_key: $VLLM_API_KEY
   #   base_url: http://localhost:8000/v1
+  #   # Enable only when the endpoint reports cumulative usage on every stream chunk.
+  #   cumulative_stream_usage: true
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
@@ -1050,6 +1052,7 @@ tool_output:
 
 suggestions:
   enabled: true
+  max_suggestions: 3
 
 
 # ============================================================================
@@ -1250,6 +1253,15 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Override whether the sandbox already sees the gateway's
+#   # thread workspace/uploads/outputs through shared mounts.
+#   # Omit this field to auto-detect from the backend (local containers: true;
+#   # remote/provisioner backends: false). Set true only when the deployment
+#   # guarantees both sides use the same thread user-data directories, such as
+#   # a correctly aligned shared PVC, NFS volume, hostPath, or bind mount.
+#   # true skips per-upload sandbox acquire/sync; false forces explicit sync.
+#   # thread_data_mounts: true
+#
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
 #   # mounts:
@@ -1424,13 +1436,13 @@ sandbox:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # skills:               # Skill whitelist (default: inherit all enabled skills)
+#       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
 #     bash:
 #       timeout_seconds: 300   # 5 minutes for quick command execution
 #       max_turns: 80
-#       # skills: []            # No skills for bash agent
+#       # skills: []            # No discoverable/activatable skills for bash agent
 #
 #   # Custom subagent types: define specialized agents with their own prompts,
 #   # tools, skills, and model configuration. Custom agents are available via
@@ -1447,7 +1459,7 @@ sandbox:
 #   #       - bash
 #   #       - read_file
 #   #       - write_file
-#   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
+#   #     skills:                 # Skill discovery/activation allowlist (null = all, [] = none)
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
@@ -1615,7 +1627,7 @@ summarization:
 #   enabled             - Master switch for the memory mechanism (call-site gate)
 #   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
-#   manager_class       - Backend selector: registered name (deermem/noop) or dotted path
+#   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
 #
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
@@ -1654,7 +1666,7 @@ memory:
   # gateway Helm deployment (see deploy/helm/deer-flow). Default 30s.
   shutdown_flush_timeout_seconds: 30.0
   # Memory backend selector. Either a registered backend name (matching a
-  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / noop)
+  # backends/<name>/ folder that exposes MANAGER_CLASS, e.g. deermem / mem0 / noop)
   # or a dotted import path to a MemoryManager subclass.
   manager_class: deermem
   # Memory operation mode:
@@ -1662,12 +1674,37 @@ memory:
   #   tool - experimental opt-in; the model calls memory_search/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
-  # Only one mode runs at a time. (tool mode calls the MemoryManager ABC --
-  # memory_search/add/update/delete go through the active backend; backends
-  # without fact-CRUD return a JSON error instead of crashing.)
+  # Normally only one mode runs at a time. A backend that needs conversation-
+  # level extraction may retain passive writes in tool mode while still
+  # exposing query-aware search (mem0 does this). Tool calls go through the
+  # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
+  #
+  # OpenViking HTTP example (replace this DeerMem backend_config block when
+  # manager_class is openviking; OpenViking currently supports middleware mode):
+  #
+  # backend_config:
+  #   base_url: http://openviking:1933
+  #   auth_mode: trusted
+  #   account: deerflow
+  #   api_key_env: OPENVIKING_API_KEY
+  #   max_connections: 100
+  #   max_keepalive_connections: 20
+  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
+  #   startup_policy: fail_fast
+  #   failure_policy:
+  #     read: fail_open
+  #     write: log_and_drop
+  #   retrieval:
+  #     top_k: 8
+  #     score_threshold: 0.25
+  #     max_injection_chars: 12000
+  #
+  # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
+  # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
+  # optional Compose overlay uses the internal http://openviking:1933 address.
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
@@ -1863,6 +1900,19 @@ database:
   # Restart required. Use one value across every process sharing this database.
   # full: current full-message checkpoints; delta: DeltaChannel for messages.
   checkpoint_channel_mode: full
+  # Delta-mode tuning (only applies when checkpoint_channel_mode is delta).
+  # Restart required, like the mode itself: the cadence is compiled into each
+  # graph's channel table. All processes sharing this database must agree.
+  # snapshot_frequency: full messages snapshot every N per-step writes
+  # (higher = smaller checkpoints, slower materialization).
+  checkpoint_delta:
+    snapshot_frequency: 10
+  # Size caps for the compiled checkpoint graph caches (per process).
+  # Hot-reloadable, no restart needed: the value is re-read on each eviction
+  # check and only changes when a cache evicts, never graph semantics.
+  checkpoint_graph_cache:
+    # Gateway thread-state accessor graphs (per assistant/mode/cadence).
+    accessor_graph_max: 64
 
 # ============================================================================
 # Run Events Configuration

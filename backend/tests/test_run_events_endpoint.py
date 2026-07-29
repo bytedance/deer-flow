@@ -55,6 +55,52 @@ async def test_list_run_events_forwards_task_id_and_after_seq():
 
 
 @pytest.mark.anyio
+async def test_list_run_events_redacts_historical_run_start_metadata():
+    from app.gateway.routers.thread_runs import list_run_events
+
+    stored_row = {
+        "seq": 1,
+        "event_type": "run.start",
+        "metadata": {
+            "caller": "lead_agent",
+            "auth_token": "legacy-secret",
+            "token_usage": 7,
+        },
+    }
+
+    class FakeStore:
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+            return [stored_row]
+
+    class FakeState:
+        run_event_store = FakeStore()
+
+    class FakeApp:
+        state = FakeState()
+
+    class FakeRequest:
+        app = FakeApp()
+        _deerflow_test_bypass_auth = True
+
+    events = await list_run_events(
+        thread_id="legacy-thread",
+        run_id="legacy-run",
+        request=FakeRequest(),
+        event_types=None,
+        task_id=None,
+        limit=500,
+        after_seq=None,
+    )
+
+    assert events[0]["metadata"] == {
+        "caller": "lead_agent",
+        "token_usage": 7,
+    }
+    assert stored_row["metadata"]["auth_token"] == "legacy-secret"
+    assert events[0] is not stored_row
+
+
+@pytest.mark.anyio
 async def test_effective_memory_flows_from_injection_to_the_existing_debug_api():
     """The production run-events route is the field-level consumer for M1."""
     from app.gateway.routers.thread_runs import list_run_events
