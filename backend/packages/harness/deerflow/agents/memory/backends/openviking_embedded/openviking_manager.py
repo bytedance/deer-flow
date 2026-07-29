@@ -16,8 +16,10 @@ OpenViking's session API (``create_session`` + ``add_message`` +
 conversation into structured memories (preferences / entities / profile / ...)
 under ``viking://user/{space}/memories/``. The backend never stores raw
 transcripts -- it surfaces OpenViking's extracted memories (short L2 abstracts)
-to deerflow. Manual facts (``create_fact`` / ``import_memory``) are written
-directly under ``memories/{category}/`` with a ``DEERFLOW_META`` comment.
+to deerflow. Manual facts (``create_fact``) are written directly under
+``memories/{category}/`` with a ``DEERFLOW_META`` comment.
+``import_memory`` uses a 2-layer waterfall: native ``data.files`` restore
+(Layer 1) or extraction via the session pipeline (Layer 2).
 """
 
 from __future__ import annotations
@@ -504,7 +506,7 @@ class OpenVikingMemoryManager(MemoryManager):
             v = st.get(key)
             if isinstance(v, str) and v:
                 return v
-            if isinstance(v, (int, float)) and v:
+            if isinstance(v, int | float) and v:
                 try:
                     return datetime.fromtimestamp(float(v), tz=UTC).isoformat()
                 except (ValueError, OSError, OverflowError):
@@ -877,7 +879,7 @@ class OpenVikingMemoryManager(MemoryManager):
                 if isinstance(m.get("category"), str):
                     item["tags"] = [m["category"]]
             conf = m.get("confidence")
-            if isinstance(conf, (int, float)):
+            if isinstance(conf, int | float):
                 item["confidence"] = float(conf)
             createdAt = m.get("createdAt") or self._stat_created_at(uri)
             if createdAt:
@@ -1269,7 +1271,7 @@ def _category_from_uri(uri: str) -> str:
     Extracted memories live under ``memories/{category}/...`` -- e.g.
     ``memories/preferences/{user}/{file}.md``, ``memories/entities/{proj}/x.md``,
     ``memories/profile.md``. The category is the path segment immediately after
-    ``memories``. Manual facts (``create_fact``/``import_memory``) land under
+    ``memories``. Manual facts (``create_fact``) land under
     ``memories/{category}/{slug}.md`` -- same rule applies.
     """
     parts = [p for p in uri.split("/") if p]

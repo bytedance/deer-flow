@@ -126,9 +126,9 @@ process-level singleton.
 | `add` / `add_nowait` | `create_session` + `add_message`(per turn) + `commit_session` (extraction); `add_nowait` waits via `get_task` |
 | `get_context` | `ls(memories, recursive)` → `read()` each (distilled memory), joined + truncated |
 | `search` | `find(query, target_uri=memories, limit, score_threshold, context_type="memory")` → `FindResult.memories` → fact dicts |
-| `get_memory` | `ls` extracted memory files (templates `identity.md`/`soul.md` filtered) → `read()` + `stat()` → DeerMem-shape `{facts:[…]}` |
+| `get_memory` | `ls` extracted memory files → `read()` + `stat()` → build `display: {sections: [...]}` (only derived helper files `.abstract.md` / `.overview.md` / `.relations.json` are filtered; identity/soul/profile are legitimate memory types shown as-is). `facts[]` stays empty — the memory panel renders display sections. |
 | `clear_memory` | `rm(memories_base, recursive=True)` (all — memories are user-level) |
-| `import_memory` | `write(mode="create")` each fact under `memories/{category}/` with a `DEERFLOW_META` comment |
+| `import_memory` | 2-layer waterfall: Layer 1 restores native `data.files` via stat→replace upsert (lossless round-trip); Layer 2 feeds all text through `create_session` + `add_message` + `commit_session` so the VLM re-extracts memories in OpenViking's own format (cross-backend path, e.g. from DeerMem). |
 | `create_fact` / `delete_fact` / `update_fact` | `write` / `rm(uri)` / `write(mode="replace")` (+ move on category change) |
 | `warm` | `initialize()` + `is_healthy()` |
 | `shutdown_flush` | `close()` |
