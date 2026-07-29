@@ -31,16 +31,8 @@ from schedule_fakes import (
 from app.adapters.schedule.scheduled_run_repository import SqlScheduledRunRepository
 from app.adapters.schedule.scheduled_task_repository import SqlScheduledTaskRepository
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.domain.schedule.model import (
-    ActiveRunConflictError,
-    ContextMode,
-    RunStatus,
-    ScheduledRun,
-    ScheduledTask,
-    ScheduleSpec,
-    TaskStatus,
-    TriggerKind,
-)
+from deerflow.domain.schedule.exceptions import ActiveRunConflictError
+from deerflow.domain.schedule.model import ContextMode, RunStatus, ScheduledRun, ScheduledTask, ScheduleSpec, TaskStatus, TriggerKind
 from deerflow.domain.schedule.ports import ScheduledRunRepository, ScheduledTaskRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 

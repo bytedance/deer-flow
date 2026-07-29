@@ -25,7 +25,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from deerflow.domain.schedule.model import LaunchFailedError, ThreadBusyError
+from deerflow.domain.schedule.exceptions import LaunchFailedError, ThreadBusyError
 from deerflow.domain.schedule.ports import LaunchedRun, RunLauncher
 from deerflow.runtime import ConflictError
 

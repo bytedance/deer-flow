@@ -4,8 +4,8 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
+from deerflow.domain.schedule.exceptions import InvalidContextModeError, TaskNotMutableError
 from deerflow.domain.schedule.model.enums import ContextMode, RunStatus, ScheduleType, TaskStatus, TriggerKind
-from deerflow.domain.schedule.model.errors import InvalidContextModeError, TaskNotMutableError
 from deerflow.domain.schedule.model.spec import SchedulePolicy, ScheduleSpec
 
 TERMINAL_TASK_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})

@@ -26,15 +26,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.domain.schedule.model import (
-    TERMINAL_TASK_STATUSES,
-    ContextMode,
-    InvalidScheduleError,
-    ScheduledTask,
-    ScheduleSpec,
-    ScheduleType,
-    TaskStatus,
-)
+from deerflow.domain.schedule.exceptions import InvalidScheduleError
+from deerflow.domain.schedule.model import TERMINAL_TASK_STATUSES, ContextMode, ScheduledTask, ScheduleSpec, ScheduleType, TaskStatus
 from deerflow.domain.schedule.ports import ScheduledTaskRepository
 
 # Transitional: the ORM row stays in the harness until engine, models, and

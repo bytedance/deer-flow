@@ -17,11 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
+from deerflow.domain.schedule.exceptions import ActiveRunConflictError
 from deerflow.domain.schedule.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
     TERMINAL_TASK_STATUSES,
-    ActiveRunConflictError,
     RunStatus,
     ScheduledRun,
     ScheduledTask,

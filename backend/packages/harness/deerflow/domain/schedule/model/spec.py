@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
+from deerflow.domain.schedule.exceptions import InvalidScheduleError
 from deerflow.domain.schedule.model.enums import ScheduleType
-from deerflow.domain.schedule.model.errors import InvalidScheduleError
 
 CRON_FIELD_COUNT = 5
 

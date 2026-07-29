@@ -19,14 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.domain.schedule.model import (
-    ACTIVE_RUN_STATUSES,
-    TERMINAL_RUN_STATUSES,
-    ActiveRunConflictError,
-    RunStatus,
-    ScheduledRun,
-    TriggerKind,
-)
+from deerflow.domain.schedule.exceptions import ActiveRunConflictError
+from deerflow.domain.schedule.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, RunStatus, ScheduledRun, TriggerKind
 from deerflow.domain.schedule.ports import ScheduledRunRepository
 
 # Transitional: the ORM row stays in the harness until engine, models, and

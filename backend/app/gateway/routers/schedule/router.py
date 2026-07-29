@@ -30,8 +30,7 @@ from app.gateway.routers.schedule.models import (
     ScheduledTaskUpdateRequest,
     TriggerResponse,
 )
-from deerflow.domain.schedule.model import (
-    DispatchOutcome,
+from deerflow.domain.schedule.exceptions import (
     InvalidContextModeError,
     InvalidScheduleError,
     ScheduleError,
@@ -39,6 +38,7 @@ from deerflow.domain.schedule.model import (
     TaskNotMutableError,
     ThreadNotFoundError,
 )
+from deerflow.domain.schedule.model import DispatchOutcome
 from deerflow.domain.schedule.service import ContextChange
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])

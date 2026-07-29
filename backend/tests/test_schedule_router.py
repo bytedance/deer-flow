@@ -30,15 +30,8 @@ from schedule_fakes import (
 )
 
 from app.gateway.routers.schedule import router as router_module
-from deerflow.domain.schedule.model import (
-    LaunchFailedError,
-    RunStatus,
-    ScheduledRun,
-    SchedulePolicy,
-    TaskStatus,
-    ThreadBusyError,
-    TriggerKind,
-)
+from deerflow.domain.schedule.exceptions import LaunchFailedError, ThreadBusyError
+from deerflow.domain.schedule.model import RunStatus, ScheduledRun, SchedulePolicy, TaskStatus, TriggerKind
 from deerflow.domain.schedule.service import ScheduleService
 
 USER = "user-1"
@@ -528,7 +521,7 @@ class TestRunHistory:
 
 class TestErrorMapping:
     def test_every_mapped_error_is_a_schedule_error(self):
-        from deerflow.domain.schedule.model import ScheduleError
+        from deerflow.domain.schedule.exceptions import ScheduleError
 
         assert all(issubclass(error, ScheduleError) for error in router_module._STATUS_BY_ERROR)
 
@@ -537,7 +530,7 @@ class TestErrorMapping:
         """A new domain error is a new protocol decision. Letting it through
         surfaces as a 500 that has to be classified, rather than shipping as
         whatever 4xx happened to be nearest."""
-        from deerflow.domain.schedule.model import ScheduleError
+        from deerflow.domain.schedule.exceptions import ScheduleError
 
         class NewDomainError(ScheduleError):
             pass
@@ -551,7 +544,7 @@ class TestErrorMapping:
 
     @pytest.mark.asyncio
     async def test_a_mapped_error_keeps_its_message_as_the_detail(self):
-        from deerflow.domain.schedule.model import TaskNotFoundError
+        from deerflow.domain.schedule.exceptions import TaskNotFoundError
 
         @router_module._map_domain_errors
         async def handler():

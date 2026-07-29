@@ -17,15 +17,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from app.gateway.routers.schedule.models import ScheduledRunResponse, ScheduledTaskResponse
-from deerflow.domain.schedule.model import (
-    ContextMode,
-    RunStatus,
-    ScheduledRun,
-    ScheduledTask,
-    ScheduleSpec,
-    TaskStatus,
-    TriggerKind,
-)
+from deerflow.domain.schedule.model import ContextMode, RunStatus, ScheduledRun, ScheduledTask, ScheduleSpec, TaskStatus, TriggerKind
 
 # Exactly the frontend's `ScheduledTask` type (frontend/src/core/scheduled-tasks/types.ts).
 FRONTEND_TASK_FIELDS = {

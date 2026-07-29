@@ -26,7 +26,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.adapters.schedule.run_launcher import GatewayRunLauncher
-from deerflow.domain.schedule.model import LaunchFailedError, ThreadBusyError
+from deerflow.domain.schedule.exceptions import LaunchFailedError, ThreadBusyError
 from deerflow.domain.schedule.ports import LaunchedRun
 from deerflow.runtime import ConflictError
 

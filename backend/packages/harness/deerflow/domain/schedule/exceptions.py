@@ -1,3 +1,11 @@
+"""The known errors of the schedule context.
+
+One family under one base class, so the primary adapter can map the whole
+family onto protocol codes in a single table. Class names keep the PEP 8
+``Error`` suffix; the module is named ``exceptions`` after the AWS
+hexagonal guidance's domain folder of the same name.
+"""
+
 from __future__ import annotations
 
 
