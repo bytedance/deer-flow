@@ -210,7 +210,15 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
         },
         "commands": [
             _version_command("node", ["node", "--version"], project_root),
-            _version_command("pnpm", ["pnpm", "--version"], project_root),
+            _version_command(
+                "pnpm",
+                [
+                    sys.executable,
+                    str(project_root / "scripts" / "pnpm.py"),
+                    "--version",
+                ],
+                project_root / "frontend",
+            ),
             _version_command("uv", ["uv", "--version"], project_root),
             _version_command("nginx", ["nginx", "-v"], project_root),
             _version_command("docker", ["docker", "--version"], project_root),
