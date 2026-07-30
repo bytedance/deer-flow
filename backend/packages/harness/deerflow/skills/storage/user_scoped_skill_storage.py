@@ -6,12 +6,12 @@ read from the global ``{base_dir}/skills/public/`` (read-only).
 
 Layout::
 
-    <host_root>/public/<name>/SKILL.md            ← global, read-only
-    <user_custom_root>/<name>/SKILL.md             ← per-user, read-write
-    <user_integrations_root>/<provider>/<name>/SKILL.md  ← per-user, read-only
-    <user_custom_root>/.history/<name>.jsonl       ← per-user history
-    <user_skills_root>/_skill_states.json          ← per-user enabled state
-    <global_custom_root>/<name>/SKILL.md           ← legacy fallback, read-only
+    <host_root>/public/<name>/SKILL.md                   ← global, read-only
+    <user_custom_root>/<name>/SKILL.md                   ← per-user, read-write
+    <integrations_root>/<provider>/<name>/SKILL.md       ← global, read-only
+    <user_custom_root>/.history/<name>.jsonl             ← per-user history
+    <user_skills_root>/_skill_states.json                ← per-user enabled state
+    <global_custom_root>/<name>/SKILL.md                 ← legacy fallback, read-only
 
 Fallback: when a user has no custom skills yet, global ``skills/custom/``
 skills are yielded as ``SkillCategory.LEGACY`` (read-only) so they are
@@ -385,26 +385,39 @@ class UserScopedSkillStorage(LocalSkillStorage):
         """Host path to this user's custom skills root directory."""
         return self._user_custom_root
 
+    def get_integrations_root(self) -> Path:
+        """Host path to the global managed integration skills root directory."""
+        return self._integrations_root
+
     def get_user_integrations_root(self) -> Path:
-        """Host path to this user's managed integration skills root directory."""
-        return self._user_integrations_root
+        """Compatibility alias for :meth:`get_integrations_root`."""
+        return self.get_integrations_root()
 
     # ------------------------------------------------------------------
-    # Path validation — accept per-user custom root as well as global root
+    # Path validation — accept public, per-user custom, and integration roots
     # ------------------------------------------------------------------
 
     def validate_skill_file_path(self, skill_file: Path) -> Path:
-        """Accept files under *either* the global root or the per-user custom root.
+        """Accept files under the public, per-user custom, or integration root.
 
-        Custom skills live in ``_user_custom_root`` which is not a sub-path
-        of ``_host_root``, so the default implementation's single-root check
-        would reject them.  This override allows both roots.
+        Custom and managed integration skills live outside ``_host_root``, so
+        the default implementation's single-root check would reject them.
         """
         resolved_file = skill_file.resolve()
-        for allowed_root in (self._host_root.resolve(), self._user_custom_root.resolve(), self._user_integrations_root.resolve()):
+        allowed_roots = (
+            self._host_root.resolve(),
+            self._user_custom_root.resolve(),
+            self._integrations_root.resolve(),
+        )
+        for allowed_root in allowed_roots:
             try:
                 resolved_file.relative_to(allowed_root)
                 return resolved_file
             except ValueError:
                 continue
-        raise ValueError(f"Resolved skill file {resolved_file} must stay within either the global skills root ({self._host_root.resolve()}) or the per-user custom root ({self._user_custom_root.resolve()}).")
+        raise ValueError(
+            f"Resolved skill file {resolved_file} must stay within the global skills root "
+            f"({self._host_root.resolve()}), the per-user custom root "
+            f"({self._user_custom_root.resolve()}), or the managed integration skills root "
+            f"({self._integrations_root.resolve()})."
+        )

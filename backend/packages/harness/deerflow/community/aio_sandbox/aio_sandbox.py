@@ -281,7 +281,12 @@ class AioSandbox(Sandbox):
                 logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                 return f"Error: {e}"
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         """Read the content of a file in the sandbox.
 
         Args:
@@ -291,7 +296,12 @@ class AioSandbox(Sandbox):
             The content of the file.
         """
         try:
-            result = self._client.file.read_file(file=path)
+            kwargs = {}
+            if start_line is not None:
+                kwargs["start_line"] = max(start_line - 1, 0)
+            if end_line is not None:
+                kwargs["end_line"] = max(end_line, 0)
+            result = self._client.file.read_file(file=path, **kwargs)
             return result.data.content if result.data else ""
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")

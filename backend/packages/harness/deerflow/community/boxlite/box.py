@@ -205,7 +205,12 @@ class BoxliteBox(Sandbox):
 
     # ── file operations ─────────────────────────────────────────────────
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
             r = self._exec("cat", "--", resolved)
@@ -214,7 +219,13 @@ class BoxliteBox(Sandbox):
             return f"Error: {e}"
         if r.exit_code not in (0, None):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
-        return r.stdout or ""
+        content = r.stdout or ""
+        if start_line is None and end_line is None:
+            return content
+        lines = content.splitlines()
+        start = start_line or 1
+        end = end_line if end_line is not None else len(lines)
+        return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)

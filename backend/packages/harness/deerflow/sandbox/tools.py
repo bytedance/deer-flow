@@ -2138,29 +2138,44 @@ def read_file_tool(
     Args:
         description: Explain why you are reading this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to read.
-        start_line: Optional starting line number (1-indexed, inclusive). Use with end_line to read a specific range.
-        end_line: Optional ending line number (1-indexed, inclusive). Use with start_line to read a specific range.
+        start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
+        end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
     try:
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
+        if start_line is not None and start_line < 1:
+            return "(start_line must be >= 1)"
+        effective_start = start_line or 1
+        if end_line is not None and end_line < 1:
+            return "(end_line must be >= 1)"
+        if end_line is not None and effective_start > end_line:
+            return "(start_line > end_line — no lines in range)"
+
         requested_path = path
-        content = read_current_file_content(runtime, path)
+        sandbox = ensure_sandbox_initialized(runtime)
+        ensure_thread_directories_exist(runtime)
+        use_line_range = start_line is not None or end_line is not None
+        if use_line_range:
+            if is_local_sandbox(runtime):
+                thread_data = get_thread_data(runtime)
+                validate_local_tool_path(path, thread_data, read_only=True)
+                if _is_skills_path(path):
+                    path = _resolve_skills_path(path)
+                elif _is_acp_workspace_path(path):
+                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+                elif not _is_custom_mount_path(path):
+                    path = _resolve_and_validate_user_data_path(path, thread_data)
+                # Custom mount paths are resolved by LocalSandbox._resolve_path()
+            content = sandbox.read_file(path, start_line=start_line, end_line=end_line)
+        else:
+            content = read_current_file_content(runtime, path)
         if not content:
-            return "(empty)"
-        if start_line is not None or end_line is not None:
-            lines = content.splitlines()
-            s = max(start_line, 1) if start_line is not None else 1
-            e = end_line if end_line is not None else len(lines)
-            if e < 1:
-                return "(end_line must be >= 1)"
-            if s > len(lines):
+            if start_line is not None and start_line > 1:
                 return "(start_line exceeds file length)"
-            if s > e:
-                return "(start_line > end_line — no lines in range)"
-            content = "\n".join(lines[s - 1 : e])
+            return "(empty)"
         try:
             from deerflow.config.app_config import get_app_config
 

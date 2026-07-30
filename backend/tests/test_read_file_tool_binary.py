@@ -63,3 +63,83 @@ def test_read_file_tool_text_file_unaffected(tmp_path, monkeypatch) -> None:
 
     assert "hello 你好" in result, result
     assert "binary" not in result.lower(), result
+
+
+def test_read_file_tool_passes_line_range_into_sandbox(monkeypatch) -> None:
+    captured: dict[str, int | str | None] = {}
+
+    class RangeAwareSandbox:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
+            captured["path"] = path
+            captured["start_line"] = start_line
+            captured["end_line"] = end_line
+            return "line 1\nline 2"
+
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio:test"}}, context={"thread_id": "t1"})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: RangeAwareSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="read top of file",
+        path="/mnt/user-data/workspace/huge.log",
+        start_line=1,
+        end_line=10,
+    )
+
+    assert result == "line 1\nline 2"
+    assert captured == {
+        "path": "/mnt/user-data/workspace/huge.log",
+        "start_line": 1,
+        "end_line": 10,
+    }
+
+
+def test_read_file_tool_passes_open_ended_ranges_into_sandbox(monkeypatch) -> None:
+    calls: list[tuple[int | None, int | None]] = []
+
+    class RangeAwareSandbox:
+        def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
+            calls.append((start_line, end_line))
+            return "line 1\nline 2"
+
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio:test"}}, context={"thread_id": "t1"})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: RangeAwareSandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    start_only = read_file_tool.func(
+        runtime=runtime,
+        description="read tail",
+        path="/mnt/user-data/workspace/huge.log",
+        start_line=1,
+    )
+    end_only = read_file_tool.func(
+        runtime=runtime,
+        description="read head",
+        path="/mnt/user-data/workspace/huge.log",
+        end_line=10,
+    )
+
+    assert start_only == "line 1\nline 2"
+    assert end_only == "line 1\nline 2"
+    assert calls == [(1, None), (None, 10)]
+
+
+def test_read_file_tool_validates_range_order(monkeypatch) -> None:
+    runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio:test"}}, context={"thread_id": "t1"})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: object())
+
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="bad order",
+        path="/mnt/user-data/workspace/huge.log",
+        start_line=20,
+        end_line=10,
+    )
+
+    assert "start_line > end_line" in result

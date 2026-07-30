@@ -41,6 +41,12 @@ docker build -t deer-flow/lark-cli-init:v1.0.65 \
 The tag should encode the lark-cli version so it can be bumped independently of
 the upstream `all-in-one-sandbox` sandbox image.
 
+CI publishes multi-arch (`linux/amd64,linux/arm64`) images to
+`ghcr.io/<owner>/deer-flow-lark-cli-init:<lark-cli-version>` via
+`.github/workflows/lark-cli-images.yaml` (run it with a `lark_cli_version` input,
+or push a `lark-cli-v*` tag). This is decoupled from the DeerFlow `v*` release
+because the image tracks the upstream `larksuite/cli` version.
+
 ## Wiring it into the provisioner
 
 The init-container runtime path is **opt-in** and off by default. Enable it by
@@ -58,6 +64,6 @@ publishing this image and pointing the provisioner at it:
   (`{"lark_cli_init_image": true|false}`), which the Gateway surfaces as the
   Lark integration sandbox-runtime readiness signal in `/api/integrations/lark/status`.
 
-> Publishing note: this repository currently ships only backend/frontend images.
-> Publishing a `lark-cli-init` tag is a fast-follow; until then the feature stays
-> behind the empty-default `LARK_CLI_INIT_IMAGE`.
+> Opt-in note: the init-container path stays off until `LARK_CLI_INIT_IMAGE` is
+> set on the provisioner, so an unpublished or unconfigured image is a no-op
+> (legacy hostPath / Gateway download path, no behavior change).
