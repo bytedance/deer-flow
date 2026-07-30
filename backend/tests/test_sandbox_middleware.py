@@ -46,7 +46,12 @@ class _SandboxStub(Sandbox):
         del env, timeout
         return "OK"
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         return "content"
 
     def download_file(self, path: str) -> bytes:

@@ -167,6 +167,8 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
         return {}
 
     pricing: dict[str, _ModelPricing] = {}
+    pricing_currency: str | None = None
+    pricing_currency_model: str | None = None
     for model_cfg in models or []:
         raw = getattr(model_cfg, "pricing", None)
         if not isinstance(raw, dict):
@@ -181,8 +183,20 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
             continue
         if input_price <= 0 and output_price <= 0:
             continue
-        currency = str(raw.get("currency") or "USD").upper()
-        entry = _ModelPricing(input_price, output_price, currency, cache_hit_price)
+        model_currency = str(raw.get("currency") or "USD").strip().upper() or "USD"
+        if pricing_currency is None:
+            pricing_currency = model_currency
+            pricing_currency_model = model_cfg.name
+        elif model_currency != pricing_currency:
+            logger.warning(
+                "console: disabling cost reporting because model pricing mixes currencies (%s on %s, %s on %s)",
+                pricing_currency,
+                pricing_currency_model,
+                model_currency,
+                model_cfg.name,
+            )
+            return {}
+        entry = _ModelPricing(input_price, output_price, model_currency, cache_hit_price)
         for key in (model_cfg.name, getattr(model_cfg, "model", None)):
             if key:
                 pricing.setdefault(key, entry)

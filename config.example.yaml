@@ -98,7 +98,8 @@ max_recursion_limit: 1000
 #
 # Optional per-model pricing (powers the real-cost display on the workspace
 # console). Add a `pricing` block to any model entry; use ONE currency across
-# all models. Prices are per one million tokens.
+# all models. Mixed currencies disable cost reporting to prevent invalid sums.
+# Prices are per one million tokens.
 #
 #   pricing:
 #     currency: CNY                    # ISO code shown in the console (CNY, USD, ...)
