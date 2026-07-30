@@ -52,3 +52,26 @@ export async function updateMCPConfig(config: MCPConfig) {
   }
   return response.json();
 }
+
+export async function updateMCPServerState(
+  serverName: string,
+  enabled: boolean,
+) {
+  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      server_name: serverName,
+      enabled,
+    }),
+  });
+  if (!response.ok) {
+    throw new MCPConfigRequestError(
+      response.status,
+      await readErrorDetail(response, "Failed to update MCP server"),
+    );
+  }
+  return response.json() as Promise<MCPConfig>;
+}

@@ -245,6 +245,11 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
+  an unrelated disallowed stdio command no longer blocks every switch; allow
+  disabling a disallowed target while still rejecting its re-enable, preserve
+  the raw extensions config, and surface backend validation details in the UI.
+  ([#4574])
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project
   `running`; clients may observe the prior thread status during worker startup.

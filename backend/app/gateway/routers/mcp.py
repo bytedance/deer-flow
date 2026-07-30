@@ -79,6 +79,17 @@ class McpConfigUpdateRequest(BaseModel):
     )
 
 
+class McpServerStateUpdateRequest(BaseModel):
+    """Request model for enabling or disabling one MCP server."""
+
+    server_name: str = Field(
+        ...,
+        min_length=1,
+        description="Name of the MCP server to update",
+    )
+    enabled: bool = Field(..., description="Whether the MCP server is enabled")
+
+
 class McpCacheResetResponse(BaseModel):
     """Response model for resetting the MCP tools cache."""
 
@@ -396,6 +407,44 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         return reloaded_config.mcp_servers
 
 
+def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
+    """Update one server state while preserving the raw extensions config."""
+    with extensions_config_write_lock:
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None or not config_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        with open(config_path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+
+        raw_servers = raw_data.get("mcpServers", {})
+        raw_server = raw_servers.get(body.server_name) if isinstance(raw_servers, dict) else None
+        if not isinstance(raw_server, dict):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        if body.enabled:
+            target_server = McpServerConfigResponse(**raw_server)
+            _validate_mcp_update_request(
+                McpConfigUpdateRequest(
+                    mcp_servers={body.server_name: target_server},
+                )
+            )
+
+        raw_server["enabled"] = body.enabled
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(raw_data, f, indent=2)
+
+        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
+        reloaded_config = reload_extensions_config()
+        return reloaded_config.mcp_servers
+
+
 @router.post(
     "/mcp/cache/reset",
     response_model=McpCacheResetResponse,
@@ -475,3 +524,25 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+
+
+@router.patch(
+    "/mcp/config",
+    response_model=McpConfigResponse,
+    summary="Update MCP Server State",
+    description="Enable or disable one MCP server without replacing the full extensions configuration.",
+)
+async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRequest) -> McpConfigResponse:
+    """Enable or disable one MCP server and reload the MCP tool cache."""
+    try:
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
+
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
+        reset_mcp_tools_cache()
+        return McpConfigResponse(mcp_servers=servers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")
