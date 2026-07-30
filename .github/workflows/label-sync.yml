@@ -1,0 +1,38 @@
+name: Label Sync
+
+# Keeps repository labels in sync with the declarative source of truth
+# (.github/labels.yml). Runs whenever that file changes on main, and can be
+# triggered manually. Additive/update-only — never deletes labels.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/labels.yml"
+      - "scripts/sync_labels.py"
+      - ".github/workflows/label-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: label-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Sync labels
+        run: uv run --with pyyaml python scripts/sync_labels.py
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}

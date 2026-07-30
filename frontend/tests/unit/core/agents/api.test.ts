@@ -16,20 +16,24 @@
  * These tests pin both halves of the contract so a future refactor doesn't
  * silently drop the detail or leak the generated fallback into the UI.
  */
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, rs } from "@rstest/core";
 
-vi.mock("@/core/api/fetcher", () => ({
-  fetch: vi.fn(),
+rs.mock("@/core/api/fetcher", () => ({
+  fetch: rs.fn(),
 }));
 
-vi.mock("@/core/config", () => ({
+rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "",
 }));
 
-import { AgentsApiDisabledError, checkAgentName } from "@/core/agents/api";
+import {
+  AgentsApiDisabledError,
+  checkAgentName,
+  updateAgent,
+} from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 
-const mockedFetch = vi.mocked(fetcher);
+const mockedFetch = rs.mocked(fetcher);
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -145,5 +149,39 @@ describe("checkAgentName", () => {
     await expect(checkAgentName("deal.agent")).rejects.not.toBeInstanceOf(
       AgentsApiDisabledError,
     );
+  });
+});
+
+describe("updateAgent", () => {
+  test("serializes per-agent model settings into the request body (issue #4336)", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        name: "researcher",
+        description: "",
+        model: "agent-model",
+        tool_groups: null,
+        skills: null,
+        model_settings: { temperature: 0.2, max_tokens: 12000 },
+        thinking_enabled: true,
+        reasoning_effort: "high",
+      }),
+    );
+
+    await updateAgent("researcher", {
+      model: "agent-model",
+      model_settings: { temperature: 0.2, max_tokens: 12000 },
+      thinking_enabled: true,
+      reasoning_effort: "high",
+    });
+
+    const [, init] = mockedFetch.mock.calls[0]!;
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(init?.body as string);
+    expect(body).toMatchObject({
+      model: "agent-model",
+      model_settings: { temperature: 0.2, max_tokens: 12000 },
+      thinking_enabled: true,
+      reasoning_effort: "high",
+    });
   });
 });

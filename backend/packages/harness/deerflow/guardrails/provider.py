@@ -16,6 +16,18 @@ class GuardrailRequest:
     thread_id: str | None = None
     is_subagent: bool = False
     timestamp: str = ""
+    user_id: str | None = None
+    user_role: str | None = None
+    oauth_provider: str | None = None
+    oauth_id: str | None = None
+    run_id: str | None = None
+    tool_call_id: str | None = None
+    # Authorization identity fields (populated by GuardrailMiddleware from
+    # runtime context). Default values ensure backward compatibility for
+    # providers that don't read them.
+    channel_user_id: str | None = None
+    is_internal: bool = False
+    authz_attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

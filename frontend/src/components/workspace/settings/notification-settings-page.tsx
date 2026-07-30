@@ -54,6 +54,7 @@ export function NotificationSettingsPage() {
           <div>{t.settings.notification.description}</div>
           <div>
             <Switch
+              aria-label={t.settings.notification.title}
               disabled={permission !== "granted"}
               checked={
                 permission === "granted" && settings.notification.enabled

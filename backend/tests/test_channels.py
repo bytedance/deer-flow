@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import tempfile
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,6 +24,60 @@ from app.channels.message_bus import (
     ResolvedAttachment,
 )
 from app.channels.store import ChannelStore
+from deerflow.skills.types import Skill, SkillCategory
+
+
+def test_known_channel_command_detection_only_matches_control_commands():
+    from app.channels.commands import is_known_channel_command
+
+    assert is_known_channel_command("/new")
+    assert is_known_channel_command("/HELP now")
+    assert not is_known_channel_command("/mnt/user-data/uploads/report.pdf")
+    assert not is_known_channel_command("/data-analysis analyze uploads/foo.csv")
+    assert not is_known_channel_command(" /new")
+
+
+def test_strip_leading_mentions_only_drops_flush_leading_mentions():
+    from app.channels.commands import is_known_channel_command, strip_leading_mentions
+
+    assert strip_leading_mentions("@bot /goal") == "/goal"
+    assert strip_leading_mentions("@_user_1 /goal ship") == "/goal ship"
+    assert strip_leading_mentions("<@U1> /status") == "/status"
+    assert strip_leading_mentions("@bot @_user_2 /help") == "/help"
+    assert strip_leading_mentions("@bot") == ""
+    assert strip_leading_mentions("") == ""
+    # No leading mention -> unchanged, including the leading-space non-command case.
+    assert strip_leading_mentions("/goal") == "/goal"
+    assert strip_leading_mentions(" /new") == " /new"
+    assert strip_leading_mentions("hello /goal") == "hello /goal"
+    # The shared classifier is deliberately NOT changed to strip mentions: Slack
+    # relies on it keeping a leading non-bot mention as chat (see Slack tests), so
+    # mention handling lives in the adapters, not here.
+    assert not is_known_channel_command("@bot /goal")
+
+
+def _make_channel_skill(tmp_path: Path, name: str, *, enabled: bool = True) -> Skill:
+    skill_dir = tmp_path / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(f"# {name}\n", encoding="utf-8")
+    return Skill(
+        name=name,
+        description=f"Description for {name}",
+        license="MIT",
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=Path(name),
+        category=SkillCategory.CUSTOM,
+        enabled=enabled,
+    )
+
+
+def _make_channel_skill_storage(skills: list[Skill]):
+    return SimpleNamespace(
+        load_skills=lambda *, enabled_only: [skill for skill in skills if skill.enabled] if enabled_only else skills,
+        get_container_root=lambda: "/mnt/skills",
+    )
 
 
 def _run(coro):
@@ -109,6 +166,27 @@ class TestMessageBus:
             out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
             await bus.publish_outbound(out)
             assert len(received) == 0
+
+        _run(go())
+
+    def test_unsubscribe_outbound_removes_fresh_bound_method_reference(self):
+        bus = MessageBus()
+        received = []
+
+        class Handler:
+            async def callback(self, msg):
+                received.append((self, msg))
+
+        handler = Handler()
+        other_handler = Handler()
+
+        async def go():
+            bus.subscribe_outbound(handler.callback)
+            bus.subscribe_outbound(other_handler.callback)
+            bus.unsubscribe_outbound(handler.callback)
+            out = OutboundMessage(channel_name="test", chat_id="c1", thread_id="t1", text="reply")
+            await bus.publish_outbound(out)
+            assert received == [(other_handler, out)]
 
         _run(go())
 
@@ -275,6 +353,73 @@ class TestChannelBase:
             assert len(ch.sent_messages) == 0
 
         _run(go())
+
+    def test_send_with_retry_retries_until_success(self, monkeypatch):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        attempts = 0
+        sleep = AsyncMock()
+        monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+        async def flaky_send():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise RuntimeError(f"failure {attempts}")
+            return "sent"
+
+        result = _run(ch._send_with_retry(flaky_send, max_retries=3, log_prefix="[Dummy]"))
+
+        assert result == "sent"
+        assert attempts == 3
+        assert [call.args[0] for call in sleep.await_args_list] == [1, 2]
+
+    def test_log_future_error_handles_cancelled_future(self, caplog):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        fut = Future()
+        fut.cancel()
+
+        with caplog.at_level(logging.ERROR):
+            ch._log_future_error(fut, "prepare_inbound", "m1")
+
+        assert "prepare_inbound" not in caplog.text
+
+    def test_log_future_error_surfaces_future_exception(self, caplog):
+        bus = MessageBus()
+        ch = DummyChannel(bus)
+        fut = Future()
+        fut.set_exception(RuntimeError("boom"))
+
+        with caplog.at_level(logging.ERROR):
+            ch._log_future_error(fut, "prepare_inbound", "m1")
+
+        assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
+
+    def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.dingtalk import DingTalkChannel
+        from app.channels.discord import DiscordChannel
+        from app.channels.feishu import FeishuChannel
+        from app.channels.github import GitHubChannel
+        from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.slack import SlackChannel
+        from app.channels.telegram import TelegramChannel
+        from app.channels.wechat import WechatChannel
+        from app.channels.wecom import WeComChannel
+
+        bus = MessageBus()
+        defaults = {
+            "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
+            "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
+            "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
+            "github": GitHubChannel(bus=bus, config={}).supports_streaming,
+            "slack": SlackChannel(bus=bus, config={}).supports_streaming,
+            "telegram": TelegramChannel(bus=bus, config={}).supports_streaming,
+            "wechat": WechatChannel(bus=bus, config={}).supports_streaming,
+            "wecom": WeComChannel(bus=bus, config={}).supports_streaming,
+        }
+
+        assert {name: caps["supports_streaming"] for name, caps in CHANNEL_CAPABILITIES.items()} == defaults
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +596,7 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
 
     # threads.create() returns a Thread-like dict
     mock_client.threads.create = AsyncMock(return_value={"thread_id": thread_id})
+    mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
 
     # threads.get() returns thread info (succeeds by default)
     mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id})
@@ -468,8 +614,33 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
+async def _make_channel_connection_repo(tmp_path: Path):
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'channel-connections.db'}", sqlite_dir=str(tmp_path))
+    return ChannelConnectionRepository(
+        get_session_factory(),
+        cipher=ChannelCredentialCipher.from_key("test-channel-key"),
+    )
+
+
 def _make_stream_part(event: str, data):
     return SimpleNamespace(event=event, data=data)
+
+
+def _ok_stream_events():
+    """Minimal successful streaming run: one text chunk plus a final values frame."""
+    return [
+        _make_stream_part(
+            "messages-tuple",
+            [{"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+        ),
+        _make_stream_part(
+            "values",
+            {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "Hello"}], "artifacts": []},
+        ),
+    ]
 
 
 def _make_async_iterator(items):
@@ -501,6 +672,57 @@ class TestChannelManager:
         assert csrf_token
         assert headers["Cookie"] == f"csrf_token={csrf_token}"
         assert headers["X-DeerFlow-Internal-Token"]
+
+    def test_concurrent_inbound_for_same_chat_reuses_single_thread(self):
+        # Each inbound message is dispatched on its own task, so two messages
+        # arriving close together for the same chat can both look up a missing
+        # thread before either stores one. Without per-conversation locking they
+        # each create a thread and the second store overwrites the first,
+        # orphaning a Gateway thread and splitting the conversation. The create
+        # path must be serialized so only one thread is created and reused.
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            created_ids: list[str] = []
+            first_create_started = asyncio.Event()
+            release_create = asyncio.Event()
+
+            async def blocking_create(*, metadata=None, headers=None):
+                thread_id = f"thread-{len(created_ids) + 1}"
+                created_ids.append(thread_id)
+                first_create_started.set()
+                # Hold the create open so a second concurrent message has a
+                # chance to race in before this one stores its thread_id.
+                await release_create.wait()
+                return {"thread_id": thread_id}
+
+            mock_client = MagicMock()
+            mock_client.threads.create = blocking_create
+            manager._client = mock_client
+
+            msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi")
+
+            task1 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await first_create_started.wait()
+            # task2 should block on the per-conversation lock rather than enter
+            # threads.create a second time.
+            task2 = asyncio.create_task(manager._get_or_create_thread(mock_client, msg))
+            await asyncio.sleep(0)
+            release_create.set()
+
+            (tid1, created1), (tid2, created2) = await asyncio.gather(task1, task2)
+
+            assert len(created_ids) == 1
+            assert tid1 == tid2 == "thread-1"
+            assert created1 is True
+            assert created2 is False
+            assert store.get_thread_id("slack", "C1") == "thread-1"
+
+        _run(go())
 
     def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
         from app.channels.manager import ChannelManager
@@ -543,6 +765,55 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_fetch_gateway_uses_bound_owner_headers(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"facts": [{"text": "owner fact"}]}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return MockResponse()
+
+        calls = []
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            msg = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U-platform",
+                owner_user_id="deerflow-user-1",
+                connection_id="connection-1",
+                text="/memory",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._fetch_gateway("/api/memory", "memory", msg=msg)
+
+            assert reply == "Memory contains 1 fact(s)."
+            assert calls[0]["headers"][INTERNAL_OWNER_USER_ID_HEADER_NAME] == "deerflow-user-1"
+
+        _run(go())
+
     def test_handle_chat_calls_channel_receive_file_for_inbound_files(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -580,7 +851,9 @@ class TestChannelManager:
             inbound = InboundMessage(
                 channel_name="test",
                 chat_id="chat1",
-                user_id="user1",
+                user_id="platform-user",
+                owner_user_id="owner-1",
+                connection_id="connection-1",
                 text="hi [image]",
                 files=[{"image_key": "img_1"}],
             )
@@ -593,12 +866,77 @@ class TestChannelManager:
             assert called_msg.text == "hi [image]"
             assert isinstance(called_thread_id, str)
             assert called_thread_id
+            assert mock_channel.receive_file.await_args.kwargs["user_id"] == "owner-1"
 
             mock_client.runs.wait.assert_called_once()
             run_call_args = mock_client.runs.wait.call_args
             assert run_call_args[1]["input"]["messages"][0]["content"] == "with /mnt/user-data/uploads/demo.png"
 
         _run(go())
+
+    def test_ingest_inbound_files_uses_explicit_owner_bucket(self, tmp_path, monkeypatch):
+        from app.channels.manager import INBOUND_FILE_READERS, _ingest_inbound_files
+        from deerflow.config.paths import Paths
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: paths)
+
+        async def read_file(file_info, client):
+            del file_info, client
+            return b"owner data"
+
+        INBOUND_FILE_READERS["owner-test"] = read_file
+
+        async def go():
+            try:
+                created = await _ingest_inbound_files(
+                    "thread-owner",
+                    InboundMessage(
+                        channel_name="owner-test",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        text="file",
+                        files=[{"filename": "report.txt", "type": "file"}],
+                    ),
+                    user_id="owner-1",
+                )
+            finally:
+                INBOUND_FILE_READERS.pop("owner-test", None)
+
+            assert created == [
+                {
+                    "filename": "report.txt",
+                    "size": len(b"owner data"),
+                    "path": "/mnt/user-data/uploads/report.txt",
+                    "is_image": False,
+                }
+            ]
+            assert (paths.sandbox_uploads_dir("thread-owner", user_id="owner-1") / "report.txt").read_bytes() == b"owner data"
+            assert not paths.sandbox_uploads_dir("thread-owner").exists()
+
+        _run(go())
+
+    def test_channel_storage_user_id_falls_back_to_platform_user(self, monkeypatch):
+        """Unbound auth-enabled channels stage files under the same bucket the run uses.
+
+        ``_resolve_run_params`` runs an unbound msg under ``safe(msg.user_id)``, so
+        ``_channel_storage_user_id`` must resolve to the same value instead of
+        ``None`` (which would fall back to ``"default"`` in the dispatcher task and
+        cross buckets — the agent would read uploads the channel never wrote there).
+        """
+        from app.channels.manager import _channel_storage_user_id, _safe_user_id_for_run
+
+        # Auth enabled (no auth-disabled owner), unbound (no owner_user_id).
+        monkeypatch.setattr("app.channels.manager._auth_disabled_owner_user_id", lambda: None)
+
+        unbound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi")
+        assert _channel_storage_user_id(unbound) == _safe_user_id_for_run("U-platform")
+
+        bound = InboundMessage(channel_name="slack", chat_id="C1", user_id="U-platform", text="hi", owner_user_id="owner-1")
+        assert _channel_storage_user_id(bound) == _safe_user_id_for_run("owner-1")
+
+        anonymous = InboundMessage(channel_name="slack", chat_id="C1", user_id="", text="hi")
+        assert _channel_storage_user_id(anonymous) is None
 
     def test_handle_chat_creates_thread(self):
         from app.channels.manager import ChannelManager
@@ -620,16 +958,34 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text="hi")
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                topic_id="topic1",
+                thread_ts="msg1",
+                connection_id="conn1",
+            )
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
             # Thread should be created through Gateway
             mock_client.threads.create.assert_called_once()
+            assert mock_client.threads.create.call_args.kwargs["metadata"] == {
+                "channel_source": {
+                    "type": "im_channel",
+                    "provider": "test",
+                    "chat_id": "chat1",
+                    "topic_id": "topic1",
+                    "thread_ts": "msg1",
+                    "connection_id": "conn1",
+                }
+            }
 
             # Thread ID should be stored
-            thread_id = store.get_thread_id("test", "chat1")
+            thread_id = store.get_thread_id("test", "chat1", topic_id="topic1")
             assert thread_id == "test-thread-123"
 
             # runs.wait should be called with the thread_id
@@ -643,6 +999,535 @@ class TestChannelManager:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_dispatch_loop_dedupes_stable_provider_message_id(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            def _slack_inbound(message_id: str) -> InboundMessage:
+                # Distinct objects per publish, like a real provider redelivery.
+                return InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U123",
+                    text="sensitive prompt",
+                    topic_id="1710000000.000100",
+                    metadata={"team_id": "T123", "message_id": message_id},
+                )
+
+            # Same stable message_id delivered twice -> processed once.
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
+            await bus.publish_inbound(_slack_inbound("1710000000.000200"))
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 1 and len(outbound_received) == 1)
+            await asyncio.sleep(0.05)
+            assert manager._client.threads.create.call_count == 1
+            assert manager._client.runs.wait.call_count == 1
+            assert len(outbound_received) == 1
+
+            # Negative control: a *different* message_id must still be processed,
+            # so an over-dedupe regression (dropping distinct messages) is caught.
+            await bus.publish_inbound(_slack_inbound("1710000000.000999"))
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2 and len(outbound_received) == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+            assert len(outbound_received) == 2
+
+        _run(go())
+
+    def test_inbound_dedupe_key_fails_closed_without_workspace(self):
+        """Without a workspace identifier, skip dedupe instead of collapsing workspaces (willem #3)."""
+        from app.channels.manager import ChannelManager
+
+        with_workspace = InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="x",
+            metadata={"team_id": "T1", "message_id": "m1"},
+        )
+        assert ChannelManager._inbound_dedupe_key(with_workspace) == ("slack", "T1", "C1", "m1")
+
+        without_workspace = InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="x",
+            metadata={"message_id": "m1"},
+        )
+        assert ChannelManager._inbound_dedupe_key(without_workspace) is None
+
+    def test_inbound_dedupe_key_uses_chat_id_for_chat_scoped_providers_when_unbound(self):
+        """Unbound telegram/feishu/wechat must still form a dedupe key via chat_id.
+
+        Those adapters persist connection.workspace_id = chat_id, but
+        attach_connection_identity only sets msg.workspace_id when a connection
+        exists. Provider redeliveries on unbound (or not-yet-bound) chats would
+        otherwise skip the entire inbound dedupe path and run the agent N times.
+        """
+        from app.channels.manager import ChannelManager
+
+        for channel, chat_id, message_id in (
+            ("telegram", "12345", "42"),
+            ("feishu", "oc_abc", "om_1"),
+            ("wechat", "wx_user_1", "m1"),
+        ):
+            unbound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(unbound) == (channel, chat_id, chat_id, message_id)
+
+            # Bound shape (workspace already on the message) must keep the same key
+            # so bound and unbound redeliveries of the same chat share the cache.
+            bound = InboundMessage(
+                channel_name=channel,
+                chat_id=chat_id,
+                user_id="u1",
+                text="hi",
+                workspace_id=chat_id,
+                metadata={"message_id": message_id},
+            )
+            assert ChannelManager._inbound_dedupe_key(bound) == (channel, chat_id, chat_id, message_id)
+
+    def test_inbound_dedupe_key_uses_dingtalk_conversation_id_when_unbound(self):
+        """DingTalk stamps conversation_id on every inbound; use it when unbound.
+
+        Group connections store workspace_id=conversation_id; P2P stores None.
+        Without a metadata fallback, unbound groups and all P2P traffic skipped
+        dedupe entirely (including bound P2P, whose connection.workspace_id is
+        None). conversation_id is already on the message and is the natural
+        tenant scope — same role as Slack team_id / Discord guild_id.
+        """
+        from app.channels.manager import ChannelManager
+
+        group_unbound = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="cid123",
+            user_id="staff1",
+            text="hi",
+            metadata={
+                "conversation_type": "2",
+                "conversation_id": "cid123",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(group_unbound) == ("dingtalk", "cid123", "cid123", "mid1")
+
+        p2p = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="staff1",
+            user_id="staff1",
+            text="hi",
+            # Bound P2P still has workspace_id=None on the connection record.
+            connection_id="conn1",
+            owner_user_id="owner1",
+            workspace_id=None,
+            metadata={
+                "conversation_type": "1",
+                "conversation_id": "cid_p2p",
+                "message_id": "mid1",
+            },
+        )
+        assert ChannelManager._inbound_dedupe_key(p2p) == ("dingtalk", "cid_p2p", "staff1", "mid1")
+
+    def test_inbound_dedupe_chat_scoped_fallback_does_not_collapse_distinct_chats(self):
+        """newly_missed guard: chat_id fallback must not cross-dedupe two chats.
+
+        Same stable message_id string in two different chats is legitimate and
+        must produce distinct keys (message_ids are only unique per chat on
+        Telegram/Feishu/WeChat).
+        """
+        from app.channels.manager import ChannelManager
+
+        a = InboundMessage(
+            channel_name="telegram",
+            chat_id="111",
+            user_id="u1",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        b = InboundMessage(
+            channel_name="telegram",
+            chat_id="222",
+            user_id="u2",
+            text="hi",
+            metadata={"message_id": "42"},
+        )
+        assert ChannelManager._inbound_dedupe_key(a) == ("telegram", "111", "111", "42")
+        assert ChannelManager._inbound_dedupe_key(b) == ("telegram", "222", "222", "42")
+        assert ChannelManager._inbound_dedupe_key(a) != ChannelManager._inbound_dedupe_key(b)
+
+    @pytest.mark.parametrize(
+        ("channel", "chat_id"),
+        (
+            ("wechat", "wx_user_1"),
+            ("telegram", "12345"),
+            ("feishu", "oc_abc"),
+        ),
+    )
+    def test_dispatch_loop_dedupes_unbound_chat_scoped_redelivery(self, tmp_path, monkeypatch, channel, chat_id):
+        """Provider redelivery of an unbound chat-scoped message runs the agent once.
+
+        Shaped like wechat.py / telegram.py inbound metadata (message_id only, no
+        workspace_id / team_id) before attach_connection_identity finds a binding.
+        Parametrized across all three CHAT_SCOPED_WORKSPACE_CHANNELS so the
+        streaming dispatch path (telegram/feishu) is covered end-to-end too, not
+        only WeChat's runs.wait path.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        streaming = ChannelManager._channel_supports_streaming(channel)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=lambda *a, **kw: _make_async_iterator(_ok_stream_events()))
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            # The mock the channel's dispatch path actually drives.
+            run_call = manager._client.runs.stream if streaming else manager._client.runs.wait
+
+            def _inbound(message_id: str) -> InboundMessage:
+                return InboundMessage(
+                    channel_name=channel,
+                    chat_id=chat_id,
+                    user_id="u1",
+                    text=f"hello from {channel}",
+                    metadata={"message_id": message_id},
+                )
+
+            await bus.publish_inbound(_inbound("m-1"))
+            await bus.publish_inbound(_inbound("m-1"))
+            await _wait_for(lambda: run_call.call_count == 1 and any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert run_call.call_count == 1
+
+            # Distinct message_id still processes (negative control / newly_missed).
+            await bus.publish_inbound(_inbound("m-2"))
+            await _wait_for(lambda: run_call.call_count == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert run_call.call_count == 2
+
+        _run(go())
+
+    def test_streaming_transient_failure_releases_dedupe_key(self, tmp_path, monkeypatch):
+        """Release a swallowed streaming error only after its final outbound.
+
+        _release_inbound_dedupe_key lives in _handle_message's `except Exception`
+        handler, but _handle_streaming_chat handles its own errors and never
+        re-raises — so without an explicit release the key recorded on receipt
+        survives the full dedupe TTL and the provider's redelivery (the retry
+        that would recover the failure) is silently dropped. Releasing before
+        the final outbound would let that retry overtake the terminal reply.
+        """
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+            key_present_during_final_publish: list[bool] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                if msg.is_final:
+                    key = manager._inbound_dedupe_key(_inbound())
+                    key_present_during_final_publish.append(key in manager._inbound_dedupe_store._store)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            def _failing_stream(*args, **kwargs):
+                async def gen():
+                    yield _make_stream_part(
+                        "messages-tuple",
+                        [{"id": "ai-1", "content": "Partial", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}],
+                    )
+                    raise ConnectionError("stream broken")
+
+                return gen()
+
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.stream = MagicMock(side_effect=_failing_stream)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="u1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.stream.call_count == 1
+            assert key_present_during_final_publish == [True]
+
+            # The provider redelivers the same message after the failure.
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.stream.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.stream.call_count == 2
+
+        _run(go())
+
+    def test_thread_busy_releases_dedupe_key(self, tmp_path):
+        """A busy thread is transient, so its redelivery must stay reprocessable.
+
+        runs.wait's ConflictError is handled in place (busy message, no re-raise),
+        so it bypasses _handle_message's release just like the streaming path.
+        """
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.wait = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name="wechat",
+                    chat_id="wx_user_1",
+                    user_id="wx_user_1",
+                    text="hi",
+                    metadata={"message_id": "m-1"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.wait.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.wait.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.wait.call_count == 2
+
+        _run(go())
+
+    def test_fire_and_forget_thread_busy_releases_dedupe_key(self, tmp_path):
+        """Same invariant for a fire-and-forget channel that does not buffer follow-ups."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        channel_name = "test-fire-and-forget-retry"
+        original = CHANNEL_RUN_POLICY.get(channel_name)
+        CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(
+            is_interactive=False,
+            fire_and_forget=True,
+            requires_bound_identity=False,
+            buffer_followups_on_busy=False,
+        )
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/t/runs")
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=httpx.Response(409, request=request),
+                body={"message": "Thread is already running a task."},
+            )
+            manager._client = _make_mock_langgraph_client()
+            manager._client.runs.create = AsyncMock(side_effect=conflict)
+            await manager.start()
+
+            def _inbound() -> InboundMessage:
+                return InboundMessage(
+                    channel_name=channel_name,
+                    chat_id="owner/repo",
+                    user_id="dev",
+                    owner_user_id="agent-owner-1",
+                    workspace_id="owner/repo",
+                    text="hi",
+                    metadata={"message_id": "delivery-1:dev:agent"},
+                )
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            await asyncio.sleep(0.05)
+            assert manager._client.runs.create.call_count == 1
+
+            await bus.publish_inbound(_inbound())
+            await _wait_for(lambda: manager._client.runs.create.call_count == 2)
+            await manager.stop()
+
+            assert manager._client.runs.create.call_count == 2
+
+        try:
+            _run(go())
+        finally:
+            if original is None:
+                CHANNEL_RUN_POLICY.pop(channel_name, None)
+            else:
+                CHANNEL_RUN_POLICY[channel_name] = original
+
+    @pytest.mark.asyncio
+    async def test_github_redelivery_is_deduped_like_other_channels(self, tmp_path):
+        """A redelivered GitHub webhook must dispatch the agent only once.
+
+        PR #3584 added inbound dedupe for the IM channels; the GitHub channel
+        added in PR #3754 never stamped the ``message_id`` / workspace the
+        dedupe keys on, so a redelivered GitHub webhook (the native
+        "Redeliver" button, the REST API, or an operator's own recovery
+        script — GitHub does not auto-retry a failed delivery) re-ran the
+        agent with real side effects (e.g. a duplicate PR comment). The
+        dispatcher now stamps the X-GitHub-Delivery
+        GUID (scoped per agent) plus the repo, so the same manager dedupe
+        absorbs the replay — while a second agent bound to the same delivery,
+        and a genuinely new delivery, still fire.
+        """
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+
+        def _gh(delivery: str, agent: str = "reviewer", owner_user_id: str = "alice") -> InboundMessage:
+            # Shaped exactly as app.gateway.github.dispatcher.fanout_event
+            # emits: a 3-part (delivery, owner_user_id, agent) message_id —
+            # ``dedupe_message_id = f"{delivery_id}:{match.user_id}:{agent.name}"``
+            # — plus the matching ``owner_user_id`` field fanout_event sets
+            # from ``match.user_id``.
+            return InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="alice",
+                owner_user_id=owner_user_id,
+                text="@bot please review",
+                topic_id=f"7:{agent}",
+                workspace_id="zhfeng/llm-gateway",
+                metadata={"message_id": f"{delivery}:{owner_user_id}:{agent}", "agent_name": agent},
+            )
+
+        # The dedupe key matches the other channels' 4-tuple shape.
+        assert ChannelManager._inbound_dedupe_key(_gh("d1")) == ("github", "zhfeng/llm-gateway", "zhfeng/llm-gateway", "d1:alice:reviewer")
+
+        # First delivery fires; an identical redelivery of the same GUID is dropped.
+        assert await manager._is_duplicate_inbound(_gh("d1")) is False
+        assert await manager._is_duplicate_inbound(_gh("d1")) is True
+        # A genuinely new delivery still fires.
+        assert await manager._is_duplicate_inbound(_gh("d2")) is False
+        # A second agent fanned out from the SAME delivery is not cross-deduped.
+        assert await manager._is_duplicate_inbound(_gh("d1", agent="coder")) is False
+        # A second user's SAME-named agent on the SAME delivery is not
+        # cross-deduped either. A helper still stamping the old 2-part
+        # (delivery, agent) id could not even express this case — it would
+        # collide with the very first assertion's "d1"+"reviewer" key and
+        # silently drop this user's run (willem-bd, PR #4104 review).
+        assert await manager._is_duplicate_inbound(_gh("d1", owner_user_id="bob")) is False
+
+    def test_dispatch_loop_releases_dedupe_key_when_handling_fails(self, tmp_path):
+        """A transient handling failure must not black-hole a provider redelivery (ShenAC #1)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            client = _make_mock_langgraph_client()
+            attempts = {"n": 0}
+
+            async def flaky_wait(*args, **kwargs):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise RuntimeError("transient gateway 503")
+                return {"messages": [{"type": "human", "content": "hi"}, {"type": "ai", "content": "recovered"}]}
+
+            client.runs.wait = AsyncMock(side_effect=flaky_wait)
+            manager._client = client
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="slack",
+                chat_id="C123",
+                user_id="U123",
+                text="hello",
+                metadata={"team_id": "T123", "message_id": "m-1"},
+            )
+
+            # First delivery fails transiently; the dedupe key must be released.
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: attempts["n"] == 1 and len(outbound_received) >= 1)
+
+            # Provider redelivers the same message_id: it must be reprocessed, not dropped.
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: attempts["n"] == 2)
+            await asyncio.sleep(0.05)
+            await manager.stop()
+
+            assert attempts["n"] == 2
 
         _run(go())
 
@@ -807,7 +1692,7 @@ class TestChannelManager:
                 bus=bus,
                 store=store,
                 channel_sessions={
-                    "telegram": {
+                    "slack": {
                         "assistant_id": "mobile_agent",
                         "config": {"recursion_limit": 55},
                         "context": {
@@ -830,7 +1715,7 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+            inbound = InboundMessage(channel_name="slack", chat_id="chat1", user_id="user1", text="hi")
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
@@ -847,9 +1732,11 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_clarification_follow_up_preserves_history(self):
+    def test_clarification_follow_up_preserves_history(self, monkeypatch):
         """Conversation should continue after ask_clarification instead of resetting history."""
         from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
@@ -979,7 +1866,7 @@ class TestChannelManager:
                 store=store,
                 default_session={"context": {"is_plan_mode": True}},
                 channel_sessions={
-                    "telegram": {
+                    "slack": {
                         "assistant_id": "mobile_agent",
                         "config": {"recursion_limit": 55},
                         "context": {
@@ -1012,7 +1899,7 @@ class TestChannelManager:
 
             await manager.start()
 
-            inbound = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="vip-user", text="hi")
+            inbound = InboundMessage(channel_name="slack", chat_id="chat1", user_id="vip-user", text="hi")
             await bus.publish_inbound(inbound)
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
@@ -1128,9 +2015,79 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.runs.stream.assert_called_once()
-            assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
+
+        _run(go())
+
+    def test_handle_streaming_chat_accepts_runtime_messages_event(self, monkeypatch):
+        """The embedded runtime emits SSE event name "messages" (LangGraph
+        Platform semantics) for the requested "messages-tuple" stream mode —
+        the manager must accumulate text from those events too."""
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            stream_events = [
+                _make_stream_part(
+                    "messages",
+                    [
+                        {"id": "ai-1", "content": "Hello", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "messages",
+                    [
+                        {"id": "ai-1", "content": " world", "type": "AIMessageChunk"},
+                        {"langgraph_node": "agent"},
+                    ],
+                ),
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "Hello world"},
+                        ],
+                        "artifacts": [],
+                    },
+                ),
+            ]
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+            manager._client = mock_client
+
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="telegram",
+                chat_id="chat1",
+                user_id="user1",
+                text="hi",
+                thread_ts="42",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 3)
+            await manager.stop()
+
+            mock_client.runs.stream.assert_called_once()
+            assert [msg.text for msg in outbound_received] == ["Hello ▉", "Hello world ▉", "Hello world"]
+            assert [msg.is_final for msg in outbound_received] == [False, False, True]
 
         _run(go())
 
@@ -1187,8 +2144,8 @@ class TestChannelManager:
             await manager.stop()
 
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
-            assert outbound_received[0].text == "Thinking"
-            assert outbound_received[1].text == "Which environment?"
+            assert outbound_received[0].text == "Thinking ▉"
+            assert outbound_received[1].text == "Which environment? ▉"
             assert outbound_received[2].text == "Which environment?"
             assert all(PENDING_CLARIFICATION_METADATA_KEY not in msg.metadata for msg in outbound_received[:-1])
             assert outbound_received[-1].metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
@@ -1301,6 +2258,232 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_feishu_same_thread_messages_queue_instead_of_busy(self, monkeypatch):
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            first_started = asyncio.Event()
+            release_first = asyncio.Event()
+            second_started = asyncio.Event()
+
+            async def _stream(thread_id, assistant_id, *, input, **kwargs):  # noqa: ARG001
+                prompt = input["messages"][0]["content"]
+                if prompt == "first":
+                    first_started.set()
+                    await release_first.wait()
+                    yield _make_stream_part(
+                        "values",
+                        {
+                            "messages": [
+                                {"type": "human", "content": "first"},
+                                {"type": "ai", "content": "First done"},
+                            ],
+                            "artifacts": [],
+                        },
+                    )
+                    return
+
+                second_started.set()
+                yield _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "second"},
+                            {"type": "ai", "content": "Second done"},
+                        ],
+                        "artifacts": [],
+                    },
+                )
+
+            mock_client = _make_mock_langgraph_client(thread_id="feishu-thread-1")
+            mock_client.runs.stream = MagicMock(side_effect=_stream)
+            manager._client = mock_client
+
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="first",
+                    topic_id="topic-1",
+                    thread_ts="om-source-1",
+                )
+            )
+            await _wait_for(first_started.is_set)
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="second",
+                    topic_id="topic-1",
+                    thread_ts="om-source-2",
+                )
+            )
+
+            await _wait_for(lambda: any(message.thread_ts == "om-source-2" and message.text.startswith("Queued behind another request") for message in outbound_received))
+            assert second_started.is_set() is False
+
+            release_first.set()
+            await _wait_for(second_started.is_set)
+            await _wait_for(lambda: len([message for message in outbound_received if message.is_final]) == 2)
+            await manager.stop()
+
+            assert all(message.text != THREAD_BUSY_MESSAGE for message in outbound_received)
+            second_turn = [message for message in outbound_received if message.thread_ts == "om-source-2"]
+            assert second_turn[0].text.startswith("Queued behind another request")
+            assert any(message.text == "thinking..." for message in second_turn if message.is_final is False)
+            assert second_turn[-1].text == "Second done"
+            assert mock_client.runs.stream.call_count == 2
+
+        _run(go())
+
+    def test_handle_feishu_queue_waiter_cleanup_on_cancelled_progress_publish(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            msg = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text="second",
+                topic_id="topic-1",
+                thread_ts="om-source-2",
+            )
+
+            thread_id = "feishu-thread-1"
+            serial_state, _ = manager._begin_serialized_thread_run(
+                channel_name="feishu",
+                thread_id=thread_id,
+            )
+            assert serial_state is not None
+            await serial_state.lock.acquire()
+
+            manager._get_client = MagicMock(return_value=object())
+            manager._get_or_create_thread = AsyncMock(return_value=(thread_id, False))
+            manager._update_thread_channel_metadata = AsyncMock()
+            manager._publish_progress_update = AsyncMock(side_effect=asyncio.CancelledError())
+            manager._handle_chat_on_thread = AsyncMock()
+
+            with pytest.raises(asyncio.CancelledError):
+                await manager._handle_chat(msg, bound_identity_checked=True)
+
+            leaked_state = manager._serialized_thread_runs.get(("feishu", thread_id))
+            assert leaked_state is serial_state
+            assert leaked_state.waiters == 1
+            assert leaked_state.lock.locked() is True
+            manager._handle_chat_on_thread.assert_not_awaited()
+
+            manager._finish_serialized_thread_run(
+                channel_name="feishu",
+                thread_id=thread_id,
+                state=serial_state,
+                lock_acquired=True,
+            )
+            assert ("feishu", thread_id) not in manager._serialized_thread_runs
+
+        _run(go())
+
+    def test_handle_feishu_different_threads_can_stream_concurrently(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            first_started = asyncio.Event()
+            second_started = asyncio.Event()
+            release_streams = asyncio.Event()
+
+            async def create_thread(**kwargs):
+                topic_id = kwargs["metadata"]["channel_source"]["topic_id"]
+                return {"thread_id": f"thread-{topic_id}"}
+
+            async def _stream(thread_id, assistant_id, *, input, **kwargs):  # noqa: ARG001
+                if thread_id == "thread-topic-a":
+                    first_started.set()
+                elif thread_id == "thread-topic-b":
+                    second_started.set()
+                await release_streams.wait()
+                yield _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": input["messages"][0]["content"]},
+                            {"type": "ai", "content": f"done:{thread_id}"},
+                        ],
+                        "artifacts": [],
+                    },
+                )
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.threads.create = AsyncMock(side_effect=create_thread)
+            mock_client.runs.stream = MagicMock(side_effect=_stream)
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="first",
+                    topic_id="topic-a",
+                    thread_ts="om-source-a",
+                )
+            )
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="second",
+                    topic_id="topic-b",
+                    thread_ts="om-source-b",
+                )
+            )
+
+            await _wait_for(first_started.is_set)
+            await _wait_for(second_started.is_set)
+            release_streams.set()
+            await _wait_for(lambda: len([message for message in outbound_received if message.is_final]) == 2)
+            await manager.stop()
+
+            assert mock_client.runs.stream.call_count == 2
+            assert not any(message.text.startswith("Queued behind another request") for message in outbound_received)
+
+        _run(go())
+
     def test_handle_command_help(self):
         from app.channels.manager import ChannelManager
 
@@ -1331,6 +2514,542 @@ class TestChannelManager:
             assert len(outbound_received) == 1
             assert "/new" in outbound_received[0].text
             assert "/help" in outbound_received[0].text
+
+        _run(go())
+
+    def test_handle_command_blank_text_is_reported_without_running_agent(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="   ",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text.startswith("Unknown command.")
+
+        _run(go())
+
+    def test_handle_command_rejects_multi_slash_control_command(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="//help",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text.startswith("Unknown command: //help.")
+
+        _run(go())
+
+    def test_handle_command_requires_control_command_at_start(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client(thread_id="new-thread-456")
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text=" /new",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.threads.create.assert_not_called()
+            assert store.get_thread_id("test", "chat1") is None
+            assert outbound_received[0].text.startswith("Unknown command: /new.")
+
+        _run(go())
+
+    def test_handle_command_outbound_thread_id_uses_topic_thread(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            store.set_thread_id("test", "chat1", "base-thread")
+            store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/status",
+                msg_type=InboundMessageType.COMMAND,
+                topic_id="topic-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert outbound_received[0].text == "Active thread: topic-thread"
+            assert outbound_received[0].thread_id == "topic-thread"
+
+        _run(go())
+
+    def test_handle_command_slash_skill_routes_to_chat(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[1]["input"]["messages"][0]["content"] == "/data-analysis analyze uploads/foo.csv"
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_command_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def fake_ingest(thread_id, msg, *, user_id=None):
+            del user_id
+            return [
+                {
+                    "filename": "report.pdf",
+                    "size": 12,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "is_image": False,
+                }
+            ]
+
+        monkeypatch.setattr("app.channels.manager._ingest_inbound_files", fake_ingest)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            original_text = "/data-analysis analyze report.pdf"
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text=original_text,
+                files=[{"filename": "report.pdf"}],
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_called_once()
+            human_message = mock_client.runs.wait.call_args[1]["input"]["messages"][0]
+            assert original_text in human_message["content"]
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
+            # injects <current_uploads> downstream.
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_streaming_slash_skill_with_attachment_preserves_original_content(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def fake_ingest(thread_id, msg, *, user_id=None):
+            del user_id
+            return [
+                {
+                    "filename": "report.pdf",
+                    "size": 12,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "is_image": False,
+                }
+            ]
+
+        monkeypatch.setattr("app.channels.manager._ingest_inbound_files", fake_ingest)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.stream = MagicMock(
+                return_value=_make_async_iterator(
+                    [
+                        _make_stream_part(
+                            "values",
+                            {"messages": [{"type": "ai", "content": "streamed response"}]},
+                        )
+                    ]
+                )
+            )
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            original_text = "/data-analysis analyze report.pdf"
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat1",
+                user_id="user1",
+                text=original_text,
+                files=[{"filename": "report.pdf"}],
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: any(message.is_final for message in outbound_received))
+            await manager.stop()
+
+            mock_client.runs.stream.assert_called_once()
+            human_message = mock_client.runs.stream.call_args[1]["input"]["messages"][0]
+            assert original_text in human_message["content"]
+            files = human_message.get("additional_kwargs", {}).get("files", [])
+            assert len(files) == 1
+            assert files[0]["filename"] == "report.pdf", "File metadata must reach the run request via additional_kwargs.files"
+
+        _run(go())
+
+    def test_handle_command_slash_skill_requires_command_at_start(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="  /data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text.startswith("Unknown command: /data-analysis.")
+
+        _run(go())
+
+    def test_handle_command_slash_skill_respects_custom_agent_skill_whitelist(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", lambda name, *, user_id=None: SimpleNamespace(skills=["frontend-design"]))
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                default_session={"assistant_id": "analyst-agent"},
+            )
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text == "Skill `/data-analysis` is not available for this agent."
+
+        _run(go())
+
+    def test_slash_skill_whitelist_loads_agent_config_for_the_resolved_owner(self, monkeypatch):
+        """The per-user custom agent whitelist must be read from the same owner
+        bucket the run uses. ``_resolve_run_params`` resolves that owner into
+        ``run_context["user_id"]`` (per ``_channel_storage_user_id``, the single
+        source of truth for run identity and storage), but the whitelist
+        pre-check dropped it, so ``load_agent_config`` fell back to the dispatch
+        loop's unset contextvar (``"default"``) — reading, or failing to find,
+        the wrong user's agent config.
+        """
+        from app.channels.manager import ChannelManager
+
+        captured: dict[str, object] = {}
+
+        def spy_load_agent_config(name, *, user_id=None):
+            captured["name"] = name
+            captured["user_id"] = user_id
+            return SimpleNamespace(skills=["data-analysis"])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", spy_load_agent_config)
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, default_session={"assistant_id": "analyst-agent"})
+
+        # A bound connection: the owner resolves to a real, non-default bucket.
+        msg = InboundMessage(
+            channel_name="test",
+            chat_id="chat1",
+            user_id="platform-user",
+            owner_user_id="owner-alice",
+            text="/data-analysis go",
+            msg_type=InboundMessageType.COMMAND,
+        )
+
+        expected_owner = manager._resolve_run_params(msg, "")[2].get("user_id")
+
+        manager._resolve_available_skill_names(msg)
+
+        assert expected_owner and expected_owner != "default"
+        assert captured["user_id"] == expected_owner
+
+    def test_handle_command_slash_skill_reports_disabled_skill(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis", enabled=False)])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text == "Skill `/data-analysis` is installed but disabled. Enable it before using slash activation."
+
+        _run(go())
+
+    def test_handle_command_uninstalled_slash_skill_stays_unknown_command(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "frontend-design")])
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text.startswith("Unknown command: /data-analysis.")
+
+        _run(go())
+
+    def test_handle_command_slash_skill_resolution_error_is_reported(self, monkeypatch):
+        from app.channels.manager import ChannelManager, SlashSkillCommandResolutionError
+
+        def fail_resolution(text, available_skills=None, storage=None):
+            raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.")
+
+        monkeypatch.setattr("app.channels.manager._resolve_slash_skill_command", fail_resolution)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            store.set_thread_id("test", "chat1", "base-thread")
+            store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+
+            inbound = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="user1",
+                text="/data-analysis analyze uploads/foo.csv",
+                msg_type=InboundMessageType.COMMAND,
+                topic_id="topic-1",
+            )
+            await bus.publish_inbound(inbound)
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            mock_client.runs.wait.assert_not_called()
+            assert outbound_received[0].text == "Failed to resolve slash skill command. Please check the skill configuration."
+            assert outbound_received[0].thread_id == "topic-thread"
 
         _run(go())
 
@@ -1428,9 +3147,11 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_same_topic_reuses_thread(self):
+    def test_same_topic_reuses_thread(self, monkeypatch):
         """Messages with the same topic_id should reuse the same DeerFlow thread."""
         from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
 
         async def go():
             bus = MessageBus()
@@ -1464,6 +3185,17 @@ class TestChannelManager:
 
             # threads.create should be called only ONCE (second message reuses the thread)
             mock_client.threads.create.assert_called_once()
+            mock_client.threads.update.assert_called_once_with(
+                "topic-thread-1",
+                metadata={
+                    "channel_source": {
+                        "type": "im_channel",
+                        "provider": "test",
+                        "chat_id": "chat1",
+                        "topic_id": "topic-root-123",
+                    }
+                },
+            )
 
             # Both runs.wait calls should use the same thread_id
             assert mock_client.runs.wait.call_count == 2
@@ -1473,7 +3205,7 @@ class TestChannelManager:
         _run(go())
 
     def test_none_topic_reuses_thread(self):
-        """Messages with topic_id=None should reuse the same thread (e.g. Telegram private chat)."""
+        """Messages with topic_id=None should reuse the same thread (e.g. a private/direct chat)."""
         from app.channels.manager import ChannelManager
 
         async def go():
@@ -1492,10 +3224,10 @@ class TestChannelManager:
             bus.subscribe_outbound(capture)
             await manager.start()
 
-            # Send two messages with topic_id=None (simulates Telegram private chat)
+            # Send two messages with topic_id=None (simulates a private/direct chat)
             for text in ["hello", "what did I just say?"]:
                 msg = InboundMessage(
-                    channel_name="telegram",
+                    channel_name="slack",
                     chat_id="chat1",
                     user_id="user1",
                     text=text,
@@ -1787,6 +3519,1772 @@ class TestChannelManager:
         _run(go())
 
 
+class TestResolveRunParamsUserId:
+    """Regression for PR #3294: channel identity must reach ``run_context``
+    while staying safe for user-scoped filesystem buckets.
+    """
+
+    def _manager(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        return ChannelManager(bus=bus, store=store)
+
+    def test_safe_user_id_is_passed_through(self, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="123456", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "123456"
+        assert run_context["channel_user_id"] == "123456"
+
+    def test_resolve_run_params_plumbs_channel_name_into_run_context(self):
+        """``channel_name`` must land on ``run_context`` so in-graph code can
+        gate tool exposure on it.
+
+        Concretely: the lead-agent factory withholds the ``update_agent``
+        tool from runs whose ``run_context["channel_name"]`` is webhook-shaped
+        (currently ``"github"``). If this plumbing regresses, the factory
+        loses the only signal it has to make that decision and webhook
+        runs silently regain a privilege-escalation path.
+        """
+        manager = self._manager()
+
+        gh_msg = InboundMessage(channel_name="github", chat_id="acme/widget", user_id="alice", text="hi")
+        _, _, gh_ctx = manager._resolve_run_params(gh_msg, "thread-1")
+        assert gh_ctx["channel_name"] == "github"
+
+        tg_msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="42", text="hi")
+        _, _, tg_ctx = manager._resolve_run_params(tg_msg, "thread-2")
+        assert tg_ctx["channel_name"] == "telegram"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"user_id": "U-platform", "owner_user_id": "deerflow-user-1"},  # bound
+            {"user_id": "U-platform"},  # unbound auth-enabled
+            {"user_id": "feishu|ou_AbC/123"},  # unbound needing sanitization
+        ],
+    )
+    def test_run_identity_matches_storage_bucket(self, kwargs, monkeypatch):
+        """The run user_id and the file/artifact storage bucket share one resolver.
+
+        Pins #2 and #3 to a single source of truth so they cannot drift: whatever
+        _resolve_run_params puts in run_context["user_id"] is exactly what
+        _channel_storage_user_id scopes uploads/artifacts to.
+        """
+        from app.channels.manager import _channel_storage_user_id
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="slack", chat_id="C123", text="hi", **kwargs)
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == _channel_storage_user_id(msg)
+
+    def test_connection_owner_user_id_takes_precedence_over_platform_user_id(self, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U-platform",
+            owner_user_id="deerflow-user-1",
+            connection_id="connection-1",
+            text="hi",
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "deerflow-user-1"
+        assert run_context["channel_user_id"] == "U-platform"
+
+    def test_github_channel_gets_raised_recursion_limit(self):
+        """Autonomous GitHub coding runs (clone → edit → test → push → PR) need
+        more super-steps than an interactive chat turn. The default
+        ``recursion_limit`` of 100 is raised for the github channel only."""
+        manager = self._manager()
+
+        gh_msg = InboundMessage(channel_name="github", chat_id="zhfeng/llm-gateway", user_id="zhfeng", text="hi")
+        _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+        assert gh_config["recursion_limit"] >= 250
+
+        # Interactive channels keep the default ceiling.
+        slack_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="u", text="hi")
+        _, slack_config, _ = manager._resolve_run_params(slack_msg, "thread-1")
+        assert slack_config["recursion_limit"] == 100
+
+    def test_github_channel_recursion_limit_respects_higher_override(self):
+        """An explicit higher recursion_limit in channel/user config must not be
+        lowered by the github bump (it uses ``max``)."""
+        manager = self._manager()
+        manager._default_session["config"] = {"recursion_limit": 400}
+
+        gh_msg = InboundMessage(channel_name="github", chat_id="zhfeng/llm-gateway", user_id="zhfeng", text="hi")
+        _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+        assert gh_config["recursion_limit"] == 400
+
+    def test_github_channel_per_agent_recursion_limit_override(self):
+        """An agent's ``github.recursion_limit`` overrides the channel default.
+
+        Some autonomous workloads (large refactors, multi-file migrations)
+        need more headroom than 250; others (review-only agents) need less.
+        The per-agent value flows via ``msg.metadata["github"]["recursion_limit"]``
+        — the dispatcher reads it from ``GitHubAgentConfig`` at fanout time.
+        The per-agent value is honored verbatim, including values below the
+        channel default and below 100.
+        """
+        manager = self._manager()
+
+        # Higher than the channel default — agent gets the bigger ceiling.
+        gh_msg = InboundMessage(
+            channel_name="github",
+            chat_id="zhfeng/llm-gateway",
+            user_id="zhfeng",
+            text="hi",
+            metadata={"github": {"recursion_limit": 500}},
+        )
+        _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+        assert gh_config["recursion_limit"] == 500
+
+        # Below the channel default — agent gets the lower ceiling.
+        gh_msg_low = InboundMessage(
+            channel_name="github",
+            chat_id="zhfeng/llm-gateway",
+            user_id="zhfeng",
+            text="hi",
+            metadata={"github": {"recursion_limit": 120}},
+        )
+        _, gh_config_low, _ = manager._resolve_run_params(gh_msg_low, "thread-1")
+        assert gh_config_low["recursion_limit"] == 120
+
+    def test_github_channel_per_agent_recursion_limit_honors_value_below_100(self):
+        """Regression pin for willem-bd's finding #4 on PR #3754.
+
+        Previously the channel-policy step did ``max(existing, limit)``
+        which clamped any per-agent recursion_limit below 100 up to 100,
+        silently breaking a safety-conscious ``github.recursion_limit: 50``
+        on a review-only agent. The per-agent value is now honored
+        verbatim for any positive integer, including values below 100.
+        """
+        manager = self._manager()
+
+        # 50: well below the 100 floor that the old max() would have applied,
+        # AND below the 250 channel default. Both clamps would silently lose
+        # this setting; the per-agent value must win.
+        gh_msg = InboundMessage(
+            channel_name="github",
+            chat_id="zhfeng/llm-gateway",
+            user_id="zhfeng",
+            text="hi",
+            metadata={"github": {"recursion_limit": 50}},
+        )
+        _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+        assert gh_config["recursion_limit"] == 50
+
+        # Boundary just-below-default to pin the contract: the override
+        # always wins over the channel default, no matter the relative size.
+        for value in (1, 25, 99, 100, 249, 250, 251, 1024):
+            gh_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                text="hi",
+                metadata={"github": {"recursion_limit": value}},
+            )
+            _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+            assert gh_config["recursion_limit"] == value, f"override {value!r} must be honored verbatim"
+
+    def test_github_channel_recursion_limit_ignores_invalid_override(self):
+        """Non-int / non-positive recursion_limit values fall back to the channel default."""
+        manager = self._manager()
+
+        for bad in (None, 0, -1, "many", 3.5):
+            gh_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                text="hi",
+                metadata={"github": {"recursion_limit": bad}},
+            )
+            _, gh_config, _ = manager._resolve_run_params(gh_msg, "thread-1")
+            assert gh_config["recursion_limit"] == 250, f"bad value {bad!r} should fall back to 250"
+
+    def test_auth_disabled_user_id_is_used_for_unbound_channel_messages(self, monkeypatch):
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+        manager = self._manager()
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+        msg = InboundMessage(channel_name="slack", chat_id="C123", user_id="U-platform", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+        assert run_context["channel_user_id"] == "U-platform"
+
+        from app.channels.manager import _owner_headers
+
+        headers = _owner_headers(msg)
+        assert headers is not None
+        assert headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == AUTH_DISABLED_USER_ID
+
+    def test_auth_disabled_user_id_overrides_bound_owner_for_local_visibility(self, monkeypatch):
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+
+        manager = self._manager()
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+        msg = InboundMessage(
+            channel_name="slack",
+            chat_id="C123",
+            user_id="U-platform",
+            owner_user_id="real-user-from-old-binding",
+            text="hi",
+        )
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+        assert run_context["channel_user_id"] == "U-platform"
+
+    def test_unbound_channel_messages_keep_platform_user_id_when_auth_is_enabled(self, monkeypatch):
+        from app.channels.manager import _owner_headers
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="slack", chat_id="C123", user_id="U-platform", text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == "U-platform"
+        assert run_context["channel_user_id"] == "U-platform"
+        assert _owner_headers(msg) is None
+
+    def test_unsafe_user_id_is_normalized_but_raw_preserved(self, monkeypatch):
+        from deerflow.config.paths import make_safe_user_id
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_context["user_id"] == make_safe_user_id(raw)
+        assert run_context["user_id"] != raw
+        assert run_context["channel_user_id"] == raw
+
+    def test_unsafe_user_id_migrates_unique_legacy_bucket(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths, make_safe_user_id
+
+        paths = Paths(tmp_path)
+        legacy_dir = paths.base_dir / "users" / "user-example-com-63a710569261a24b"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "memory.json").write_text('{"legacy": true}\n', encoding="utf-8")
+        monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        raw = "user@example.com"
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        safe = make_safe_user_id(raw)
+        assert run_context["user_id"] == safe
+        assert paths.user_dir(safe).exists()
+        assert not legacy_dir.exists()
+        assert (paths.user_dir(safe) / "memory.json").read_text(encoding="utf-8") == '{"legacy": true}\n'
+
+    @pytest.mark.parametrize("raw_user_id", ["", None])
+    def test_empty_or_none_user_id_is_not_injected(self, raw_user_id, monkeypatch):
+        manager = self._manager()
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+        msg = InboundMessage(channel_name="feishu", chat_id="c", user_id=raw_user_id, text="hi")
+
+        _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        assert "user_id" not in run_context
+        assert "channel_user_id" not in run_context
+
+
+class TestGithubFireAndForget:
+    """Regression for the ``httpx.ReadTimeout`` on long autonomous GitHub runs.
+
+    The GitHub channel's outbound ``send`` is log-only by design — the agent
+    posts to the issue/PR via the ``gh`` CLI from inside the sandbox. Keeping
+    ``client.runs.wait`` on the manager side kept an HTTP stream open for the
+    entire run lifetime, so any run that legitimately exceeded the SDK default
+    300s read deadline (a routine clone → edit → test → push → PR cycle) blew
+    up with ``httpx.ReadTimeout`` and the outer except branch then released the
+    dedupe key and emitted a false "internal error" outbound.
+
+    The fix is policy-driven: ``ChannelRunPolicy.fire_and_forget=True`` swaps
+    the dispatch call to ``runs.create`` (short POST, returns once the run is
+    ``pending``) and skips the response-extraction + outbound-publish block.
+    """
+
+    def test_channel_run_policy_default_is_not_fire_and_forget(self):
+        """Adding ``fire_and_forget`` must not silently re-route any existing
+        channel onto the new path — the default has to stay False so Slack,
+        Telegram, Discord, etc. keep using ``runs.wait`` exactly as before."""
+        from app.channels.run_policy import ChannelRunPolicy
+
+        assert ChannelRunPolicy().fire_and_forget is False
+        assert ChannelRunPolicy().serialize_thread_runs is False
+
+    def test_feishu_channel_policy_opts_into_serialized_thread_runs(self):
+        """Feishu's queue-same-thread behavior should be policy-driven."""
+        import app.channels.feishu_run_policy  # noqa: F401
+        from app.channels.run_policy import CHANNEL_RUN_POLICY
+
+        feishu_policy = CHANNEL_RUN_POLICY.get("feishu")
+        assert feishu_policy is not None
+        assert feishu_policy.serialize_thread_runs is True
+
+    def test_github_channel_policy_opts_into_fire_and_forget(self):
+        """The GitHub channel must register ``fire_and_forget=True``. This is
+        the only signal the manager has to skip ``runs.wait`` for github."""
+        # Importing the github subpackage registers the policy as a side
+        # effect (``register_policy()`` runs at module import time).
+        import app.gateway.github.run_policy  # noqa: F401
+        from app.channels.run_policy import CHANNEL_RUN_POLICY
+
+        github_policy = CHANNEL_RUN_POLICY.get("github")
+        assert github_policy is not None
+        assert github_policy.fire_and_forget is True
+
+    def test_handle_chat_for_github_calls_runs_create_not_wait(self):
+        """The hot path: a github inbound dispatches via ``runs.create``, not
+        ``runs.wait``. ``runs.create`` returns once the run is ``pending`` so
+        the manager doesn't have to hold an HTTP stream open for ~6 minutes."""
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            # GitHub deliveries skip the bound-identity gate (authenticity is
+            # enforced at the webhook route by HMAC), but constructing the
+            # manager with the default require_bound_identity=False keeps the
+            # test focused on the dispatch path rather than the gate.
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-1")
+            # Wire runs.create as an AsyncMock — _make_mock_langgraph_client
+            # only wires runs.wait. Returning the same {"thread_id": ...} dict
+            # mirrors what the real SDK returns from POST /threads/{id}/runs.
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-abc", "status": "pending"})
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text="please fix the bug in foo.py",
+                )
+            )
+
+            mock_client.runs.create.assert_called_once()
+            # And — crucially — ``runs.wait`` must NOT have been called. Any
+            # regression that keeps the long-poll alive for github would
+            # immediately re-introduce the ``httpx.ReadTimeout`` symptom.
+            mock_client.runs.wait.assert_not_called()
+
+            create_args = mock_client.runs.create.call_args
+            assert create_args[0][0] == "gh-thread-1"  # thread_id
+            assert create_args[0][1] == "lead_agent"  # assistant_id
+            # multitask_strategy must still be ``reject`` — concurrent runs on
+            # the same GitHub thread are surfaced via ConflictError below.
+            assert create_args[1]["multitask_strategy"] == "reject"
+
+        _run(go())
+
+    def test_handle_chat_for_github_does_not_publish_outbound(self):
+        """Fire-and-forget channels publish nothing on success. The GitHub
+        agent posts to the issue/PR itself via the ``gh`` CLI; if the manager
+        ALSO published an outbound, the channel's log-only ``send`` would
+        write a final-state message into ``gateway.log`` for every run and
+        muddy the operator-facing logs. The streaming-path counterpart of
+        this guarantee already holds — this pins the non-streaming side."""
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-2")
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-xyz", "status": "pending"})
+            manager._client = mock_client
+
+            await manager.start()
+            try:
+                await manager._handle_chat(
+                    InboundMessage(
+                        channel_name="github",
+                        chat_id="zhfeng/llm-gateway",
+                        user_id="zhfeng",
+                        owner_user_id="agent-owner-1",
+                        text="please add a test for the empty case",
+                    )
+                )
+                # Give the bus a chance to flush anything that might have
+                # been published. Nothing should arrive — but if a future
+                # regression starts publishing again we want this test to see
+                # it, not race against it.
+                await asyncio.sleep(0.05)
+            finally:
+                await manager.stop()
+
+            assert outbound_received == []
+            mock_client.runs.create.assert_called_once()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_handle_chat_for_github_busy_thread_still_emits_busy_message(self):
+        """A ``ConflictError`` from ``runs.create`` (the runtime rejected the
+        run because a previous one on the same thread is still active) must
+        still trip the ``THREAD_BUSY_MESSAGE`` outbound path. The GitHub
+        channel's ``send`` is log-only, so in practice the operator sees the
+        busy message in ``gateway.log`` rather than on the PR — but the manager
+        must treat this exactly like the ``runs.wait`` case so any future
+        non-github fire-and-forget channel inherits the behavior unchanged."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-3/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError(
+                "Thread is already running a task. Wait for it to finish or choose a different multitask strategy.",
+                response=response,
+                body={"message": "Thread is already running a task."},
+            )
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-3")
+            mock_client.runs.create = AsyncMock(side_effect=conflict)
+            manager._client = mock_client
+
+            await manager.start()
+            try:
+                await manager._handle_chat(
+                    InboundMessage(
+                        channel_name="github",
+                        chat_id="zhfeng/llm-gateway",
+                        user_id="zhfeng",
+                        owner_user_id="agent-owner-1",
+                        text="ping",
+                    )
+                )
+                await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            finally:
+                await manager.stop()
+
+            busy = [m for m in outbound_received if m.text == THREAD_BUSY_MESSAGE]
+            assert len(busy) == 1
+            assert busy[0].channel_name == "github"
+            mock_client.runs.create.assert_called_once()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_handle_chat_for_non_fire_and_forget_channel_still_uses_runs_wait(self):
+        """Regression guard for the non-github channels (Slack, DingTalk,
+        WeCom, etc.) — they still need the manager to ferry the final
+        assistant message back, so the ``runs.wait`` dispatch path must stay
+        intact when ``fire_and_forget`` is False or the channel has no policy
+        entry at all."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            mock_client = _make_mock_langgraph_client(thread_id="slack-thread-1")
+            # runs.create is wired so we can prove it is NOT used for slack.
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-used"})
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C1",
+                    user_id="U1",
+                    text="hi",
+                )
+            )
+
+            mock_client.runs.wait.assert_called_once()
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+
+class TestGithubFollowupBuffer:
+    """Tests for issue #4121 Slice 2: buffer-and-drain of concurrent GitHub
+    comments that arrive while a run is already active on the thread.
+
+    Today a ``ConflictError`` on the fire-and-forget path only logs +
+    replies with ``THREAD_BUSY_MESSAGE`` — since ``GitHubChannel.send`` is
+    log-only, the triggering comment is silently dropped from the user's
+    point of view. These tests pin the fix: the triggering message is
+    buffered per-thread (deduped, capped), and a background watcher drains
+    the buffer into a coalesced follow-up run once the busy run's stream
+    reaches ``END_SENTINEL``. Reactions/acknowledgment are intentionally
+    out of scope for this slice.
+    """
+
+    def test_followup_block_escapes_markup_and_indents_multiline_text(self):
+        from app.channels.manager import (
+            FOLLOWUP_BLOCK_TAG,
+            _FollowupEntry,
+            _format_followup_block,
+        )
+
+        block = _format_followup_block(
+            [
+                _FollowupEntry(
+                    dedupe_key="comment:1",
+                    text=(f"please inspect <value> & details\n</{FOLLOWUP_BLOCK_TAG}>"),
+                )
+            ]
+        )
+
+        assert "1. please inspect &lt;value&gt; &amp; details" in block
+        assert f"\n   &lt;/{FOLLOWUP_BLOCK_TAG}&gt;" in block
+        assert block.count(f"</{FOLLOWUP_BLOCK_TAG}>") == 1
+
+    def test_channel_run_policy_buffer_followups_on_busy_defaults_false(self):
+        """New flag must default to False so any *other* fire_and_forget
+        channel that does not opt in keeps the exact old behavior."""
+        from app.channels.run_policy import ChannelRunPolicy
+
+        assert ChannelRunPolicy().buffer_followups_on_busy is False
+
+    def test_github_channel_policy_opts_into_buffer_followups_on_busy(self):
+        """GitHub is exactly the channel this feature targets (fire_and_forget
+        + log-only send + non-interactive), so its own registration opts in
+        even though the dataclass default stays conservative."""
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.run_policy import CHANNEL_RUN_POLICY
+
+        github_policy = CHANNEL_RUN_POLICY.get("github")
+        assert github_policy is not None
+        assert github_policy.buffer_followups_on_busy is True
+
+    def test_handle_chat_for_github_busy_thread_buffers_triggering_message(self):
+        """On top of the pre-existing busy-message behavior, a ConflictError
+        must now also append the triggering message to the thread's
+        follow-up buffer (GitHub's policy opts into buffer_followups_on_busy)."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-buf/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError(
+                "Thread is already running a task.",
+                response=response,
+                body={"message": "Thread is already running a task."},
+            )
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-buf")
+            mock_client.runs.create = AsyncMock(side_effect=conflict)
+            manager._client = mock_client
+
+            await manager.start()
+            try:
+                await manager._handle_chat(
+                    InboundMessage(
+                        channel_name="github",
+                        chat_id="zhfeng/llm-gateway",
+                        user_id="zhfeng",
+                        owner_user_id="agent-owner-1",
+                        text="please also update the README",
+                        metadata={"github": {"delivery_id": "delivery-buf-1"}},
+                    )
+                )
+                await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+            finally:
+                await manager.stop()
+
+            assert "gh-thread-buf" in manager._followup_buffers
+            buffered = list(manager._followup_buffers["gh-thread-buf"].values())
+            assert len(buffered) == 1
+            assert buffered[0].text == "please also update the README"
+
+        _run(go())
+
+    def test_conflict_error_does_not_buffer_when_flag_disabled(self):
+        """A fire_and_forget channel that has NOT opted into
+        buffer_followups_on_busy must keep the exact old silent-drop-with-log
+        behavior: busy message still emitted, nothing buffered."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        original = CHANNEL_RUN_POLICY.get("test-fire-and-forget-no-buffer")
+        CHANNEL_RUN_POLICY["test-fire-and-forget-no-buffer"] = ChannelRunPolicy(
+            is_interactive=False,
+            fire_and_forget=True,
+            requires_bound_identity=False,
+            buffer_followups_on_busy=False,
+        )
+        try:
+
+            async def go():
+                bus = MessageBus()
+                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                manager = ChannelManager(bus=bus, store=store)
+
+                outbound_received: list[OutboundMessage] = []
+
+                async def capture_outbound(msg):
+                    outbound_received.append(msg)
+
+                bus.subscribe_outbound(capture_outbound)
+
+                request = httpx.Request("POST", "http://127.0.0.1:2024/threads/no-buf-thread/runs")
+                response = httpx.Response(409, request=request)
+                conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+                mock_client = _make_mock_langgraph_client(thread_id="no-buf-thread")
+                mock_client.runs.create = AsyncMock(side_effect=conflict)
+                manager._client = mock_client
+
+                await manager.start()
+                try:
+                    await manager._handle_chat(
+                        InboundMessage(
+                            channel_name="test-fire-and-forget-no-buffer",
+                            chat_id="c1",
+                            user_id="u1",
+                            text="hello while busy",
+                        )
+                    )
+                    await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+                finally:
+                    await manager.stop()
+
+                assert manager._followup_buffers == {}
+
+            _run(go())
+        finally:
+            if original is None:
+                CHANNEL_RUN_POLICY.pop("test-fire-and-forget-no-buffer", None)
+            else:
+                CHANNEL_RUN_POLICY["test-fire-and-forget-no-buffer"] = original
+
+    def test_duplicate_delivery_id_does_not_double_buffer(self):
+        """A redelivered webhook for the same comment (same delivery_id) must
+        not be buffered twice."""
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        thread_id = "gh-thread-dedup"
+        msg = InboundMessage(
+            channel_name="github",
+            chat_id="c",
+            user_id="u",
+            text="please look at this",
+            metadata={"github": {"delivery_id": "dupe-1"}},
+        )
+
+        manager._buffer_followup(thread_id, msg)
+        manager._buffer_followup(thread_id, msg)  # redelivery of the same comment
+
+        assert len(manager._followup_buffers[thread_id]) == 1
+
+    def test_followup_buffer_overflow_drops_oldest_and_warns(self, caplog):
+        """At the per-thread cap, overflow must drop the OLDEST buffered
+        comment (not the newest) and log a warning — recent activity is a
+        more useful signal than the stalest queued item once a thread is
+        deep enough in the backlog to hit the cap."""
+        from app.channels.manager import FOLLOWUP_BUFFER_MAX_PER_THREAD, ChannelManager
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        thread_id = "gh-thread-overflow"
+
+        with caplog.at_level(logging.WARNING):
+            for i in range(FOLLOWUP_BUFFER_MAX_PER_THREAD + 5):
+                msg = InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text=f"comment {i}",
+                    metadata={"github": {"delivery_id": f"d{i}"}},
+                )
+                manager._buffer_followup(thread_id, msg)
+
+        buffer = manager._followup_buffers[thread_id]
+        assert len(buffer) == FOLLOWUP_BUFFER_MAX_PER_THREAD
+        kept_texts = {entry.text for entry in buffer.values()}
+        for i in range(5):
+            assert f"comment {i}" not in kept_texts
+        assert f"comment {FOLLOWUP_BUFFER_MAX_PER_THREAD + 4}" in kept_texts
+        assert any("overflow" in r.message.lower() for r in caplog.records)
+
+    def test_drain_batches_at_most_ten_entries_per_cycle(self):
+        """A queue deeper than the drain batch size must only coalesce the
+        oldest N entries in one cycle, leaving the rest buffered — this is
+        what lets a >10 backlog chain into a second drain cycle instead of
+        growing one unbounded input block."""
+        from app.channels.manager import FOLLOWUP_DRAIN_BATCH_SIZE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-batch"
+            for i in range(15):
+                entry_msg = InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text=f"comment {i}",
+                    metadata={"github": {"delivery_id": f"d{i}"}},
+                )
+                manager._buffer_followup(thread_id, entry_msg)
+
+            assert len(manager._followup_buffers[thread_id]) == 15
+
+            mock_client = _make_mock_langgraph_client(thread_id=thread_id)
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-drain-1", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            mock_client.runs.create.assert_called_once()
+            drained_text = mock_client.runs.create.call_args[1]["input"]["messages"][0]["content"]
+            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE):
+                assert f"comment {i}" in drained_text
+            for i in range(FOLLOWUP_DRAIN_BATCH_SIZE, 15):
+                assert f"comment {i}" not in drained_text
+
+            assert len(manager._followup_buffers[thread_id]) == 15 - FOLLOWUP_DRAIN_BATCH_SIZE
+
+        _run(go())
+
+    def test_drain_conflict_requeues_entries_without_losing_them(self):
+        """If the drain's own runs.create hits ConflictError (a real edge
+        case — e.g. a manual/scheduled trigger raced onto the same thread),
+        the popped batch must be put back rather than lost, and the drain
+        must not raise."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-9"
+            manager._buffer_followup(thread_id, carrier_msg)
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-9/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(side_effect=conflict)
+
+            # Must not raise.
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_called_once()
+
+        _run(go())
+
+    def test_drain_non_conflict_error_also_requeues_without_crashing(self):
+        """A non-busy exception from the drain's runs.create (network error,
+        5xx, ...) must also be swallowed-and-requeued rather than crashing
+        the watcher task or losing the buffered comments."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-neterr"
+            manager._buffer_followup(thread_id, carrier_msg)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+        _run(go())
+
+    def test_drain_resolve_run_params_failure_requeues_entries_without_losing_them(self, monkeypatch):
+        """If a step BETWEEN the buffer pop and runs.create raises -- e.g.
+        _resolve_run_params blows up because the target agent config was
+        removed mid-run -- the already-popped batch must still end up back
+        in the buffer instead of vanishing, and the drain must not raise
+        (mirrors the existing runs.create requeue-on-failure guarantee)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-resolve-fail"
+            manager._buffer_followup(thread_id, carrier_msg)
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+            def _boom(*args, **kwargs):
+                raise RuntimeError("agent config missing mid-run")
+
+            monkeypatch.setattr(manager, "_resolve_run_params", _boom)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
+
+            # Must not raise -- the failure must be swallowed and requeued.
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_drain_apply_channel_policy_failure_requeues_entries_without_losing_them(self, monkeypatch):
+        """Same guarantee one step later: if _apply_channel_policy raises
+        (e.g. channel-policy/credential resolution blows up instead of
+        following its documented degrade-and-continue path), the popped
+        batch must still be requeued rather than lost."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="queued comment",
+            )
+            thread_id = "gh-thread-apply-fail"
+            manager._buffer_followup(thread_id, carrier_msg)
+
+            async def _boom(*args, **kwargs):
+                raise RuntimeError("channel policy blew up")
+
+            monkeypatch.setattr(manager, "_apply_channel_policy", _boom)
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-be-created", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            assert thread_id in manager._followup_buffers
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_run_watcher_drains_buffer_on_end_sentinel(self):
+        """End-to-end mechanism test: a busy-thread follow-up gets buffered,
+        and once the ORIGINAL run's stream reaches END_SENTINEL, the watcher
+        drains the buffer into a new coalesced runs.create call. That
+        drained run is itself watched too, so an empty buffer at its own
+        END_SENTINEL is a clean no-op (the chain terminates)."""
+        import httpx
+        from langgraph_sdk.errors import ConflictError
+
+        import app.gateway.github.run_policy  # noqa: F401 — register policy
+        from app.channels.manager import FOLLOWUP_BLOCK_TAG, ChannelManager
+        from deerflow.runtime import MemoryStreamBridge
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            bridge = MemoryStreamBridge()
+            manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
+
+            request = httpx.Request("POST", "http://127.0.0.1:2024/threads/gh-thread-watch/runs")
+            response = httpx.Response(409, request=request)
+            conflict = ConflictError("busy", response=response, body={"message": "busy"})
+
+            mock_client = _make_mock_langgraph_client(thread_id="gh-thread-watch")
+            mock_client.runs.create = AsyncMock(
+                side_effect=[
+                    {"run_id": "run-1", "status": "pending"},
+                    conflict,
+                    {"run_id": "run-2", "status": "pending"},
+                ]
+            )
+            manager._client = mock_client
+
+            # First message: no active run yet -> succeeds, watcher spawned for run-1.
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text="first comment",
+                    metadata={"github": {"delivery_id": "d1"}},
+                )
+            )
+            # Second message: thread is busy -> ConflictError -> buffered.
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="zhfeng/llm-gateway",
+                    user_id="zhfeng",
+                    owner_user_id="agent-owner-1",
+                    text="second comment while busy",
+                    metadata={"github": {"delivery_id": "d2"}},
+                )
+            )
+
+            assert len(manager._followup_buffers["gh-thread-watch"]) == 1
+
+            # The busy run completes -> watcher observes END_SENTINEL -> drains.
+            await bridge.publish_end("run-1")
+            await _wait_for(lambda: mock_client.runs.create.call_count == 3, timeout=2.0)
+
+            drain_call = mock_client.runs.create.call_args_list[2]
+            assert drain_call[0][0] == "gh-thread-watch"
+            coalesced_text = drain_call[1]["input"]["messages"][0]["content"]
+            assert "second comment while busy" in coalesced_text
+            assert f"<{FOLLOWUP_BLOCK_TAG}>" in coalesced_text
+
+            await _wait_for(lambda: "gh-thread-watch" not in manager._followup_buffers)
+
+            # The drained run (run-2) also gets watched. Ending it with an
+            # empty buffer must be a clean no-op — no 4th runs.create call.
+            await bridge.publish_end("run-2")
+            await asyncio.sleep(0.2)
+            assert mock_client.runs.create.call_count == 3
+
+        _run(go())
+
+    def test_stop_cancels_inflight_followup_watcher_task(self):
+        """A follow-up watcher spawned for a run that is still active must be
+        tracked and actually cancelled+awaited by manager.stop() rather than
+        left running as an orphaned task -- otherwise a run that ends AFTER
+        shutdown would still fire a brand new runs.create() into a manager
+        that has already been stopped."""
+        from app.channels.manager import ChannelManager
+        from deerflow.runtime import MemoryStreamBridge
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            bridge = MemoryStreamBridge()
+            manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-stop-watcher"
+            # Something buffered, so a slipped-through drain would have a
+            # non-empty batch to (wrongly) fire a run for.
+            manager._buffer_followup(
+                thread_id,
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text="queued while busy",
+                    metadata={"github": {"delivery_id": "d-stop-1"}},
+                ),
+            )
+
+            mock_client = _make_mock_langgraph_client(thread_id=thread_id)
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "run-should-not-fire", "status": "pending"})
+            manager._client = mock_client
+
+            await manager.start()
+
+            # Spawn a watcher for a run whose stream never ends -- it sits
+            # suspended awaiting stream_bridge.subscribe(), exactly like a
+            # real in-flight watcher for a long-running GitHub coding run.
+            manager._maybe_spawn_followup_watcher(thread_id, {"run_id": "run-being-watched"}, carrier_msg)
+            await asyncio.sleep(0.05)
+
+            assert len(manager._followup_watcher_tasks) == 1
+            watcher_task = next(iter(manager._followup_watcher_tasks))
+            assert not watcher_task.done()
+
+            await manager.stop()
+
+            assert watcher_task.done()
+            assert watcher_task.cancelled()
+            assert watcher_task not in manager._followup_watcher_tasks
+
+            # A late "run completed" signal for the (cancelled) watched run
+            # must not resurrect a drain -- nothing is subscribed anymore.
+            await bridge.publish_end("run-being-watched")
+            await asyncio.sleep(0.1)
+            mock_client.runs.create.assert_not_called()
+
+        _run(go())
+
+    def test_drain_after_stop_does_not_create_run(self):
+        """Belt-and-suspenders guard: even if a drain call reaches
+        _drain_followups_for_thread after the manager has been stopped (e.g.
+        a watcher that had already slipped past its own cancellation point
+        mid-drain), it must not fire client.runs.create against the stopped
+        manager, and the buffered entries must remain untouched (not popped,
+        not lost)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            carrier_msg = InboundMessage(
+                channel_name="github",
+                chat_id="zhfeng/llm-gateway",
+                user_id="zhfeng",
+                owner_user_id="agent-owner-1",
+                text="carrier",
+            )
+            thread_id = "gh-thread-post-stop-drain"
+            manager._buffer_followup(
+                thread_id,
+                InboundMessage(
+                    channel_name="github",
+                    chat_id="c",
+                    user_id="u",
+                    text="queued",
+                    metadata={"github": {"delivery_id": "d-post-stop-1"}},
+                ),
+            )
+
+            await manager.start()
+            await manager.stop()
+            assert manager._running is False
+
+            mock_client = MagicMock()
+            mock_client.runs.create = AsyncMock(return_value={"run_id": "should-not-fire", "status": "pending"})
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            mock_client.runs.create.assert_not_called()
+            assert len(manager._followup_buffers[thread_id]) == 1
+
+        _run(go())
+
+    def test_channel_manager_get_stream_bridge_threaded_from_service(self):
+        """The app.py -> service.py -> manager.py plumbing: ChannelService
+        must forward get_stream_bridge through to its ChannelManager."""
+        from app.channels.service import ChannelService
+
+        sentinel = object()
+        service = ChannelService(channels_config={}, get_stream_bridge=lambda: sentinel)
+
+        assert service.manager._get_stream_bridge() is sentinel
+
+    def test_start_channel_service_forwards_get_stream_bridge(self):
+        """The module-level singleton entrypoint must also thread the
+        callable through to ChannelService.from_app_config."""
+        import app.channels.service as service_module
+
+        captured: dict[str, object] = {}
+
+        class _FakeService:
+            async def start(self):
+                return None
+
+            def get_status(self):
+                return {}
+
+        def fake_from_app_config(app_config=None, *, get_stream_bridge=None):
+            captured["get_stream_bridge"] = get_stream_bridge
+            return _FakeService()
+
+        async def go():
+            service_module._channel_service = None
+            with patch.object(service_module.ChannelService, "from_app_config", staticmethod(fake_from_app_config)):
+                sentinel = object()
+                await service_module.start_channel_service(get_stream_bridge=lambda: sentinel)
+
+            assert captured["get_stream_bridge"]() is sentinel
+
+        try:
+            _run(go())
+        finally:
+            service_module._channel_service = None
+
+
+class _BoundIdentityRepo:
+    def __init__(self, connections: list[dict[str, str | None]] | None = None) -> None:
+        self.connections = list(connections or [])
+        self.lookups: list[dict[str, str | None]] = []
+        self.thread_sets: list[dict[str, str | None]] = []
+
+    async def find_connection_by_external_identity(self, *, provider: str, external_account_id: str, workspace_id: str | None = None):
+        self.lookups.append(
+            {
+                "provider": provider,
+                "external_account_id": external_account_id,
+                "workspace_id": workspace_id,
+            }
+        )
+        for connection in self.connections:
+            if connection.get("provider") == provider and connection.get("external_account_id") == external_account_id and connection.get("workspace_id") == workspace_id:
+                return connection
+        return None
+
+    async def get_thread_id(self, connection_id: str, chat_id: str, topic_id: str | None = None):
+        return None
+
+    async def set_thread_id(
+        self,
+        *,
+        connection_id: str,
+        owner_user_id: str,
+        provider: str,
+        external_conversation_id: str,
+        external_topic_id: str | None,
+        thread_id: str,
+    ) -> None:
+        self.thread_sets.append(
+            {
+                "connection_id": connection_id,
+                "owner_user_id": owner_user_id,
+                "provider": provider,
+                "external_conversation_id": external_conversation_id,
+                "external_topic_id": external_topic_id,
+                "thread_id": thread_id,
+            }
+        )
+
+
+class TestChannelManagerBoundIdentityPolicy:
+    def test_unbound_auth_enabled_chat_is_rejected_before_thread_or_run_creation(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                    thread_ts="1710000000.000100",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_bound_identity_repo_unavailable_uses_transient_failure_message(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_UNAVAILABLE_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="hi",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_UNAVAILABLE_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_unbound_auth_enabled_chat_is_rejected_before_semaphore(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager.start()
+            assert manager._semaphore is not None
+            await manager._semaphore.acquire()
+            try:
+                await asyncio.wait_for(
+                    manager._handle_message(
+                        InboundMessage(
+                            channel_name="slack",
+                            chat_id="C123",
+                            user_id="U-platform",
+                            text="hi",
+                        )
+                    ),
+                    timeout=0.5,
+                )
+            finally:
+                manager._semaphore.release()
+                await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+
+        _run(go())
+
+    def test_bound_auth_enabled_chat_is_allowed_when_bound_identity_is_required(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == "deerflow-user-1"
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_bound_auth_enabled_message_checks_bound_identity_once_on_hot_path(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+            await manager.start()
+            try:
+                await manager._handle_message(
+                    InboundMessage(
+                        channel_name="slack",
+                        chat_id="C123",
+                        user_id="U-platform",
+                        owner_user_id="deerflow-user-1",
+                        connection_id="connection-1",
+                        workspace_id="T123",
+                        text="hi",
+                    )
+                )
+            finally:
+                await manager.stop()
+
+            assert repo.lookups == [
+                {
+                    "provider": "slack",
+                    "external_account_id": "U-platform",
+                    "workspace_id": "T123",
+                }
+            ]
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+
+        _run(go())
+
+    def test_auth_enabled_chat_rejects_unverified_bound_identity(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "actual-connection",
+                        "owner_user_id": "actual-owner",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": None,
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="forged-owner",
+                    connection_id="forged-connection",
+                    text="hi",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].connection_id == "actual-connection"
+            assert outbound_received[0].owner_user_id == "actual-owner"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_not_called()
+
+        _run(go())
+
+    def test_auth_disabled_chat_keeps_default_user_when_bound_identity_is_required(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+
+        monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-local")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == AUTH_DISABLED_USER_ID
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_legacy_open_bot_mode_allows_unbound_auth_enabled_chat(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=False)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-legacy")
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="hi",
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+            mock_client.runs.wait.assert_called_once()
+            run_context = mock_client.runs.wait.call_args.kwargs["context"]
+            assert run_context["user_id"] == "U-platform"
+            assert run_context["channel_user_id"] == "U-platform"
+
+        _run(go())
+
+    def test_unbound_auth_enabled_new_command_is_rejected_before_thread_creation(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE, ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            outbound_received = []
+
+            async def capture(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture)
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    text="/new",
+                    msg_type=InboundMessageType.COMMAND,
+                    thread_ts="1710000000.000100",
+                )
+            )
+
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == BOUND_IDENTITY_REQUIRED_MESSAGE
+            assert outbound_received[0].thread_id == ""
+            assert outbound_received[0].connection_id is None
+            assert outbound_received[0].owner_user_id is None
+            mock_client.threads.create.assert_not_called()
+
+        _run(go())
+
+    def test_bound_auth_enabled_new_command_creates_thread(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            repo = _BoundIdentityRepo(
+                [
+                    {
+                        "id": "connection-1",
+                        "owner_user_id": "deerflow-user-1",
+                        "provider": "slack",
+                        "external_account_id": "U-platform",
+                        "workspace_id": "T123",
+                    }
+                ]
+            )
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-bound")
+            manager._client = mock_client
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C123",
+                    user_id="U-platform",
+                    owner_user_id="deerflow-user-1",
+                    connection_id="connection-1",
+                    workspace_id="T123",
+                    text="/new",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            mock_client.threads.create.assert_called_once()
+
+        _run(go())
+
+    def test_webhook_channel_run_policy_opts_out_of_bound_identity_gate(self, monkeypatch):
+        """A channel whose ChannelRunPolicy declares ``requires_bound_identity=False``
+        is exempt from the per-sender bound-identity gate, even when
+        ``require_bound_identity=True`` is on for interactive IM channels in the
+        same deployment. This is what lets GitHub webhook deliveries reach the
+        agent: they are HMAC-authenticated at the route, and the sender→DeerFlow
+        binding lives in the agent's config.yaml ownership, not in the
+        channel-connections table.
+        """
+        from app.channels.manager import ChannelManager
+        from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        # Save+restore so test parallelism / re-import side effects from
+        # app.gateway.github.run_policy don't leak across tests.
+        original = CHANNEL_RUN_POLICY.get("webhook-fixture")
+        CHANNEL_RUN_POLICY["webhook-fixture"] = ChannelRunPolicy(
+            is_interactive=False,
+            requires_bound_identity=False,
+        )
+        try:
+
+            async def go():
+                bus = MessageBus()
+                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
+                mock_client = _make_mock_langgraph_client(thread_id="thread-webhook")
+                manager._client = mock_client
+
+                await manager._handle_chat(
+                    InboundMessage(
+                        channel_name="webhook-fixture",
+                        chat_id="repo-owner/repo-name",
+                        user_id="commenter-login",
+                        # owner_user_id is set by the dispatcher from the
+                        # agent binding, NOT from a channel-connection row.
+                        owner_user_id="agent-installer-user",
+                        text="hi",
+                    )
+                )
+
+                # If the gate fired, threads.create would never be called and
+                # one outbound rejection would be on the bus instead. We
+                # assert the agent path ran.
+                mock_client.threads.create.assert_called_once()
+                mock_client.runs.wait.assert_called_once()
+
+            _run(go())
+        finally:
+            if original is None:
+                CHANNEL_RUN_POLICY.pop("webhook-fixture", None)
+            else:
+                CHANNEL_RUN_POLICY["webhook-fixture"] = original
+
+
+class TestChannelManagerConnectionRouting:
+    def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+        from deerflow.persistence.engine import close_engine
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            repo = await _make_channel_connection_repo(tmp_path)
+            alice = await repo.upsert_connection(
+                owner_user_id="alice",
+                provider="slack",
+                external_account_id="U-alice",
+                workspace_id="T1",
+            )
+            bob = await repo.upsert_connection(
+                owner_user_id="bob",
+                provider="slack",
+                external_account_id="U-bob",
+                workspace_id="T1",
+            )
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "legacy-store.json")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
+            mock_client = _make_mock_langgraph_client()
+            mock_client.threads.create = AsyncMock(
+                side_effect=[
+                    {"thread_id": "thread-alice"},
+                    {"thread_id": "thread-bob"},
+                ]
+            )
+            manager._client = mock_client
+
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-alice",
+                    owner_user_id="alice",
+                    connection_id=alice["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+            await manager._handle_chat(
+                InboundMessage(
+                    channel_name="slack",
+                    chat_id="C-shared",
+                    user_id="U-bob",
+                    owner_user_id="bob",
+                    connection_id=bob["id"],
+                    text="hello",
+                    thread_ts="1710000000.000100",
+                    topic_id="1710000000.000100",
+                )
+            )
+
+            assert await repo.get_thread_id(alice["id"], "C-shared", "1710000000.000100") == "thread-alice"
+            assert await repo.get_thread_id(bob["id"], "C-shared", "1710000000.000100") == "thread-bob"
+            assert store.list_entries() == []
+
+            first_context = mock_client.runs.wait.call_args_list[0].kwargs["context"]
+            second_context = mock_client.runs.wait.call_args_list[1].kwargs["context"]
+            assert first_context["user_id"] == "alice"
+            assert first_context["channel_user_id"] == "U-alice"
+            assert second_context["user_id"] == "bob"
+            assert second_context["channel_user_id"] == "U-bob"
+
+            first_create_headers = mock_client.threads.create.call_args_list[0].kwargs["headers"]
+            second_create_headers = mock_client.threads.create.call_args_list[1].kwargs["headers"]
+            assert first_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_create_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
+
+            first_run_headers = mock_client.runs.wait.call_args_list[0].kwargs["headers"]
+            second_run_headers = mock_client.runs.wait.call_args_list[1].kwargs["headers"]
+            assert first_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "alice"
+            assert second_run_headers[INTERNAL_OWNER_USER_ID_HEADER_NAME] == "bob"
+
+        try:
+            _run(go())
+        finally:
+            _run(close_engine())
+
+
 # ---------------------------------------------------------------------------
 # ChannelService tests
 # ---------------------------------------------------------------------------
@@ -1917,6 +5415,60 @@ class TestFormatArtifactText:
 
 
 class TestHandleChatWithArtifacts:
+    def test_bound_owner_artifacts_resolve_from_owner_outputs_bucket(self, tmp_path, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+        outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
+        outputs_dir.mkdir(parents=True)
+        (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "generate report"},
+                    {
+                        "type": "ai",
+                        "content": "Here is your report.",
+                        "tool_calls": [
+                            {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md"]}},
+                        ],
+                    },
+                    {"type": "tool", "name": "present_files", "content": "ok"},
+                ],
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            await manager.start()
+
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="c1",
+                    user_id="U-platform",
+                    owner_user_id="owner-1",
+                    connection_id="connection-1",
+                    text="generate report",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert len(outbound_received[0].attachments) == 1
+            assert outbound_received[0].attachments[0].actual_path == outputs_dir / "report.md"
+
+        _run(go())
+
     def test_artifacts_appended_to_text(self):
         from app.channels.manager import ChannelManager
 
@@ -2181,6 +5733,48 @@ class TestFeishuChannel:
 
         _run(go())
 
+    def test_prepare_inbound_topic_reply_includes_source_preview(self):
+        from app.channels.feishu import SOURCE_PREVIEW_METADATA_KEY, FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = FeishuChannel(bus, config={})
+
+            reply_started = asyncio.Event()
+            release_reply = asyncio.Event()
+
+            async def slow_reply(message_id: str, text: str) -> str:
+                reply_started.set()
+                await release_reply.wait()
+                return "om-running-card"
+
+            channel._add_reaction = AsyncMock()
+            channel._reply_card = AsyncMock(side_effect=slow_reply)
+
+            inbound = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="follow-up question",
+                thread_ts="om-source-msg",
+                metadata={SOURCE_PREVIEW_METADATA_KEY: "follow-up question"},
+            )
+
+            prepare_task = asyncio.create_task(channel._prepare_inbound("om-source-msg", inbound))
+
+            await _wait_for(lambda: bus.publish_inbound.await_count == 1)
+            await _wait_for(reply_started.is_set)
+
+            preview_text = channel._reply_card.await_args.args[1]
+            assert preview_text == "> follow-up question\n\nthinking..."
+
+            await prepare_task
+            release_reply.set()
+            await _wait_for(lambda: channel._running_card_ids.get("om-source-msg") == "om-running-card")
+
+        _run(go())
+
     def test_prepare_inbound_and_send_share_running_card_task(self):
         from app.channels.feishu import FeishuChannel
 
@@ -2320,6 +5914,479 @@ class TestFeishuChannel:
 
         _run(go())
 
+    def test_streaming_updates_preserve_source_preview(self):
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+            ReplyMessageRequest,
+            ReplyMessageRequestBody,
+        )
+
+        from app.channels.feishu import SOURCE_PREVIEW_METADATA_KEY, FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._PatchMessageRequest = PatchMessageRequest
+            channel._PatchMessageRequestBody = PatchMessageRequestBody
+            channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+            channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            channel._Emoji = Emoji
+
+            reply_response = MagicMock()
+            reply_response.data.message_id = "om-running-card"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=reply_response)
+            channel._api_client.im.v1.message.patch = MagicMock()
+            channel._api_client.im.v1.message_reaction.create = MagicMock()
+
+            metadata = {SOURCE_PREVIEW_METADATA_KEY: "What changed in the last run?"}
+
+            await channel._send_running_reply("om-source-msg", metadata=metadata)
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Queued behind another request",
+                    is_final=False,
+                    thread_ts="om-source-msg",
+                    metadata=metadata,
+                )
+            )
+            await channel.send(
+                OutboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-1",
+                    thread_id="thread-1",
+                    text="Answer ready",
+                    is_final=True,
+                    thread_ts="om-source-msg",
+                    metadata=metadata,
+                )
+            )
+
+            reply_request = channel._api_client.im.v1.message.reply.call_args.args[0]
+            first_patch_request = channel._api_client.im.v1.message.patch.call_args_list[0].args[0]
+            final_patch_request = channel._api_client.im.v1.message.patch.call_args_list[1].args[0]
+
+            assert json.loads(reply_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nthinking..."
+            assert json.loads(first_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nQueued behind another request"
+            assert json.loads(final_patch_request.body.content)["elements"][0]["content"] == "> What changed in the last run?\n\nAnswer ready"
+
+        _run(go())
+
+
+class TestFeishuSendFileSuccessChecks:
+    """``send_file`` uploads via ``_upload_image``/``_upload_file`` (which already
+    raise on a ``response.success() is False`` business failure), then sends the
+    resulting file/image message with a raw ``message.reply``/``message.create``
+    call whose response was never checked. lark-oapi signals that same kind of
+    business-level failure (invalid receiver, permission error, etc.) by
+    returning ``success()=False`` without raising, so a failed file/image send
+    logged "file sent" and returned ``True`` exactly like a real success.
+    """
+
+    def test_send_file_returns_false_on_reply_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-1"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_false_on_create_business_failure(self, tmp_path):
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageRequest = CreateMessageRequest
+            channel._CreateMessageRequestBody = CreateMessageRequestBody
+            channel._upload_file = AsyncMock(return_value="file-key-1")
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-send-file-2"
+            channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
+
+            path = tmp_path / "report.pdf"
+            path.write_bytes(b"pdf")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/report.pdf",
+                actual_path=path,
+                filename="report.pdf",
+                mime_type="application/pdf",
+                size=path.stat().st_size,
+                is_image=False,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is False
+
+        _run(go())
+
+    def test_send_file_returns_true_on_reply_business_success(self, tmp_path):
+        """Control case: a genuinely successful response still returns True."""
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+            channel._upload_image = AsyncMock(return_value="img-key-1")
+
+            success_response = MagicMock()
+            success_response.success.return_value = True
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=success_response)
+
+            path = tmp_path / "image.png"
+            path.write_bytes(b"png")
+            attachment = ResolvedAttachment(
+                virtual_path="/mnt/user-data/outputs/image.png",
+                actual_path=path,
+                filename="image.png",
+                mime_type="image/png",
+                size=path.stat().st_size,
+                is_image=True,
+            )
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            result = await channel.send_file(msg, attachment)
+
+            assert result is True
+
+        _run(go())
+
+
+class TestFeishuCardSuccessChecks:
+    """Regression coverage: ``lark-oapi`` signals a *business-level* failure
+    (expired/invalid card, permission error, etc.) by returning a response
+    whose ``response.success()`` is ``False`` -- the SDK call itself does not
+    raise. This file's own ``_upload_image``/``_upload_file``/
+    ``_receive_single_file`` already guard against this by checking
+    ``response.success()``; ``_reply_card``/``_create_card``/``_update_card``/
+    ``_add_reaction`` did not, so a failed card send/update looked identical
+    to a successful one to every caller.
+    """
+
+    def test_reply_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._ReplyMessageRequest = ReplyMessageRequest
+            channel._ReplyMessageRequestBody = ReplyMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-reply-1"
+            channel._api_client.im.v1.message.reply = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._reply_card("om-source-msg", "hello")
+            assert "log-reply-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_create_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageRequest = CreateMessageRequest
+            channel._CreateMessageRequestBody = CreateMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "param invalid"
+            failure_response.get_log_id.return_value = "log-create-1"
+            channel._api_client.im.v1.message.create = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._create_card("chat-1", "hello")
+            assert "log-create-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_update_card_raises_on_business_failure_response(self):
+        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._PatchMessageRequest = PatchMessageRequest
+            channel._PatchMessageRequestBody = PatchMessageRequestBody
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "card has expired"
+            failure_response.get_log_id.return_value = "log-update-1"
+            channel._api_client.im.v1.message.patch = MagicMock(return_value=failure_response)
+
+            with pytest.raises(RuntimeError, match="99991400") as exc_info:
+                await channel._update_card("om-running-card", "hello")
+            assert "log-update-1" in str(exc_info.value)
+
+        _run(go())
+
+    def test_add_reaction_logs_warning_on_business_failure_without_raising(self, caplog):
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+        )
+
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            channel._CreateMessageReactionRequest = CreateMessageReactionRequest
+            channel._CreateMessageReactionRequestBody = CreateMessageReactionRequestBody
+            channel._Emoji = Emoji
+
+            failure_response = MagicMock()
+            failure_response.success.return_value = False
+            failure_response.code = 99991400
+            failure_response.msg = "reaction not allowed"
+            failure_response.get_log_id.return_value = "log-1"
+            channel._api_client.im.v1.message_reaction.create = MagicMock(return_value=failure_response)
+
+            with caplog.at_level(logging.WARNING):
+                await channel._add_reaction("om-source-msg", "OK")
+
+            assert "99991400" in caplog.text
+
+        _run(go())
+
+    def test_final_streaming_update_falls_back_to_new_card_when_update_card_fails(self):
+        """``_send_card_message``'s ``try/except`` around ``_update_card``
+        already falls back to a brand-new card reply for a final message --
+        but that fallback could never fire while ``_update_card`` swallowed
+        business failures silently. Now that ``_update_card`` raises, the
+        fallback is reachable."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(side_effect=RuntimeError("Feishu card update failed: code=99991400, msg=card expired"))
+            channel._reply_card = AsyncMock(return_value="om-fallback-card")
+            channel._add_reaction = AsyncMock()
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="final answer",
+                is_final=True,
+                thread_ts="om-source-msg",
+            )
+
+            await channel._send_card_message(msg)
+
+            channel._update_card.assert_awaited_once_with("om-running-card", "final answer")
+            channel._reply_card.assert_awaited_once_with("om-source-msg", "final answer")
+            assert "om-source-msg" not in channel._running_card_ids
+
+        _run(go())
+
+    def test_non_final_streaming_update_failure_propagates_instead_of_silently_succeeding(self):
+        """A non-final ``_update_card`` failure must propagate out of
+        ``_send_card_message`` so ``send()``'s ``_send_with_retry`` sees it --
+        previously it never would, since ``_update_card`` had no way to raise
+        on a business-level failure."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(side_effect=RuntimeError("Feishu card update failed: code=99991400, msg=card expired"))
+            channel._reply_card = AsyncMock()
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="partial answer",
+                is_final=False,
+                thread_ts="om-source-msg",
+            )
+
+            with pytest.raises(RuntimeError, match="99991400"):
+                await channel._send_card_message(msg)
+
+            channel._reply_card.assert_not_awaited()
+            assert channel._running_card_ids["om-source-msg"] == "om-running-card"
+
+        _run(go())
+
+    def test_send_retries_after_update_card_business_failure_then_succeeds(self, monkeypatch):
+        """End-to-end through ``send()``: a non-final ``_update_card``
+        business failure must now engage ``_send_with_retry`` instead of the
+        caller believing the streaming update was delivered."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            sleep = AsyncMock()
+            monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+            channel._running_card_ids["om-source-msg"] = "om-running-card"
+            channel._update_card = AsyncMock(
+                side_effect=[
+                    RuntimeError("Feishu card update failed: code=99991400, msg=card expired"),
+                    None,
+                ]
+            )
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="partial answer",
+                is_final=False,
+                thread_ts="om-source-msg",
+            )
+
+            await channel.send(msg, _max_retries=2)
+
+            assert channel._update_card.await_count == 2
+            sleep.assert_awaited_once_with(1)
+
+        _run(go())
+
+    def test_send_retries_after_create_card_business_failure_then_succeeds(self, monkeypatch):
+        """End-to-end through ``send()`` for the no-``thread_ts`` path: a
+        business failure from ``_create_card`` (unwrapped at the tail of
+        ``_send_card_message``) must also engage ``_send_with_retry``,
+        mirroring ``test_send_retries_after_update_card_business_failure_then_succeeds``
+        for the ``_update_card`` path above."""
+        from app.channels.feishu import FeishuChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = FeishuChannel(bus, config={})
+            channel._api_client = MagicMock()
+            sleep = AsyncMock()
+            monkeypatch.setattr("app.channels.base.asyncio.sleep", sleep)
+
+            channel._create_card = AsyncMock(
+                side_effect=[
+                    RuntimeError("Feishu card creation failed: code=99991400, msg=param invalid, log_id=log-1"),
+                    None,
+                ]
+            )
+
+            msg = OutboundMessage(
+                channel_name="feishu",
+                chat_id="chat-1",
+                thread_id="thread-1",
+                text="new card message",
+                is_final=True,
+                thread_ts=None,
+            )
+
+            await channel.send(msg, _max_retries=2)
+
+            assert channel._create_card.await_count == 2
+            sleep.assert_awaited_once_with(1)
+
+        _run(go())
+
 
 class TestWeComChannel:
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
@@ -2360,7 +6427,7 @@ class TestWeComChannel:
             assert inbound.thread_ts == "msg-1"
             assert inbound.topic_id == "user-1"
             assert inbound.files == files
-            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single"}
+            assert inbound.metadata == {"aibotid": "bot-1", "chattype": "single", "message_id": "msg-1"}
             assert channel._ws_frames["msg-1"] is frame
             assert channel._ws_stream_ids["msg-1"] == "stream-1"
 
@@ -2392,6 +6459,36 @@ class TestWeComChannel:
             await channel._publish_ws_inbound(frame, "hello")
 
             channel._ws_client.reply_stream.assert_awaited_once_with(frame, "stream-1", "Please wait...", False)
+
+        _run(go())
+
+    def test_publish_ws_inbound_treats_slash_prefixed_paths_as_chat(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = WeComChannel(bus, config={})
+            channel._ws_client = SimpleNamespace(reply_stream=AsyncMock())
+
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(generate_req_id=lambda prefix: "stream-1"),
+            )
+
+            frame = {
+                "body": {
+                    "msgid": "msg-1",
+                    "from": {"userid": "user-1"},
+                }
+            }
+
+            await channel._publish_ws_inbound(frame, "/mnt/user-data/uploads/report.pdf")
+
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.text == "/mnt/user-data/uploads/report.pdf"
+            assert inbound.msg_type == InboundMessageType.CHAT
 
         _run(go())
 
@@ -2473,6 +6570,121 @@ class TestWeComChannel:
 
         _run(go())
 
+    def test_on_ws_task_done_logs_error_on_exception(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+        task = MagicMock()
+        task.cancelled.return_value = False
+        task.exception.return_value = RuntimeError("boom")
+
+        with caplog.at_level(logging.ERROR):
+            channel._on_ws_task_done(task)
+
+        assert any("WeCom WebSocket connection task failed" in r.message and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_on_ws_task_done_silent_when_cancelled(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+        task = MagicMock()
+        task.cancelled.return_value = True
+
+        with caplog.at_level(logging.ERROR):
+            channel._on_ws_task_done(task)
+
+        task.exception.assert_not_called()
+        assert caplog.records == []
+
+    def test_on_ws_task_done_silent_when_no_exception(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+        task = MagicMock()
+        task.cancelled.return_value = False
+        task.exception.return_value = None
+
+        with caplog.at_level(logging.ERROR):
+            channel._on_ws_task_done(task)
+
+        assert caplog.records == []
+
+    def test_on_ws_error_logs_error(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+
+        with caplog.at_level(logging.ERROR):
+            channel._on_ws_error(RuntimeError("handshake failed"))
+
+        assert any("WeCom WebSocket error" in r.message and r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_on_ws_disconnected_logs_warning(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+
+        with caplog.at_level(logging.WARNING):
+            channel._on_ws_disconnected()
+
+        assert any("WeCom WebSocket disconnected" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_on_ws_disconnected_logs_reason_when_present(self, caplog):
+        import logging
+
+        from app.channels.wecom import WeComChannel
+
+        channel = WeComChannel(MessageBus(), config={})
+
+        with caplog.at_level(logging.WARNING):
+            channel._on_ws_disconnected("connection reset")
+
+        assert any("connection reset" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_start_subscribes_connection_lifecycle_events(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            bus = MessageBus()
+            channel = WeComChannel(bus, config={"bot_id": "corp123", "bot_secret": "secret"})
+
+            ws_client = MagicMock()
+
+            async def fake_connect():
+                return None
+
+            ws_client.connect = fake_connect
+
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(
+                    WSClient=lambda options: ws_client,
+                    WSClientOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+                ),
+            )
+
+            await channel.start()
+
+            subscribed_events = {call.args[0] for call in ws_client.on.call_args_list}
+            assert "error" in subscribed_events
+            assert "disconnected" in subscribed_events
+            assert channel._ws_task is not None
+
+            await channel.stop()
+
+        _run(go())
+
 
 class TestChannelService:
     def test_get_status_no_channels(self):
@@ -2492,6 +6704,41 @@ class TestChannelService:
 
         _run(go())
 
+    def test_is_channel_enabled_reflects_live_config(self):
+        """``is_channel_enabled`` is the runtime kill-switch read by the GitHub
+        webhook router. Verify it tracks the live ``_config`` dict, including
+        updates from ``configure_channel`` (which the UI uses to flip the
+        enabled flag without rewriting ``config.yaml``).
+        """
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "github": {"enabled": True, "default_mention_login": "bot"},
+                    "feishu": {"enabled": False},
+                }
+            )
+            await service.start()
+
+            # Configured + enabled → True.
+            assert service.is_channel_enabled("github") is True
+            # Configured + disabled → False.
+            assert service.is_channel_enabled("feishu") is False
+            # Not present at all → False (don't fail open).
+            assert service.is_channel_enabled("slack") is False
+            # Non-dict garbage in config → False (defensive).
+            service._config["broken"] = "not a dict"
+            assert service.is_channel_enabled("broken") is False
+
+            # Runtime flip via configure_channel must be visible.
+            await service.configure_channel("github", {"enabled": False})
+            assert service.is_channel_enabled("github") is False
+
+            await service.stop()
+
+        _run(go())
+
     def test_disabled_channels_are_skipped(self):
         from app.channels.service import ChannelService
 
@@ -2503,6 +6750,38 @@ class TestChannelService:
             )
             await service.start()
             assert "feishu" not in service._channels
+            await service.stop()
+
+        _run(go())
+
+    def test_concurrent_ensure_channel_ready_starts_channel_once(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "telegram": {"enabled": True, "bot_token": "tg-token"},
+                }
+            )
+            await service.manager.start()
+            service._running = True
+            start_calls = []
+
+            async def fake_start_channel(name, config):
+                start_calls.append(name)
+                await asyncio.sleep(0.01)
+                service._channels[name] = SimpleNamespace(is_running=True, stop=AsyncMock())
+                return True
+
+            service._start_channel = fake_start_channel
+
+            results = await asyncio.gather(
+                service.ensure_channel_ready("telegram"),
+                service.ensure_channel_ready("telegram"),
+            )
+
+            assert results == [True, True]
+            assert start_calls == ["telegram"]
             await service.stop()
 
         _run(go())
@@ -2574,6 +6853,234 @@ class TestChannelService:
 
         assert service._config == {"telegram": {"enabled": False}}
 
+    def test_from_app_config_does_not_create_runtime_channels_from_channel_connections(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config == {}
+
+    def test_from_app_config_preserves_existing_runtime_channels_with_channel_connections_enabled(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "telegram": {"enabled": True, "bot_token": "telegram-token"},
+                    "slack": {"enabled": True, "bot_token": "xoxb", "app_token": "xapp"},
+                    "discord": {"enabled": True, "bot_token": "discord-bot-token"},
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "telegram": {"enabled": True, "bot_username": "deerflow_bot"},
+                    "slack": {"enabled": True},
+                    "discord": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["telegram"]["bot_token"] == "telegram-token"
+        # The runtime (UI-entered) value must win over the yaml value.
+        assert service._config["slack"]["app_token"] == "xapp-ui"
+        assert service._config["discord"]["bot_token"] == "discord-bot-token"
+
+    def test_from_app_config_loads_persisted_runtime_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "slack",
+            {
+                "enabled": True,
+                "bot_token": "xoxb-ui",
+                "app_token": "xapp-ui",
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={},
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "slack": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert service._config["slack"] == {
+            "enabled": True,
+            "bot_token": "xoxb-ui",
+            "app_token": "xapp-ui",
+        }
+
+    def test_from_app_config_runtime_disconnect_suppresses_file_channel_config(self, monkeypatch, tmp_path):
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "feishu",
+            {
+                "enabled": False,
+                "_runtime_disabled": True,
+            },
+        )
+        app_config = SimpleNamespace(
+            model_extra={
+                "channels": {
+                    "feishu": {
+                        "enabled": True,
+                        "app_id": "file-app-id",
+                        "app_secret": "file-secret",
+                    }
+                }
+            },
+            channel_connections=ChannelConnectionsConfig.model_validate(
+                {
+                    "enabled": True,
+                    "feishu": {"enabled": True},
+                }
+            ),
+        )
+
+        service = ChannelService.from_app_config(app_config)
+
+        assert "feishu" not in service._config
+
+    def test_start_retries_configured_channel_until_ready(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        class FlakyReadyChannel(Channel):
+            starts = 0
+
+            def __init__(self, bus, config):
+                super().__init__(name="slack", bus=bus, config=config)
+
+            async def start(self):
+                type(self).starts += 1
+                self._running = type(self).starts >= 2
+
+            async def stop(self):
+                self._running = False
+
+            async def send(self, msg):
+                return None
+
+        monkeypatch.setattr(
+            "deerflow.reflection.resolve_class",
+            lambda import_path, base_class=None: FlakyReadyChannel,
+        )
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "slack": {
+                        "enabled": True,
+                        "bot_token": "xoxb-ui",
+                        "app_token": "xapp-ui",
+                    },
+                }
+            )
+
+            try:
+                await service.start()
+
+                assert FlakyReadyChannel.starts == 2
+                assert service.get_status()["channels"]["slack"]["running"] is True
+            finally:
+                await service.stop()
+
+        _run(go())
+
+    def test_connection_repo_is_forwarded_to_manager(self):
+        from app.channels.service import ChannelService
+
+        repo = object()
+        service = ChannelService(channels_config={}, connection_repo=repo)
+
+        assert service.manager._connection_repo is repo
+
+    def test_require_bound_identity_is_forwarded_to_manager(self):
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={}, require_bound_identity=True)
+
+        assert service.manager._require_bound_identity is True
+
+    def test_remove_channel_stops_running_channel_and_forgets_config(self):
+        from app.channels.service import ChannelService
+
+        async def go():
+            service = ChannelService(
+                channels_config={
+                    "slack": {
+                        "enabled": True,
+                        "bot_token": "xoxb-ui",
+                        "app_token": "xapp-ui",
+                    },
+                }
+            )
+            channel = AsyncMock()
+            service._channels["slack"] = channel
+            service._running = True
+
+            assert await service.remove_channel("slack") is True
+
+            channel.stop.assert_awaited_once()
+            assert "slack" not in service._channels
+            assert "slack" not in service._config
+
+        _run(go())
+
     def test_disabled_channel_with_string_creds_emits_warning(self, caplog):
         """Warning is emitted when a channel has string credentials but enabled=false."""
         import logging
@@ -2591,7 +7098,8 @@ class TestChannelService:
             await service.stop()
 
         _run(go())
-        assert any("wecom" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert any("credentials configured but is disabled" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert all("wecom" not in r.message for r in caplog.records)
 
     def test_disabled_channel_with_int_creds_emits_warning(self, caplog):
         """Warning is emitted even when YAML-parsed integer credentials are present."""
@@ -2611,7 +7119,8 @@ class TestChannelService:
             await service.stop()
 
         _run(go())
-        assert any("telegram" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert any("credentials configured but is disabled" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+        assert all("telegram" not in r.message for r in caplog.records)
 
     def test_disabled_channel_without_creds_emits_info(self, caplog):
         """Only an info log (no warning) is emitted when a channel is disabled with no credentials."""
@@ -2632,6 +7141,226 @@ class TestChannelService:
         _run(go())
         warning_records = [r for r in caplog.records if "telegram" in r.message and r.levelno == logging.WARNING]
         assert not warning_records
+
+    # -- restart_channel config reload tests (issue #3497) --
+
+    def test_restart_channel_reloads_config_from_disk(self, monkeypatch):
+        """restart_channel reads the latest config via get_app_config()."""
+        from app.channels.service import ChannelService
+
+        initial_config = {"feishu": {"enabled": True, "app_id": "old_id", "app_secret": "old_secret"}}
+        updated_config = {"feishu": {"enabled": True, "app_id": "new_id", "app_secret": "new_secret"}}
+
+        service = ChannelService(channels_config=initial_config)
+
+        def mock_get_app_config():
+            return SimpleNamespace(model_extra={"channels": updated_config})
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu")
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "new_id"
+        assert started_configs["feishu"]["app_secret"] == "new_secret"
+        assert service._config["feishu"]["app_id"] == "new_id"
+
+    def test_configure_channel_keeps_explicit_config_over_stale_file_entry(self, monkeypatch):
+        """UI-entered runtime credentials must not be clobbered by a config.yaml reload.
+
+        configure_channel() receives the authoritative config (e.g. from the
+        browser Connect/Modify dialog, never written to config.yaml), so its
+        restart must skip the file reload that restart_channel() performs for
+        operator-triggered restarts.
+        """
+        from app.channels.service import ChannelService
+
+        def fail_get_app_config():
+            raise AssertionError("configure_channel must not reload file config")
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", fail_get_app_config)
+
+        service = ChannelService(channels_config={})
+        service._running = True
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.configure_channel("feishu", {"enabled": True, "app_id": "ui_id", "app_secret": "ui_secret"})
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "ui_id"
+        assert started_configs["feishu"]["app_secret"] == "ui_secret"
+        assert service._config["feishu"]["app_id"] == "ui_id"
+
+    def test_restart_channel_reload_applies_runtime_store_overlay(self, monkeypatch, tmp_path):
+        """An operator-triggered restart keeps UI runtime-store credentials for
+        channels that have no config.yaml entry."""
+        from app.channels.runtime_config_store import ChannelRuntimeConfigStore
+        from app.channels.service import ChannelService
+        from deerflow.config import paths as paths_module
+        from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setattr(paths_module, "_paths", None)
+        ChannelRuntimeConfigStore().set_provider_config(
+            "telegram",
+            {"enabled": True, "bot_token": "store-token"},
+        )
+
+        def mock_get_app_config():
+            return SimpleNamespace(
+                model_extra={"channels": {}},
+                channel_connections=ChannelConnectionsConfig.model_validate({"enabled": True, "telegram": {"enabled": True, "bot_username": "deerflow_bot"}}),
+            )
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        service = ChannelService(channels_config={})
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("telegram")
+
+        _run(go())
+
+        assert started_configs["telegram"]["bot_token"] == "store-token"
+
+    def test_restart_channel_falls_back_to_cached_config_on_error(self, monkeypatch):
+        """When get_app_config() fails, restart_channel uses cached config."""
+        from app.channels.service import ChannelService
+
+        cached_config = {"feishu": {"enabled": True, "app_id": "cached_id", "app_secret": "cached_secret"}}
+        service = ChannelService(channels_config=cached_config)
+
+        def _raise():
+            raise RuntimeError("config missing")
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", _raise)
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu")
+
+        _run(go())
+
+        assert started_configs["feishu"]["app_id"] == "cached_id"
+
+    def test_restart_channel_returns_false_for_unknown_channel(self):
+        """restart_channel returns False when the channel has no config."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={})
+
+        async def go():
+            result = await service.restart_channel("nonexistent")
+            assert result is False
+
+        _run(go())
+
+    def test_restart_channel_stops_existing_channel_before_restart(self):
+        """restart_channel stops the running channel instance before restarting."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"feishu": {"enabled": True, "app_id": "x", "app_secret": "y"}})
+
+        stopped = []
+
+        class FakeChannel:
+            is_running = True
+
+            async def stop(self):
+                stopped.append(True)
+
+        service._channels["feishu"] = FakeChannel()
+
+        started_configs = {}
+
+        async def mock_start_channel(name, config):
+            started_configs[name] = config
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            await service.restart_channel("feishu", reload_config=False)
+
+        _run(go())
+
+        assert stopped
+        assert "feishu" in started_configs
+
+    def test_restart_channel_skips_disabled_channel(self, monkeypatch):
+        """restart_channel stops the channel and returns True when config has enabled: false."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"feishu": {"enabled": True, "app_id": "x", "app_secret": "y"}})
+
+        stopped = []
+
+        class FakeChannel:
+            is_running = True
+
+            async def stop(self):
+                stopped.append(True)
+
+        service._channels["feishu"] = FakeChannel()
+
+        # Simulate config.yaml updated to enabled: false
+        disabled_config = {"feishu": {"enabled": False, "app_id": "x", "app_secret": "y"}}
+
+        def mock_get_app_config():
+            return SimpleNamespace(model_extra={"channels": disabled_config})
+
+        monkeypatch.setattr("deerflow.config.app_config.get_app_config", mock_get_app_config)
+
+        started = []
+
+        async def mock_start_channel(name, config):
+            started.append(name)
+            return True
+
+        service._start_channel = mock_start_channel
+
+        async def go():
+            result = await service.restart_channel("feishu")
+            assert result is True  # successfully stopped (no restart needed)
+
+        _run(go())
+
+        assert stopped  # old channel was stopped
+        assert not started  # _start_channel was NOT called
 
 
 # ---------------------------------------------------------------------------
@@ -2743,6 +7472,254 @@ class TestSlackAllowedUsers:
         assert inbound.chat_id == "C123"
         assert inbound.text == "hello from slack"
 
+    def test_connect_code_bypasses_allowed_users_filter(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(
+            bus=bus,
+            config={"allowed_users": ["U-allowed"], "connection_repo": object()},
+        )
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._bind_connection_from_connect_code = AsyncMock(return_value=True)
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "user": "U-blocked",
+            "text": "/connect slack-bind-code",
+            "team": "T123",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ) as submit:
+            channel._handle_message_event(event)
+
+        channel._bind_connection_from_connect_code.assert_called_once()
+        submit.assert_called_once()
+        bus.publish_inbound.assert_not_awaited()
+        channel._add_reaction.assert_not_called()
+        channel._send_running_reply.assert_not_called()
+
+    def test_app_mention_strips_leading_bot_mention_before_command_detection(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UBOT> /help",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "/help"
+        assert inbound.msg_type == InboundMessageType.COMMAND
+
+    def test_app_mention_strips_labelled_leading_bot_mention(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UBOT|deerflow> /help",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "/help"
+        assert inbound.msg_type == InboundMessageType.COMMAND
+
+    def test_app_mention_strips_leading_bot_mention_before_slash_skill(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UBOT> /data-analysis analyze uploads/foo.csv",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "/data-analysis analyze uploads/foo.csv"
+        assert inbound.msg_type == InboundMessageType.CHAT
+
+    def test_app_mention_preserves_following_user_mention(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UBOT> <@UASSIGNEE> please review this",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "<@UASSIGNEE> please review this"
+        assert inbound.msg_type == InboundMessageType.CHAT
+
+    def test_app_mention_preserves_leading_non_bot_mention_when_bot_id_known(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UASSIGNEE> <@UBOT> please review this",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "<@UASSIGNEE> <@UBOT> please review this"
+        assert inbound.msg_type == InboundMessageType.CHAT
+
+    def test_app_mention_preserves_leading_non_bot_mention_when_bot_id_unknown(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={})
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {
+            "type": "app_mention",
+            "user": "U123456",
+            "text": "<@UASSIGNEE> /help <@UBOT>",
+            "channel": "C123",
+            "ts": "1710000000.000100",
+        }
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event(event)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert inbound.text == "<@UASSIGNEE> /help <@UBOT>"
+        assert inbound.msg_type == InboundMessageType.CHAT
+
+    def test_socket_event_resolves_bot_user_id_before_app_mention_command_detection(self):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={})
+        channel._SocketModeResponse = lambda envelope_id: SimpleNamespace(envelope_id=envelope_id)
+        channel._loop = MagicMock()
+        channel._loop.is_running.return_value = True
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        client = SimpleNamespace(send_socket_mode_response=MagicMock())
+        req = SimpleNamespace(
+            envelope_id="env-1",
+            type="events_api",
+            payload={
+                "authorizations": [{"user_id": "UBOT"}],
+                "event": {
+                    "type": "app_mention",
+                    "user": "U123456",
+                    "text": "<@UBOT> /help",
+                    "channel": "C123",
+                    "ts": "1710000000.000100",
+                },
+            },
+        )
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._on_socket_event(client, req)
+
+        inbound = bus.publish_inbound.call_args.args[0]
+        assert channel._bot_user_id == "UBOT"
+        assert inbound.text == "/help"
+        assert inbound.msg_type == InboundMessageType.COMMAND
+
     def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
         from app.channels.slack import SlackChannel
 
@@ -2816,6 +7793,98 @@ class TestSlackAllowedUsers:
 
 
 class TestTelegramSendRetry:
+    def test_start_registers_known_channel_commands(self, monkeypatch):
+        import sys
+        from types import ModuleType
+
+        from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+        from app.channels.telegram import TelegramChannel
+
+        class FakeFilter:
+            def __init__(self, expr: str):
+                self.expr = expr
+
+            def __and__(self, other):
+                return FakeFilter(f"{self.expr}&{other.expr}")
+
+            def __or__(self, other):
+                return FakeFilter(f"{self.expr}|{other.expr}")
+
+            def __invert__(self):
+                return FakeFilter(f"~{self.expr}")
+
+        class FakeApplication:
+            def __init__(self):
+                self.handlers = []
+
+            def add_handler(self, handler):
+                self.handlers.append(handler)
+
+        fake_app = FakeApplication()
+
+        class FakeApplicationBuilder:
+            def token(self, token):
+                assert token == "test-token"
+                return self
+
+            def build(self):
+                return fake_app
+
+        def fake_command_handler(command, callback):
+            return SimpleNamespace(kind="command", command=command, callback=callback)
+
+        def fake_message_handler(filter_expr, callback):
+            return SimpleNamespace(kind="message", filter_expr=filter_expr, callback=callback)
+
+        telegram_mod = ModuleType("telegram")
+        telegram_ext_mod = ModuleType("telegram.ext")
+        telegram_ext_mod.ApplicationBuilder = FakeApplicationBuilder
+        telegram_ext_mod.CommandHandler = fake_command_handler
+        telegram_ext_mod.MessageHandler = fake_message_handler
+        telegram_ext_mod.filters = SimpleNamespace(
+            TEXT=FakeFilter("TEXT"),
+            COMMAND=FakeFilter("COMMAND"),
+            PHOTO=FakeFilter("PHOTO"),
+            Document=SimpleNamespace(ALL=FakeFilter("DOCUMENT")),
+        )
+        telegram_mod.ext = telegram_ext_mod
+        monkeypatch.setitem(sys.modules, "telegram", telegram_mod)
+        monkeypatch.setitem(sys.modules, "telegram.ext", telegram_ext_mod)
+
+        class FakeThread:
+            def __init__(self, *, target, daemon):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+        monkeypatch.setattr("app.channels.telegram.threading.Thread", FakeThread)
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            await ch.start()
+            try:
+                registered_commands = {handler.command for handler in fake_app.handlers if handler.kind == "command"}
+                expected_commands = {command.removeprefix("/") for command in KNOWN_CHANNEL_COMMANDS}
+                assert expected_commands <= registered_commands
+                assert "start" in registered_commands
+                message_filters = {handler.filter_expr.expr for handler in fake_app.handlers if handler.kind == "message"}
+                assert {"TEXT&COMMAND", "TEXT&~COMMAND"} <= message_filters
+                assert "PHOTO|DOCUMENT" in message_filters
+            finally:
+                await ch.stop()
+
+        _run(go())
+
     def test_retries_on_failure_then_succeeds(self):
         from app.channels.telegram import TelegramChannel
 
@@ -2903,13 +7972,25 @@ class TestFeishuSendRetry:
 # ---------------------------------------------------------------------------
 
 
-def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_id: int | None = None, text: str = "hello"):
+def _make_telegram_update(
+    chat_type: str,
+    message_id: int,
+    *,
+    reply_to_message_id: int | None = None,
+    text: str | None = "hello",
+    caption: str | None = None,
+    photo: list[SimpleNamespace] | None = None,
+    document: SimpleNamespace | None = None,
+):
     """Build a minimal mock telegram Update for testing _on_text / _cmd_generic."""
     update = MagicMock()
     update.effective_chat.type = chat_type
     update.effective_chat.id = 100
     update.effective_user.id = 42
     update.message.text = text
+    update.message.caption = caption
+    update.message.photo = photo or []
+    update.message.document = document
     update.message.message_id = message_id
     if reply_to_message_id is not None:
         reply_msg = MagicMock()
@@ -2920,8 +8001,8 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
     return update
 
 
-class TestTelegramPrivateChatThread:
-    """Verify that private chats use topic_id=None (single thread per chat)."""
+class TestTelegramInboundMessages:
+    """Verify Telegram inbound normalization and conversation thread context."""
 
     def test_private_chat_no_reply_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
@@ -2929,7 +8010,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=10)
             await ch._on_text(update, None)
@@ -2939,13 +8020,560 @@ class TestTelegramPrivateChatThread:
 
         _run(go())
 
+    def test_photo_caption_uses_largest_size_and_preserves_thread_context(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            small = SimpleNamespace(file_id="photo-small", file_unique_id="unique-small", file_size=10, width=90, height=90)
+            large = SimpleNamespace(file_id="photo-large", file_unique_id="unique-large", file_size=200, width=800, height=600)
+            update = _make_telegram_update(
+                "group",
+                message_id=40,
+                reply_to_message_id=15,
+                text=None,
+                caption="  Describe this image  ",
+                # Do not rely on Telegram returning PhotoSize objects in order.
+                photo=[large, small],
+            )
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "Describe this image"
+            assert msg.topic_id == "15"
+            assert msg.thread_ts == "40"
+            assert len(msg.files) == 1
+            assert msg.files[0] == {
+                "type": "image",
+                "file_id": "photo-large",
+                "file_unique_id": "unique-large",
+                "filename": "telegram-photo-40.jpg",
+                "mime_type": "image/jpeg",
+                "size": 200,
+            }
+
+        _run(go())
+
+    def test_document_without_caption_still_publishes_an_inbound_turn(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            document = SimpleNamespace(
+                file_id="document-id",
+                file_unique_id="document-unique",
+                file_name="../report.pdf",
+                mime_type="application/pdf",
+                file_size=1234,
+            )
+            update = _make_telegram_update("private", message_id=41, text=None, document=document)
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == ""
+            assert msg.topic_id is None
+            assert msg.files == [
+                {
+                    "type": "file",
+                    "file_id": "document-id",
+                    "file_unique_id": "document-unique",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 1234,
+                }
+            ]
+
+        _run(go())
+
+    def test_photo_without_caption_still_publishes_an_inbound_turn(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            photo = SimpleNamespace(file_id="photo-id", file_unique_id="photo-unique", file_size=25)
+            update = _make_telegram_update("private", message_id=42, text=None, photo=[photo])
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == ""
+            assert msg.files[0]["filename"] == "telegram-photo-42.jpg"
+            assert msg.files[0]["file_id"] == "photo-id"
+
+        _run(go())
+
+    def test_document_caption_is_preserved_and_missing_filename_gets_safe_fallback(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+            document = SimpleNamespace(
+                file_id="document-id",
+                file_unique_id="document-unique",
+                file_name=None,
+                mime_type="text/plain",
+                file_size=12,
+            )
+            update = _make_telegram_update("private", message_id=43, text=None, caption="  Review this  ", document=document)
+
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "Review this"
+            assert msg.files[0]["filename"] == "telegram-document-43.bin"
+
+        _run(go())
+
+    def test_document_staging_filename_gets_visible_safe_fallback(self):
+        from app.channels.telegram import TelegramChannel
+
+        document = SimpleNamespace(
+            file_id="document-id",
+            file_unique_id="document-unique",
+            file_name=".upload-hidden.part",
+            mime_type="application/pdf",
+            file_size=12,
+        )
+        update = _make_telegram_update("private", message_id=44, text=None, document=document)
+
+        files = TelegramChannel._extract_inbound_files(update.message)
+
+        assert files[0]["filename"] == "telegram-document-44.bin"
+
+    def test_receive_file_downloads_bytes_without_retaining_telegram_file_id(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            downloaded = bytearray(b"data")
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=downloaded))
+            bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[
+                    {
+                        "type": "file",
+                        "file_id": "document-id",
+                        "file_unique_id": "document-unique",
+                        "filename": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "size": 4,
+                    }
+                ],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            bot.get_file.assert_awaited_once_with("document-id")
+            telegram_file.download_as_bytearray.assert_awaited_once_with()
+            assert result.text == "caption"
+            assert result.files[0]["_content"] is downloaded
+            assert result.files == [
+                {
+                    "type": "file",
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "size": 4,
+                    "_content": b"data",
+                }
+            ]
+
+        _run(go())
+
+    def test_receive_file_marshals_ptb_download_to_telegram_event_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+
+                class LoopBoundFile:
+                    file_size = 4
+
+                    async def download_as_bytearray(self):
+                        assert asyncio.get_running_loop() is telegram_loop
+                        return bytearray(b"data")
+
+                class LoopBoundBot:
+                    async def get_file(self, file_id):
+                        assert asyncio.get_running_loop() is telegram_loop
+                        assert file_id == "document-id"
+                        return LoopBoundFile()
+
+                ch._tg_loop = telegram_loop
+                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="100",
+                    user_id="42",
+                    text="caption",
+                    files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+                )
+                result = await ch.receive_file(msg, "thread-1")
+            finally:
+                telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+            assert result.files[0]["_content"] == b"data"
+
+        _run(go())
+
+    def test_stop_cancels_and_drains_an_inflight_receive_download(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            download_started = threading.Event()
+            download_cancelled = threading.Event()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class SlowTelegramFile:
+                file_size = 4
+
+                async def download_as_bytearray(self):
+                    download_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        download_cancelled.set()
+
+            class LoopBoundBot:
+                async def get_file(self, file_id):
+                    assert asyncio.get_running_loop() is telegram_loop
+                    assert file_id == "document-id"
+                    return SlowTelegramFile()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="100",
+                    user_id="42",
+                    text="caption",
+                    files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+                )
+                receive_task = asyncio.create_task(ch.receive_file(msg, "thread-1"))
+                assert await asyncio.to_thread(download_started.wait, 2)
+
+                await ch.stop()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await receive_task
+                assert download_cancelled.is_set()
+                assert not ch._tg_bridge_tasks
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_cancelled_stop_still_stops_thread_and_clears_state(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            drain_started = threading.Event()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            async def slow_drain():
+                drain_started.set()
+                await asyncio.Event().wait()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._cancel_telegram_bridge_tasks = slow_drain
+
+                stop_task = asyncio.create_task(ch.stop())
+                assert await asyncio.to_thread(drain_started.wait, 2)
+                stop_task.cancel()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+
+                assert not loop_thread.is_alive()
+                assert ch._thread is None
+                assert ch._application is None
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_does_not_reuse_ptb_client_after_telegram_loop_stops(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            stopped_loop = asyncio.new_event_loop()
+            bot = SimpleNamespace(get_file=AsyncMock())
+            ch._tg_loop = stopped_loop
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 4}],
+            )
+
+            try:
+                result = await ch.receive_file(msg, "thread-1")
+            finally:
+                stopped_loop.close()
+
+            bot.get_file.assert_not_awaited()
+            assert result.files == []
+            assert result.text.startswith("caption")
+            assert "report.pdf" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_declared_oversize_before_download(self):
+        from app.channels.telegram import TELEGRAM_MAX_INBOUND_FILE_BYTES, TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            bot = SimpleNamespace(get_file=AsyncMock())
+            ch._application = SimpleNamespace(bot=bot)
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[
+                    {
+                        "type": "file",
+                        "file_id": "too-large",
+                        "filename": "archive.zip",
+                        "mime_type": "application/zip",
+                        "size": TELEGRAM_MAX_INBOUND_FILE_BYTES + 1,
+                    }
+                ],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            bot.get_file.assert_not_called()
+            assert result.files == []
+            assert "archive.zip" in result.text
+            assert "20 MB" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_download_larger_than_reported(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 3)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_file = SimpleNamespace(file_size=2, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "image", "file_id": "photo-id", "filename": "photo.jpg", "mime_type": "image/jpeg", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert result.text.startswith("caption")
+            assert "photo.jpg" in result.text
+
+        _run(go())
+
+    def test_receive_file_rejects_resolved_oversize_before_downloading(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 3)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            download = AsyncMock(return_value=bytearray(b"four"))
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=download)
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[{"type": "file", "file_id": "file-id", "filename": "large.bin", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            download.assert_not_awaited()
+            assert result.files == []
+            assert "large.bin" in result.text
+
+        _run(go())
+
+    def test_receive_file_accepts_exact_download_limit(self, monkeypatch):
+        from app.channels import telegram
+
+        async def go():
+            monkeypatch.setattr(telegram, "TELEGRAM_MAX_INBOUND_FILE_BYTES", 4)
+            bus = MessageBus()
+            ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="",
+                files=[{"type": "file", "file_id": "file-id", "filename": "exact.bin", "size": 4}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files[0]["_content"] == b"four"
+            assert result.files[0]["size"] == 4
+
+        _run(go())
+
+    def test_receive_file_download_failure_keeps_caption_and_drops_attachment(self, caplog):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed"))))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="Summarize this",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "mime_type": "application/pdf", "size": 10}],
+            )
+
+            with caplog.at_level(logging.ERROR):
+                result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert result.text.startswith("Summarize this")
+            assert "report.pdf" in result.text
+            assert "test-token" not in caplog.text
+
+        _run(go())
+
+    def test_private_chat_slash_skill_text_routes_as_chat(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+
+            update = _make_telegram_update("private", message_id=12, text="/data-analysis analyze uploads/foo.csv")
+            await ch._on_text(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "/data-analysis analyze uploads/foo.csv"
+            assert msg.msg_type == InboundMessageType.CHAT
+            assert msg.topic_id is None
+
+        _run(go())
+
+    def test_slash_skill_addressed_to_telegram_bot_strips_username(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+
+            update = _make_telegram_update(
+                "group",
+                message_id=13,
+                text="/data-analysis@DeerFlowBot analyze uploads/foo.csv",
+            )
+            context = SimpleNamespace(bot=SimpleNamespace(username="DeerFlowBot"))
+            await ch._on_text(update, context)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "/data-analysis analyze uploads/foo.csv"
+            assert msg.msg_type == InboundMessageType.CHAT
+            assert msg.topic_id == "13"
+
+        _run(go())
+
     def test_private_chat_with_reply_still_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
 
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
             await ch._on_text(update, None)
@@ -2961,7 +8589,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=20)
             await ch._on_text(update, None)
@@ -2977,7 +8605,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
             await ch._on_text(update, None)
@@ -2993,7 +8621,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("supergroup", message_id=25)
             await ch._on_text(update, None)
@@ -3009,7 +8637,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("private", message_id=30, text="/new")
             await ch._cmd_generic(update, None)
@@ -3026,7 +8654,7 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=31, text="/status")
             await ch._cmd_generic(update, None)
@@ -3043,13 +8671,32 @@ class TestTelegramPrivateChatThread:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
             await ch._cmd_generic(update, None)
 
             msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
             assert msg.topic_id == "20"
+            assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+    def test_cmd_generic_strips_addressed_telegram_bot_username(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_running_loop()
+
+            update = _make_telegram_update("group", message_id=33, text="/status@DeerFlowBot")
+            context = SimpleNamespace(bot=SimpleNamespace(username="DeerFlowBot"))
+            await ch._cmd_generic(update, context)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "/status"
+            assert msg.topic_id == "33"
             assert msg.msg_type == InboundMessageType.COMMAND
 
         _run(go())
@@ -3065,7 +8712,7 @@ class TestTelegramProcessingOrder:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
 
-            ch._main_loop = asyncio.get_event_loop()
+            ch._main_loop = asyncio.get_running_loop()
 
             order = []
 
@@ -3112,3 +8759,893 @@ class TestSlackMarkdownConversion:
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result
         assert "#" not in result
+
+    def test_converter_passes_reserved_characters_through_unchanged(self):
+        # The library itself never escapes Slack's reserved characters -- this
+        # pins that assumption so SlackChannel.send() knows it must do so itself.
+        from app.channels.slack import _slack_md_converter
+
+        result = _slack_md_converter.convert("if a < b && b > c:")
+        assert result == "if a < b && b > c:"
+
+
+# ---------------------------------------------------------------------------
+# Slack outbound text escaping tests (Slack's &/</> HTML-entity requirement)
+#
+# Slack requires callers to replace &, <, and > with their HTML entity
+# equivalents before sending message text, because an unescaped `<...>`
+# triggers Slack's own mention/link syntax (e.g. `<@USERID>`,
+# `<http://url|label>`). See:
+# https://api.slack.com/reference/surfaces/formatting#escaping
+# ---------------------------------------------------------------------------
+
+
+class TestSlackTextEscaping:
+    @staticmethod
+    def _sent_text(text: str) -> str:
+        """Send *text* through SlackChannel.send() and return the resulting
+        Slack API ``text`` kwarg, without actually hitting the network."""
+        from app.channels.slack import SlackChannel
+
+        captured: dict[str, object] = {}
+
+        async def go():
+            bus = MessageBus()
+            ch = SlackChannel(bus=bus, config={"bot_token": "xoxb-test", "app_token": "xapp-test"})
+
+            mock_web = MagicMock()
+
+            def post_message(**kwargs):
+                captured.update(kwargs)
+                return MagicMock()
+
+            mock_web.chat_postMessage = post_message
+            ch._web_client = mock_web
+
+            msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text=text)
+            await ch.send(msg)
+
+        _run(go())
+        return captured["text"]
+
+    def test_raw_angle_brackets_and_ampersand_are_escaped(self):
+        # Realistic technical/code content containing all three reserved
+        # characters must arrive escaped, so Slack renders it as literal text
+        # instead of attempting to parse a broken mention/link.
+        sent = self._sent_text("if a < b && b > c:")
+        assert sent == "if a &lt; b &amp;&amp; b &gt; c:"
+        assert "<" not in sent
+        assert ">" not in sent
+
+    def test_bot_mention_syntax_is_neutralized_not_interpreted(self):
+        # Raw text that happens to look like a mention must not survive as
+        # live `<@...>` syntax -- Slack would otherwise try to resolve it.
+        sent = self._sent_text("please ask <@U12345> for review")
+        assert sent == "please ask &lt;@U12345&gt; for review"
+
+    def test_real_markdown_link_still_converts_without_double_escaping(self):
+        # Critical non-regression case: escaping must run BEFORE mrkdwn
+        # conversion, not after. The converter's own generated `<url|label>`
+        # syntax for a real markdown link must survive untouched -- if
+        # escaping ran after conversion instead, this would corrupt into
+        # `&lt;url|label&gt;` and Slack would render a dead link.
+        sent = self._sent_text("See [DeerFlow docs](https://example.com/docs) for more.")
+        assert "<https://example.com/docs|DeerFlow docs>" in sent
+        assert "&lt;" not in sent
+        assert "&gt;" not in sent
+
+    def test_ampersand_in_link_url_is_escaped_before_conversion(self):
+        # & must be escaped first (before < and >) so it doesn't double-escape
+        # the &amp;/&lt;/&gt; entities being introduced, and a literal '&' in a
+        # URL must still come through as &amp; per Slack's escaping rule --
+        # even inside the converter's own generated <url|label> syntax.
+        sent = self._sent_text("[Search](https://example.com?a=1&b=2)")
+        assert "<https://example.com?a=1&amp;b=2|Search>" in sent
+
+    def test_blockquote_marker_at_line_start_is_preserved(self):
+        # A ">" at the very start of a line is Slack's own blockquote marker
+        # (the mrkdwn converter passes it through unchanged), not part of the
+        # <...> mention/link syntax that & and < neutralize. Escaping it would
+        # turn a quoted line into visible "&gt;" text instead of a rendered
+        # blockquote.
+        sent = self._sent_text("> quoted text")
+        assert sent == "> quoted text"
+
+    def test_blockquote_marker_exemption_is_line_start_only(self):
+        # The line-start exemption must not widen into "never escape '>'":
+        # a "<"/"&" anywhere, and a ">" that is NOT at the start of a line,
+        # still escape -- only the leading marker is restored.
+        sent = self._sent_text("> a < b & c > d")
+        assert sent == "> a &lt; b &amp; c &gt; d"
+
+    def test_blockquote_marker_restored_on_every_line(self):
+        # The restoration must apply per-line (re.MULTILINE), not just once
+        # at the start of the whole string.
+        sent = self._sent_text("intro\n> first quote\nmiddle\n> second quote")
+        assert sent == "intro\n> first quote\nmiddle\n> second quote"
+
+
+# ---------------------------------------------------------------------------
+# Telegram streaming tests
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramStreaming:
+    @staticmethod
+    def _make_channel_with_bot():
+        from app.channels.telegram import TelegramChannel
+
+        bus = MessageBus()
+        ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+        mock_app = MagicMock()
+        bot = SimpleNamespace()
+        bot.sent = []
+        bot.edited = []
+        bot.rich = []
+        bot.next_message_id = 100
+
+        async def send_message(**kwargs):
+            bot.sent.append(kwargs)
+            result = MagicMock()
+            result.message_id = bot.next_message_id
+            bot.next_message_id += 1
+            return result
+
+        async def edit_message_text(**kwargs):
+            bot.edited.append(kwargs)
+            result = MagicMock()
+            result.message_id = kwargs["message_id"]
+            return result
+
+        async def do_api_request(endpoint, api_kwargs):
+            bot.rich.append((endpoint, api_kwargs))
+            result = {"message_id": bot.next_message_id}
+            bot.next_message_id += 1
+            return result
+
+        bot.send_message = send_message
+        bot.edit_message_text = edit_message_text
+        bot.do_api_request = do_api_request
+        mock_app.bot = bot
+        ch._application = mock_app
+        return ch, bot
+
+    def test_stream_updates_edit_placeholder_in_place(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            update1 = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hello", is_final=False, thread_ts="42")
+            await ch.send(update1)
+
+            clock["now"] += 2.0
+            update2 = OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hello world", is_final=False, thread_ts="42")
+            await ch.send(update2)
+
+            assert len(bot.sent) == 1  # only the placeholder
+            assert [e["message_id"] for e in bot.edited] == [placeholder_id, placeholder_id]
+            assert [e["text"] for e in bot.edited] == ["Hello", "Hello world"]
+
+        _run(go())
+
+    def test_stream_updates_throttled_within_interval(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="a", is_final=False, thread_ts="42"))
+            clock["now"] += 0.3  # within 1s window -> dropped
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="ab", is_final=False, thread_ts="42"))
+            clock["now"] += 1.0  # past window -> edited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="abc", is_final=False, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["a", "abc"]
+
+        _run(go())
+
+    def test_stream_updates_in_group_chat_use_wider_throttle(self, monkeypatch):
+        """Telegram groups (negative chat_id) are capped at 20 messages/minute,
+        so group-chat stream edits throttle at 3s instead of 1s."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("-100123", 42)
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="a", is_final=False, thread_ts="42"))
+            clock["now"] += 1.2  # past the 1s private window, within the 3s group window -> dropped
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="ab", is_final=False, thread_ts="42"))
+            clock["now"] += 2.0  # 3.2s since last edit -> edited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="-100123", thread_id="t1", text="abc", is_final=False, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["a", "abc"]
+
+        _run(go())
+
+    def test_stream_update_without_placeholder_sends_new_message(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+
+            assert len(bot.sent) == 1
+            assert bot.sent[0]["text"] == "Hi"
+            # Threads under the user's message that started this turn
+            assert bot.sent[0]["reply_to_message_id"] == 42
+            assert ch._stream_messages["12345:42"]["message_id"] == 100
+
+        _run(go())
+
+    def test_stream_edit_fallback_message_threads_under_user_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_gone(**kwargs):
+                raise Exception("Bad Request: message to edit not found")
+
+            bot.edit_message_text = edit_gone
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+
+            # Fallback message threads under the user's message and becomes the new stream target
+            assert bot.sent[1]["text"] == "Hi"
+            assert bot.sent[1]["reply_to_message_id"] == 42
+            assert ch._stream_messages["12345:42"]["message_id"] == 101
+
+        _run(go())
+
+    def test_stream_message_registry_is_bounded(self):
+        from app.channels.telegram import MAX_TRACKED_STREAM_MESSAGES
+
+        async def go():
+            ch, _bot = self._make_channel_with_bot()
+
+            for i in range(MAX_TRACKED_STREAM_MESSAGES + 1):
+                ch._register_stream_message(f"chat:{i}", message_id=i, last_text="x", last_edit_at=0.0)
+
+            assert len(ch._stream_messages) == MAX_TRACKED_STREAM_MESSAGES
+            assert "chat:0" not in ch._stream_messages  # oldest evicted
+            assert f"chat:{MAX_TRACKED_STREAM_MESSAGES}" in ch._stream_messages
+
+        _run(go())
+
+    def test_stream_update_truncates_long_text(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            long_text = "x" * 5000
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=False, thread_ts="42"))
+
+            assert len(bot.edited) == 1
+            assert len(bot.edited[0]["text"]) == 4096
+            assert bot.edited[0]["text"].endswith("…")
+
+        _run(go())
+
+    def test_stream_update_retry_after_is_dropped(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_rate_limited(**kwargs):
+                exc = Exception("Flood control exceeded")
+                exc.retry_after = 5
+                raise exc
+
+            bot.edit_message_text = edit_rate_limited
+            # Must not raise, must not send a new message
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Hi", is_final=False, thread_ts="42"))
+            assert len(bot.sent) == 1  # placeholder only
+
+        _run(go())
+
+    def test_telegram_reports_streaming_support(self):
+        from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.telegram import TelegramChannel
+
+        bus = MessageBus()
+        ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+        assert ch.supports_streaming is True
+        assert CHANNEL_CAPABILITIES["telegram"]["supports_streaming"] is True
+
+    def test_running_reply_registers_stream_placeholder(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            mock_app = MagicMock()
+            mock_bot = AsyncMock()
+            sent = MagicMock()
+            sent.message_id = 777
+            mock_bot.send_message = AsyncMock(return_value=sent)
+            mock_app.bot = mock_bot
+            ch._application = mock_app
+
+            await ch._send_running_reply("12345", 42)
+
+            state = ch._stream_messages["12345:42"]
+            assert state["message_id"] == 777
+            assert state["last_edit_at"] == 0.0
+            assert state["last_text"] == "Working on it..."
+            mock_bot.send_message.assert_awaited_once_with(
+                chat_id=12345,
+                text="Working on it...",
+                reply_to_message_id=42,
+            )
+
+        _run(go())
+
+    def test_final_message_edits_stream_message_and_clears_state(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="partial", is_final=False, thread_ts="42"))
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="full answer", is_final=True, thread_ts="42"))
+
+            assert [e["text"] for e in bot.edited] == ["partial", "full answer"]
+            assert len(bot.sent) == 1  # placeholder only — final edited, not re-sent
+            assert "12345:42" not in ch._stream_messages
+            assert ch._last_bot_message["12345"] == placeholder_id
+
+        _run(go())
+
+    def test_final_message_splits_long_text(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            long_text = "a" * 4096 + "b" * 100
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=True, thread_ts="42"))
+
+            assert len(bot.edited) == 1
+            assert bot.edited[0]["text"] == "a" * 4096
+            follow_ups = bot.sent[1:]  # bot.sent[0] is the placeholder
+            assert [m["text"] for m in follow_ups] == ["b" * 100]
+            # Fake bot assigns ids sequentially: placeholder=100, follow-up chunk=101
+            assert ch._last_bot_message["12345"] == 101
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_message_not_modified_error_is_ignored(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=False, thread_ts="42"))
+
+            async def edit_not_modified(**kwargs):
+                raise Exception("Bad Request: message is not modified")
+
+            bot.edit_message_text = edit_not_modified
+            # Same text again as final — skipped via the equal-text guard:
+            # must not raise, must not send a new message
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=True, thread_ts="42"))
+
+            assert len(bot.sent) == 1  # placeholder only
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_edit_raising_not_modified_is_swallowed(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            async def edit_not_modified(**kwargs):
+                raise Exception("Bad Request: message is not modified")
+
+            bot.edit_message_text = edit_not_modified
+            # Final text differs from last_text, so the edit IS attempted and
+            # raises not-modified — must be swallowed, no fallback send.
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="done", is_final=True, thread_ts="42"))
+
+            assert len(bot.sent) == 1  # placeholder only
+            assert "12345:42" not in ch._stream_messages
+            assert ch._last_bot_message["12345"] == placeholder_id
+
+        _run(go())
+
+    def test_final_without_stream_state_sends_plain_message(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="direct", is_final=True, thread_ts=None))
+
+            assert len(bot.sent) == 1
+            assert bot.sent[0]["text"] == "direct"
+            assert len(bot.edited) == 0
+
+        _run(go())
+
+    def test_final_uses_telegram_rich_markdown_when_enabled(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            markdown = "# Result\n\n**Bold** and `code`"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=markdown, is_final=True))
+
+            assert bot.rich == [
+                (
+                    "sendRichMessage",
+                    {"chat_id": 12345, "rich_message": {"markdown": markdown}},
+                )
+            ]
+            assert bot.sent == []
+
+        _run(go())
+
+    def test_final_replaces_plain_stream_with_rich_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**partial", is_final=False, thread_ts="42"))
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**final**", is_final=True, thread_ts="42"))
+
+            assert bot.rich == [
+                (
+                    "editMessageText",
+                    {
+                        "chat_id": 12345,
+                        "message_id": 100,
+                        "rich_message": {"markdown": "**final**"},
+                    },
+                )
+            ]
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+
+        _run(go())
+
+    def test_rich_message_bad_request_falls_back_to_plain_text_once(self):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def reject_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = reject_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True))
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_rich_message_retryable_failure_falls_back_to_plain_text_once(self):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise RuntimeError("network failed")
+
+            bot.do_api_request = fail_rich
+            await ch.send(
+                OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True),
+                _max_retries=1,
+            )
+
+            assert [message["text"] for message in bot.sent] == ["**answer**"]
+
+        _run(go())
+
+    def test_stream_rich_message_bad_request_falls_back_to_one_plain_text_edit(self, monkeypatch):
+        from telegram.error import BadRequest
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+
+            async def fail_rich(endpoint, api_kwargs):
+                raise BadRequest("Can't parse rich message")
+
+            bot.do_api_request = fail_rich
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="**answer**", is_final=True, thread_ts="42"))
+
+            assert [message["text"] for message in bot.sent] == ["Working on it..."]
+            assert bot.edited == [{"chat_id": 12345, "message_id": 100, "text": "**answer**"}]
+
+        _run(go())
+
+    def test_final_edit_retries_once_after_rate_limit(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+            placeholder_id = ch._stream_messages["12345:42"]["message_id"]
+
+            real_edit = bot.edit_message_text
+            calls = {"n": 0}
+
+            async def edit_flaky(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    exc = Exception("Flood control exceeded")
+                    exc.retry_after = 3
+                    raise exc
+                return await real_edit(**kwargs)
+
+            bot.edit_message_text = edit_flaky
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            assert sleeps == [3.0]
+            assert [e["text"] for e in bot.edited] == ["final"]
+            assert len(bot.sent) == 1  # placeholder only
+            assert ch._last_bot_message["12345"] == placeholder_id
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_edit_double_rate_limit_falls_back_to_new_message(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+
+            async def edit_rate_limited(**kwargs):
+                exc = Exception("Flood control exceeded")
+                exc.retry_after = 2
+                raise exc
+
+            bot.edit_message_text = edit_rate_limited
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="final", is_final=True, thread_ts="42"))
+
+            # Fallback delivered the final text as a new message (after the placeholder)
+            assert [m["text"] for m in bot.sent] == ["Working on it...", "final"]
+            assert ch._last_bot_message["12345"] == 101
+            assert "12345:42" not in ch._stream_messages
+
+        _run(go())
+
+    def test_final_overflow_chunk_send_is_retried(self, monkeypatch):
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+
+            clock = {"now": 1000.0}
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: clock["now"])
+
+            sleeps = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+
+            await ch._send_running_reply("12345", 42)
+
+            real_send = bot.send_message
+            failures = {"left": 1}
+
+            async def send_flaky(**kwargs):
+                if failures["left"] > 0:
+                    failures["left"] -= 1
+                    raise ConnectionError("transient")
+                return await real_send(**kwargs)
+
+            bot.send_message = send_flaky
+            long_text = "a" * 4096 + "b" * 10
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=long_text, is_final=True, thread_ts="42"))
+
+            assert bot.edited[0]["text"] == "a" * 4096
+            assert [m["text"] for m in bot.sent] == ["Working on it...", "b" * 10]
+            assert ch._last_bot_message["12345"] == 101
+
+        _run(go())
+
+
+class TestHandleGoalCommand:
+    """Covers the IM-channel ``/goal`` handler (get/set/clear via the Gateway)."""
+
+    @staticmethod
+    def _install_mock_httpx(monkeypatch, calls, *, goal_payload=None, fail_method=None):
+        class MockResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"goal": goal_payload}
+
+        class MockAsyncClient:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def _record(self, method, url, **kwargs):
+                calls.append({"method": method, "url": url, **kwargs})
+                if fail_method == method:
+                    raise RuntimeError("gateway down")
+                return MockResponse()
+
+            async def get(self, url, **kwargs):
+                return await self._record("get", url, **kwargs)
+
+            async def put(self, url, **kwargs):
+                return await self._record("put", url, **kwargs)
+
+            async def delete(self, url, **kwargs):
+                return await self._record("delete", url, **kwargs)
+
+        monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+    @staticmethod
+    def _make_manager(monkeypatch, *, thread_id):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+
+        async def _lookup(msg):
+            return thread_id
+
+        monkeypatch.setattr(manager, "_lookup_thread_id", _lookup)
+        return manager
+
+    @staticmethod
+    def _msg(text):
+        return InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text=text,
+            msg_type=InboundMessageType.COMMAND,
+        )
+
+    def test_status_without_thread_reports_no_active_goal(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+            assert calls == []  # no thread -> no gateway round-trip
+
+        _run(go())
+
+    def test_status_with_active_goal_reports_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "ship it"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "Goal: ship it"
+            assert calls[0]["method"] == "get"
+            assert calls[0]["url"].endswith("/api/threads/t-1/goal")
+
+        _run(go())
+
+    def test_status_with_no_goal_reports_none(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload=None)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal"), "")
+            assert reply == "No active goal."
+
+        _run(go())
+
+    def test_clear_with_thread_calls_delete(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal clear"), "clear")
+            assert reply == "Goal cleared."
+            assert calls[0]["method"] == "delete"
+
+        _run(go())
+
+    def test_clear_without_thread_is_noop(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls)
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            reply = await manager._handle_goal_command(self._msg("/goal reset"), "reset")
+            assert reply == "Goal cleared."
+            assert calls == []
+
+        _run(go())
+
+    def test_set_with_existing_thread_puts_objective(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "finish the work"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chats = []
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal finish the work"), "finish the work")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["json"] == {"objective": "finish the work"}
+            assert chats[0][0].text == "finish the work"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+            assert chats[0][1] == {"bound_identity_checked": True}
+
+        _run(go())
+
+    def test_set_without_thread_creates_one(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, goal_payload={"objective": "do X"})
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id=None)
+            chats = []
+
+            async def _create(client, msg):
+                return "new-thread"
+
+            async def _handle_chat(msg, **kwargs):
+                chats.append((msg, kwargs))
+
+            monkeypatch.setattr(manager, "_create_thread", _create)
+            monkeypatch.setattr(manager, "_get_client", lambda: object())
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply is None
+            assert calls[0]["method"] == "put"
+            assert calls[0]["url"].endswith("/api/threads/new-thread/goal")
+            assert chats[0][0].text == "do X"
+            assert chats[0][0].msg_type == InboundMessageType.CHAT
+
+        _run(go())
+
+    def test_set_failure_returns_error_message(self, monkeypatch):
+        calls = []
+        self._install_mock_httpx(monkeypatch, calls, fail_method="put")
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
+            assert reply == "Failed to set goal."
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# _merge_stream_text regression: CJK reduplication, repeated tokens, suffix
+# matching tails.  Proves that the fixed function does not drop legitimate
+# deltas that happen to match the accumulated buffer or its suffix.
+# Import is deferred because app.channels.manager pulls in fastapi.
+# ---------------------------------------------------------------------------
+
+
+def _get_merge_stream_text():
+    from app.channels.manager import _merge_stream_text
+
+    return _merge_stream_text
+
+
+def test_merge_stream_text_cjk_reduplication():
+    """Two identical CJK tokens ('谢','谢') -> '谢谢', not '谢'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("谢", "谢") == "谢谢"
+
+
+def test_merge_stream_text_repeated_token_append():
+    """Identical repeated tokens ('go','go') -> 'gogo', not 'go'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("go", "go") == "gogo"
+
+
+def test_merge_stream_text_suffix_tail_not_dropped():
+    """Delta equal to buffer suffix ('l' after 'hel') -> 'hell', not 'hel'."""
+    _merge = _get_merge_stream_text()
+    assert _merge("hel", "l") == "hell"
+
+
+def test_merge_stream_text_cumulative_strictly_longer_replaces():
+    """A strictly longer cumulative snapshot that starts with existing replaces it."""
+    _merge = _get_merge_stream_text()
+    assert _merge("Hel", "Hel lo world") == "Hel lo world"
+
+
+def test_merge_stream_text_empty_chunk_noop():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello", "") == "Hello"
+
+
+def test_merge_stream_text_empty_existing_returns_chunk():
+    _merge = _get_merge_stream_text()
+    assert _merge("", "Hello") == "Hello"
+
+
+def test_merge_stream_text_newline_split():
+    """'\\n\\n' split across two '\\n' deltas accumulates to two newlines."""
+    _merge = _get_merge_stream_text()
+    assert _merge("\n", "\n") == "\n\n"
+
+
+def test_merge_stream_text_normal_append():
+    _merge = _get_merge_stream_text()
+    assert _merge("Hello ", "world") == "Hello world"

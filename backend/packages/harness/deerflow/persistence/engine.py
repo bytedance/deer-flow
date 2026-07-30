@@ -10,15 +10,43 @@ None and fall back to in-memory implementations.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+# Recycle pooled Postgres connections before stale idle sockets can hang
+# pool_pre_ping. The command timeout bounds stalled ORM queries independently.
+POSTGRES_POOL_RECYCLE_SECONDS = 300
+POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
+
 
 def _json_serializer(obj: object) -> str:
     """JSON serializer with ensure_ascii=False for Chinese character support."""
     return json.dumps(obj, ensure_ascii=False)
+
+
+def _postgres_engine_kwargs(
+    *,
+    echo: bool,
+    pool_size: int,
+    pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
+    command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    connect_args: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the shared SQLAlchemy engine options for PostgreSQL."""
+    merged_connect_args = dict(connect_args or {})
+    if command_timeout is not None:
+        merged_connect_args["command_timeout"] = command_timeout
+    return {
+        "echo": echo,
+        "pool_size": pool_size,
+        "pool_pre_ping": True,
+        "pool_recycle": pool_recycle,
+        "connect_args": merged_connect_args,
+        "json_serializer": _json_serializer,
+    }
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +88,10 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
+    pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
+    command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
+    postgres_schema: str = "",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -69,7 +100,13 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
+        pool_recycle: Seconds before Postgres connections are recycled.
+        command_timeout: Timeout in seconds for app ORM Postgres commands, or None to disable.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
+        postgres_schema: Target PostgreSQL schema. When set, the engine
+            pins the connection ``search_path`` to it via asyncpg
+            ``server_settings`` and the schema is created (if missing)
+            before tables are auto-created. Ignored for non-postgres.
     """
     global _engine, _session_factory
 
@@ -97,7 +134,11 @@ async def init_engine(
 
         from sqlalchemy import event
 
-        os.makedirs(sqlite_dir or ".", exist_ok=True)
+        # Offload the directory creation: ``init_engine`` runs on the FastAPI
+        # lifespan event loop, and a sync ``os.makedirs`` (a stat + mkdir
+        # syscall) blocks it during startup. Mirrors the #1912 fix for the
+        # checkpointer's ``ensure_sqlite_parent_dir``.
+        await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
         _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
@@ -107,11 +148,14 @@ async def init_engine(
         # SQLite deployment (TC-UPG-06 in AUTH_TEST_PLAN.md). The companion
         # ``synchronous=NORMAL`` is the safe-and-fast pairing — fsync only
         # at WAL checkpoint boundaries instead of every commit.
-        # Note: we do not set PRAGMA busy_timeout here — Python's sqlite3
-        # driver already defaults to a 5-second busy timeout (see the
-        # ``timeout`` kwarg of ``sqlite3.connect``), and aiosqlite /
-        # SQLAlchemy's aiosqlite dialect inherit that default.  Setting
-        # it again would be a no-op.
+        # We also widen ``busy_timeout`` to 30s here. Python's sqlite3 driver
+        # defaults to 5s, which is fine for transient row contention but too
+        # tight for cross-process bootstrap: the second-N-th Gateway process
+        # may need to wait while the first runs ``ALTER TABLE`` /
+        # ``CREATE TABLE`` for a fresh schema. The same widened timeout is
+        # mirrored on the alembic-spawned engine in
+        # ``migrations/env.py::run_migrations_online`` so its connections
+        # behave identically.
         @event.listens_for(_engine.sync_engine, "connect")
         def _enable_sqlite_wal(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
             cursor = dbapi_conn.cursor()
@@ -119,46 +163,75 @@ async def init_engine(
                 cursor.execute("PRAGMA journal_mode=WAL;")
                 cursor.execute("PRAGMA synchronous=NORMAL;")
                 cursor.execute("PRAGMA foreign_keys=ON;")
+                cursor.execute("PRAGMA busy_timeout=30000;")
             finally:
                 cursor.close()
     elif backend == "postgres":
+        from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+        pg_connect_args = build_asyncpg_connect_args(postgres_schema)
         _engine = create_async_engine(
             url,
-            echo=echo,
-            pool_size=pool_size,
-            pool_pre_ping=True,
-            json_serializer=_json_serializer,
+            **_postgres_engine_kwargs(
+                echo=echo,
+                pool_size=pool_size,
+                pool_recycle=pool_recycle,
+                command_timeout=command_timeout,
+                connect_args=pg_connect_args,
+            ),
         )
     else:
         raise ValueError(f"Unknown persistence backend: {backend!r}")
 
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
-    # Auto-create tables (dev convenience). Production should use Alembic.
-    from deerflow.persistence.base import Base
+    # Schema bootstrap (hybrid):
+    #   - empty DB        -> create_all + alembic stamp head
+    #   - legacy DB       -> create_all (baseline tables only, backfill) + alembic stamp baseline + upgrade head
+    #   - already managed -> alembic upgrade head
+    # Concurrency: Postgres advisory lock (true cross-process); SQLite uses an
+    # in-process asyncio.Lock plus a 30s PRAGMA busy_timeout (also set on
+    # alembic's own connections in env.py) -- multi-process SQLite bootstrap
+    # is best-effort, gated by SQLite's natural file-level write lock.
+    # See deerflow.persistence.bootstrap for the full state machine.
+    from deerflow.persistence.bootstrap import bootstrap_schema
 
-    # Import all models so Base.metadata discovers them.
-    # When no models exist yet (scaffolding phase), this is a no-op.
-    try:
-        import deerflow.persistence.models  # noqa: F401
-    except ImportError:
-        # Models package not yet available — tables won't be auto-created.
-        # This is expected during initial scaffolding or minimal installs.
-        logger.debug("deerflow.persistence.models not found; skipping auto-create tables")
+    async def _ensure_postgres_schema() -> None:
+        # CREATE SCHEMA is DDL and is unaffected by search_path, so it is
+        # safe even though the connection's search_path already points at
+        # the (not-yet-existing) target schema. It must run before
+        # ``bootstrap_schema`` so the subsequent ``create_all`` / alembic
+        # DDL lands in the target schema instead of failing on a missing one.
+        if backend == "postgres" and postgres_schema:
+            from sqlalchemy.schema import CreateSchema
+
+            async with _engine.begin() as conn:
+                await conn.execute(CreateSchema(postgres_schema, if_not_exists=True))
 
     try:
-        async with _engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        await _ensure_postgres_schema()
+        await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
     except Exception as exc:
         if backend == "postgres" and "does not exist" in str(exc):
-            # Database not yet created — attempt to auto-create it, then retry.
+            # Database not yet created -- attempt to auto-create it, then retry.
             await _auto_create_postgres_db(url)
-            # Rebuild engine against the now-existing database
+            # Rebuild engine against the now-existing database. The rebuilt
+            # engine MUST keep the same connect_args so the retried bootstrap
+            # lands in the target schema, not the default one.
             await _engine.dispose()
-            _engine = create_async_engine(url, echo=echo, pool_size=pool_size, pool_pre_ping=True, json_serializer=_json_serializer)
+            _engine = create_async_engine(
+                url,
+                **_postgres_engine_kwargs(
+                    echo=echo,
+                    pool_size=pool_size,
+                    pool_recycle=pool_recycle,
+                    command_timeout=command_timeout,
+                    connect_args=pg_connect_args,
+                ),
+            )
             _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
-            async with _engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+            await _ensure_postgres_schema()
+            await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
         else:
             raise
 
@@ -175,7 +248,10 @@ async def init_engine_from_config(config) -> None:
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
+        pool_recycle=config.pool_recycle,
+        command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
+        postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
     )
 
 

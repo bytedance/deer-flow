@@ -1,7 +1,66 @@
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { ThreadTokenUsageResponse } from "./types";
+import type { AgentThread, ThreadTokenUsageResponse } from "./types";
+
+export type ThreadCompactResponse = {
+  thread_id: string;
+  compacted: boolean;
+  reason?: string | null;
+  removed_message_count: number;
+  preserved_message_count: number;
+  summary_updated: boolean;
+  checkpoint_id?: string | null;
+  total_tokens: number;
+};
+
+export type CompactThreadContextOptions = {
+  signal?: AbortSignal;
+  agentName?: string | null;
+  modelName?: string | null;
+};
+
+export type ThreadBranchResponse = {
+  thread_id: string;
+  parent_thread_id: string;
+  parent_checkpoint_id: string;
+  branched_from_message_id: string;
+  workspace_clone_mode: string;
+};
+
+export type BranchThreadFromTurnInput = {
+  messageId: string;
+  messageIds?: string[];
+  title?: string;
+};
+
+export type ThreadMetadataPatch = Record<string, unknown>;
+
+/**
+ * The subset of thread fields the Gateway ``PATCH /api/threads/{id}`` handler
+ * returns with meaningful values. The endpoint's ``ThreadResponse`` model also
+ * serializes default ``values`` and ``interrupts``, but PATCH leaves those empty;
+ * callers that need state should read it via a full thread fetch instead.
+ */
+export type ThreadMetadataPatchResponse = Pick<
+  AgentThread,
+  "thread_id" | "status" | "created_at" | "updated_at" | "metadata"
+>;
+
+async function readThreadAPIError(
+  response: Response,
+  fallback: string,
+): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown };
+    if (typeof body.detail === "string" && body.detail) {
+      return body.detail;
+    }
+  } catch {
+    // Fall through to the caller-provided message.
+  }
+  return fallback;
+}
 
 export async function fetchThreadTokenUsage(
   threadId: string,
@@ -21,4 +80,85 @@ export async function fetchThreadTokenUsage(
   }
 
   return (await response.json()) as ThreadTokenUsageResponse;
+}
+
+export async function branchThreadFromTurn(
+  threadId: string,
+  input: BranchThreadFromTurnInput,
+): Promise<ThreadBranchResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/branches`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        message_id: input.messageId,
+        message_ids: input.messageIds ?? [input.messageId],
+        ...(input.title ? { title: input.title } : {}),
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to branch conversation."),
+    );
+  }
+
+  return (await response.json()) as ThreadBranchResponse;
+}
+
+export async function patchThreadMetadata(
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+): Promise<ThreadMetadataPatchResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ metadata }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to update conversation."),
+    );
+  }
+
+  return (await response.json()) as ThreadMetadataPatchResponse;
+}
+
+export async function compactThreadContext(
+  threadId: string,
+  options: CompactThreadContextOptions = {},
+): Promise<ThreadCompactResponse> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/compact`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        force: true,
+        ...(options.agentName ? { agent_name: options.agentName } : {}),
+        ...(options.modelName ? { model_name: options.modelName } : {}),
+      }),
+      signal: options.signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to compact context."),
+    );
+  }
+
+  return (await response.json()) as ThreadCompactResponse;
 }

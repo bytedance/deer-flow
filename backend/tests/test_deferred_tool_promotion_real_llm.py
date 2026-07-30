@@ -82,15 +82,6 @@ def fake_translator(text: str, target_lang: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _reset_registry_between_tests():
-    from deerflow.tools.builtins.tool_search import reset_deferred_registry
-
-    reset_deferred_registry()
-    yield
-    reset_deferred_registry()
-
-
 def _patch_mcp_pipeline(monkeypatch: pytest.MonkeyPatch, mcp_tools: list) -> None:
     from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 
@@ -145,6 +136,7 @@ async def test_real_llm_promotes_then_invokes_with_subagent_reentry(monkeypatch:
     from langchain_openai import ChatOpenAI
 
     from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+    from deerflow.tools.builtins.tool_search import build_deferred_tool_setup
     from deerflow.tools.tools import get_available_tools
 
     _patch_mcp_pipeline(monkeypatch, [fake_calculator, fake_translator])
@@ -158,18 +150,17 @@ async def test_real_llm_promotes_then_invokes_with_subagent_reentry(monkeypatch:
         Use this whenever the user asks you to delegate work — pass a short
         description as ``prompt``.
         """
-        # ``task_tool`` does this internally. Whether the registry-reset that
-        # used to happen here actually leaks back to the parent task depends
-        # on asyncio's implicit context-copying semantics (gather creates
-        # child tasks with copied contexts, so reset_deferred_registry is
-        # task-local) — but the fix in this PR is what GUARANTEES the
-        # promotion sticks regardless of which integration path triggers a
-        # re-entrant ``get_available_tools`` call.
+        # ``task_tool`` does this internally. With the closure + graph-state
+        # design there is no shared registry/ContextVar, so a re-entrant
+        # ``get_available_tools`` call here cannot affect the lead agent's
+        # deferred middleware or its promotion state.
         get_available_tools(subagent_enabled=False)
         _calls.append(f"fake_subagent_trigger:{prompt}")
         return "subagent completed"
 
-    tools = get_available_tools() + [fake_subagent_trigger]
+    raw_tools = get_available_tools() + [fake_subagent_trigger]
+    setup = build_deferred_tool_setup(raw_tools, enabled=True)
+    tools = [*raw_tools, setup.tool_search_tool] if setup.tool_search_tool else raw_tools
 
     model = ChatOpenAI(
         model=os.environ.get("ONEAPI_MODEL", "claude-sonnet-4-6"),
@@ -195,7 +186,7 @@ async def test_real_llm_promotes_then_invokes_with_subagent_reentry(monkeypatch:
     graph = create_agent(
         model=model,
         tools=tools,
-        middleware=[DeferredToolFilterMiddleware()],
+        middleware=[DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash)],
         system_prompt=system_prompt,
     )
 

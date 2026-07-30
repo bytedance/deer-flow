@@ -8,6 +8,7 @@ sync/async code paths.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from types import SimpleNamespace
@@ -27,9 +28,11 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     _needs_budget,
     _patch_model_messages,
     _sanitize_tool_name,
+    _snap_start_to_line_boundary,
     _snap_to_line_boundary,
     _tool_message_over_budget,
 )
+from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_synopsis
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -37,6 +40,20 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _lines_then_long_line(total: int, newline_ratio: float = 0.6) -> str:
+    """Content that is line-oriented for the first *newline_ratio*, then one unbroken line.
+
+    Mirrors real bash/web_fetch output that logs progress lines and then dumps a
+    single-line artifact (minified JSON, base64 blob). The last newline lands in
+    the second half of the content, which is what exercises line snapping around
+    the tail offset.
+    """
+    head_len = int(total * newline_ratio)
+    lines = "".join(f"[info] step {i} ok\n" for i in range(head_len // 18 + 1))[:head_len]
+    lines = lines[:-1] + "\n" if not lines.endswith("\n") else lines
+    return lines + "A" * (total - len(lines))
 
 
 def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1", outputs_path: str | None = None) -> SimpleNamespace:
@@ -99,6 +116,28 @@ class TestSnapToLineBoundary:
         assert _snap_to_line_boundary("abc", 10) == 10
 
 
+class TestSnapStartToLineBoundary:
+    def test_snaps_forward_to_newline(self):
+        text = "line1\nline2\nline3"
+        result = _snap_start_to_line_boundary(text, 2)  # inside "line1"
+        assert text[result - 1] == "\n"
+        assert result >= 2
+
+    def test_never_moves_backwards(self):
+        text = "aaaa\n" + "b" * 20
+        for pos in range(1, len(text)):
+            assert _snap_start_to_line_boundary(text, pos) >= pos
+
+    def test_no_snap_when_no_newline_in_range(self):
+        assert _snap_start_to_line_boundary("abcdefghij", 2) == 2
+
+    def test_zero_pos(self):
+        assert _snap_start_to_line_boundary("a\nbc", 0) == 0
+
+    def test_pos_beyond_length(self):
+        assert _snap_start_to_line_boundary("abc", 10) == 10
+
+
 class TestExternalize:
     def test_writes_file_and_returns_virtual_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -121,11 +160,17 @@ class TestExternalize:
                 assert f.read() == "full content here"
 
     def test_returns_none_on_invalid_path(self):
+        # ``/dev/null`` is a character device on both Linux and macOS, so
+        # ``os.makedirs`` cannot create any subdirectory under it for any
+        # user (including root). The previously-used ``/nonexistent/...``
+        # path was silently created by ``mkdir -p`` when the test process
+        # ran as root inside the CI container, which made this test fail
+        # in CI independently of the externalization logic under test.
         path = _externalize(
             "data",
             tool_name="test",
             tool_call_id="tc-1",
-            outputs_path="/nonexistent/path/that/should/not/exist",
+            outputs_path="/dev/null/cannot-mkdir-here",
             storage_subdir=".tool-results",
         )
         assert path is None
@@ -220,7 +265,7 @@ class TestNeedsBudget:
 
 
 class TestBuildPreview:
-    def test_contains_head_and_tail_and_reference(self):
+    def test_contains_typed_summary_and_reference(self):
         content = "HEAD_" + "x" * 5000 + "_TAIL"
         preview = _build_preview(
             content,
@@ -229,8 +274,9 @@ class TestBuildPreview:
             head_chars=100,
             tail_chars=50,
         )
-        assert preview.startswith("HEAD_")
-        assert "_TAIL" in preview
+        assert preview.startswith("[Full bash output saved to /mnt/test/bash-abc.log")
+        assert "Preview kind: text" in preview
+        assert "Text output" in preview
         assert "/mnt/test/bash-abc.log" in preview
         assert "read_file" in preview
         assert "start_line and end_line" in preview
@@ -245,6 +291,233 @@ class TestBuildPreview:
             tail_chars=100,
         )
         assert "10000 chars" in preview
+
+    def test_json_preview_includes_structure_and_raw_sample(self):
+        content = '{"meta":{"source":"unit"},"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],"payload":"' + "x" * 5000 + '","tail_marker":"SHOULD_NOT_NEED_TAIL"}'
+        preview = _build_preview(
+            content,
+            tool_name="mcp_json",
+            virtual_path="/mnt/test/result.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: json" in preview
+        assert "JSON object with 4 top-level keys" in preview
+        assert "Top-level keys: meta, items, payload, tail_marker" in preview
+        assert "items: array length 2" in preview
+        assert '$.meta.source: "unit"' in preview
+        assert not preview.startswith('{"meta"')
+        # The synopsis no longer hides the raw head/tail bytes; the model
+        # gets the typed synopsis AND inline raw samples so it can read
+        # the file with a tighter start_line range.
+        assert "Raw sample (head + tail" in preview
+        # payload segment dominates the document, so even with head_chars=80
+        # the raw head sample is almost entirely 'x' characters.
+        assert preview.count("x") >= 50
+
+    def test_json_preview_reports_nested_paths_and_line_hints(self):
+        content = json.dumps(
+            {
+                "data": {
+                    "items": [{"id": idx, "name": f"item-{idx}"} for idx in range(47)],
+                    "next_cursor": "cursor-2",
+                },
+                "meta": {"source": "unit"},
+            },
+            indent=2,
+        )
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 2; keys items, next_cursor" in preview
+        assert "$.data.items: array length 47; first item object" in preview
+        # Location hints were removed: they are wrong when a key string also
+        # appears as a value earlier in the document, or when the same key
+        # recurs at multiple depths.
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_json_paths_are_emitted_without_line_hints(self):
+        content = "\n\n" + json.dumps({"data": {"items": [1, 2, 3]}}, indent=2)
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "$.data: object keys 1; keys items" in preview
+        assert "line " not in preview.split("Access:")[0]
+        assert "byte offset " not in preview
+
+    def test_table_preview_extracts_columns(self):
+        content = "name,score\n" + "\n".join(f"Ada{i},{90 + i}" for i in range(10)) + "\n"
+        preview = _build_preview(
+            content,
+            tool_name="csv_tool",
+            virtual_path="/mnt/test/table.csv",
+            head_chars=80,
+            tail_chars=40,
+        )
+        assert "Preview kind: csv" in preview
+        assert "CSV table with 10 data rows and 2 columns" in preview
+        assert "columns: name, score" in preview
+        assert "first data row: name=Ada0 | score=90" in preview
+
+
+class TestToolOutputSynopsis:
+    def test_code_synopsis_extracts_imports_and_symbols(self):
+        content = "import os\nfrom pathlib import Path\n\nclass Runner:\n    pass\n\ndef main():\n    return Path(os.getcwd())\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="python")
+        assert synopsis.kind == "code"
+        assert "line count" in synopsis.structure[0]
+        assert any("imports: os, pathlib" in item for item in synopsis.structure)
+        assert "class Runner" in synopsis.notable_items
+        assert "def main" in synopsis.notable_items
+
+    def test_yaml_synopsis_extracts_top_level_keys(self):
+        content = "name: deer\nsettings:\n  enabled: true\n  retries: 3\nitems:\n  - alpha\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="config")
+        assert synopsis.kind == "yaml"
+        assert "Top-level keys: name, settings, items" in synopsis.summary
+        assert "settings: object" in synopsis.structure
+        assert "items: array" in synopsis.structure
+
+    def test_xml_synopsis_extracts_root_and_children(self):
+        content = '<feed><entry id="1"/><entry id="2"/><meta/></feed>'
+        synopsis = build_tool_output_synopsis(content, tool_name="xml")
+        assert synopsis.kind == "xml"
+        assert "XML document with root tag feed." in synopsis.summary
+        assert "root tag: feed" in synopsis.structure
+        assert "entry: 2" in synopsis.structure
+
+    # ------------------------------------------------------------------
+    # Regression tests for the @willem-bd review of PR #3377.
+    # Each test pins one of the eight findings so a future change cannot
+    # silently regress the fix.
+    # ------------------------------------------------------------------
+
+    def test_review_5_log_lines_are_not_misclassified_as_yaml(self):
+        # 200 lines of log output shaped like "LEVEL: message". The previous
+        # _looks_yaml counted 2 'key:' lines and accepted it; _try_yaml then
+        # produced a "YAML object with 3 top-level keys: INFO, ERROR, WARN"
+        # summary that hid every line, count, and middle-of-log signal.
+        content = "INFO: starting service\nERROR: failed to connect\nWARN: retrying\nINFO: connected\n" * 200
+        synopsis = build_tool_output_synopsis(content, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_6_json_paths_are_emitted_without_byte_offset(self):
+        # The previous _json_path_location anchored at the first textual
+        # occurrence of the key string, which is wrong when the key also
+        # appears as a value earlier in the document.
+        content = '{"label": "items", "items": {"id": 1, "name": "foo"}}'
+        preview = _build_preview(
+            content,
+            tool_name="api_tool",
+            virtual_path="/mnt/test/api.json",
+            head_chars=200,
+            tail_chars=200,
+        )
+        assert "byte offset" not in preview
+        # The path itself is still useful navigation.
+        assert "$.items" in preview
+
+    def test_review_7_scalar_examples_respects_depth_cap(self):
+        # build_tool_output_synopsis used to recurse without a depth cap
+        # in _scalar_examples, which could trigger RecursionError on
+        # deeply nested JSON. The cap is now mirrored from
+        # _JSON_STRUCTURE_DEPTH.
+        deep = {"k": 1}
+        for _ in range(500):
+            deep = {"k": deep}
+        # Should not raise.
+        synopsis = build_tool_output_synopsis(json.dumps(deep))
+        assert synopsis.kind == "json"
+
+    def test_review_8_csv_first_row_quoted_cells_round_trip(self):
+        # delimiter.join(rows[1]) silently re-split cells containing the
+        # delimiter inside a quoted cell, misleading the model about
+        # column count.
+        header = "name,description,score"
+        rows = [
+            'Ada,"a fine, brilliant logician",98',
+            'Grace,"a creator, of compilers",99',
+            'Alan,"a pioneer, of computing",95',
+            'Kurt,"a poet, of logic",91',
+            'Ada2,"another, fine mind",97',
+            'Grace2,"yet another, creator",93',
+        ]
+        content = header + "\n" + "\n".join(rows) + "\n"
+        synopsis = build_tool_output_synopsis(content, tool_name="csv_tool")
+        assert synopsis.kind == "csv"
+        first_row = next((line for line in synopsis.structure if line.startswith("first data row:")), "")
+        # All three columns must be present, and the quoted cell must
+        # round-trip without losing the embedded comma.
+        assert "name=Ada" in first_row
+        assert "score=98" in first_row
+        assert "a fine, brilliant logician" in first_row
+        # The re-joined comma-broken row is the failure mode we are guarding.
+        assert "Ada,a fine, brilliant" not in first_row
+
+    def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
+        # Tab-indented output (ls -l, tree, indented logs) used to be
+        # accepted as TSV because _try_table only checked that the
+        # delimiter is present and rows agree on width.
+        row = "drwxr-xr-x  2 user  group   64 Jun 24 17:00 dir"
+        bash_out = "ls -l output:\n\ttotal 0\n" + "\n".join(f"\t{row}{i}" for i in range(1, 6)) + "\n"
+        synopsis = build_tool_output_synopsis(bash_out, tool_name="bash")
+        assert synopsis.kind == "text", f"expected text, got {synopsis.kind!r}: {synopsis.summary}"
+
+    def test_review_10_preview_includes_raw_head_and_tail_sample(self):
+        # Default behavior change in the PR removed the inline raw bytes
+        # for non-binary previews. The fix restores them so the model
+        # can see the actual first/last KB without a follow-up read_file.
+        content = "log line 1\n" * 200
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=400,
+            tail_chars=400,
+        )
+        assert "Raw sample (head + tail" in preview
+        # head_chars=400 should capture the first 80 'log line 1' lines
+        # verbatim; tail_chars=400 should capture the last 80.
+        assert preview.count("log line 1") >= 70  # line snapping may lose a few
+
+    def test_review_11_short_text_does_not_duplicate_excerpts(self):
+        # For inputs shorter than 2 * _TEXT_EXCERPT_CHARS, the previous
+        # opener/closer slices overlapped and the model saw the same
+        # body twice. build_tool_output_synopsis is reachable directly
+        # from tests and other callers that pass small inputs.
+        short = "hello world " * 30  # ~360 chars
+        synopsis = build_tool_output_synopsis(short)
+        opener_line = next((ln for ln in synopsis.summary if ln.startswith("Opening excerpt: ")), "")
+        # Closer is now suppressed entirely for short inputs.
+        assert all(not ln.startswith("Closing excerpt: ") for ln in synopsis.summary), f"unexpected closer for short input: {synopsis.summary}"
+        assert opener_line, "opening excerpt should still be present"
+
+    def test_review_12_preview_head_tail_chars_are_operational(self):
+        # preview_head_chars / preview_tail_chars were silently no-op
+        # for every non-binary kind. The fix plumbs them through
+        # render_tool_output_preview as an explicit 'Raw sample' section.
+        content = "alpha " * 1000  # 6000 chars
+        preview = _build_preview(
+            content,
+            tool_name="bash",
+            virtual_path="/mnt/test/run.log",
+            head_chars=300,
+            tail_chars=300,
+        )
+        # The head sample should contain 'alpha' more times than the
+        # tail (or split-count), proving head_chars=300 took effect.
+        # The full document has 1000 'alpha' tokens; without head_chars
+        # we'd see fewer than 50 in the head sample.
+        assert preview.count("alpha") >= 50
 
 
 class TestBuildFallback:
@@ -274,6 +547,32 @@ class TestBuildFallback:
             content = "x" * 50000
             result = _build_fallback(content, tool_name="long_tool_name", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
             assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+
+    def test_result_never_exceeds_max_chars_with_newlines(self):
+        """Same guarantee as above, on content that actually exercises line snapping.
+
+        ``test_result_never_exceeds_max_chars`` passes newline-free content, so the
+        tail offset is never snapped. Real bash/web_fetch output has newlines.
+        """
+        for total in [50_000, 200_000, 1_000_000]:
+            content = _lines_then_long_line(total)
+            result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+            assert len(result) <= 30_000, f"total={total}: got {len(result)}"
+
+    def test_fallback_forward_snaps_tail_onto_line_boundary(self):
+        """The tail must begin *after* the newline, never before it.
+
+        The bound test above never moves the tail offset: its content has no
+        newline inside the snap window, so it would pass even with the snap
+        removed. Placing a newline in the window pins the direction instead —
+        a backward snap leaves the tail starting mid-line.
+        """
+        total, newline_pos = 100_000, 98_000  # window is [97_000, 98_500)
+        content = "A" * newline_pos + "\n" + "B" * (total - newline_pos - 1)
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8_000, tail_chars=3_000)
+        assert len(result) <= 30_000
+        tail = result.rsplit("]\n\n", 1)[1]
+        assert tail.startswith("B"), f"tail begins mid-line: {tail[:20]!r}"
 
     def test_very_small_max_chars_does_not_crash(self):
         content = "x" * 1000
@@ -325,7 +624,7 @@ class TestWrapToolCallExternalize:
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
 
-    def test_preview_contains_head_and_tail(self):
+    def test_preview_contains_typed_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
             mw = ToolOutputBudgetMiddleware(config=config)
@@ -335,8 +634,10 @@ class TestWrapToolCallExternalize:
 
             result = mw.wrap_tool_call(req, lambda _: msg)
 
-            assert result.content.startswith("HEADPART_")
-            assert "_TAILPART" in result.content
+            assert result.content.startswith("[Full web_search output saved to")
+            assert "Preview kind: text" in result.content
+            assert "Text output" in result.content
+            assert "HEADPART_" in result.content
 
 
 class TestWrapToolCallFallback:
@@ -370,7 +671,7 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/nonexistent/impossible/path")
+        req = _make_request(outputs_path="/dev/null/cannot-mkdir-here")
 
         result = mw.wrap_tool_call(req, lambda _: msg)
 
@@ -850,7 +1151,12 @@ class TestMiddlewareChainIntegration:
         app_config = AppConfig(sandbox=SandboxConfig(use="test"))
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
-        assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
+        # InputSanitizationMiddleware is the outermost wrap_model_call wrapper;
+        # ToolOutputBudgetMiddleware is the first wrap_tool_call handler.
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+
+        assert isinstance(middlewares[0], InputSanitizationMiddleware)
+        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
 
     def test_budget_middleware_in_lead_chain(self):
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -858,7 +1164,10 @@ class TestMiddlewareChainIntegration:
         app_config = AppConfig(sandbox=SandboxConfig(use="test"))
         middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
-        assert isinstance(middlewares[0], ToolOutputBudgetMiddleware)
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+
+        assert isinstance(middlewares[0], InputSanitizationMiddleware)
+        assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
 
 
 # ===========================================================================
@@ -888,3 +1197,337 @@ class TestConfigVersion:
             assert tool_output["enabled"] is True
             assert tool_output["externalize_min_chars"] == 12000
             assert "read_file" in tool_output["exempt_tools"]
+
+
+# ===========================================================================
+# externalize into sandbox for non-mounted (remote) sandboxes
+# ===========================================================================
+
+
+class _FakeSandbox:
+    """In-memory stand-in for a Sandbox. Records calls and supports failure injection."""
+
+    def __init__(self, *, write_ok: bool = True, check_result: str = "OK") -> None:
+        self.commands: list[str] = []
+        self.writes: list[tuple[str, str]] = []
+        self._write_ok = write_ok
+        self._check_result = check_result
+
+    def execute_command(
+        self,
+        command: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        del env, timeout
+        self.commands.append(command)
+        if command.startswith("test -s"):
+            return self._check_result
+        return ""
+
+    def write_file(self, path: str, content: str, append: bool = False) -> None:
+        if not self._write_ok:
+            raise RuntimeError("simulated write failure")
+        self.writes.append((path, content))
+
+
+class _FakeProvider:
+    """Minimal SandboxProvider stand-in for monkeypatching get_sandbox_provider."""
+
+    def __init__(self, *, uses_thread_data_mounts: bool, sandbox: _FakeSandbox | None = None) -> None:
+        self.uses_thread_data_mounts = uses_thread_data_mounts
+        self._sandbox = sandbox
+
+    def get(self, sandbox_id: str):
+        return self._sandbox
+
+
+class TestExternalizeToSandbox:
+    def test_writes_and_returns_virtual_path(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-1",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is not None
+        assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
+        assert result.endswith(".log")
+        assert any(c.startswith("mkdir -p ") for c in sb.commands)
+        assert any(c.startswith("test -s ") for c in sb.commands)
+        assert sb.writes and sb.writes[0][0] == result
+        assert sb.writes[0][1] == "x" * 100
+
+    def test_returns_none_when_write_raises(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="web_fetch",
+            tool_call_id="tc-2",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(write_ok=False),
+        )
+        assert result is None
+
+    def test_returns_none_when_validation_fails(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(check_result="MISSING"),
+        )
+        assert result is None
+
+    def test_rejects_unsafe_storage_subdir(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        sb = _FakeSandbox()
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-4",
+                storage_subdir="../escape",
+                sandbox=sb,
+            )
+            is None
+        )
+        assert (
+            _externalize_to_sandbox(
+                "x" * 100,
+                tool_name="bash",
+                tool_call_id="tc-5",
+                storage_subdir="/abs/path",
+                sandbox=sb,
+            )
+            is None
+        )
+        # Sandbox must not be touched when the subdir is rejected up-front.
+        assert sb.commands == []
+        assert sb.writes == []
+
+    def test_default_extension_for_unknown_tool(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        result = _externalize_to_sandbox(
+            "data",
+            tool_name="unknown_tool",
+            tool_call_id="tc-6",
+            storage_subdir=".tool-results",
+            sandbox=_FakeSandbox(),
+        )
+        assert result is not None and result.endswith(".txt")
+
+
+class TestBudgetContentSandboxDispatch:
+    """_budget_content must branch on uses_thread_data_mounts (issue #3416)."""
+
+    def test_mounted_sandbox_uses_host_disk(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=True, sandbox=sb),
+        )
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-m",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        # Mounted path must NOT touch the sandbox.
+        assert sb.commands == []
+        assert sb.writes == []
+        # And the host file must exist.
+        storage_dir = tmp_path / ".tool-results"
+        assert storage_dir.is_dir()
+        assert len(list(storage_dir.iterdir())) == 1
+
+    def test_non_mounted_sandbox_writes_to_sandbox(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-n",
+            outputs_path=str(tmp_path),  # present, but ignored on non-mounted path
+            config=config,
+            sandbox=sb,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        # Non-mounted path MUST write into the sandbox.
+        assert sb.writes and sb.writes[0][1] == "x" * 500
+        # And MUST NOT touch the host.
+        assert not (tmp_path / ".tool-results").exists()
+
+    def test_non_mounted_without_sandbox_falls_back(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=None),
+        )
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=500,
+            fallback_head_chars=100,
+            fallback_tail_chars=50,
+        )
+        result = mod._budget_content(
+            "x" * 5000,
+            tool_name="web_search",
+            tool_call_id="tc-fb",
+            outputs_path=None,
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Persistent storage unavailable" in result
+
+
+class TestResolveSandbox:
+    def test_returns_none_when_no_state(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=None)
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_state_has_no_sandbox(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_none_when_sandbox_id_missing(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import _resolve_sandbox
+
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {}}))
+        assert _resolve_sandbox(req) is None
+
+    def test_returns_sandbox_from_provider(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_none_on_provider_exception(self, monkeypatch):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class _Boom:
+            def get(self, sandbox_id):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", lambda: _Boom())
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-x"}}))
+        assert mod._resolve_sandbox(req) is None
+
+
+class TestWrapToolCallSandboxIntegration:
+    """End-to-end via wrap_tool_call for the non-mounted path (issue #3416)."""
+
+    def test_oversized_output_lands_in_sandbox_not_host(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        mw = ToolOutputBudgetMiddleware(config=config)
+        content = "x" * 500
+        msg = _tm(content, name="remote_executor")
+        # Request carries BOTH outputs_path (host) AND a sandbox_id; the
+        # non-mounted branch must ignore outputs_path and write into sandbox.
+        req = SimpleNamespace(
+            tool_call={"name": "remote_executor", "id": "tc-1"},
+            runtime=SimpleNamespace(
+                state={
+                    "thread_data": {"outputs_path": str(tmp_path)},
+                    "sandbox": {"sandbox_id": "sb-1"},
+                }
+            ),
+        )
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result.content
+        assert sb.writes and sb.writes[0][1] == content
+        # Host disk must not have been written.
+        assert not (tmp_path / ".tool-results").exists()
+
+
+class TestBudgetContentNoSandboxNoProviderCall:
+    """Without a sandbox, _budget_content must NOT call get_sandbox_provider.
+
+    This is the legacy host-disk path (and the CI-without-config.yaml path):
+    touching the provider would raise and force inline fallback, regressing
+    issue #3416's fix and breaking environments that never opt into sandbox.
+    """
+
+    def test_no_provider_call_when_sandbox_absent(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        called = {"n": 0}
+
+        def boom():
+            called["n"] += 1
+            raise RuntimeError("provider must not be called on the legacy path")
+
+        monkeypatch.setattr(mod, "get_sandbox_provider", boom)
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = mod._budget_content(
+            "x" * 500,
+            tool_name="remote_executor",
+            tool_call_id="tc-legacy",
+            outputs_path=str(tmp_path),
+            config=config,
+            sandbox=None,
+        )
+        assert result is not None
+        assert "Full remote_executor output saved to /mnt/user-data/outputs/" in result
+        assert called["n"] == 0
+        assert (tmp_path / ".tool-results").is_dir()

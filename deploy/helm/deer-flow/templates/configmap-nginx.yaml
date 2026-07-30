@@ -1,0 +1,230 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-nginx
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    pid /tmp/nginx.pid;
+    http {
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+
+        access_log /dev/stdout;
+        error_log /dev/stderr;
+
+        # Preserve an upstream proxy's X-Forwarded-Proto so the Gateway sees the
+        # real client scheme when nginx runs behind an Ingress/TLS terminator.
+        map $http_x_forwarded_proto $forwarded_proto {
+            default    $scheme;
+            "~*^https" https;
+        }
+
+        # K8s Services resolve at config-parse time (no resolver directive needed).
+        upstream gateway_upstream {
+            server gateway:8001;
+            keepalive 32;
+        }
+        upstream frontend_upstream {
+            server frontend:3000;
+            keepalive 32;
+        }
+        {{- if .Values.provisioner.enabled }}
+        upstream provisioner_upstream {
+            server provisioner:8002;
+            keepalive 16;
+        }
+        {{- end }}
+
+        server {
+            listen 2026 default_server;
+            listen [::]:2026 default_server;
+            server_name _;
+
+            proxy_buffering off;
+            proxy_cache off;
+
+            # Static liveness endpoint — always 200 if nginx itself is alive.
+            # Decouples the liveness probe from gateway availability so nginx
+            # is not restart-looped while the gateway pulls its image or is
+            # otherwise down. Readiness still proxies /health to the gateway so
+            # traffic is not routed to an nginx that cannot reach it.
+            location = /nginx-health {
+                access_log off;
+                default_type text/plain;
+                return 200 "ok";
+            }
+
+            # LangGraph-compatible API routes (rewrite /api/langgraph/* -> /api/*).
+            location /api/langgraph/ {
+                rewrite ^/api/langgraph/(.*) /api/$1 break;
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                proxy_set_header Connection '';
+                proxy_set_header X-Accel-Buffering no;
+                # Long chat/text-prompt support (issue #3952): matches the
+                # uploads location's buffering fix below, sized for text
+                # prompts rather than binary file uploads.
+                client_max_body_size 20M;
+                proxy_request_buffering off;
+                proxy_connect_timeout 600s;
+                proxy_send_timeout 600s;
+                proxy_read_timeout 600s;
+                chunked_transfer_encoding on;
+            }
+
+            location /api/models {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /api/memory {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /api/mcp {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /api/skills {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /api/agents {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            # Uploads — large bodies, no request buffering.
+            location ~ ^/api/threads/[^/]+/uploads {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                client_max_body_size 100M;
+                proxy_request_buffering off;
+            }
+
+            location ~ ^/api/threads {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /docs {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /redoc {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /openapi.json {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location /health {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            # Provisioner (sandbox management). Omitted when the provisioner is
+            # disabled; /api/sandboxes then falls through to the catch-all /api/
+            # below and the gateway answers (404 / "sandbox not configured").
+            {{- if .Values.provisioner.enabled }}
+            location /api/sandboxes {
+                proxy_pass http://provisioner_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+            {{- end }}
+
+            # Catch-all for other /api/ routes (e.g. /api/v1/auth/*).
+            location /api/ {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            # Everything else -> frontend (with WebSocket upgrade for HMR/sockets).
+            location / {
+                proxy_pass http://frontend_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_cache_bypass $http_upgrade;
+                proxy_connect_timeout 600s;
+                proxy_send_timeout 600s;
+                proxy_read_timeout 600s;
+            }
+        }
+    }

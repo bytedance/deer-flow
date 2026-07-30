@@ -83,6 +83,41 @@ def test_build_server_params_rejects_unsupported_transport():
         build_server_params("bad-transport", config)
 
 
+@pytest.mark.parametrize("transport", ["sse", "http"])
+def test_mcp_server_config_accepts_transport_alias(transport: str):
+    """The MCP-spec ``transport`` field should be accepted as an alias for ``type``.
+
+    Regression test for https://github.com/bytedance/deer-flow/issues/3238 — a
+    remote MCP server configured with only ``transport: sse`` was previously
+    misidentified as ``stdio`` (the default for ``type``).
+    """
+    config = McpServerConfig.model_validate(
+        {
+            "transport": transport,
+            "url": "https://example.com/mcp",
+        }
+    )
+
+    assert config.type == transport
+
+    params = build_server_params("aliased-server", config)
+    assert params["transport"] == transport
+    assert params["url"] == "https://example.com/mcp"
+
+
+def test_mcp_server_config_type_takes_precedence_over_transport():
+    """When both ``type`` and ``transport`` are provided, ``type`` wins."""
+    config = McpServerConfig.model_validate(
+        {
+            "type": "http",
+            "transport": "sse",
+            "url": "https://example.com/mcp",
+        }
+    )
+
+    assert config.type == "http"
+
+
 def test_build_servers_config_returns_empty_when_no_enabled_servers():
     extensions = ExtensionsConfig(
         mcp_servers={
@@ -111,3 +146,28 @@ def test_build_servers_config_skips_invalid_server_and_keeps_valid_ones():
     assert result["valid-stdio"]["transport"] == "stdio"
     assert "invalid-stdio" not in result
     assert "disabled-http" not in result
+
+
+def test_build_server_params_excludes_tool_call_timeout():
+    """tool_call_timeout must NOT appear in the connection dict.
+
+    langchain-mcp-adapters passes the connection dict to create_session(),
+    which forwards unknown keys to _create_stdio_session(), causing TypeError.
+    The timeout is read from McpServerConfig at the tool wrapper call-site
+    instead.  Regression for PR #3843 P1 bug.
+    """
+    config = McpServerConfig(
+        type="stdio",
+        command="npx",
+        args=["-y", "my-mcp-server"],
+        tool_call_timeout=30.0,
+    )
+
+    params = build_server_params("my-server", config)
+
+    assert "tool_call_timeout" not in params
+    assert params == {
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "my-mcp-server"],
+    }
