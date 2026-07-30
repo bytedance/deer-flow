@@ -408,7 +408,8 @@ that server's `command` against the same allowlist used by the full `PUT`
 endpoint. Disabling a server does not require its command to be allowlisted, and
 invalid commands on other servers do not block the update. The endpoint
 preserves secrets, environment-variable placeholders, skills, custom server
-fields, and other top-level extensions config.
+fields, and other top-level extensions config. SSE/HTTP targets may use either
+DeerFlow's `type` field or the MCP-spec `transport` field.
 
 **Request Body:**
 ```json

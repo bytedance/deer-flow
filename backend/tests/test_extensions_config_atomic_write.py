@@ -84,6 +84,29 @@ def test_atomic_write_preserves_original_when_replace_fails(
     assert _temporary_files_for(config_path) == []
 
 
+def test_atomic_write_preserves_original_when_file_fsync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    original = '{"mcpServers": {}, "skills": {}}'
+    config_path.write_text(original, encoding="utf-8")
+
+    def fail_fsync(_file_descriptor) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(extensions_config_module.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError, match="fsync failed"):
+        atomic_write_extensions_config(
+            config_path,
+            {"mcpServers": {"github": {"enabled": True}}, "skills": {}},
+        )
+
+    assert config_path.read_text(encoding="utf-8") == original
+    assert _temporary_files_for(config_path) == []
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits unavailable")
 def test_atomic_write_preserves_existing_file_mode(tmp_path: Path) -> None:
     config_path = tmp_path / "extensions_config.json"

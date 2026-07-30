@@ -248,9 +248,10 @@ This section accumulates work toward the **2.1.0** milestone
 - **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
   an unrelated disallowed stdio command no longer blocks every switch; allow
   disabling a disallowed target while still rejecting its re-enable, preserve
-  the raw extensions config, surface backend validation details in the UI, and
-  atomically replace the shared config for MCP, skill, and embedded-client
-  updates so interrupted writes cannot leave it truncated.
+  the raw extensions config, honor the MCP-spec `transport` alias when enabling
+  SSE/HTTP servers, surface backend validation details in the UI, and atomically
+  replace the shared config for MCP, skill, and embedded-client updates so
+  interrupted writes cannot leave it truncated.
   ([#4574])
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project

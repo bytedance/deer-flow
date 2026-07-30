@@ -16,6 +16,15 @@ from deerflow.config.runtime_paths import existing_project_file
 logger = logging.getLogger(__name__)
 
 
+def normalize_mcp_transport_alias(data: Any) -> Any:
+    """Promote MCP-spec ``transport`` to ``type`` when ``type`` is absent."""
+    if isinstance(data, dict):
+        transport = data.get("transport")
+        if transport and not data.get("type"):
+            return {**data, "type": transport}
+    return data
+
+
 class McpRoutingConfig(BaseModel):
     """Soft routing hints for MCP tool preference."""
 
@@ -107,11 +116,7 @@ class McpServerConfig(BaseModel):
         ``stdio`` (the default). This validator normalizes the two so either
         spelling works, with ``type`` taking precedence when both are provided.
         """
-        if isinstance(data, dict):
-            transport = data.get("transport")
-            if transport and not data.get("type"):
-                data = {**data, "type": transport}
-        return data
+        return normalize_mcp_transport_alias(data)
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
@@ -370,11 +375,10 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
             json.dump(data, temporary_file, indent=2)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-
-        if existing_mode is not None:
-            temporary_path.chmod(existing_mode)
 
         os.replace(temporary_path, target_path)
         _fsync_directory_best_effort(target_path.parent)

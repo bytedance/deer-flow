@@ -72,9 +72,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 5. TanStack Query manages server state; localStorage stores user settings. The
    Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
-   mutation, disables switches while that mutation is pending, displays the
-   backend error `detail` through a toast, and invalidates `["mcpConfig"]` only
-   after success.
+   mutation, disables switches until that mutation's success refetch completes,
+   displays the backend error `detail` through a toast, and invalidates
+   `["mcpConfig"]` only after success.
 6. Components subscribe to thread state and render updates
 
 Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display anchored after the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time; reasoning disclosure and run activity/duration are rendered separately.

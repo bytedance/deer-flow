@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
@@ -17,6 +17,7 @@ from deerflow.config.extensions_config import (
     atomic_write_extensions_config,
     extensions_config_write_lock,
     get_extensions_config,
+    normalize_mcp_transport_alias,
     reload_extensions_config,
 )
 from deerflow.mcp.cache import reset_mcp_tools_cache
@@ -67,6 +68,12 @@ class McpServerConfigResponse(BaseModel):
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transport_alias(cls, data: Any) -> Any:
+        """Keep API parsing aligned with the runtime MCP config model."""
+        return normalize_mcp_transport_alias(data)
 
 
 class McpConfigResponse(BaseModel):

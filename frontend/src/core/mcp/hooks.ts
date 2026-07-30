@@ -31,9 +31,7 @@ export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
   return {
     mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
       updateMCPServerState(serverName, enabled),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
     onError: (error: Error) => {
       toast.error(error.message);
     },
