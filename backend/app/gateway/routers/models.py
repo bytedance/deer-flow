@@ -304,6 +304,13 @@ def _apply_models_config_update(body: AdminModelsUpdateRequest) -> list[FullMode
             if isinstance(entry, dict) and "name" in entry:
                 existing_by_name[str(entry["name"])] = entry
 
+        # Snapshot the original model list *before* merging so that
+        # _sync_env_file can compute prev_env_refs from the full on-disk
+        # set.  Otherwise a model deleted in this PUT (absent from the
+        # incoming list) never has its $VAR reference marked as orphaned.
+        original_raw_data: dict[str, Any] = dict(raw_data)
+        original_raw_data["models"] = list(raw_data.get("models", []))
+
         # Merge incoming models into raw data.
         merged_models: list[dict[str, Any]] = []
         for incoming in body.models:
@@ -386,8 +393,10 @@ def _apply_models_config_update(body: AdminModelsUpdateRequest) -> list[FullMode
 
         raw_data["models"] = merged_models
 
-        # Sync .env file.
-        _sync_env_file(project_root, raw_data, body.models)
+        # Sync .env file — pass the *original* config so prev_env_refs
+        # is computed from the full on-disk model set, not just the
+        # surviving models.
+        _sync_env_file(project_root, original_raw_data, body.models)
 
         # Write config.yaml atomically.
         AppConfig.write_config(config_path, raw_data)
