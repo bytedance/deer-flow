@@ -1130,7 +1130,7 @@ def test_authenticate_skips_rehash_for_v2_hash():
     mock_repo.update_user.assert_not_called()
 
 
-def test_validate_next_param_rejects_colon_paths():
+def test_validate_next_param_rejects_unsafe_paths():
     from app.gateway.routers.auth import validate_next_param
 
     assert validate_next_param("/workspace") == "/workspace"

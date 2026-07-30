@@ -827,6 +827,7 @@ async def oauth_callback(
     # ── Issue DeerFlow session ───────────────────────────────────────
     token = create_access_token(str(user.id), token_version=user.token_version)
 
+    # Revalidate as defense-in-depth if future state writers populate this target.
     redirect_target = validate_next_param(state_payload.next_path) or "/workspace"
     frontend_base = oidc_config.frontend_base_url or ""
     callback_redirect = f"{frontend_base}/auth/callback?next={urllib.parse.quote(redirect_target)}"
