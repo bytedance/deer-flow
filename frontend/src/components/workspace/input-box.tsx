@@ -1971,7 +1971,7 @@ export function InputBox({
     if (
       !shouldGenerateFollowupsAfterStream({
         wasStreaming,
-        isStreaming: streaming,
+        status,
         interruptedByUser,
       })
     ) {

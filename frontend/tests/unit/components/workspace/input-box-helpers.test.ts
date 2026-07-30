@@ -462,6 +462,12 @@ describe("shouldShowFollowups", () => {
       false,
     );
   });
+
+  it("keeps follow-up suggestions hidden after a run error", () => {
+    expect(shouldShowFollowups({ ...visibleState, status: "error" })).toBe(
+      false,
+    );
+  });
 });
 
 describe("shouldGenerateFollowupsAfterStream", () => {
@@ -469,7 +475,7 @@ describe("shouldGenerateFollowupsAfterStream", () => {
     expect(
       shouldGenerateFollowupsAfterStream({
         wasStreaming: true,
-        isStreaming: false,
+        status: "ready",
         interruptedByUser: false,
       }),
     ).toBe(true);
@@ -479,7 +485,7 @@ describe("shouldGenerateFollowupsAfterStream", () => {
     expect(
       shouldGenerateFollowupsAfterStream({
         wasStreaming: true,
-        isStreaming: true,
+        status: "streaming",
         interruptedByUser: false,
       }),
     ).toBe(false);
@@ -489,8 +495,18 @@ describe("shouldGenerateFollowupsAfterStream", () => {
     expect(
       shouldGenerateFollowupsAfterStream({
         wasStreaming: true,
-        isStreaming: false,
+        status: "ready",
         interruptedByUser: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips suggestions after a failed stream", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        status: "error",
+        interruptedByUser: false,
       }),
     ).toBe(false);
   });

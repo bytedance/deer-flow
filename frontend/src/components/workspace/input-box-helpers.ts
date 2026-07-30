@@ -1,3 +1,5 @@
+import type { ChatStatus } from "ai";
+
 import type { Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
@@ -14,7 +16,7 @@ export type FollowupVisibilityState = {
   hidden: boolean;
   loading: boolean;
   count: number;
-  status: string;
+  status: ChatStatus;
 };
 
 export function shouldShowFollowups({
@@ -28,7 +30,7 @@ export function shouldShowFollowups({
   status,
 }: FollowupVisibilityState): boolean {
   return (
-    status !== "streaming" &&
+    status === "ready" &&
     !disabled &&
     !isWelcomeMode &&
     !hasSkillSuggestions &&
@@ -40,16 +42,16 @@ export function shouldShowFollowups({
 
 export type FollowupStreamTransition = {
   wasStreaming: boolean;
-  isStreaming: boolean;
+  status: ChatStatus;
   interruptedByUser: boolean;
 };
 
 export function shouldGenerateFollowupsAfterStream({
   wasStreaming,
-  isStreaming,
+  status,
   interruptedByUser,
 }: FollowupStreamTransition): boolean {
-  return wasStreaming && !isStreaming && !interruptedByUser;
+  return wasStreaming && status === "ready" && !interruptedByUser;
 }
 
 // Mirror of the backend raw request limit (`ThreadGoalRequest.objective`

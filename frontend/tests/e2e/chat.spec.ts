@@ -1,6 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
+import {
+  handleRunStream,
+  MOCK_RUN_ID,
+  MOCK_THREAD_ID,
+  mockLangGraphAPI,
+} from "./utils/mock-api";
 
 function textFromMessageContent(content: unknown) {
   if (typeof content === "string") {
@@ -1056,18 +1061,40 @@ test.describe("Chat workspace", () => {
     expect(suggestionsFetched).toBe(false);
   });
 
-  test("hides stale follow-up suggestions while the next run is streaming", async ({
+  test("hides stale follow-up suggestions while regenerating a response", async ({
     page,
   }) => {
     const staleSuggestion = "Review the previous answer";
-    let runCount = 0;
-    let markSecondRunStarted!: () => void;
-    let releaseSecondRun!: () => void;
-    const secondRunStarted = new Promise<void>((resolve) => {
-      markSecondRunStarted = resolve;
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Follow-up regeneration",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-existing",
+              content: [{ type: "text", text: "Existing request" }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-existing",
+              content: "Existing response",
+            },
+          ],
+        },
+      ],
     });
-    const secondRunHeld = new Promise<void>((resolve) => {
-      releaseSecondRun = resolve;
+    let firstRunMessages: unknown[] = [];
+    let prepareMessageId: string | undefined;
+    let runCount = 0;
+    let markRegenerationStarted!: () => void;
+    let releaseRegeneration!: () => void;
+    const regenerationStarted = new Promise<void>((resolve) => {
+      markRegenerationStarted = resolve;
+    });
+    const regenerationHeld = new Promise<void>((resolve) => {
+      releaseRegeneration = resolve;
     });
 
     await page.route("**/api/suggestions/config", (route) => {
@@ -1084,34 +1111,83 @@ test.describe("Chat workspace", () => {
         body: JSON.stringify({ suggestions: [staleSuggestion] }),
       });
     });
+    await page.route("**/api/threads/*/runs/regenerate/prepare", (route) => {
+      prepareMessageId = (
+        route.request().postDataJSON() as { message_id?: string }
+      ).message_id;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          input: { messages: firstRunMessages },
+          checkpoint: {
+            checkpoint_id: "checkpoint-before-human",
+            checkpoint_ns: "",
+            checkpoint_map: null,
+          },
+          metadata: {
+            regenerate_from_message_id: prepareMessageId,
+            regenerate_from_run_id: MOCK_RUN_ID,
+            regenerate_checkpoint_id: "checkpoint-before-human",
+          },
+          target_run_id: MOCK_RUN_ID,
+        }),
+      });
+    });
     await page.route("**/runs/stream", async (route) => {
-      runCount += 1;
-      if (runCount === 2) {
-        markSecondRunStarted();
-        await secondRunHeld;
+      const currentRun = ++runCount;
+      if (currentRun === 1) {
+        const body = route.request().postDataJSON() as {
+          input?: { messages?: unknown[] };
+        };
+        firstRunMessages = body.input?.messages ?? [];
+        return route.fallback();
       }
-      return handleRunStream(route);
+      if (currentRun === 2) {
+        markRegenerationStarted();
+        await regenerationHeld;
+      }
+      return route.fallback();
     });
 
-    await page.goto("/workspace/chats/new");
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
     await expect(textarea).toBeVisible({ timeout: 15_000 });
     await textarea.fill("First request");
     await textarea.press("Enter");
 
-    await expect(page.getByText(staleSuggestion)).toBeVisible({
+    const staleFollowups = page.locator('[data-slot="suggestions-list"]', {
+      hasText: staleSuggestion,
+    });
+    const staleChip = staleFollowups.getByRole("button", {
+      name: staleSuggestion,
+      exact: true,
+    });
+    const dismissFollowups = staleFollowups.getByRole("button", {
+      name: "Close",
+    });
+    await expect(staleFollowups).toBeVisible({
       timeout: 10_000,
     });
+    await expect(staleChip).toBeVisible();
+    await expect(dismissFollowups).toBeVisible();
+    expect(firstRunMessages).not.toHaveLength(0);
 
-    await textarea.fill("Second request");
-    await textarea.press("Enter");
-    await secondRunStarted;
+    const assistantTurn = page
+      .getByTestId("main-message-list")
+      .locator("[data-assistant-turn]")
+      .last();
+    await assistantTurn.hover();
 
     try {
-      await expect(page.getByText(staleSuggestion)).toBeHidden();
+      await assistantTurn.getByRole("button", { name: "Regenerate" }).click();
+      await expect.poll(() => prepareMessageId).toBe("msg-ai-1");
+      await regenerationStarted;
+      await expect(staleChip).toBeHidden();
+      await expect(dismissFollowups).toBeHidden();
     } finally {
-      releaseSecondRun();
+      releaseRegeneration();
     }
   });
 });
