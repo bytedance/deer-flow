@@ -759,6 +759,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "mcpServers": {},
         "skills": {"public-skill": {"enabled": False}},
+        "middlewares": [],
     }
 
 

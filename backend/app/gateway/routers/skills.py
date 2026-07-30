@@ -107,32 +107,6 @@ def _skill_to_response(skill: Skill) -> SkillResponse:
     )
 
 
-def _persist_shared_skill_state(
-    storage: SkillStorage,
-    config_path: Path,
-    skill_name: str,
-    enabled: bool,
-    *,
-    rebuild_public_projection: bool,
-) -> None:
-    from contextlib import nullcontext
-
-    from deerflow.skills.projection import skill_projection_mutation
-    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-    removal_names = (skill_name,) if not enabled else ()
-    projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
-    with projection_update:
-        # The projection lock is cross-process, but the singleton cache is not.
-        # Reload the latest disk state inside the lock before this RMW.
-        extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else ExtensionsConfig(mcp_servers={}, skills={})
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
-        config_data = extensions_config.model_dump(by_alias=True, exclude_unset=True)
-        with config_path.open("w", encoding="utf-8") as stream:
-            json.dump(config_data, stream, indent=2)
-        reload_extensions_config()
-
-
 def _static_scan_http_detail(error: StaticScanBlockedError) -> dict:
     return {
         "message": str(error),
@@ -448,36 +422,49 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
         raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
 
 
-def _write_extensions_skill_state(skill_name: str, enabled: bool) -> None:
+def _write_extensions_skill_state(
+    storage: SkillStorage,
+    skill_name: str,
+    enabled: bool,
+    *,
+    rebuild_public_projection: bool,
+) -> None:
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    ``extensions_config_write_lock`` itself, so that this router and the MCP
-    router (which performs the same RMW on the same file) cannot interleave and
-    drop each other's change. The lock is held by the worker rather than by the
-    awaiting task, so cancelling the request cannot release it mid-write.
+    the public projection lock before ``extensions_config_write_lock``. The first
+    keeps the enabled-only view synchronized across workers; the second prevents
+    this router and the MCP router from interleaving writes to the shared file.
+    Both locks are held by the worker, so request cancellation cannot release
+    either lock while the write or projection rebuild is still running.
     """
-    with extensions_config_write_lock:
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+    from contextlib import nullcontext
 
-        # Work on a deep copy rather than the cached singleton: mutating the
-        # singleton in place would publish the new state to readers before it is
-        # durable on disk, and leave it applied even if the write below fails.
-        # to_file_dict() serializes the full extensions_config.json shape (all
-        # top-level keys), so no field is dropped from the file.
-        extensions_config = get_extensions_config().model_copy(deep=True)
-        extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+    from deerflow.skills.projection import skill_projection_mutation
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 
-        config_data = extensions_config.to_file_dict()
+    removal_names = (skill_name,) if not enabled else ()
+    projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
+    with projection_update:
+        with extensions_config_write_lock:
+            config_path = ExtensionsConfig.resolve_config_path()
+            if config_path is None:
+                config_path = Path.cwd().parent / "extensions_config.json"
+                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+            # The projection lock is cross-process, but the singleton cache is
+            # not. Existing files are therefore re-read under the lock; a new
+            # file starts from a deep snapshot of the cached defaults.
+            extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else get_extensions_config().model_copy(deep=True)
+            extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
 
-        logger.info(f"Skills configuration updated and saved to: {config_path}")
-        reload_extensions_config()
+            config_data = extensions_config.to_file_dict()
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, indent=2)
+
+            logger.info(f"Skills configuration updated and saved to: {config_path}")
+            reload_extensions_config()
 
 
 @router.put(
@@ -511,20 +498,13 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
         # so that two users with same-named custom skills can toggle independently.
         if skill.category == SkillCategory.PUBLIC:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                config_path = Path.cwd().parent / "extensions_config.json"
-                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
             await asyncio.to_thread(
-                _persist_shared_skill_state,
+                _write_extensions_skill_state,
                 storage,
-                config_path,
                 skill_name,
                 body.enabled,
                 rebuild_public_projection=True,
             )
-            logger.info(f"Skills configuration updated and saved to: {config_path}")
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
@@ -532,14 +512,12 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
             if isinstance(storage, UserScopedSkillStorage):
                 await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
             else:
-                # Fallback for non-user-scoped storage (unlikely in practice)
-                config_path = ExtensionsConfig.resolve_config_path()
-                if config_path is None:
-                    config_path = Path.cwd().parent / "extensions_config.json"
+                # Fallback for non-user-scoped storage (unlikely in practice):
+                # same shared-file RMW as the PUBLIC branch, without a public
+                # projection rebuild for this non-public skill.
                 await asyncio.to_thread(
-                    _persist_shared_skill_state,
+                    _write_extensions_skill_state,
                     storage,
-                    config_path,
                     skill_name,
                     body.enabled,
                     rebuild_public_projection=False,

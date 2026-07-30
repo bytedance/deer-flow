@@ -1299,7 +1299,7 @@ class DeerFlowClient:
                 extensions_config = ExtensionsConfig.from_file(config_path)
                 extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-                config_data = extensions_config.model_dump(by_alias=True, exclude_unset=True)
+                config_data = extensions_config.to_file_dict()
 
                 self._atomic_write_json(config_path, config_data)
                 reload_extensions_config()
