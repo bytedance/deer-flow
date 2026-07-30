@@ -165,6 +165,28 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+
+    def _fake_exec(*argv: str):
+        calls.append(argv)
+        return types.SimpleNamespace(
+            exit_code=0,
+            stdout="line 1\nline 2\nline 3\nline 4\nline 5",
+            stderr="",
+        )
+
+    monkeypatch.setattr(box, "_exec", _fake_exec)
+
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
+
+
 def test_grep_always_prints_filename_for_single_file_paths() -> None:
     fake = _FakeBox(name="box-id")
     box = BoxliteBox("box-id", box=fake, run=_fake_run)

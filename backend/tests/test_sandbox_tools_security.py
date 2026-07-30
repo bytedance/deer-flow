@@ -1245,7 +1245,12 @@ def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) ->
             self._state_lock = threading.Lock()
             self._overlap_detected = threading.Event()
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             with self._state_lock:
                 self._active_reads += 1
                 snapshot = self.content
@@ -1308,7 +1313,12 @@ def test_str_replace_parallel_updates_in_isolated_sandboxes_should_not_share_pat
             self.content = "alpha\nbeta\n"
             self._shared_state = shared_state
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             state_lock = self._shared_state["state_lock"]
             with state_lock:
                 active_reads = self._shared_state["active_reads"]
@@ -1390,7 +1400,12 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
             self.str_replace_has_snapshot = threading.Event()
             self.append_finished = threading.Event()
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             with self.state_lock:
                 snapshot = self.content
             self.str_replace_has_snapshot.set()

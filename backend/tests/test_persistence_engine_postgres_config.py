@@ -145,7 +145,7 @@ async def test_init_engine_postgres_uses_hardened_kwargs() -> None:
             await engine_mod.init_engine(backend="postgres", url=url, echo=True, pool_size=12)
 
             create_engine.assert_called_once_with(url, **engine_mod._postgres_engine_kwargs(echo=True, pool_size=12))
-            bootstrap_schema.assert_awaited_once_with(mock_engine, backend="postgres")
+            bootstrap_schema.assert_awaited_once_with(mock_engine, backend="postgres", postgres_schema="")
         finally:
             await engine_mod.close_engine()
 
@@ -174,7 +174,10 @@ async def test_init_engine_postgres_retry_uses_hardened_kwargs() -> None:
             assert create_engine.call_args_list == [call(url, **kwargs), call(url, **kwargs)]
             auto_create.assert_awaited_once_with(url)
             initial_engine.dispose.assert_awaited_once()
-            assert bootstrap_schema.await_args_list == [call(initial_engine, backend="postgres"), call(retry_engine, backend="postgres")]
+            assert bootstrap_schema.await_args_list == [
+                call(initial_engine, backend="postgres", postgres_schema=""),
+                call(retry_engine, backend="postgres", postgres_schema=""),
+            ]
         finally:
             await engine_mod.close_engine()
 

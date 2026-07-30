@@ -185,6 +185,108 @@ describe("MessageGroup", () => {
     expect(timeoutSpy).not.toHaveBeenCalled();
   });
 
+  it("renders streaming reasoning above the answer text of the same message", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "The user asked who I am, so I will summarize.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, ["Thinking", ">Zephyr</span>"]);
+  });
+
+  it("renders streaming inline think reasoning above the answer text", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content:
+            "<think>\nThe user only said hello, so I will greet back.\n</think>\n\nZephyr answer body.",
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, ["Thinking", ">Zephyr</span>"]);
+  });
+
+  it("renders trailing reasoning above the answer text that follows a tool call", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-1",
+              name: "read_file",
+              args: { path: "message-group.tsx" },
+            },
+          ],
+        } as Message,
+        {
+          id: "tool-1",
+          type: "tool",
+          name: "read_file",
+          tool_call_id: "call-1",
+          content: "file contents",
+        } as Message,
+        {
+          id: "ai-2",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "The file confirms the renderer order.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, [
+      "message-group.tsx",
+      "Thinking",
+      ">Zephyr</span>",
+    ]);
+  });
+
+  it("keeps assistant text emitted before the trailing reasoning above it", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "Quartz interim note.",
+        } as Message,
+        {
+          id: "ai-2",
+          type: "ai",
+          content: "Zephyr answer body.",
+          additional_kwargs: {
+            reasoning_content: "Now I can write the final answer.",
+          },
+        } as Message,
+      ],
+      { isLoading: true },
+    );
+
+    expectRenderedInOrder(html, [
+      ">Quartz</span>",
+      "Thinking",
+      ">Zephyr</span>",
+    ]);
+  });
+
   it("keeps tool-calling assistant text visible when reasoning is also present", () => {
     const html = renderGroup([
       {
@@ -412,6 +514,15 @@ describe("MessageGroup", () => {
     expect(html).not.toContain("https://later.example");
   });
 });
+
+/** Asserts every needle is present and that they appear in the given order. */
+function expectRenderedInOrder(html: string, needles: string[]) {
+  const indices = needles.map((needle) => html.indexOf(needle));
+  for (const index of indices) {
+    expect(index).toBeGreaterThan(-1);
+  }
+  expect(indices).toStrictEqual([...indices].sort((a, b) => a - b));
+}
 
 function renderGroup(
   messages: Message[],

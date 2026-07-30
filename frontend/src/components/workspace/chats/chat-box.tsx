@@ -72,11 +72,12 @@ const ChatBox: React.FC<{
     if (threadIdRef.current !== threadId) {
       threadIdRef.current = threadId;
       deselect();
-      setArtifacts([]);
     }
 
     // Update artifacts from the current thread
-    if (threadArtifacts) {
+    // An empty initial state must not erase artifacts restored by the provider
+    // before the persisted thread state has arrived.
+    if (threadArtifacts && threadArtifacts.length > 0) {
       setArtifacts(threadArtifacts);
     }
 

@@ -234,6 +234,10 @@ def test_apply_prompt_template_includes_subagent_total_limit(monkeypatch):
 
     assert "MAXIMUM 3 `task` CALLS PER RESPONSE" in prompt
     assert "MAXIMUM 5 `task` CALLS PER RUN" in prompt
+    assert "Default to direct execution" in prompt
+    assert "DELEGATION CHECK" in prompt
+    assert "expected benefit from real parallel latency" in prompt
+    assert "HARD LIMITS ARE NON-NEGOTIABLE" in prompt
 
 
 def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeypatch):
@@ -304,7 +308,12 @@ def test_apply_prompt_template_single_subagent_limit_matches_middleware(monkeypa
     )
 
     assert f"MAXIMUM {enforced} `task` CALLS PER RESPONSE" in prompt
-    assert f"HARD LIMITS: max {enforced} `task` calls per response" in prompt
+    assert f"HARD LIMITS ARE NON-NEGOTIABLE: max {enforced} `task` calls per response" in prompt
+    assert "Expected benefit = specialist capability + context isolation" in prompt
+    assert "delegate only for material specialist or context-isolation benefit" in prompt
+    assert "expected benefit from real parallel latency" not in prompt
+    assert "material within-batch parallel savings" not in prompt
+    assert "Multi-batch example" not in prompt
 
 
 def test_build_acp_section_uses_explicit_app_config_without_global_config(monkeypatch):
