@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from deerflow.domain.feedback import InvalidRatingError, InvalidTagError
+from deerflow.domain.feedback.exceptions import InvalidRatingError, InvalidTagError
 
 VALID_RATINGS = (-1, 1)
 
