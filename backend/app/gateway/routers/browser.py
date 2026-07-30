@@ -10,6 +10,7 @@ from app.gateway.authz import require_permission
 from app.gateway.browser_capability import browser_capability
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
     description="Steer the thread's live browser session to a URL from the UI and capture a screenshot.",
 )
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def navigate_browser(thread_id: str, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
+async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
     user_id = str(request.state.auth.user.id)
     thread_store = getattr(request.app.state, "thread_store", None)
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
@@ -176,7 +177,7 @@ def _ws_origin_allowed(websocket: WebSocket) -> bool:
 
 
 @router.websocket("/threads/{thread_id}/browser/stream")
-async def browser_stream(websocket: WebSocket, thread_id: str) -> None:
+async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     """Bidirectional live browser stream.
 
     Server → client: JSON ``{"type":"frame","data":"<base64 jpeg>"}`` frames

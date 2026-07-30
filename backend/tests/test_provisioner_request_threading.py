@@ -15,6 +15,33 @@ from blockbuster import BlockBuster
 from kubernetes.client.rest import ApiException
 
 
+def test_provisioner_thread_id_pattern_matches_gateway_contract(provisioner_module) -> None:
+    from deerflow.utils.thread_id import THREAD_ID_PATTERN
+
+    assert provisioner_module.SAFE_THREAD_ID_PATTERN == THREAD_ID_PATTERN
+
+
+@pytest.mark.parametrize("thread_id", ["", "thread.with.dot", "../escape", "x" * 65])
+def test_provisioner_rejects_noncanonical_thread_ids(provisioner_module, thread_id: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-validation",
+            thread_id=thread_id,
+        )
+
+
+@pytest.mark.parametrize("thread_id", ["a", "A1_b-2", "x" * 64])
+def test_provisioner_accepts_canonical_thread_ids(provisioner_module, thread_id: str) -> None:
+    request = provisioner_module.CreateSandboxRequest(
+        sandbox_id="sandbox-validation",
+        thread_id=thread_id,
+    )
+
+    assert request.thread_id == thread_id
+
+
 class _RecordingCoreV1:
     def __init__(
         self,

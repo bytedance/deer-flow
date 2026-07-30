@@ -68,6 +68,7 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
+from deerflow.utils.thread_id import resolve_thread_id, validate_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -534,6 +535,7 @@ class DeerFlowClient:
 
     def get_goal(self, thread_id: str) -> dict:
         """Return the active goal for a thread, if any."""
+        validate_thread_id(thread_id)
         checkpointer = self._get_thread_checkpointer()
         goal = _run_async_from_sync(read_thread_goal(checkpointer, thread_id))
         return {"goal": goal}
@@ -546,6 +548,7 @@ class DeerFlowClient:
         max_continuations: int = DEFAULT_MAX_GOAL_CONTINUATIONS,
     ) -> dict:
         """Set or replace a thread-scoped goal."""
+        validate_thread_id(thread_id)
         checkpointer = self._get_thread_checkpointer()
         goal = build_goal_state(objective, max_continuations=max_continuations)
 
@@ -558,6 +561,7 @@ class DeerFlowClient:
 
     def clear_goal(self, thread_id: str) -> dict:
         """Clear the active goal for a thread."""
+        validate_thread_id(thread_id)
         checkpointer = self._get_thread_checkpointer()
 
         async def _clear_goal() -> None:
@@ -812,8 +816,7 @@ class DeerFlowClient:
               Tool results also include ``"artifact"`` when the source ToolMessage has a non-None artifact.
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
-        if thread_id is None:
-            thread_id = str(uuid.uuid4())
+        thread_id = resolve_thread_id(thread_id)
 
         config = self._get_runnable_config(thread_id, **kwargs)
         inject_checkpoint_mode(config, self._checkpoint_channel_mode)
