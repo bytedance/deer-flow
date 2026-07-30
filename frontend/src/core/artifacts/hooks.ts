@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef } from "react";
 import { useThread } from "@/components/workspace/messages/context";
 
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
-import { hasActiveWriteForArtifact } from "./refresh";
 
 export function useArtifactContent({
   filepath,
@@ -19,10 +18,6 @@ export function useArtifactContent({
     return filepath.startsWith("write-file:");
   }, [filepath]);
   const { thread, isMock } = useThread();
-  const hasActiveWrite = useMemo(
-    () => !isWriteFile && hasActiveWriteForArtifact(thread.messages, filepath),
-    [filepath, isWriteFile, thread.messages],
-  );
   const content = useMemo(() => {
     if (isWriteFile) {
       return loadArtifactContentFromToolCall({ url: filepath, thread });
@@ -36,19 +31,12 @@ export function useArtifactContent({
       return loadArtifactContent({ filepath, threadId, isMock });
     },
     enabled,
-    // Poll only the formal file currently shown in the panel. The detail
-    // component is unmounted when the panel closes, so this does not poll the
-    // whole artifact list or files the user is not viewing. The transient
-    // write-file preview is already driven directly by streamed tool arguments.
-    refetchInterval:
-      enabled && !isWriteFile && (thread.isLoading || hasActiveWrite)
-        ? 1000
-        : false,
-    refetchIntervalInBackground: true,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
 
+  // Refetch once when the run settles so edits made during the run are
+  // visible without a manual reload.
   const wasLoadingRef = useRef(thread.isLoading);
   useEffect(() => {
     const wasLoading = wasLoadingRef.current;
