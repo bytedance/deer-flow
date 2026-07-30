@@ -234,16 +234,25 @@ def _alembic_safe_url(engine: AsyncEngine) -> str:
     return _escape_url_for_alembic(rendered)
 
 
-def _get_alembic_config(engine: AsyncEngine) -> AlembicConfig:
+def _get_alembic_config(engine: AsyncEngine, *, postgres_schema: str = "") -> AlembicConfig:
     """Build an in-process alembic config pointing at our migrations dir.
 
     Avoids reading ``alembic.ini`` from disk so the production runtime doesn't
     depend on a working-directory-relative file lookup. The ``script_location``
     is anchored at the package path on disk.
+
+    When *postgres_schema* is set it is forwarded as the ``deerflow_pg_schema``
+    main option so ``env.py`` can pin its alembic-spawned engine's
+    ``search_path`` to the same schema the app engine uses. Without it,
+    alembic's own engine -- built from the bare URL -- would create
+    ``alembic_version`` and all migration DDL in the default (``public``)
+    schema while the app tables land in the custom schema.
     """
     cfg = AlembicConfig()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
     cfg.set_main_option("sqlalchemy.url", _alembic_safe_url(engine))
+    if postgres_schema:
+        cfg.set_main_option("deerflow_pg_schema", postgres_schema)
     return cfg
 
 
@@ -470,7 +479,7 @@ def _bootstrap_lock(engine: AsyncEngine, *, backend: str):
 # ---------------------------------------------------------------------------
 
 
-async def bootstrap_schema(engine: AsyncEngine, *, backend: str) -> None:
+async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema: str = "") -> None:
     """Bring the DB schema to head.
 
     Postgres calls are serialised across processes with an advisory lock.
@@ -480,9 +489,14 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str) -> None:
     Branch dispatch is documented at module top. ``alembic.command.stamp`` and
     ``alembic.command.upgrade`` are synchronous and would block the event
     loop; both are wrapped in ``asyncio.to_thread``.
+
+    *postgres_schema*, when set, is forwarded to the alembic config so the
+    alembic-spawned engine pins its ``search_path`` to that schema. The target
+    schema must already exist (``init_engine`` issues ``CREATE SCHEMA`` before
+    calling this). Ignored for non-postgres backends.
     """
     head = _get_head_revision()
-    cfg = _get_alembic_config(engine)
+    cfg = _get_alembic_config(engine, postgres_schema=postgres_schema if backend == "postgres" else "")
 
     async with _bootstrap_lock(engine, backend=backend):
         async with engine.connect() as conn:

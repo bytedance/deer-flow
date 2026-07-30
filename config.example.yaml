@@ -1815,6 +1815,9 @@ skill_evolution:
 # checkpointer:
 #   type: postgres
 #   connection_string: postgresql://user:password@localhost:5432/deerflow
+#   # Optional: place LangGraph checkpointer/store tables in this schema.
+#   # Leave empty to use the server default search_path, usually public.
+#   postgres_schema: deerflow
 
 # ============================================================================
 # Database
@@ -1866,6 +1869,51 @@ skill_evolution:
 # database:
 #   backend: postgres
 #   postgres_url: $DATABASE_URL
+#   # Optional: place DeerFlow ORM tables and LangGraph checkpointer/store
+#   # tables in this schema. Leave empty to use the server default
+#   # search_path, usually public.
+#   postgres_schema: deerflow
+#
+# postgres_schema only takes effect for new tables. On startup DeerFlow runs
+# CREATE SCHEMA IF NOT EXISTS and pins the connection search_path; it never
+# moves existing tables, so third-party tables in `public` are left untouched.
+#
+# Migrating an EXISTING deployment from `public` to a dedicated schema:
+#   1. Stop the DeerFlow services.
+#   2. Move EVERY DeerFlow-owned table AND the Alembic state into the new schema
+#      (run as the DB owner). Missing any table strands its rows: after restart
+#      DeerFlow recreates an empty counterpart in the target schema and the old
+#      rows stay invisible in `public`. Moving the ORM tables but leaving
+#      `alembic_version` behind is especially dangerous -- bootstrap then treats
+#      the target schema as unversioned, re-baselines it, and replays migrations.
+#        CREATE SCHEMA IF NOT EXISTS deerflow;
+#        -- Application ORM tables:
+#        ALTER TABLE public.runs                  SET SCHEMA deerflow;
+#        ALTER TABLE public.run_events            SET SCHEMA deerflow;
+#        ALTER TABLE public.threads_meta          SET SCHEMA deerflow;
+#        ALTER TABLE public.feedback              SET SCHEMA deerflow;
+#        ALTER TABLE public.users                 SET SCHEMA deerflow;
+#        ALTER TABLE public.agents                SET SCHEMA deerflow;
+#        -- IM channel tables:
+#        ALTER TABLE public.channel_connections   SET SCHEMA deerflow;
+#        ALTER TABLE public.channel_credentials   SET SCHEMA deerflow;
+#        ALTER TABLE public.channel_oauth_states  SET SCHEMA deerflow;
+#        ALTER TABLE public.channel_conversations SET SCHEMA deerflow;
+#        -- Scheduled-task tables:
+#        ALTER TABLE public.scheduled_tasks       SET SCHEMA deerflow;
+#        ALTER TABLE public.scheduled_task_runs   SET SCHEMA deerflow;
+#        -- Alembic migration state (REQUIRED -- see note above):
+#        ALTER TABLE public.alembic_version       SET SCHEMA deerflow;
+#      The DeerFlow-owned set grows over time; discover any tables the list
+#      above misses (as the DeerFlow DB owner/role) with:
+#        SELECT table_name FROM information_schema.tables WHERE table_schema='public';
+#      LangGraph checkpointer/store table names also vary by version -- list them
+#      the same way, then ALTER ... SET SCHEMA deerflow for each (e.g. checkpoints,
+#      checkpoint_blobs, checkpoint_writes, checkpoint_migrations, store,
+#      store_migrations).
+#   3. Set postgres_schema: deerflow here and restart.
+#   4. Verify with `SHOW search_path;` and a smoke test (create a run, read
+#      its history). The `public` schema should gain no new DeerFlow tables.
 database:
   backend: sqlite
   sqlite_dir: .deer-flow/data

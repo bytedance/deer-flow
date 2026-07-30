@@ -35,7 +35,9 @@ import logging
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +153,22 @@ class DatabaseConfig(BaseModel):
         gt=0,
         description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
     )
+    postgres_schema: str = Field(
+        default="",
+        description=(
+            "PostgreSQL schema for both app ORM tables and LangGraph "
+            "checkpointer/store tables (postgres only). Empty string keeps "
+            "the server default search_path (usually 'public'). When set, "
+            "the schema is created automatically at startup and applied via "
+            "connection-level search_path. Only plain identifiers are "
+            f"allowed: {POSTGRES_SCHEMA_PATTERN}."
+        ),
+    )
+
+    @field_validator("postgres_schema")
+    @classmethod
+    def _validate_postgres_schema(cls, value: str) -> str:
+        return validate_postgres_schema(value)
 
     # -- Legacy key migration (not user-configured) --
 
