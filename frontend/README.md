@@ -131,7 +131,7 @@ src/
 | `pnpm dev`          | Start development server with Turbopack |
 | `pnpm build`        | Build for production                    |
 | `pnpm start`        | Start production server                 |
-| `pnpm test`         | Run unit tests with Vitest              |
+| `pnpm test`         | Run unit tests with Rstest              |
 | `pnpm test:e2e`     | Run E2E tests with Playwright           |
 | `pnpm format`       | Check formatting with Prettier          |
 | `pnpm format:write` | Apply formatting with Prettier          |

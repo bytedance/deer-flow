@@ -14,8 +14,13 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,11 @@ _CONVERSATION_TYPE_P2P = "1"
 _CONVERSATION_TYPE_GROUP = "2"
 
 _MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024
+
+# Inbound attachments are buffered in memory before being persisted and synced
+# into the sandbox, so bound them. DingTalk chats accept far larger files than
+# an agent can usefully read; oversized ones surface as a failed-load marker.
+_MAX_INBOUND_FILE_SIZE_BYTES = 50 * 1024 * 1024
 
 
 def _normalize_conversation_type(raw: Any) -> str:
@@ -59,9 +69,17 @@ def _normalize_allowed_users(allowed_users: Any) -> set[str]:
 
 
 def _is_dingtalk_command(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+    return is_known_channel_command(text)
+
+
+def _display_filename(filename: str) -> str:
+    """Collapse whitespace and cap length for embedding a filename in message text.
+
+    ``fileName`` is webhook-supplied data: embedded raw in a failed-load marker,
+    a newline could forge a standalone ``/mnt/user-data/uploads/...`` line and an
+    over-long name would bloat the message text.
+    """
+    return re.sub(r"\s+", " ", filename).strip()[:80]
 
 
 def _extract_text_from_rich_text(rich_text_list: list) -> str:
@@ -138,6 +156,9 @@ class DingTalkChannel(Channel):
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
+        # Serialize inbound-file writes into the uploads directory to avoid
+        # racing writers clobbering one another (mirrors FeishuChannel).
+        self._file_write_lock = threading.Lock()
 
     @property
     def supports_streaming(self) -> bool:
@@ -247,32 +268,19 @@ class DingTalkChannel(Channel):
                 self._card_repliers.pop(out_track_id, None)
             return
 
-        # Non-card mode: send sampleMarkdown with retry
-        last_exc: Exception | None = None
-        for attempt in range(_max_retries):
-            try:
-                if conversation_type == _CONVERSATION_TYPE_GROUP:
-                    await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
-                else:
-                    await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < _max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[DingTalk] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        _max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_markdown() -> None:
+            if conversation_type == _CONVERSATION_TYPE_GROUP:
+                await self._send_group_message(robot_code, conversation_id, msg.text, at_user_ids=[sender_staff_id] if sender_staff_id else None)
+            else:
+                await self._send_p2p_message(robot_code, sender_staff_id, msg.text)
 
-        logger.error("[DingTalk] send failed after %d attempts: %s", _max_retries, last_exc)
-        if last_exc is None:
-            raise RuntimeError("DingTalk send failed without an exception from any attempt")
-        raise last_exc
+        # Non-card mode: send sampleMarkdown with retry
+        await self._send_with_retry(
+            send_markdown,
+            max_retries=_max_retries,
+            log_prefix="[DingTalk]",
+        )
+        return
 
     async def _send_markdown_fallback(
         self,
@@ -379,22 +387,45 @@ class DingTalkChannel(Channel):
             msg_id = message.message_id or ""
             sender_nick = message.sender_nick or ""
 
+            text = self._extract_text(message)
+            files = self._extract_files(message)
+            if not text and not files:
+                logger.info("[DingTalk] empty message with no files, ignoring")
+                return
+
+            connect_code = self._pending_connect_code(text)
+            if connect_code:
+                if self._main_loop and self._main_loop.is_running():
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._bind_connection_from_connect_code(
+                            conversation_type=conversation_type,
+                            sender_staff_id=sender_staff_id,
+                            sender_nick=sender_nick,
+                            conversation_id=conversation_id,
+                            code=connect_code,
+                        ),
+                        self._main_loop,
+                    )
+                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                else:
+                    logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
+                return
+
             if self._allowed_users and sender_staff_id not in self._allowed_users:
                 logger.debug("[DingTalk] ignoring message from non-allowed user: %s", sender_staff_id)
                 return
 
-            text = self._extract_text(message)
-            if not text:
-                logger.info("[DingTalk] empty text, ignoring message")
-                return
-
+            # Log only metadata (length, not content) so message text never reaches
+            # INFO logs, and only after the allowed_users gate so blocked senders are
+            # not logged at all.
             logger.info(
-                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text=%r",
+                "[DingTalk] parsed message: conv_type=%s, msg_id=%s, sender=%s(%s), text_len=%d, files=%d",
                 conversation_type,
                 msg_id,
                 sender_staff_id,
                 sender_nick,
-                text[:100],
+                len(text or ""),
+                len(files),
             )
 
             if _is_dingtalk_command(text):
@@ -409,12 +440,26 @@ class DingTalkChannel(Channel):
             # chat_id uses conversation_id for groups, sender_staff_id for P2P
             chat_id = conversation_id if conversation_type == _CONVERSATION_TYPE_GROUP else sender_staff_id
 
+            # An empty chat_id does not identify a conversation, and ChannelStore keys on it:
+            # a P2P message with no sender keys to the literal "dingtalk:", so every such
+            # message from every user shares one thread and one history. Mirrors the guard the
+            # WeChat channel already applies (wechat.py, `if not chat_id: return`) and the one
+            # this file's own bind path applies before persisting a connection.
+            if not chat_id:
+                logger.warning(
+                    "[DingTalk] ignoring message with no conversation identity: conv_type=%s, msg_id=%s",
+                    conversation_type,
+                    msg_id,
+                )
+                return
+
             inbound = self._make_inbound(
                 chat_id=chat_id,
                 user_id=sender_staff_id,
                 text=text,
                 msg_type=msg_type,
                 thread_ts=msg_id,
+                files=files,
                 metadata={
                     "conversation_type": conversation_type,
                     "conversation_id": conversation_id,
@@ -451,11 +496,326 @@ class DingTalkChannel(Channel):
             return _extract_text_from_rich_text(message.rich_text_content.rich_text_list).strip()
         return ""
 
+    # -- inbound: file attachments -----------------------------------------
+
+    @staticmethod
+    def _extract_files(message: Any) -> list[dict[str, Any]]:
+        """Extract inbound file/image descriptors from a DingTalk message.
+
+        Returns a list of dicts shaped for ``InboundMessage.files``; each carries
+        ``type`` (``"image"`` or ``"file"``), ``download_code``, and ``filename``.
+
+        Images arrive as ``picture`` messages (a single ``downloadCode``) or as
+        inline images inside a ``richText`` message. Documents arrive as ``file``
+        messages, which ``dingtalk_stream.ChatbotMessage.from_dict`` does not
+        parse — the descriptor (``downloadCode`` / ``fileName``) is read from the
+        raw callback payload stashed on the message as ``_df_raw_data`` by
+        ``_DingTalkMessageHandler.process``.
+        """
+        msg_type = getattr(message, "message_type", None)
+        files: list[dict[str, Any]] = []
+
+        if msg_type == "picture":
+            image_content = getattr(message, "image_content", None)
+            code = getattr(image_content, "download_code", None)
+            if code:
+                files.append({"type": "image", "download_code": code, "filename": "image.png"})
+        elif msg_type == "richText":
+            try:
+                codes = message.get_image_list() or []
+            except Exception:
+                # Log rather than swallow: without this, a richText message whose
+                # SDK image parse fails looks identical to one that simply has no
+                # inline images, which is hard to diagnose if the SDK shape changes.
+                logger.warning("[DingTalk] failed to read inline images from richText message", exc_info=True)
+                codes = []
+            for idx, code in enumerate(codes):
+                if code:
+                    files.append({"type": "image", "download_code": code, "filename": f"image_{idx}.png"})
+        elif msg_type == "file":
+            raw = getattr(message, "_df_raw_data", None)
+            content = raw.get("content") if isinstance(raw, dict) else None
+            if isinstance(content, dict):
+                code = content.get("downloadCode")
+                if code:
+                    filename = content.get("fileName") or "file.bin"
+                    files.append({"type": "file", "download_code": code, "filename": filename})
+
+        return files
+
+    async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
+        """Download inbound DingTalk files into the thread uploads directory.
+
+        Mirrors :meth:`FeishuChannel.receive_file`: each descriptor in
+        ``msg.files`` is downloaded by its ``downloadCode``, persisted under the
+        thread's uploads bucket, synced into a non-local sandbox, and its sandbox
+        virtual path is prepended to ``msg.text`` so downstream models can read
+        the file by path. Descriptors are then cleared so the generic
+        URL-based ``_ingest_inbound_files`` pass does not try to re-fetch them
+        (DingTalk files are downloaded by code, not by URL).
+
+        An attachment that fails to download contributes a short
+        ``[failed to load ...]`` marker instead of a path, so the agent can tell
+        the user something was sent but could not be read rather than silently
+        ignoring it.
+        """
+        if not msg.files:
+            return msg
+
+        virtual_paths: list[str] = []
+        failures: list[str] = []
+        for f in msg.files:
+            if not isinstance(f, dict):
+                continue
+            download_code = f.get("download_code")
+            if not download_code:
+                continue
+            file_type = "image" if f.get("type") == "image" else "file"
+            filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
+            # Per-attachment isolation: the manager awaits receive_file without a
+            # try, so anything escaping here would kill the chat turn with no
+            # reply — the silent-drop failure mode this feature exists to fix.
+            try:
+                virtual_path = await self._receive_single_file(download_code, file_type, filename, thread_id, user_id=user_id)
+            except Exception:
+                logger.exception("[DingTalk] unexpected error receiving inbound %s", file_type)
+                virtual_path = ""
+            if virtual_path:
+                virtual_paths.append(virtual_path)
+            else:
+                display = _display_filename(filename)
+                failures.append(f"[failed to load {file_type}: {display}]" if display else f"[failed to load {file_type}]")
+
+        prefix_lines = virtual_paths + failures
+        if prefix_lines:
+            block = "\n".join(prefix_lines)
+            msg.text = f"{block}\n\n{msg.text}".strip() if msg.text else block
+
+        msg.files = []
+        return msg
+
+    async def _receive_single_file(
+        self,
+        download_code: str,
+        file_type: str,
+        filename: str,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> str:
+        """Download one file by ``downloadCode`` and persist it into uploads.
+
+        Returns the sandbox virtual path on success, or ``""`` on failure.
+        """
+        content = await self._download_by_code(download_code)
+        if not content:
+            return ""
+
+        paths = get_paths()
+        effective_user_id = user_id or get_effective_user_id()
+
+        default_ext = "png" if file_type == "image" else "bin"
+        # ``download_code`` is attacker-controllable webhook data, so restrict it to
+        # a safe character set before embedding it in the fallback name. This keeps
+        # the fallback safe by construction instead of relying on a later write
+        # failure to reject a name that escaped the uploads directory.
+        code_token = re.sub(r"[^A-Za-z0-9_-]", "", download_code)[-12:] or "attachment"
+        fallback_name = f"dingtalk_{code_token}.{default_ext}"
+        # normalize_filename strips directory components and rejects traversal
+        # patterns ("..", backslash paths, over-long names); fall back to the
+        # sanitized generated name if the platform-supplied filename is rejected.
+        try:
+            safe_filename = normalize_filename(filename or fallback_name)
+        except ValueError:
+            safe_filename = fallback_name
+
+        def _persist() -> Path:
+            # Directory prep, the uniqueness claim, and the write are blocking
+            # filesystem IO — the whole sequence stays off the event loop. The
+            # claim and the write share one lock because generated names repeat
+            # across messages ("image.png" for every picture message): without a
+            # claim a later attachment silently overwrites an earlier one whose
+            # path was already handed to the agent, and letting the claim and
+            # write interleave would resolve two attachments to the same free name.
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
+            with self._file_write_lock:
+                seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                unique_name = claim_unique_filename(safe_filename, seen)
+                # write_upload_file_no_symlink refuses a symlinked destination:
+                # uploads dirs can be mounted into local sandboxes, so a sandbox
+                # process could otherwise redirect this privileged write outside
+                # the bucket.
+                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
+
+        try:
+            resolved_target = await asyncio.to_thread(_persist)
+        except (OSError, UnsafeUploadPathError):
+            logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
+            return ""
+
+        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+
+        try:
+            sandbox_provider = get_sandbox_provider()
+            # acquire_async keeps provider lifecycle work (Docker discovery,
+            # readiness polls) off the event loop; update_file is blocking
+            # transport IO on remote sandboxes, so it is offloaded too.
+            sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
+            if sandbox_id != "local":
+                sandbox = sandbox_provider.get(sandbox_id)
+                if sandbox is None:
+                    # Mirror Feishu: the agent's non-local sandbox cannot see this
+                    # file, so returning the virtual path would hand the model a
+                    # path that reads as nothing — surface a failed-load marker.
+                    logger.warning("[DingTalk] sandbox %s not found after acquire, dropping attachment: %s", sandbox_id, virtual_path)
+                    return ""
+                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+        except Exception:
+            # Same failure mode as the sandbox-is-None branch: the bytes never
+            # reached the agent's sandbox, so the virtual path would read as
+            # nothing. Mirror Feishu and surface a failed-load marker.
+            logger.exception("[DingTalk] failed to sync downloaded file into non-local sandbox: %s", virtual_path)
+            return ""
+
+        return virtual_path
+
+    async def _download_by_code(self, download_code: str) -> bytes | None:
+        """Exchange a DingTalk ``downloadCode`` for the raw file bytes.
+
+        Two steps per the DingTalk robot OpenAPI:
+        1. ``POST /v1.0/robot/messageFiles/download`` -> ``{downloadUrl}``
+        2. ``GET downloadUrl`` -> binary content
+        """
+        try:
+            # Token acquisition stays inside the try: the manager awaits
+            # receive_file without a try, so a token failure escaping here would
+            # abort the whole chat turn instead of degrading to a failed-load marker.
+            token = await self._get_access_token()
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                response = await client.post(
+                    f"{DINGTALK_API_BASE}/v1.0/robot/messageFiles/download",
+                    headers={
+                        "x-acs-dingtalk-access-token": token,
+                        "Content-Type": "application/json",
+                    },
+                    json={"downloadCode": download_code, "robotCode": self._client_id},
+                )
+                if response.status_code != 200:
+                    logger.warning("[DingTalk] messageFiles/download failed: status=%d, body=%s", response.status_code, response.text[:300])
+                    return None
+                download_url = response.json().get("downloadUrl")
+                if not download_url:
+                    logger.warning("[DingTalk] messageFiles/download returned no downloadUrl")
+                    return None
+
+                # Stream with a size cap: the bytes are buffered in memory before
+                # being persisted, so an oversized attachment must be refused
+                # before it is fully read, not after.
+                chunks: list[bytes] = []
+                total = 0
+                async with client.stream("GET", download_url, follow_redirects=True) as file_response:
+                    file_response.raise_for_status()
+                    async for chunk in file_response.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_INBOUND_FILE_SIZE_BYTES:
+                            logger.warning("[DingTalk] inbound file exceeds %d bytes, dropping", _MAX_INBOUND_FILE_SIZE_BYTES)
+                            return None
+                        chunks.append(chunk)
+                return b"".join(chunks)
+        except (httpx.HTTPError, ValueError):
+            logger.exception("[DingTalk] failed to download file by code")
+            return None
+
     async def _prepare_inbound(self, chat_id: str, inbound: InboundMessage) -> None:
+        inbound = await self._attach_connection_identity(inbound)
         # Running reply must finish before publish_inbound so AI card tracks are
         # registered before the manager emits streaming outbounds.
         await self._send_running_reply(chat_id, inbound)
         await self.bus.publish_inbound(inbound)
+
+    @staticmethod
+    def _connection_workspace_id(conversation_type: str, conversation_id: str) -> str | None:
+        if conversation_type == _CONVERSATION_TYPE_GROUP and conversation_id:
+            return conversation_id
+        return None
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        conversation_type = str(inbound.metadata.get("conversation_type") or _CONVERSATION_TYPE_P2P)
+        conversation_id = str(inbound.metadata.get("conversation_id") or "")
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="dingtalk",
+            workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
+            fallback_without_workspace=True,
+        )
+
+    async def _bind_connection_from_connect_code(
+        self,
+        *,
+        conversation_type: str,
+        sender_staff_id: str,
+        sender_nick: str,
+        conversation_id: str,
+        code: str,
+    ) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="dingtalk", state=code)
+        if state is None:
+            await self._send_connection_reply(
+                conversation_type,
+                sender_staff_id,
+                conversation_id,
+                "DingTalk connection code is invalid or expired.",
+            )
+            return True
+
+        if not sender_staff_id:
+            await self._send_connection_reply(
+                conversation_type,
+                sender_staff_id,
+                conversation_id,
+                "DingTalk connection could not be completed from this message.",
+            )
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="dingtalk",
+            external_account_id=sender_staff_id,
+            external_account_name=sender_nick or None,
+            workspace_id=self._connection_workspace_id(conversation_type, conversation_id),
+            metadata={
+                "conversation_type": conversation_type,
+                "conversation_id": conversation_id,
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(
+            conversation_type,
+            sender_staff_id,
+            conversation_id,
+            "DingTalk connected to DeerFlow.",
+        )
+        return True
+
+    async def _send_connection_reply(
+        self,
+        conversation_type: str,
+        sender_staff_id: str,
+        conversation_id: str,
+        text: str,
+    ) -> None:
+        robot_code = self._client_id
+        if conversation_type == _CONVERSATION_TYPE_GROUP:
+            if conversation_id:
+                await self._send_text_message_to_group(robot_code, conversation_id, text)
+            return
+        if sender_staff_id:
+            await self._send_text_message_to_user(robot_code, sender_staff_id, text)
 
     async def _send_running_reply(self, chat_id: str, inbound: InboundMessage) -> None:
         conversation_type = inbound.metadata.get("conversation_type", _CONVERSATION_TYPE_P2P)
@@ -700,15 +1060,6 @@ class DingTalkChannel(Channel):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
 
-    @staticmethod
-    def _log_future_error(fut: Any, name: str, msg_id: str) -> None:
-        try:
-            exc = fut.exception()
-            if exc:
-                logger.error("[DingTalk] %s failed for msg_id=%s: %s", name, msg_id, exc)
-        except (asyncio.CancelledError, asyncio.InvalidStateError):
-            pass
-
 
 class _DingTalkMessageHandler:
     """Callback handler registered with dingtalk-stream."""
@@ -736,5 +1087,9 @@ class _DingTalkMessageHandler:
         import dingtalk_stream
 
         incoming_message = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
+        # Stash the raw callback payload: dingtalk_stream does not parse ``file``
+        # (document) messages, so DingTalkChannel._extract_files reads the file
+        # descriptor (downloadCode / fileName) from it.
+        incoming_message._df_raw_data = callback.data
         self._channel._on_chatbot_message(incoming_message)
         return dingtalk_stream.AckMessage.STATUS_OK, "OK"

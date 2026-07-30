@@ -1,21 +1,24 @@
 """Tests for SubagentLimitMiddleware."""
 
+import logging
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.subagent_limit_middleware import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS,
     MAX_CONCURRENT_SUBAGENTS,
     MAX_SUBAGENT_LIMIT,
     MIN_SUBAGENT_LIMIT,
     SubagentLimitMiddleware,
     _clamp_subagent_limit,
 )
+from deerflow.agents.thread_state import DelegationEntry
 
 
-def _make_runtime():
+def _make_runtime(run_id: str = "run-1"):
     runtime = MagicMock()
-    runtime.context = {"thread_id": "test-thread"}
+    runtime.context = {"thread_id": "test-thread", "run_id": run_id}
     return runtime
 
 
@@ -27,6 +30,19 @@ def _other_call(name="bash", call_id="call_other"):
     return {"name": name, "id": call_id, "args": {}}
 
 
+def _delegation(entry_id: str, *, run_id: str | None = None) -> DelegationEntry:
+    entry: DelegationEntry = {
+        "id": entry_id,
+        "description": "prior work",
+        "subagent_type": "general-purpose",
+        "status": "completed",
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    if run_id is not None:
+        entry["run_id"] = run_id
+    return entry
+
+
 def _raw_tool_call(call_id: str, name: str = "task") -> dict:
     return {
         "id": call_id,
@@ -36,11 +52,23 @@ def _raw_tool_call(call_id: str, name: str = "task") -> dict:
 
 
 class TestClampSubagentLimit:
-    def test_below_min_clamped_to_min(self):
-        assert _clamp_subagent_limit(0) == MIN_SUBAGENT_LIMIT
-        assert _clamp_subagent_limit(1) == MIN_SUBAGENT_LIMIT
+    def test_min_limit_is_one(self):
+        # MIN lowered from 2 to 1 so a user asking for a single subagent gets 1.
+        # Both consumers (SubagentLimitMiddleware.__init__ and the prompt path)
+        # share this floor via clamp_subagent_concurrency in subagents_config.py.
+        assert MIN_SUBAGENT_LIMIT == 1
+        assert MAX_SUBAGENT_LIMIT == 4
 
-    def test_above_max_clamped_to_max(self):
+    def test_below_min_clamped_to_one(self):
+        assert _clamp_subagent_limit(0) == 1
+        assert _clamp_subagent_limit(-5) == 1
+
+    def test_one_is_allowed_not_bumped_to_two(self):
+        # Previously 1 clamped up to 2; it must now pass through as 1.
+        assert _clamp_subagent_limit(1) == 1
+
+    def test_above_max_clamped_to_four(self):
+        assert _clamp_subagent_limit(5) == 4
         assert _clamp_subagent_limit(10) == MAX_SUBAGENT_LIMIT
         assert _clamp_subagent_limit(100) == MAX_SUBAGENT_LIMIT
 
@@ -54,6 +82,7 @@ class TestSubagentLimitMiddlewareInit:
     def test_default_max_concurrent(self):
         mw = SubagentLimitMiddleware()
         assert mw.max_concurrent == MAX_CONCURRENT_SUBAGENTS
+        assert mw.max_total == DEFAULT_MAX_TOTAL_SUBAGENTS
 
     def test_custom_max_concurrent_clamped(self):
         mw = SubagentLimitMiddleware(max_concurrent=1)
@@ -141,6 +170,122 @@ class TestTruncateTaskCalls:
         assert [tc["id"] for tc in updated_msg.tool_calls] == ["t1", "t2"]
         assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["t1", "t2"]
         assert updated_msg.response_metadata["finish_reason"] == "tool_calls"
+
+    def test_total_limit_counts_prior_delegations(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=4)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("t4"), _task_call("t5"), _task_call("t6")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("t4"), _raw_tool_call("t5"), _raw_tool_call("t6")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [msg],
+            "delegations": [_delegation("t1"), _delegation("t2"), _delegation("t3")],
+        }
+
+        result = mw._truncate_task_calls(state)
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert [tc["id"] for tc in updated_msg.tool_calls] == ["t4"]
+        assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["t4"]
+        assert "subagent delegation limit" not in updated_msg.content
+
+    def test_missing_run_id_logs_fail_restrictive_fallback(self, caplog):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=1)
+        msg = AIMessage(content="", tool_calls=[_task_call("t2")])
+        state = {"messages": [msg], "delegations": [_delegation("t1")]}
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.agents.middlewares.subagent_limit_middleware"):
+            result = mw._truncate_task_calls(state)
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert "received no run_id" in caplog.text
+        assert "counting all thread delegations" in caplog.text
+
+    def test_total_limit_reached_forces_terminal_message(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=3)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("t4")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("t4")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [msg],
+            "delegations": [_delegation("t1"), _delegation("t2"), _delegation("t3")],
+        }
+
+        result = mw._truncate_task_calls(state)
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert updated_msg.tool_calls == []
+        assert "tool_calls" not in updated_msg.additional_kwargs
+        assert updated_msg.response_metadata["finish_reason"] == "stop"
+        assert "subagent delegation limit" in updated_msg.content
+
+    def test_total_limit_ignores_previous_thread_delegations_for_new_run(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=3)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("new-run-task")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("new-run-task")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [HumanMessage(content="new request"), msg],
+            "delegations": [_delegation("old-1"), _delegation("old-2"), _delegation("old-3")],
+        }
+
+        assert mw.after_model(state, _make_runtime(run_id="run-2")) is None
+
+    def test_total_limit_counts_only_current_run_delegations(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=3)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("current-t3"), _task_call("current-t4")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("current-t3"), _raw_tool_call("current-t4")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [HumanMessage(content="continue"), msg],
+            "delegations": [
+                _delegation("old-t1", run_id="run-old"),
+                _delegation("current-t1", run_id="run-current"),
+                _delegation("current-t2", run_id="run-current"),
+            ],
+        }
+
+        result = mw.after_model(state, _make_runtime(run_id="run-current"))
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert [tc["id"] for tc in updated_msg.tool_calls] == ["current-t3"]
+        assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["current-t3"]
+
+    def test_total_limit_reached_with_non_task_calls_still_adds_visible_notice(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=1)
+        msg = AIMessage(
+            content="",
+            tool_calls=[_task_call("blocked-task"), _other_call("bash", "allowed-bash")],
+            additional_kwargs={"tool_calls": [_raw_tool_call("blocked-task"), _raw_tool_call("allowed-bash", name="bash")]},
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+        state = {
+            "messages": [msg],
+            "delegations": [_delegation("already-used", run_id="run-1")],
+        }
+
+        result = mw.after_model(state, _make_runtime(run_id="run-1"))
+
+        assert result is not None
+        updated_msg = result["messages"][0]
+        assert [tc["id"] for tc in updated_msg.tool_calls] == ["allowed-bash"]
+        assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["allowed-bash"]
+        assert "subagent delegation limit" in updated_msg.content
 
     def test_only_non_task_calls_returns_none(self):
         mw = SubagentLimitMiddleware()

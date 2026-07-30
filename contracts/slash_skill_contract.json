@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "description": "Cross-language contract fixture for the leading /skill activation gate. The backend parser (deerflow/skills/slash.py) and the frontend display parser (frontend/src/core/skills/slash.ts) must agree on which leading /word tokens are reserved control commands and on the exact skill-name grammar, so the transcript only renders an activation chip for text the backend would actually treat as a /skill activation.",
+  "reserved_slash_skill_names": ["bootstrap", "goal", "help", "memory", "models", "new", "status"],
+  "skill_name_pattern": "^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\\s+|$)"
+}

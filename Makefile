@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -16,14 +16,17 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
+FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
 	@echo "  make doctor          - Check configuration and system requirements"
+	@echo "  make support-bundle  - Create a redacted issue summary, AI draft, and evidence bundle"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
+	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
@@ -31,6 +34,7 @@ help:
 	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
 	@echo "  make start           - Start all services in production mode (optimized, no hot-reloading)"
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
+	@echo "  make nginx           - Start nginx alone in the foreground (local dev config)"
 	@echo "  make stop            - Stop all running services"
 	@echo "  make clean           - Clean up processes and temporary files"
 	@echo ""
@@ -45,6 +49,7 @@ help:
 	@echo "  make docker-logs     - View Docker development logs"
 	@echo "  make docker-logs-frontend - View Docker frontend logs"
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
+	@echo "  make docker-logs-redis - View Docker Redis logs"
 
 ## Setup & Diagnosis
 setup:
@@ -53,8 +58,11 @@ setup:
 doctor:
 	@$(BACKEND_UV_RUN) python ../scripts/doctor.py
 
+support-bundle:
+	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
+
 detect-thread-boundaries:
-	@$(PYTHON) ./scripts/detect_thread_boundaries.py
+	@$(BACKEND_UV_RUN) python ../scripts/detect_thread_boundaries.py --json-output ../.deer-flow/thread-boundary-inventory.json
 
 detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
@@ -74,9 +82,10 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && pnpm install
+	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
-	@$(BACKEND_UV_RUN) --with pre-commit pre-commit install
+	@uv tool install pre-commit
+	@pre-commit install --overwrite
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="
@@ -110,6 +119,10 @@ dev-daemon:
 start-daemon:
 	@$(PYTHON) ./scripts/check.py
 	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+
+# Start nginx alone in the foreground with the local dev config
+nginx:
+	@$(RUN_WITH_GIT_BASH) ./scripts/nginx.sh
 
 # Stop all services
 stop:
@@ -147,6 +160,8 @@ docker-logs-frontend:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
 docker-logs-gateway:
 	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
+docker-logs-redis:
+	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --redis
 
 # ==========================================
 # Production Docker Commands

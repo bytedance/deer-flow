@@ -18,13 +18,9 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 ## 公式ウェブサイト
 
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
 **実際のデモ**は[**公式ウェブサイト**](https://deerflow.tech)でご覧いただけます。
 
 ## ByteDance Volcengine のコーディングプラン
-
-<img width="4808" height="2400" alt="英文方舟" src="https://github.com/user-attachments/assets/2ecc7b9d-50be-4185-b1f7-5542d222fb2d" />
 
 - DeerFlowの実行には、Doubao-Seed-2.0-Code、DeepSeek v3.2、Kimi 2.5の使用を強く推奨します
 - [詳細はこちら](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
@@ -46,6 +42,7 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [公式ウェブサイト](#公式ウェブサイト)
+  - [ByteDance Volcengine のコーディングプラン](#bytedance-volcengine-のコーディングプラン)
   - [InfoQuest](#infoquest)
   - [目次](#目次)
   - [Coding Agent に一文でセットアップを依頼](#coding-agent-に一文でセットアップを依頼)
@@ -59,16 +56,21 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
       - [MCPサーバー](#mcpサーバー)
       - [IMチャネル](#imチャネル)
       - [LangSmithトレーシング](#langsmithトレーシング)
+      - [Langfuseトレーシング](#langfuseトレーシング)
+      - [両方のプロバイダーを使用する](#両方のプロバイダーを使用する)
   - [Deep Researchからスーパーエージェントハーネスへ](#deep-researchからスーパーエージェントハーネスへ)
   - [コア機能](#コア機能)
     - [スキルとツール](#スキルとツール)
       - [Claude Code連携](#claude-code連携)
+    - [セッションゴール (Session Goals)](#セッションゴール-session-goals)
     - [サブエージェント](#サブエージェント)
     - [サンドボックスとファイルシステム](#サンドボックスとファイルシステム)
     - [コンテキストエンジニアリング](#コンテキストエンジニアリング)
     - [長期メモリ](#長期メモリ)
   - [推奨モデル](#推奨モデル)
   - [組み込みPythonクライアント](#組み込みpythonクライアント)
+  - [スケジュールタスク (Scheduled Tasks)](#スケジュールタスク-scheduled-tasks)
+  - [ターミナルワークベンチ (TUI)](#ターミナルワークベンチ-tui)
   - [ドキュメント](#ドキュメント)
   - [⚠️ セキュリティに関する注意](#️-セキュリティに関する注意)
   - [コントリビュート](#コントリビュート)
@@ -98,67 +100,102 @@ DeerFlow がまだ clone されていなければ先に clone してから、htt
    cd deer-flow
    ```
 
-2. **ローカル設定ファイルの生成**
+2. **セットアップウィザードの実行（推奨）**
 
    プロジェクトルートディレクトリ（`deer-flow/`）から以下を実行します：
 
    ```bash
-   make config
+   make setup
    ```
 
-   このコマンドは、提供されたテンプレートに基づいてローカル設定ファイルを作成します。
+   対話式ウィザードが起動し、LLMプロバイダーの選択、オプションのWeb検索、そしてサンドボックスモード・bash権限・ファイル書き込みツールなどの実行/安全設定を順に案内します。最小構成の`config.yaml`を生成し、APIキーを`.env`に書き込みます。所要時間は約2分です。
 
-3. **使用するモデルの設定**
+   いつでも`make doctor`を実行して、設定を確認し、具体的な修正ヒントを得られます。
+   ローカルセットアップや実行時の問題についてGitHub issueを起票する場合は、`make support-bundle`を実行してください。このコマンドは報告者向けの次のステップを表示し、issueに貼り付けるための`*-issue-summary.md`ファイルと、AI支援でissueを起票するための`*-issue-draft.md`ファイルを書き出し、オプションで証跡zipを`.deer-flow/support-bundles/`以下に作成します。AIアシスタントがissueを起票する場合は、ドラフトを起点にして、不足している事実を創作するのではなく、すべてのREQUIREDプレースホルダーを置き換えてください。zipは、メンテナーから求められた場合、またはサマリーだけでは不十分な場合にのみ添付してください。メンテナーやAIトリアージツールは`triage.json`から確認を始められます。バンドルに含まれるのはリダクト済みの診断情報とファイルマニフェストのみで、`.env`、生の会話メッセージ、ユーザーファイルの内容は含まれません。
 
-   `config.yaml`を編集し、少なくとも1つのモデルを定義します：
+   > **上級者向け / 手動設定**：`config.yaml`を直接編集したい場合は、代わりに`make config`を実行して完全なテンプレートをコピーしてください。CLI連携プロバイダー（Codex CLI、Claude Code OAuth）、OpenRouter、Responses APIなどを含む完全なリファレンスは`config.example.yaml`を参照してください。
+
+   <details>
+   <summary>手動モデル設定の例</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # 内部識別子
-       display_name: GPT-4               # 表示名
-       use: langchain_openai:ChatOpenAI  # LangChainクラスパス
-       model: gpt-4                      # API用モデル識別子
-       api_key: $OPENAI_API_KEY          # APIキー（推奨：環境変数を使用）
-       max_tokens: 4096                  # リクエストあたりの最大トークン数
-       temperature: 0.7                  # サンプリング温度
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouterもここではOpenAI互換のフィールド名を使用
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: gpt-5-responses
+       display_name: GPT-5 (Responses API)
+       use: langchain_openai:ChatOpenAI
+       model: gpt-5
+       api_key: $OPENAI_API_KEY
+       use_responses_api: true
+       output_version: responses/v1
+
+     - name: qwen3-32b-vllm
+       display_name: Qwen3 32B (vLLM)
+       use: deerflow.models.vllm_provider:VllmChatModel
+       model: Qwen/Qwen3-32B
+       api_key: $VLLM_API_KEY
+       base_url: http://localhost:8000/v1
+       supports_thinking: true
+       when_thinking_enabled:
+         extra_body:
+           chat_template_kwargs:
+             enable_thinking: true
    ```
 
    OpenRouterやOpenAI互換のゲートウェイは、`langchain_openai:ChatOpenAI`と`base_url`で設定します。プロバイダー固有の環境変数名を使用したい場合は、`api_key`でその変数を明示的に指定してください（例：`api_key: $OPENROUTER_API_KEY`）。
 
-4. **設定したモデルのAPIキーを設定**
+   OpenAIモデルを`/v1/responses`経由でルーティングするには、引き続き`langchain_openai:ChatOpenAI`を使用し、`use_responses_api: true`と`output_version: responses/v1`を設定してください。
 
-   以下のいずれかの方法を選択してください：
+   vLLM 0.19.0では`deerflow.models.vllm_provider:VllmChatModel`を使用してください。Qwen系のreasoningモデルでは、DeerFlowは`extra_body.chat_template_kwargs.enable_thinking`でreasoningを切り替え、マルチターンのツールコール会話にわたってvLLM独自の非標準`reasoning`フィールドを保持します。従来の`thinking`設定は後方互換性のため自動的に正規化されます。reasoningモデルはサーバー側で`--reasoning-parser ...`を付けて起動する必要がある場合もあります。ローカルのvLLMデプロイメントが空でない任意のAPIキーを受け付ける場合でも、`VLLM_API_KEY`にはプレースホルダー値を設定しておけます。
 
-- オプションA：プロジェクトルートの`.env`ファイルを編集（推奨）
-
-   ```bash
-   TAVILY_API_KEY=your-tavily-api-key
-   OPENAI_API_KEY=your-openai-api-key
-   # OpenRouterもlangchain_openai:ChatOpenAI + base_url使用時はOPENAI_API_KEYを使用します。
-   # 必要に応じて他のプロバイダーキーを追加
-   INFOQUEST_API_KEY=your-infoquest-api-key
-   ```
-
-- オプションB：シェルで環境変数をエクスポート
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-- オプションC：`config.yaml`を直接編集（本番環境には非推奨）
+   CLI連携プロバイダーの例：
 
    ```yaml
    models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # プレースホルダーを置換
+     - name: gpt-5.4
+       display_name: GPT-5.4 (Codex CLI)
+       use: deerflow.models.openai_codex_provider:CodexChatModel
+       model: gpt-5.4
+       supports_thinking: true
+       supports_reasoning_effort: true
+
+     - name: claude-sonnet-4.6
+       display_name: Claude Sonnet 4.6 (Claude Code OAuth)
+       use: deerflow.models.claude_provider:ClaudeChatModel
+       model: claude-sonnet-4-6
+       max_tokens: 4096
+       supports_thinking: true
    ```
+
+   - Codex CLIは`~/.codex/auth.json`を読み取ります
+   - Claude Codeは`CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`、または`~/.claude/.credentials.json`を受け付けます
+   - ACPエージェントのエントリはモデルプロバイダーとは別物です。`acp_agents.codex`を設定する場合は、`npx -y @zed-industries/codex-acp`のようなCodex ACPアダプターを指定してください
+   - macOSでは、必要に応じてClaude Codeの認証情報を明示的にエクスポートしてください：
+
+   ```bash
+   eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
+   ```
+
+   APIキーは`.env`で手動設定する（推奨）ことも、シェルでエクスポートすることもできます：
+
+   ```bash
+   OPENAI_API_KEY=your-openai-api-key
+   TAVILY_API_KEY=your-tavily-api-key
+   ```
+
+   </details>
 
 ### アプリケーションの実行
 
@@ -191,7 +228,8 @@ make down   # コンテナを停止して削除
 
 サービスをローカルで実行する場合：
 
-前提条件：上記の「設定」手順を先に完了してください（`make config`とモデルAPIキー）。`make dev`には有効な設定ファイルが必要です（デフォルトはプロジェクトルートの`config.yaml`。`DEER_FLOW_CONFIG_PATH`で上書き可能）。
+前提条件：上記の「設定」手順を先に完了してください（`make setup`）。`make dev`にはプロジェクトルートに有効な`config.yaml`が必要です。`DEER_FLOW_PROJECT_ROOT`でプロジェクトルートを明示的に指定するか、`DEER_FLOW_CONFIG_PATH`で特定の設定ファイルを指定できます。実行時の状態はデフォルトでプロジェクトルート直下の`.deer-flow`に書き込まれ、`DEER_FLOW_HOME`で移動できます。skillsはデフォルトでプロジェクトルート直下の`skills/`から読み込まれ、`DEER_FLOW_SKILLS_PATH`で移動できます。起動前に`make doctor`を実行して設定を確認してください。
+Windowsでは、ローカル開発フローはGit Bashから実行してください。bashベースのサービススクリプトはネイティブの`cmd.exe`やPowerShellではサポートされておらず、一部のスクリプトがGit for Windowsの`cygpath`などのユーティリティに依存しているため、WSLでの動作も保証されません。
 
 1. **前提条件の確認**：
    ```bash
@@ -238,11 +276,15 @@ HTTP/SSE MCPサーバーでは、OAuthトークンフロー（`client_credential
 
 DeerFlowはメッセージングアプリからのタスク受信をサポートしています。チャネルは設定時に自動的に開始されます。いずれもパブリックIPは不要です。
 
+DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeComをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
+
 | チャネル | トランスポート | 難易度 |
 |---------|-----------|------------|
 | Telegram | Bot API（ロングポーリング） | 簡単 |
 | Slack | Socket Mode | 中程度 |
 | Feishu / Lark | WebSocket | 中程度 |
+| WeChat | Tencent iLink（ロングポーリング） | 中程度 |
+| WeCom | WebSocket | 中程度 |
 | DingTalk | Stream Push（WebSocket） | 中程度 |
 
 **`config.yaml`での設定：**
@@ -271,6 +313,11 @@ channels:
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
 
+  wecom:
+    enabled: true
+    bot_id: $WECOM_BOT_ID
+    bot_secret: $WECOM_BOT_SECRET
+
   slack:
     enabled: true
     bot_token: $SLACK_BOT_TOKEN     # xoxb-...
@@ -296,6 +343,19 @@ channels:
             thinking_enabled: true
             subagent_enabled: true
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # オプション：bot_tokenがない場合に初回のQRブートストラップを許可
+    allowed_users: []               # 空 = 全員許可
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
   dingtalk:
     enabled: true
     client_id: $DINGTALK_CLIENT_ID             # DingTalk Open PlatformのClientId
@@ -317,6 +377,14 @@ SLACK_APP_TOKEN=xapp-...
 # Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
+
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
+# WeCom
+WECOM_BOT_ID=your_bot_id
+WECOM_BOT_SECRET=your_bot_secret
 
 # DingTalk
 DINGTALK_CLIENT_ID=your_client_id
@@ -342,6 +410,22 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. 権限を追加：`im:message`、`im:message.p2p_msg:readonly`、`im:resource`。
 3. **イベント**で`im.message.receive_v1`を購読し、**ロングコネクション**モードを選択。
 4. App IDとApp Secretをコピー。`.env`に`FEISHU_APP_ID`と`FEISHU_APP_SECRET`を設定し、`config.yaml`でチャネルを有効にします。
+
+**WeChatのセットアップ**
+
+1. `config.yaml`で`wechat`チャネルを有効にします。
+2. `.env`に`WECHAT_BOT_TOKEN`を設定するか、初回のQRブートストラップのために`qrcode_login_enabled: true`を設定します。
+3. `bot_token`がなくQRブートストラップが有効な場合は、バックエンドログでiLinkが返したQRコンテンツを監視し、バインドフローを完了します。
+4. QRフローが成功した後、DeerFlowは取得したトークンを`state_dir`に永続化し、以降の再起動で再利用します。
+5. Docker Composeデプロイでは、`state_dir`を永続ボリュームに置き、`get_updates_buf`カーソルと保存済みの認証ステートが再起動後も保持されるようにしてください。
+
+**WeComのセットアップ**
+
+1. WeCom AI Botプラットフォームでボットを作成し、`bot_id`と`bot_secret`を取得します。
+2. `config.yaml`で`channels.wecom`を有効にし、`bot_id` / `bot_secret`を入力します。
+3. `.env`に`WECOM_BOT_ID`と`WECOM_BOT_SECRET`を設定します。
+4. バックエンドの依存関係に`wecom-aibot-python-sdk`が含まれていることを確認してください。このチャネルはWebSocketロングコネクションを使用し、パブリックなコールバックURLは不要です。
+5. 現在の統合では、受信テキスト、画像、ファイルメッセージをサポートしています。エージェントが生成した最終的な画像/ファイルもWeComの会話に送り返されます。
 
 **DingTalkのセットアップ**
 
@@ -376,6 +460,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Langfuseトレーシング
+
+DeerFlowは、LangChain互換の実行に対して[Langfuse](https://langfuse.com)による可観測性もサポートしています。
+
+`.env`ファイルに以下を追加します：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+セルフホストのLangfuseインスタンスを使用している場合は、`LANGFUSE_BASE_URL`をデプロイ先のURLに設定します。
+
+**トレース関連付けフィールド。** 各エージェント実行には、Langfuseの予約済みトレース属性が付与されるため、SessionsページとUsersページが自動的に表示されます：
+
+- `session_id` = LangGraphの`thread_id`——同一会話のすべてのトレースをグループ化します
+- `user_id` = `get_effective_user_id()`から取得した有効なユーザー（認証なしモードでは`default`にフォールバック）
+- `trace_name` = assistant id（デフォルトは`lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未設定の場合は省略）
+- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。リクエストトレース関連付けが有効な場合は`X-Trace-Id`と一致します
+
+これらは、gatewayパス（`runtime/runs/worker.py::run_agent`）と埋め込みパス（`client.py::DeerFlowClient.stream`）の両方で、グラフ呼び出しのルートで`RunnableConfig.metadata`に注入されるため、LangChain互換の任意のcallbackから読み取れます。`DEER_FLOW_ENV`（または`ENVIRONMENT`）を設定すると、デプロイ環境ごとにトレースにタグを付けられます。
+
+#### 両方のプロバイダーを使用する
+
+LangSmithとLangfuseの両方を有効にすると、DeerFlowは両方のトレーシングcallbackを取り付け、同じモデルアクティビティを両方のシステムに報告します。
+
+あるプロバイダーが明示的に有効化されているにもかかわらず必要な認証情報が欠けている場合、またはそのcallbackの初期化に失敗した場合、DeerFlowはモデル作成時のトレーシング初期化中に早期に失敗（fail fast）し、エラーメッセージには失敗の原因となったプロバイダー名が示されます。
 
 Dockerデプロイでは、トレーシングはデフォルトで無効です。`.env`で`LANGSMITH_TRACING=true`と`LANGSMITH_API_KEY`を設定して有効にします。
 
@@ -449,6 +564,22 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 完全なAPIリファレンスは[`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)をご覧ください。
 
+### セッションゴール (Session Goals)
+
+`/goal <完了条件>`を使うと、現在のスレッドに1つのアクティブな完了条件を紐付けられます。このゴールはスレッドスコープのステートであり、スキルの有効化ではないため、DeerFlowが満たされたと判定するか、あなたがクリアするまでターンをまたいで有効なまま維持されます。
+
+対応するコマンド：
+
+```text
+/goal finish the implementation and make all tests pass
+/goal              # アクティブなゴールを表示
+/goal clear        # クリアする
+```
+
+各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話をアクティブなゴールと照らし合わせます。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
+
+Web UIは入力欄の上にアクティブなゴールを表示します。同じコマンドはTUIとサポート対象のIMチャネルからも利用できます。Web UIとサポート対象のIMチャネルでは、`/goal <完了条件>`を設定するとその条件をタスクとしてrunを開始します。ステータス確認やクリアのコマンドはゴールステートの管理のみを行います。
+
 ### サブエージェント
 
 複雑なタスクは単一のパスに収まりません。DeerFlowはそれを分解します。
@@ -498,7 +629,7 @@ DeerFlowはモデルに依存しません——OpenAI互換APIを実装する任
 
 ## 組み込みPythonクライアント
 
-DeerFlowは、完全なHTTPサービスを実行せずに組み込みPythonライブラリとして使用できます。`DeerFlowClient`は、すべてのエージェントとGateway機能へのプロセス内直接アクセスを提供し、HTTP Gateway APIと同じレスポンススキーマを返します：
+DeerFlowは、完全なHTTPサービスを実行せずに組み込みPythonライブラリとして使用できます。`DeerFlowClient`は、すべてのエージェントとGateway機能へのプロセス内直接アクセスを提供し、HTTP Gateway APIと同じレスポンススキーマを返します。HTTP Gatewayは、LangGraphスレッド自体が削除された後にDeerFlow管理下のローカルスレッドデータを削除するための`DELETE /api/threads/{thread_id}`も公開しています：
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -518,9 +649,55 @@ models = client.list_models()        # {"models": [...]}
 skills = client.list_skills()        # {"skills": [...]}
 client.update_skill("web-search", enabled=True)
 client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.set_goal("thread-1", "finish the implementation and make all tests pass")
+client.get_goal("thread-1")       # {"goal": {...}} or {"goal": None}
+client.clear_goal("thread-1")
 ```
 
 すべてのdict返却メソッドはCIでGateway Pydanticレスポンスモデルに対して検証されており（`TestGatewayConformance`）、組み込みクライアントがHTTP APIスキーマと同期していることを保証します。完全なAPIドキュメントは`backend/packages/harness/deerflow/client.py`をご覧ください。
+
+## スケジュールタスク (Scheduled Tasks)
+
+DeerFlowには現在、ワークスペース内でファーストクラスのスケジュールタスクMVPが組み込まれています。
+
+現在のMVPの機能：
+
+- `/workspace/scheduled-tasks`でタスクを管理
+- 各スケジュールタスクがスレッドを再利用するか、実行ごとに新しいスレッドを作成するかを選択可能
+- `once`と`cron`のスケジュールをサポート
+- バックグラウンドのスケジュール実行を非対話型のDeerFlow runとして実行（`ask_clarification`はここでは公開されません）
+- 再利用された同じスレッド上でアクティブなrunと衝突する期限到来のcron実行に対して`skip`オーバーラップ挙動を使用
+- タスクの一時停止、再開、トリガー、履歴確認、削除
+- スケジュールされた作業を通常のDeerFlow runライフサイクルを通じて実行
+
+現在のMVPの制限：
+
+- 会話で`schedule_task`ツールを作成する機能はまだありません
+- テキストのみの通知ジョブはありません
+- チャネルやGitHubのディスパッチターゲットはありません
+- この最初のバージョンでは`interval`スケジュールタイプはありません
+
+`config.yaml -> scheduler.enabled`でバックグラウンドポーリングを有効にします。手動トリガーは同じスケジュールタスクリソースと実行パスを使用します。
+
+## ターミナルワークベンチ (TUI)
+
+`deerflow`は、シェルに暮らす人々のためのターミナルネイティブなワークベンチです。**組み込み**で`DeerFlowClient`上で実行され、Gateway、フロントエンド、nginx、Dockerは不要ですが、DeerFlowの他の部分と同じ`config.yaml`、checkpointer、スキル、メモリ、MCP、サンドボックス設定を尊重します。
+
+![DeerFlow TUI](docs/tui/tui-preview.svg)
+
+```bash
+uv pip install 'deerflow-harness[tui]'        # オプションの'textual'依存関係
+
+deerflow                                      # ターミナルUIを起動（TTYが必要）
+deerflow --continue                           # 直近のスレッドを再開
+deerflow --resume THREAD                      # IDでスレッドを再開
+deerflow --print "summarize this repo"        # ヘッドレスでstdoutにワンショットの回答を出力
+deerflow --json  "hello"                       # ヘッドレスで改行区切りのStreamEventを出力
+```
+
+ストリーミング文字起こし（Markdownでレンダリングされた回答）、コンパクトなツールアクティビティカード、`/`スラッシュコマンドパレット、`/goal`ゴール管理、`/model`と`/threads`ピッカー、入力履歴、`Esc` / `Ctrl+C`割り込みを備えた、キーボード駆動のチャット画面。TUIで開いたセッションはWeb UIのサイドバーにも表示されます。ローカルのデフォルトユーザーの下で共有スレッドストアに書き込むため、**Gatewayを実行せずに**ターミナルとウェブが同期します。
+
+完全なガイドは[backend/docs/TUI.md](backend/docs/TUI.md)をご覧ください。
 
 ## ドキュメント
 

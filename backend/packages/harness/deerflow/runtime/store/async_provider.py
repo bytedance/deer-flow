@@ -1,11 +1,11 @@
-"""Async Store factory — backend mirrors the configured checkpointer.
+"""Async Store factory — backend mirrors runtime persistence configuration.
 
-The store and checkpointer share the same ``checkpointer`` section in
-*config.yaml* so they always use the same persistence backend:
+The deprecated ``checkpointer`` section takes precedence when present;
+otherwise Store follows the unified ``database`` section in *config.yaml*:
 
-- ``type: memory``   → :class:`langgraph.store.memory.InMemoryStore`
-- ``type: sqlite``   → :class:`langgraph.store.sqlite.aio.AsyncSqliteStore`
-- ``type: postgres`` → :class:`langgraph.store.postgres.aio.AsyncPostgresStore`
+- ``memory``   → :class:`langgraph.store.memory.InMemoryStore`
+- ``sqlite``   → :class:`langgraph.store.sqlite.aio.AsyncSqliteStore`
+- ``postgres`` → :class:`langgraph.store.postgres.aio.AsyncPostgresStore`
 
 Usage (e.g. FastAPI lifespan)::
 
@@ -17,6 +17,7 @@ Usage (e.g. FastAPI lifespan)::
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
@@ -24,9 +25,23 @@ from collections.abc import AsyncIterator
 from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.runtime.store.provider import POSTGRES_CONN_REQUIRED, POSTGRES_STORE_INSTALL, SQLITE_STORE_INSTALL, ensure_sqlite_parent_dir, resolve_sqlite_conn_str
+from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async
+from deerflow.runtime.store.provider import (
+    POSTGRES_CONN_REQUIRED,
+    POSTGRES_STORE_INSTALL,
+    SQLITE_STORE_INSTALL,
+    _resolve_store_config,
+    ensure_sqlite_parent_dir,
+    resolve_sqlite_conn_str,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def _ensure_postgres_schema(conn_string: str, schema: str) -> None:
+    """Create the configured schema before LangGraph creates its store tables."""
+    await ensure_postgres_schema_async(conn_string, schema, install_hint=POSTGRES_STORE_INSTALL)
+
 
 # ---------------------------------------------------------------------------
 # Internal backend factory
@@ -54,7 +69,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
             raise ImportError(SQLITE_STORE_INSTALL) from exc
 
         conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
-        ensure_sqlite_parent_dir(conn_str)
+        await asyncio.to_thread(ensure_sqlite_parent_dir, conn_str)
 
         async with AsyncSqliteStore.from_conn_string(conn_str) as store:
             await store.setup()
@@ -71,7 +86,9 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        async with AsyncPostgresStore.from_conn_string(config.connection_string) as store:
+        await _ensure_postgres_schema(config.connection_string, config.postgres_schema)
+        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
+        async with AsyncPostgresStore.from_conn_string(conn_string) as store:
             await store.setup()
             logger.info("Store: using AsyncPostgresStore")
             yield store
@@ -87,28 +104,21 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
 
 @contextlib.asynccontextmanager
 async def make_store(app_config: AppConfig | None = None) -> AsyncIterator[BaseStore]:
-    """Async context manager that yields a Store whose backend matches the
-    configured checkpointer.
+    """Yield a Store selected from legacy or unified persistence config.
 
-    Reads from the same ``checkpointer`` section of *config.yaml* used by
-    :func:`deerflow.runtime.checkpointer.async_provider.make_checkpointer` so
-    that both singletons always use the same persistence technology::
+    The legacy ``checkpointer`` section takes precedence when configured;
+    otherwise the unified ``database`` section selects the backend, matching
+    :func:`deerflow.runtime.checkpointer.async_provider.make_checkpointer`::
 
         async with make_store(app_config) as store:
             app.state.store = store
 
-    Yields an :class:`~langgraph.store.memory.InMemoryStore` when no
-    ``checkpointer`` section is configured (emits a WARNING in that case).
+    An :class:`~langgraph.store.memory.InMemoryStore` is returned only when the
+    resolved backend is explicitly ``memory``.
     """
     if app_config is None:
         app_config = get_app_config()
 
-    if app_config.checkpointer is None:
-        from langgraph.store.memory import InMemoryStore
-
-        logger.warning("No 'checkpointer' section in config.yaml — using InMemoryStore for the store. Thread list will be lost on server restart. Configure a sqlite or postgres backend for persistence.")
-        yield InMemoryStore()
-        return
-
-    async with _async_store(app_config.checkpointer) as store:
+    config = _resolve_store_config(app_config)
+    async with _async_store(config) as store:
         yield store

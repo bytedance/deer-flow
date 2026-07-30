@@ -1,5 +1,6 @@
-import "@/styles/globals.css";
 import "katex/dist/katex.min.css";
+import "streamdown/styles.css";
+import "@/styles/globals.css";
 
 import { type Metadata } from "next";
 

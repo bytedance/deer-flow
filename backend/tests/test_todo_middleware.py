@@ -11,7 +11,6 @@ from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.todo_middleware import (
     TodoMiddleware,
-    _completion_reminder_count,
     _format_todos,
     _has_tool_call_intent_or_error,
     _reminder_in_messages,
@@ -189,10 +188,6 @@ class TestAbeforeModel:
         assert result["messages"][0].name == "todo_reminder"
 
 
-def _completion_reminder_msg():
-    return HumanMessage(name="todo_completion_reminder", content="finish your todos")
-
-
 def _todo_completion_reminders(messages):
     reminders = []
     for message in messages:
@@ -262,20 +257,6 @@ def _all_completed_todos():
         {"status": "completed", "content": "Step 1"},
         {"status": "completed", "content": "Step 2"},
     ]
-
-
-class TestCompletionReminderCount:
-    def test_zero_when_no_reminders(self):
-        msgs = [HumanMessage(content="hi"), _ai_no_tool_calls()]
-        assert _completion_reminder_count(msgs) == 0
-
-    def test_counts_completion_reminders(self):
-        msgs = [_completion_reminder_msg(), _completion_reminder_msg()]
-        assert _completion_reminder_count(msgs) == 2
-
-    def test_does_not_count_todo_reminders(self):
-        msgs = [_reminder_msg(), _completion_reminder_msg()]
-        assert _completion_reminder_count(msgs) == 1
 
 
 class TestToolCallIntentOrError:

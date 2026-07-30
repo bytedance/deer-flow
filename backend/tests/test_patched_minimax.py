@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
 from deerflow.models.patched_minimax import PatchedChatMiniMax
 
@@ -19,6 +19,30 @@ def test_get_request_payload_preserves_thinking_and_forces_reasoning_split():
 
     assert payload["extra_body"]["thinking"]["type"] == "disabled"
     assert payload["extra_body"]["reasoning_split"] is True
+
+
+def test_get_request_payload_strips_inconsistent_user_message_names():
+    """MiniMax rejects user messages whose `name` fields differ (error 2013).
+
+    DeerFlow middlewares tag user messages with internal provenance names
+    (e.g. "summary", "user-input", "loop_warning"). langchain serializes those
+    into the OpenAI-compatible payload, and MiniMax requires every user-role
+    name to be consistent. Strip them so the request is accepted.
+    """
+    model = _make_model()
+
+    payload = model._get_request_payload(
+        [
+            SystemMessage(content="system"),
+            HumanMessage(content="older summary", name="summary"),
+            AIMessage(content="ok"),
+            HumanMessage(content="latest question", name="user-input"),
+        ]
+    )
+
+    user_messages = [m for m in payload["messages"] if m["role"] == "user"]
+    assert len(user_messages) == 2
+    assert all(m.get("name") is None for m in user_messages)
 
 
 def test_create_chat_result_maps_reasoning_details_to_reasoning_content():

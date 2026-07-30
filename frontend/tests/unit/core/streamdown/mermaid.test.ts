@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test } from "@rstest/core";
 
 import { normalizeMermaidMarkdown } from "@/core/streamdown/mermaid";
 import { preprocessStreamdownMarkdown } from "@/core/streamdown/preprocess";

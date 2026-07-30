@@ -8,9 +8,15 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+
+def test_run_journal_is_marked_as_loop_bound():
+    assert RunJournal.deerflow_loop_bound is True
 
 
 @pytest.fixture
@@ -57,6 +63,28 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
 
 
 class TestLlmCallbacks:
+    @pytest.mark.anyio
+    async def test_on_chat_model_start_persists_original_user_input_without_mutating_model_message(self, journal_setup):
+        j, store = journal_setup
+        wrapped_content = "--- BEGIN USER INPUT ---\nShow revenue\n--- END USER INPUT ---"
+        model_message = HumanMessage(
+            content=wrapped_content,
+            id="human-1",
+            additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "Show revenue", "channel": "web"},
+        )
+
+        j.on_chat_model_start({}, [[model_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Show revenue"
+        events = await store.list_events("t1", "r1")
+        human_event = next(event for event in events if event["event_type"] == "llm.human.input")
+        assert human_event["content"]["content"] == "Show revenue"
+        assert human_event["content"]["id"] == "human-1"
+        assert human_event["content"]["additional_kwargs"] == {"channel": "web"}
+        assert model_message.content == wrapped_content
+        assert model_message.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "Show revenue"
+
     @pytest.mark.anyio
     async def test_on_llm_end_produces_trace_event(self, journal_setup):
         j, store = journal_setup
@@ -179,15 +207,16 @@ class TestLifecycleCallbacks:
         assert "run.end" in types
 
     @pytest.mark.anyio
-    async def test_nested_chain_no_run_start(self, journal_setup):
-        """Nested chains (parent_run_id set) should NOT produce run.start."""
+    async def test_nested_chain_no_run_lifecycle_events(self, journal_setup):
+        """Nested chains (parent_run_id set) should NOT produce root run lifecycle events."""
         j, store = journal_setup
         parent_id = uuid4()
         j.on_chain_start({}, {}, run_id=uuid4(), parent_run_id=parent_id)
-        j.on_chain_end({}, run_id=uuid4())
+        j.on_chain_end({}, run_id=uuid4(), parent_run_id=parent_id)
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert not any(e["event_type"] == "run.start" for e in events)
+        assert not any(e["event_type"] == "run.end" for e in events)
 
 
 class TestToolCallbacks:
@@ -230,6 +259,118 @@ class TestToolCallbacks:
         # Base implementation does not emit tool_error — just verify no crash
         events = await store.list_events("t1", "r1")
         assert isinstance(events, list)
+
+
+class TestFinalToolMessageReconciliation:
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_missing_ask_clarification_tool_message(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Which format?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(
+            content="Which format?",
+            tool_call_id="call_clarify",
+            name="ask_clarification",
+            artifact={"human_input": {"kind": "human_input_request", "request_id": "clarification:call_clarify"}},
+        )
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["name"] == "ask_clarification"
+        assert tool_results[0]["content"]["artifact"]["human_input"]["request_id"] == "clarification:call_clarify"
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_does_not_duplicate_tool_message_captured_by_on_tool_end(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Which format?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(content="Which format?", tool_call_id="call_clarify", name="ask_clarification")
+
+        j.on_tool_end(tool_msg, run_id=uuid4())
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_retained_old_tool_message_from_previous_run(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_current", "name": "ask_clarification", "args": {"question": "Current?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        retained_old_tool_msg = ToolMessage(content="Old question", tool_call_id="call_old", name="ask_clarification")
+
+        j.on_chain_end({"messages": [retained_old_tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_non_allowlisted_tool_message(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_search", "name": "web_search", "args": {"query": "deerflow"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(content="Search result", tool_call_id="call_search", name="web_search")
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_ignores_hidden_ask_clarification_tool_message(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_clarify", "name": "ask_clarification", "args": {"question": "Hidden?"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        tool_msg = ToolMessage(
+            content="Hidden?",
+            tool_call_id="call_clarify",
+            name="ask_clarification",
+            additional_kwargs={"hide_from_ui": True},
+        )
+
+        j.on_chain_end({"messages": [tool_msg]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert not any(m["event_type"] == "llm.tool.result" for m in messages)
 
 
 class TestCustomEvents:
@@ -474,6 +615,51 @@ class TestMiddlewareEvents:
         event_types = {e["event_type"] for e in events}
         assert "middleware:title" in event_types
         assert "middleware:guardrail" in event_types
+
+
+class TestContextEvents:
+    @pytest.mark.anyio
+    async def test_record_memory_context_is_readable_from_public_store_contract(self, journal_setup):
+        j, store = journal_setup
+
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        # Goal continuations may enter the graph more than once under the same
+        # run-scoped journal; the effective frozen memory event stays singular.
+        j.record_memory_context(
+            content_sha256="a" * 64,
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["category"] == "context"
+        assert events[0]["content"] == {"content_sha256": "a" * 64}
+
+    @pytest.mark.anyio
+    async def test_record_memory_context_can_retry_after_buffer_failure(self, journal_setup, monkeypatch):
+        j, store = journal_setup
+        original_put = j._put
+        attempts = 0
+
+        def fail_once(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("buffer unavailable")
+            return original_put(**kwargs)
+
+        monkeypatch.setattr(j, "_put", fail_once)
+
+        with pytest.raises(RuntimeError, match="buffer unavailable"):
+            j.record_memory_context(content_sha256="a" * 64)
+        j.record_memory_context(content_sha256="a" * 64)
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["context:memory"])
+        assert len(events) == 1
+        assert events[0]["content"] == {"content_sha256": "a" * 64}
 
 
 class TestCallerBucketing:
@@ -821,6 +1007,18 @@ class TestProgressSnapshots:
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
 
+    @staticmethod
+    def _human_input_response(source: str = "ask_clarification") -> dict:
+        return {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": source,
+            "request_id": "clarification:call-abc",
+            "response_kind": "option",
+            "option_id": "option-2",
+            "value": "staging",
+        }
+
     @pytest.mark.anyio
     async def test_extracts_first_human_message(self, journal_setup):
         """on_chat_model_start captures the first HumanMessage from prompts."""
@@ -840,18 +1038,208 @@ class TestChatModelStartHumanMessage:
         assert human_events[0]["content"]["content"] == "What is AI?"
 
     @pytest.mark.anyio
-    async def test_skips_summary_named_human_messages(self, journal_setup):
-        """HumanMessages with name='summary' are skipped."""
+    async def test_skips_hidden_human_messages(self, journal_setup):
+        """HumanMessages hidden from the UI are internal context, not user input."""
         from langchain_core.messages import HumanMessage
 
         j, store = journal_setup
         messages_batch = [
-            [HumanMessage(content="Summarized context", name="summary"), HumanMessage(content="Real question")],
+            [
+                HumanMessage(content="What is the weather today?"),
+                HumanMessage(
+                    content="Your todo list from earlier...",
+                    name="todo_reminder",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+            ],
         ]
         j.on_chat_model_start({}, messages_batch, run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
 
+        assert j._first_human_msg == "What is the weather today?"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "What is the weather today?"
+
+    @pytest.mark.anyio
+    async def test_only_hidden_human_messages_are_not_captured(self, journal_setup):
+        """A prompt containing only internal HumanMessages has no user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_hidden_human_input_response_is_captured(self, journal_setup):
+        """Hidden HumanInputCard replies are user-authored and must survive compaction."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_response = HumanMessage(
+            content='For your clarification "Which environment?", my answer is: staging',
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(),
+            },
+        )
+        j.on_chat_model_start({}, [[hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == 'For your clarification "Which environment?", my answer is: staging'
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["additional_kwargs"]["hide_from_ui"] is True
+        assert human_events[0]["content"]["additional_kwargs"]["human_input_response"]["request_id"] == "clarification:call-abc"
+
+    @pytest.mark.anyio
+    async def test_hidden_human_input_response_wins_over_older_visible_prompt(self, journal_setup):
+        """The latest hidden card reply is the run input, not an older visible prompt."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        older_prompt = HumanMessage(content="Write a quicksort PDF")
+        hidden_response = HumanMessage(
+            content='For your clarification "Which format?", my answer is: tutorial',
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(),
+            },
+        )
+        j.on_chat_model_start({}, [[older_prompt, hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == 'For your clarification "Which format?", my answer is: tutorial'
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == 'For your clarification "Which format?", my answer is: tutorial'
+
+    @pytest.mark.anyio
+    async def test_hidden_human_input_response_ignores_non_allowlisted_source(self, journal_setup):
+        """Only explicit HumanInputCard sources are persisted while hidden."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_response = HumanMessage(
+            content="Internal approval response",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": self._human_input_response(source="future_approval"),
+            },
+        )
+        j.on_chat_model_start({}, [[hidden_response]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_message_is_not_captured_as_user_input(self, journal_setup):
+        """Legacy synthetic summaries are internal context even if hide_from_ui is absent."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        legacy_summary = HumanMessage(content="Older compressed conversation state", name="summary")
+        j.on_chat_model_start({}, [[legacy_summary]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_visible_human_message_after_hidden_only_prompt_is_captured(self, journal_setup):
+        """Skipping an internal-only prompt does not block later user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        hidden_message = HumanMessage(
+            content="Internal context",
+            additional_kwargs={"hide_from_ui": True},
+        )
+        j.on_chat_model_start({}, [[hidden_message]], run_id=uuid4(), tags=["lead_agent"])
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real question")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
         assert j._first_human_msg == "Real question"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real question"
+
+    @pytest.mark.anyio
+    async def test_summarization_prompt_does_not_capture_first_human_message(self, journal_setup):
+        """Internal summarization prompts must not replace the run's real user input."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        summarization_prompt = HumanMessage(
+            content="<role>\nContext Extraction Assistant\n</role>\n\n<primary_objective>\nExtract context...",
+        )
+        j.on_chat_model_start(
+            {},
+            [[summarization_prompt]],
+            run_id=uuid4(),
+            tags=["middleware:summarize"],
+        )
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Real user follow-up")]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        assert j._first_human_msg == "Real user follow-up"
+        assert j.get_completion_data()["message_count"] == 1
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Real user follow-up"
+        assert human_events[0]["metadata"]["caller"] == "lead_agent"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("tags", [["middleware:summarize"], ["subagent:research"]])
+    async def test_non_lead_human_prompts_are_not_captured_as_user_input(self, journal_setup, tags):
+        """Only lead-agent LLM starts create UI-facing human input events."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Internal prompt")]],
+            run_id=uuid4(),
+            tags=tags,
+        )
+        await j.flush()
+
+        assert j._first_human_msg is None
+        assert j.get_completion_data()["message_count"] == 0
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
     async def test_only_first_human_message_captured(self, journal_setup):
@@ -875,3 +1263,277 @@ class TestChatModelStartHumanMessage:
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+
+class TestDeliveryTracking:
+    """Slice 1 (#4272): journal records artifact production for run.delivery."""
+
+    @staticmethod
+    def _register_tool_call(j: RunJournal, tool_call_id: str, name: str) -> None:
+        from langchain_core.messages import AIMessage
+
+        ai = AIMessage(content="", tool_calls=[{"id": tool_call_id, "name": name, "args": {}}])
+        j._remember_current_run_tool_calls(ai, caller="lead_agent")
+
+    def test_callbacks_run_inline_to_serialize_parallel_mutations(self, journal_setup):
+        j, _ = journal_setup
+
+        # LangChain dispatches synchronous handlers with run_inline=False via
+        # run_in_executor, allowing parallel tool callbacks to mutate one
+        # journal from different threads.
+        assert j.run_inline is True
+
+    @pytest.mark.anyio
+    async def test_concurrent_callbacks_on_one_journal_are_serialized(self, journal_setup):
+        from langchain_core.callbacks.manager import ahandle_event
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, _ = journal_setup
+        commands = []
+        for index, path in enumerate(("report.md", "report.md", "appendix.md"), start=1):
+            tool_call_id = f"call_{index}"
+            self._register_tool_call(j, tool_call_id, "present_files")
+            commands.append(
+                Command(
+                    update={
+                        "artifacts": [f"/mnt/user-data/outputs/{path}"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                    }
+                )
+            )
+
+        # This is the real LangChain async callback dispatcher. Because the
+        # journal is run_inline, each synchronous mutation completes on the
+        # event-loop thread instead of racing in executor threads.
+        await asyncio.gather(
+            *(
+                ahandle_event(
+                    [j],
+                    "on_tool_end",
+                    "ignore_agent",
+                    command,
+                    run_id=uuid4(),
+                )
+                for command in commands
+            )
+        )
+
+        content = j.get_delivery_content()
+        assert content["presented"] == 2
+        assert set(content["paths"]) == {
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/outputs/appendix.md",
+        }
+        assert set(content["by_tool"]["present_files"]) == set(content["paths"])
+
+    @pytest.mark.anyio
+    async def test_concurrent_runs_keep_delivery_accumulators_isolated(self):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        store = MemoryRunEventStore()
+        journals = [RunJournal(run_id, "t1", store, flush_threshold=100) for run_id in ("r1", "r2")]
+
+        async def finish_run(journal: RunJournal, index: int) -> None:
+            tool_call_id = f"call_run_{index}"
+            self._register_tool_call(journal, tool_call_id, "present_files")
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": [f"/mnt/user-data/outputs/report-{index}.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            await asyncio.sleep(0)
+            journal.record_delivery()
+            await journal.flush()
+
+        await asyncio.gather(*(finish_run(journal, index) for index, journal in enumerate(journals, start=1)))
+
+        for index in (1, 2):
+            events = await store.list_events("t1", f"r{index}")
+            content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+            assert content == {
+                "presented": 1,
+                "paths": [f"/mnt/user-data/outputs/report-{index}.md"],
+                "by_tool": {"present_files": [f"/mnt/user-data/outputs/report-{index}.md"]},
+            }
+
+    @pytest.mark.anyio
+    async def test_present_files_success_command_recorded_with_attribution(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_1", "present_files")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/report.md"],
+                "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        delivery = [e for e in events if e["event_type"] == "run.delivery"]
+        assert len(delivery) == 1
+        content = delivery[0]["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/report.md"]
+        assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
+        assert delivery[0]["category"] == "outputs"
+
+    @pytest.mark.anyio
+    async def test_command_with_multiple_messages_records_artifacts_once(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_multi", "present_files")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/report.md"],
+                "messages": [
+                    ToolMessage("Successfully presented files", tool_call_id="call_multi"),
+                    HumanMessage("Additional command message"),
+                ],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content == {
+            "presented": 1,
+            "paths": ["/mnt/user-data/outputs/report.md"],
+            "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+        }
+
+    @pytest.mark.anyio
+    async def test_command_with_multiple_tool_names_leaves_artifacts_unattributed(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_present", "present_files")
+        self._register_tool_call(j, "call_browser", "browser_screenshot")
+        cmd = Command(
+            update={
+                "artifacts": [
+                    "/mnt/user-data/outputs/report.md",
+                    "/mnt/user-data/outputs/shot.png",
+                ],
+                "messages": [
+                    ToolMessage("Successfully presented files", tool_call_id="call_present"),
+                    ToolMessage("Saved browser screenshot", tool_call_id="call_browser"),
+                ],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content == {
+            "presented": 2,
+            "paths": [
+                "/mnt/user-data/outputs/report.md",
+                "/mnt/user-data/outputs/shot.png",
+            ],
+            "by_tool": {},
+        }
+
+    @pytest.mark.anyio
+    async def test_error_command_without_artifacts_not_recorded(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_2", "present_files")
+        cmd = Command(update={"messages": [ToolMessage("Error: Only files in /mnt/user-data/outputs can be presented", tool_call_id="call_2")]})
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        delivery = [e for e in events if e["event_type"] == "run.delivery"]
+        assert len(delivery) == 1
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+
+    @pytest.mark.anyio
+    async def test_browser_tool_artifacts_recorded_under_producing_tool(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_3", "browser_screenshot")
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/shot.png"],
+                "messages": [ToolMessage("Saved browser screenshot", tool_call_id="call_3")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["by_tool"] == {"browser_screenshot": ["/mnt/user-data/outputs/shot.png"]}
+
+    @pytest.mark.anyio
+    async def test_duplicate_path_tool_pair_recorded_once(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        self._register_tool_call(j, "call_4", "present_files")
+        for _ in range(2):
+            j.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_4")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/report.md"]
+
+    @pytest.mark.anyio
+    async def test_unattributed_artifacts_counted_without_by_tool_entry(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        # No _register_tool_call: attribution missing (e.g. tool_call names map miss).
+        cmd = Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/anon.txt"],
+                "messages": [ToolMessage("ok", tool_call_id="call_unknown")],
+            }
+        )
+        j.on_tool_end(cmd, run_id=uuid4())
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["presented"] == 1
+        assert content["paths"] == ["/mnt/user-data/outputs/anon.txt"]
+        assert content["by_tool"] == {}

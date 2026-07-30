@@ -31,16 +31,96 @@ need to do any environment variable processing.
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from deerflow.config.postgres_schema import POSTGRES_SCHEMA_PATTERN, validate_postgres_schema
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_checkpoint_graph_cache_max(database_config: Any, field_name: str, default: int) -> int:
+    """Read a graph-cache cap from a database config-ish object.
+
+    Tolerates stub configs (SimpleNamespace/MagicMock in tests, missing
+    section): anything that is not a plain int >= 1 falls back to
+    ``default``.
+    """
+    section = getattr(database_config, "checkpoint_graph_cache", None)
+    value = getattr(section, field_name, None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return default
+    return value
+
+
+CheckpointChannelMode = Literal["full", "delta"]
+
+DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY = 10
+
+
+class CheckpointDeltaConfig(BaseModel):
+    """Tuning knobs for ``checkpoint_channel_mode: delta``.
+
+    Ignored in ``full`` mode. Like the mode itself, these values are
+    restart-required and must match across every process sharing one
+    checkpoint database: the snapshot cadence is baked into each compiled
+    graph's channel table, not stored in the checkpoint, so a mismatched
+    process would apply a different cadence to the same threads.
+    """
+
+    snapshot_frequency: int = Field(
+        default=DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY,
+        ge=1,
+        description=(
+            "DeltaChannel snapshot cadence: a full messages snapshot is stored "
+            "every N per-step writes (higher = smaller checkpoints, slower "
+            "materialization). Restart is required, and all processes sharing "
+            "one checkpoint database must use the same value."
+        ),
+    )
+
+
+class CheckpointGraphCacheConfig(BaseModel):
+    """Size cap for the process-local compiled checkpoint graph cache.
+
+    Unlike the mode and snapshot cadence, this is NOT restart-required:
+    a larger/smaller cap only changes when the cache evicts, never graph
+    semantics, so a hot-reloaded value takes effect on the next eviction
+    check. The cache is keyed by (assistant, mode, cadence, app_config) and
+    cleared wholesale at the cap.
+    """
+
+    accessor_graph_max: int = Field(
+        default=64,
+        ge=1,
+        description=("Max compiled thread-state accessor graphs cached by the gateway (keyed per assistant, channel mode, and snapshot cadence)."),
+    )
 
 
 class DatabaseConfig(BaseModel):
     backend: Literal["memory", "sqlite", "postgres"] = Field(
         default="memory",
         description=("Storage backend for both checkpointer and application data. 'memory' for development (no persistence across restarts), 'sqlite' for single-node deployment, 'postgres' for production multi-node deployment."),
+    )
+    checkpoint_channel_mode: CheckpointChannelMode = Field(
+        default="full",
+        description=(
+            "Checkpoint representation for accumulating channels. "
+            "'full' preserves full-value message checkpoints; 'delta' uses "
+            "LangGraph DeltaChannel for messages. Restart is required, and all "
+            "processes sharing one checkpoint database must use the same value."
+        ),
+    )
+    checkpoint_delta: CheckpointDeltaConfig = Field(
+        default_factory=CheckpointDeltaConfig,
+        description="Delta-mode checkpoint tuning. Only applies when checkpoint_channel_mode is 'delta'.",
+    )
+    checkpoint_graph_cache: CheckpointGraphCacheConfig = Field(
+        default_factory=CheckpointGraphCacheConfig,
+        description="Size caps for the compiled checkpoint graph caches. Hot-reloadable; not restart-required.",
     )
     sqlite_dir: str = Field(
         default=".deer-flow/data",
@@ -63,6 +143,72 @@ class DatabaseConfig(BaseModel):
         default=5,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
+    pool_recycle: int = Field(
+        default=300,
+        gt=0,
+        description="Seconds before app ORM PostgreSQL connections are recycled.",
+    )
+    command_timeout: float | None = Field(
+        default=30,
+        gt=0,
+        description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
+    )
+    postgres_schema: str = Field(
+        default="",
+        description=(
+            "PostgreSQL schema for both app ORM tables and LangGraph "
+            "checkpointer/store tables (postgres only). Empty string keeps "
+            "the server default search_path (usually 'public'). When set, "
+            "the schema is created automatically at startup and applied via "
+            "connection-level search_path. Only plain identifiers are "
+            f"allowed: {POSTGRES_SCHEMA_PATTERN}."
+        ),
+    )
+
+    @field_validator("postgres_schema")
+    @classmethod
+    def _validate_postgres_schema(cls, value: str) -> str:
+        return validate_postgres_schema(value)
+
+    # -- Legacy key migration (not user-configured) --
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_snapshot_frequency(cls, data: Any) -> Any:
+        """Carry the pre-rename top-level ``checkpoint_delta_snapshot_frequency``
+        key onto ``checkpoint_delta.snapshot_frequency``.
+
+        ``DatabaseConfig`` ignores unknown keys (pydantic ``extra="ignore"``),
+        so without this shim a config.yaml written against the old flat key
+        would silently fall back to the new default cadence instead of the
+        operator's chosen value. An explicitly set nested key always wins.
+        """
+        if not isinstance(data, dict) or "checkpoint_delta_snapshot_frequency" not in data:
+            return data
+        data = dict(data)
+        legacy_value = data.pop("checkpoint_delta_snapshot_frequency")
+        nested = data.get("checkpoint_delta")
+        if isinstance(nested, dict):
+            if "snapshot_frequency" in nested:
+                logger.warning(
+                    "Both database.checkpoint_delta_snapshot_frequency (deprecated) and database.checkpoint_delta.snapshot_frequency are set; the nested key wins.",
+                )
+                return data
+            data["checkpoint_delta"] = {**nested, "snapshot_frequency": legacy_value}
+        elif nested is None:
+            data["checkpoint_delta"] = {"snapshot_frequency": legacy_value}
+        else:
+            # Programmatically constructed CheckpointDeltaConfig instance: the
+            # explicit object wins over the legacy scalar.
+            logger.warning(
+                "Ignoring deprecated database.checkpoint_delta_snapshot_frequency because database.checkpoint_delta is already set.",
+            )
+            return data
+        logger.warning(
+            "database.checkpoint_delta_snapshot_frequency is deprecated; use database.checkpoint_delta.snapshot_frequency instead. Carried the legacy value (%r) forward.",
+            legacy_value,
+        )
+        return data
 
     # -- Derived helpers (not user-configured) --
 
@@ -98,5 +244,33 @@ class DatabaseConfig(BaseModel):
             url = self.postgres_url
             if url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif url.startswith("postgres://"):
+                # libpq's short alias: accepted by the psycopg checkpointer, but not a SQLAlchemy dialect.
+                url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+            return url
+        raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")
+
+    @property
+    def app_sync_sqlalchemy_url(self) -> str:
+        """SQLAlchemy *synchronous* URL for the application ORM data.
+
+        Used by the ``agent_storage.backend: db`` store, whose consumers (the
+        LangGraph graph factory, the setup/update tools) are synchronous and may
+        run on the event loop or in a separate process from the gateway, where an
+        async engine cannot be driven. Points at the same database file/server as
+        :meth:`app_sqlalchemy_url`; only the driver differs (both drivers —
+        stdlib sqlite3 and psycopg — ship with the app, so this adds no
+        dependency).
+        """
+        if self.backend == "sqlite":
+            return f"sqlite:///{self.sqlite_path}"
+        if self.backend == "postgres":
+            url = self.postgres_url
+            if url.startswith("postgresql+asyncpg://"):
+                url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
             return url
         raise ValueError(f"No SQLAlchemy URL for backend={self.backend!r}")

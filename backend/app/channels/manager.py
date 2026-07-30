@@ -7,15 +7,22 @@ import logging
 import mimetypes
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
+    INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
     InboundMessageType,
@@ -23,11 +30,23 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+# Import built-in channel run-policy registrars eagerly so direct
+# ChannelManager construction sees the same policy map as gateway bootstrap.
+from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
+from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime import END_SENTINEL, StreamBridge
+from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.slash import parse_slash_skill_reference
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -36,21 +55,82 @@ DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
+# Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
+# This is independent of subagent depth: a `task()` dispatch runs the whole
+# subagent inside ONE lead tools-node step, and subagents enforce their own
+# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
+# 100 with the general-purpose subagent's max_turns.
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
     "subagent_enabled": False,
 }
-STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+STREAM_UPDATE_MIN_INTERVAL_SECONDS = 1.0
+STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulate
+# Stream modes requested from the runtime, and the SSE event names under which
+# the message-tuple stream may arrive: the embedded runtime (and LangGraph
+# Platform) deliver the requested "messages-tuple" mode as event "messages".
+STREAM_MODES = ["messages-tuple", "values"]
+MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
+BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
+# Inbound-redelivery dedup window. The dedupe state lives in
+# ``self._inbound_dedupe_store``: the default in-process Memory store is
+# local to this Gateway process (a recorded key survives only for the store's
+# TTL / entry cap and is gone across a restart), while a Postgres-backed store
+# is shared across pods. 10 minutes is a deliberately bounded window: long
+# enough to absorb a near-term redelivery of the same event — whether a
+# provider's own automatic retry or an operator resend — without keeping a
+# growing ledger.
+#
+# For GitHub specifically: GitHub does NOT automatically retry or redeliver
+# a failed delivery (non-2xx response, timeout, or connection error) — it
+# is simply recorded as failed. See GitHub's own documentation:
+# https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
+# Every redelivery of the same ``X-GitHub-Delivery`` GUID is therefore an
+# explicit action — the repo/App "Redeliver" button, the REST API, or an
+# operator's own scheduled recovery script polling the failed-deliveries
+# endpoint (the pattern GitHub's own docs recommend) — never an automatic
+# GitHub-side retry. This TTL exists to absorb exactly those explicit
+# near-term replays.
+#
+# At the boundary: a manual redelivery (e.g. GitHub's "Redeliver" button)
+# clicked *after* the TTL has elapsed, or any redelivery following a Gateway
+# restart, is no longer recognized as a duplicate — the key has already been
+# evicted, or never existed in the new process — so the agent runs again
+# and may repeat a real side effect (e.g. a duplicate PR comment on
+# GitHub). This is parity with every other IM channel's dedupe (same
+# mechanism, same TTL), not a channel-specific gap. True idempotency against
+# a late/manual redelivery would require persisting the dedupe key in
+# ``ChannelStore`` instead, which is not implemented here.
+# Follow-up buffering for busy fire_and_forget threads (issue #4121 Slice 2).
+# A ConflictError on a channel opted into ChannelRunPolicy.buffer_followups_on_busy
+# buffers the triggering message per-thread instead of only logging it; a
+# background watcher drains the buffer into a coalesced follow-up run once the
+# busy run's StreamBridge stream reaches END_SENTINEL. See _buffer_followup,
+# _drain_followups_for_thread, and _watch_run_and_drain_followups below.
+FOLLOWUP_BUFFER_MAX_PER_THREAD = 20
+FOLLOWUP_DRAIN_BATCH_SIZE = 10
+FOLLOWUP_BLOCK_TAG = "followups-while-busy"
+# Only server-stable provider message ids: client-generated ids (client_msg_id,
+# client_id) are not guaranteed identical across a provider's own redelivery, so
+# keying dedupe on them would miss exactly the retries we want to absorb.
+INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
+# Providers that persist connection.workspace_id = chat_id (telegram / feishu /
+# wechat upsert_connection). Unbound inbound has no connection, so msg.workspace_id
+# is unset; chat_id is still the tenant scope and is safe for the dedupe key.
+# Slack is intentionally excluded: its channel ids are not globally unique.
+CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
+    "github": {"supports_streaming": False},
     "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": False},
+    "telegram": {"supports_streaming": True},
     "wechat": {"supports_streaming": False},
     "wecom": {"supports_streaming": True},
 }
@@ -124,12 +204,113 @@ class InvalidChannelSessionConfigError(ValueError):
     """Raised when IM channel session overrides contain invalid agent config."""
 
 
+class SlashSkillCommandResolutionError(RuntimeError):
+    """Raised when IM slash-skill command resolution cannot complete safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SlashSkillCommandResolution:
+    route_to_chat: bool = False
+    failure_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundIdentityRejection:
+    message: str = BOUND_IDENTITY_REQUIRED_MESSAGE
+    # Server-side connection id that may be used only as an outbound routing
+    # hint for the rejection message. This is never copied from the inbound
+    # message; it comes from the repository re-read when available.
+    outbound_connection_id: str | None = None
+    # Server-side owner for the outbound routing connection above. It lets
+    # channel senders preserve per-connection context without trusting the
+    # rejected inbound identity assertion.
+    outbound_owner_user_id: str | None = None
+
+
+@dataclass(slots=True)
+class _SerializedThreadRunState:
+    """Per-thread lock state for channels that queue same-thread turns."""
+
+    lock: asyncio.Lock
+    waiters: int = 0
+
+
+@dataclass(slots=True)
+class _FollowupEntry:
+    """One inbound message's text, buffered because its thread was busy.
+
+    Routing/policy identity (channel_name, metadata, owner headers) for the
+    eventual drained run comes from a separate ``carrier_msg`` — see
+    ``ChannelManager._drain_followups_for_thread`` — not from a per-entry
+    message, since every buffered entry for one thread_id shares that
+    identity already (thread_id is itself derived deterministically from
+    (repo, number, agent_name) for GitHub). Only the text needs to survive
+    per entry.
+    """
+
+    dedupe_key: str
+    text: str
+
+
 def _is_thread_busy_error(exc: BaseException | None) -> bool:
     if exc is None:
         return False
     if isinstance(exc, ConflictError):
         return True
     return "already running a task" in str(exc)
+
+
+def _followup_dedupe_key(msg: InboundMessage) -> str:
+    """Best-effort stable identifier for a buffered follow-up comment.
+
+    Mirrors ``_inbound_dedupe_key``'s provider-id preference order (a GitHub
+    webhook delivery id first, then the generic provider-message-id metadata
+    keys), but scoped to one thread's follow-up buffer rather than the
+    global cross-channel inbound dedupe map, and always returns a usable key
+    — falling back to an object-identity key — since the follow-up buffer
+    must still accept an entry even when a provider omits every known id
+    field (unlike ``_inbound_dedupe_key``, which returns ``None`` to skip
+    dedupe entirely in that case).
+    """
+    metadata = msg.metadata or {}
+    gh = metadata.get("github")
+    if isinstance(gh, dict):
+        delivery_id = gh.get("delivery_id")
+        if delivery_id:
+            return f"github:delivery:{delivery_id}"
+
+    for key in INBOUND_DEDUPE_METADATA_KEYS:
+        value = metadata.get(key)
+        if value:
+            return f"{key}:{value}"
+
+    raw_message = metadata.get("raw_message")
+    if isinstance(raw_message, Mapping):
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = raw_message.get(key)
+            if value:
+                return f"{key}:{value}"
+
+    # No stable provider id available: fall back to a per-message key so the
+    # entry is still buffered (just never deduped against a redelivery).
+    return f"__no_id__:{id(msg)}:{msg.created_at}"
+
+
+def _format_followup_block(entries: list[_FollowupEntry]) -> str:
+    """Coalesce buffered follow-up entries into one templated input block."""
+    lines = [
+        f"<{FOLLOWUP_BLOCK_TAG}>",
+        "The following messages arrived on this thread while a previous run was still in progress. They were queued and are now delivered together as one turn:",
+        "",
+    ]
+    for idx, entry in enumerate(entries, start=1):
+        escaped_text = escape(entry.text, quote=False).replace(
+            "\n",
+            "\n   ",
+        )
+        lines.append(f"{idx}. {escaped_text}")
+    lines.append(f"</{FOLLOWUP_BLOCK_TAG}>")
+    return "\n".join(lines)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -258,6 +439,22 @@ def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: 
     return metadata
 
 
+def _thread_channel_metadata(msg: InboundMessage) -> dict[str, Any]:
+    channel_source: dict[str, Any] = {
+        "type": "im_channel",
+        "provider": msg.channel_name,
+        "chat_id": msg.chat_id,
+    }
+    if msg.topic_id:
+        channel_source["topic_id"] = msg.topic_id
+    if msg.thread_ts:
+        channel_source["thread_ts"] = msg.thread_ts
+    if msg.connection_id:
+        channel_source["connection_id"] = msg.connection_id
+
+    return {"channel_source": channel_source}
+
+
 def _extract_text_content(content: Any) -> str:
     """Extract text from a streaming payload content field."""
     if isinstance(content, str):
@@ -288,12 +485,17 @@ def _merge_stream_text(existing: str, chunk: str) -> str:
     """Merge either delta text or cumulative text into a single snapshot."""
     if not chunk:
         return existing
-    if not existing or chunk == existing:
-        return chunk or existing
-    if chunk.startswith(existing):
+    if not existing:
         return chunk
-    if existing.endswith(chunk):
-        return existing
+    # Cumulative re-delivery: strictly longer and starts with existing.
+    if len(chunk) > len(existing) and chunk.startswith(existing):
+        return chunk
+    # Everything else is a delta — always append, even when the delta
+    # happens to match the buffer suffix (e.g. 'hel' + 'l') or equals
+    # the buffer (CJK reduplication: '谢' + '谢' = '谢谢'). Channels feed
+    # only delta ('messages-tuple') events to this function; 'values'
+    # snapshots are consumed via a separate branch, so a same-content
+    # delta (chunk == existing) still represents a fresh token to keep.
     return existing + chunk
 
 
@@ -410,7 +612,117 @@ def _format_artifact_text(artifacts: list[str]) -> str:
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
-def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedAttachment]:
+def _unknown_command_reply(command: str | None = None) -> str:
+    available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
+    if command:
+        return f"Unknown command: /{command}. Available commands: {available}"
+    return f"Unknown command. Available commands: {available}"
+
+
+def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "human", "content": content}
+    if original_content is not None and original_content != content or files:
+        additional_kwargs: dict[str, Any] = {}
+        if original_content is not None and original_content != content:
+            additional_kwargs[ORIGINAL_USER_CONTENT_KEY] = original_content
+        if files:
+            additional_kwargs["files"] = files
+        message["additional_kwargs"] = additional_kwargs
+    return message
+
+
+def _auth_disabled_owner_user_id() -> str | None:
+    try:
+        from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
+    except Exception:
+        logger.debug("Unable to inspect auth-disabled mode for channel owner fallback", exc_info=True)
+        return None
+    return AUTH_DISABLED_USER_ID if is_auth_disabled() else None
+
+
+def _effective_owner_user_id(msg: InboundMessage) -> str | None:
+    return _auth_disabled_owner_user_id() or msg.owner_user_id
+
+
+def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
+    owner_user_id = _effective_owner_user_id(msg)
+    if owner_user_id:
+        msg.owner_user_id = owner_user_id
+    return msg
+
+
+def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
+    owner_user_id = _effective_owner_user_id(msg)
+    if not owner_user_id:
+        return None
+    return create_internal_auth_headers(owner_user_id=owner_user_id)
+
+
+def _safe_user_id_for_run(raw_user_id: str) -> str:
+    from deerflow.config.paths import get_paths
+
+    try:
+        return get_paths().prepare_user_dir_for_raw_id(raw_user_id)
+    except Exception:
+        logger.exception("Failed to prepare channel run user directory")
+        return make_safe_user_id(raw_user_id)
+
+
+def _channel_storage_user_id(msg: InboundMessage) -> str | None:
+    """Resolve the canonical DeerFlow user id for a channel-triggered message.
+
+    Single source of truth for both the agent **run identity**
+    (``_resolve_run_params`` → ``run_context["user_id"]``) and the **file/artifact
+    storage bucket** (``receive_file`` / ``_ingest_inbound_files`` /
+    ``_prepare_artifact_delivery``), so the bucket the agent reads/writes always
+    matches where channel files are staged. Prefer the bound DeerFlow owner,
+    otherwise fall back to the sanitized raw platform user id. Without that
+    fallback, an unbound auth-enabled channel would run under ``safe(msg.user_id)``
+    but stage files under ``get_effective_user_id()`` (the dispatcher task's unset
+    contextvar → ``"default"``), so uploads would land in ``users/default/...``
+    while the agent reads ``users/{safe_platform_user_id}/...``. Returns ``None``
+    only when neither identity is available, leaving the caller to fall back to the
+    contextvar/default user.
+
+    Distinct from :func:`_owner_headers`, which deliberately sends the *raw* owner
+    id (no sanitize, no platform fallback) over HTTP for gateway to re-resolve;
+    this helper is the in-process, sanitized, filesystem-facing identity.
+    """
+    owner_user_id = _effective_owner_user_id(msg)
+    if owner_user_id:
+        return _safe_user_id_for_run(owner_user_id)
+    if msg.user_id:
+        return _safe_user_id_for_run(msg.user_id)
+    return None
+
+
+def _resolve_slash_skill_command(
+    text: str,
+    available_skills: set[str] | None = None,
+    storage: SkillStorage | Callable[[], SkillStorage] | None = None,
+) -> _SlashSkillCommandResolution | None:
+    reference = parse_slash_skill_reference(text)
+    if reference is None:
+        return None
+    try:
+        resolved_storage = storage() if callable(storage) else storage or get_or_new_skill_storage()
+        skills = resolved_storage.load_skills(enabled_only=False)
+
+        skill = next((candidate for candidate in skills if candidate.name == reference.name), None)
+        if skill is None:
+            return None
+        if not skill.enabled:
+            return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is installed but disabled. Enable it before using slash activation.")
+        if available_skills is not None and reference.name not in available_skills:
+            return _SlashSkillCommandResolution(failure_message=f"Skill `/{reference.name}` is not available for this agent.")
+
+        return _SlashSkillCommandResolution(route_to_chat=True)
+    except Exception as exc:
+        logger.exception("[Manager] failed to resolve slash skill command")
+        raise SlashSkillCommandResolutionError("Failed to resolve slash skill command. Please check the skill configuration.") from exc
+
+
+def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str | None = None) -> list[ResolvedAttachment]:
     """Resolve virtual artifact paths to host filesystem paths with metadata.
 
     Only paths under ``/mnt/user-data/outputs/`` are accepted; any other
@@ -424,15 +736,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
+    effective_user_id = user_id or get_effective_user_id()
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
             logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
+            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=effective_user_id)
             # Verify the resolved path is actually under the outputs directory
             # (guards against path-traversal even after prefix check)
             try:
@@ -464,13 +776,15 @@ def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
+    attachments = _resolve_attachments(thread_id, artifacts, user_id=user_id)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -487,7 +801,7 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
-async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dict[str, Any]]:
+async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
 
@@ -499,8 +813,14 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
         write_upload_file_no_symlink,
     )
 
-    uploads_dir = ensure_uploads_dir(thread_id)
-    seen_names = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+    def _prepare_uploads_dir() -> tuple[Path, set[str]]:
+        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
+        # blocking filesystem IO that must stay off the event loop.
+        target = ensure_uploads_dir(thread_id, user_id=user_id)
+        existing = {entry.name for entry in target.iterdir() if entry.is_file()}
+        return target, existing
+
+    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -512,15 +832,21 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
             ftype = f.get("type") if isinstance(f.get("type"), str) else "file"
             filename = f.get("filename") if isinstance(f.get("filename"), str) else ""
 
-            try:
-                data = await file_reader(f, client)
-            except Exception:
-                logger.exception(
-                    "[Manager] failed to read inbound file: channel=%s, file=%s",
-                    msg.channel_name,
-                    f.get("url") or filename or idx,
-                )
-                continue
+            inline_content = f.pop(INBOUND_FILE_CONTENT_KEY, None)
+            if isinstance(inline_content, bytes):
+                data = inline_content
+            elif isinstance(inline_content, (bytearray, memoryview)):
+                data = bytes(inline_content)
+            else:
+                try:
+                    data = await file_reader(f, client)
+                except Exception:
+                    logger.exception(
+                        "[Manager] failed to read inbound file: channel=%s, file=%s",
+                        msg.channel_name,
+                        f.get("url") or filename or idx,
+                    )
+                    continue
 
             if data is None:
                 logger.warning(
@@ -548,7 +874,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
 
             dest = uploads_dir / safe_name
             try:
-                dest = write_upload_file_no_symlink(uploads_dir, safe_name, data)
+                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
@@ -566,33 +892,6 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage) -> list[dic
             )
 
     return created
-
-
-def _format_uploaded_files_block(files: list[dict[str, Any]]) -> str:
-    lines = [
-        "<uploaded_files>",
-        "The following files were uploaded in this message:",
-        "",
-    ]
-    if not files:
-        lines.append("(empty)")
-    else:
-        for f in files:
-            filename = f.get("filename", "")
-            size = int(f.get("size") or 0)
-            size_kb = size / 1024 if size else 0
-            size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
-            path = f.get("path", "")
-            is_image = bool(f.get("is_image"))
-            file_kind = "image" if is_image else "file"
-            lines.append(f"- {filename} ({size_str})")
-            lines.append(f"  Type: {file_kind}")
-            lines.append(f"  Path: {path}")
-            lines.append("")
-    lines.append("Use `read_file` for text-based files and documents.")
-    lines.append("Use `view_image` for image files (jpg, jpeg, png, webp) so the model can inspect the image content.")
-    lines.append("</uploaded_files>")
-    return "\n".join(lines)
 
 
 class ChannelManager:
@@ -614,6 +913,10 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        connection_repo: Any | None = None,
+        require_bound_identity: bool = False,
+        inbound_dedupe_store: InboundDedupeStore | None = None,
+        get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -623,11 +926,52 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._connection_repo = connection_repo
+        self._require_bound_identity = require_bound_identity
+        # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
+        # threaded in from app.py's lifespan via start_channel_service() ->
+        # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
+        # launch_run closure over `app` in the same lifespan function). None
+        # when not wired (e.g. a ChannelManager constructed directly in
+        # tests) — follow-up buffering still works, but no watcher is
+        # spawned to auto-drain it (see _maybe_spawn_followup_watcher).
+        self._get_stream_bridge = get_stream_bridge
         self._client = None  # lazy init — langgraph_sdk async client
+        self._channel_metadata_synced: set[str] = set()
+        # Per-conversation locks so concurrent inbound messages for the same
+        # chat don't race to create duplicate threads (see _get_or_create_thread).
+        self._thread_create_locks: dict[tuple[str, str, str | None], asyncio.Lock] = {}
+        # Per-thread run locks for channels that want in-manager serialization
+        # instead of surfacing the runtime's generic busy reply.
+        self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
+        self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
+        # Distinct from self._running: that flag is also False before the
+        # very first start() (so tests that call internal drain/handler
+        # methods directly without going through start()/stop() keep
+        # working unchanged). self._stopped tracks specifically whether
+        # stop() has run, for the follow-up drain guard below.
+        self._stopped = False
         self._task: asyncio.Task | None = None
+        # Inbound webhook dedupe store. Defaults to the in-process Memory store
+        # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
+        # duplicate deliveries landing on different pods are collapsed.
+        self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
+        # Per-thread follow-up buffers for busy fire_and_forget channels that
+        # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
+        # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
+        # oldest-first, mirroring the dedupe store's shape but scoped
+        # per-thread with a hard cap instead of a global TTL (see
+        # _buffer_followup / _enforce_followup_cap).
+        self._followup_buffers: dict[str, OrderedDict[str, _FollowupEntry]] = {}
+        # Background watcher tasks spawned by _maybe_spawn_followup_watcher,
+        # tracked so stop() can cancel+await them instead of leaving them as
+        # orphaned fire-and-forget tasks that could still fire a follow-up
+        # run after this manager has been shut down. Discarded via the same
+        # task's done-callback (see _maybe_spawn_followup_watcher).
+        self._followup_watcher_tasks: set[asyncio.Task] = set()
 
     @staticmethod
     def _channel_supports_streaming(channel_name: str) -> bool:
@@ -646,10 +990,337 @@ class ChannelManager:
         user_layer = _as_dict(users_layer.get(msg.user_id))
         return channel_layer, user_layer
 
+    def _begin_serialized_thread_run(
+        self,
+        *,
+        channel_name: str,
+        thread_id: str,
+    ) -> tuple[_SerializedThreadRunState | None, bool]:
+        policy = CHANNEL_RUN_POLICY.get(channel_name)
+        if policy is None or not policy.serialize_thread_runs:
+            return None, False
+
+        key = (channel_name, thread_id)
+        state = self._serialized_thread_runs.get(key)
+        if state is None:
+            state = _SerializedThreadRunState(lock=asyncio.Lock())
+            self._serialized_thread_runs[key] = state
+        queued = state.lock.locked()
+        state.waiters += 1
+        return state, queued
+
+    def _finish_serialized_thread_run(
+        self,
+        *,
+        channel_name: str,
+        thread_id: str,
+        state: _SerializedThreadRunState | None,
+        lock_acquired: bool,
+    ) -> None:
+        if state is None:
+            return
+
+        if lock_acquired:
+            state.lock.release()
+        state.waiters -= 1
+        if state.waiters == 0 and not state.lock.locked():
+            self._serialized_thread_runs.pop((channel_name, thread_id), None)
+
+    # -- follow-up buffering for busy fire_and_forget threads (issue #4121) --
+
+    def _resolve_stream_bridge(self) -> StreamBridge | None:
+        """Resolve the current StreamBridge via the injected accessor, if any."""
+        if self._get_stream_bridge is None:
+            return None
+        try:
+            return self._get_stream_bridge()
+        except Exception:
+            logger.exception("[Manager] get_stream_bridge callable raised; follow-up watch disabled for this run")
+            return None
+
+    def _enforce_followup_cap(self, thread_id: str, buffer: OrderedDict[str, _FollowupEntry]) -> None:
+        """Drop the OLDEST buffered entries once *buffer* exceeds the per-thread cap.
+
+        Dropping the oldest (rather than the newest, incoming) entry means a
+        thread that is deep enough in the backlog to hit the cap still keeps
+        the most recent activity — a better signal for the eventual coalesced
+        turn than the stalest queued comment. No reaction/acknowledgment is
+        sent on drop (out of scope for this slice); a WARNING is logged so
+        operators can see it in gateway.log.
+        """
+        while len(buffer) > FOLLOWUP_BUFFER_MAX_PER_THREAD:
+            dropped_key, _ = buffer.popitem(last=False)
+            logger.warning(
+                "[Manager] follow-up buffer overflow for thread_id=%s (cap=%d); dropped oldest buffered comment (dedupe_key=%s)",
+                thread_id,
+                FOLLOWUP_BUFFER_MAX_PER_THREAD,
+                dropped_key,
+            )
+
+    def _buffer_followup(self, thread_id: str, msg: InboundMessage) -> None:
+        """Append *msg* to thread_id's follow-up buffer (ConflictError path).
+
+        Dedupe mirrors ``_is_duplicate_inbound``'s OrderedDict idiom, scoped
+        per-thread instead of global: a redelivered webhook for a comment
+        already buffered (same dedupe key) is a no-op instead of a second
+        entry.
+        """
+        key = _followup_dedupe_key(msg)
+        buffer = self._followup_buffers.setdefault(thread_id, OrderedDict())
+        if key in buffer:
+            logger.info(
+                "[Manager] duplicate follow-up ignored for thread_id=%s (dedupe_key=%s)",
+                thread_id,
+                key,
+            )
+            return
+
+        buffer[key] = _FollowupEntry(dedupe_key=key, text=msg.text)
+        self._enforce_followup_cap(thread_id, buffer)
+        logger.info(
+            "[Manager] buffered follow-up for busy thread_id=%s (dedupe_key=%s, buffered=%d)",
+            thread_id,
+            key,
+            len(buffer),
+        )
+
+    def _pop_followup_batch(self, thread_id: str, *, limit: int) -> list[_FollowupEntry]:
+        """Pop up to *limit* buffered entries FIFO (oldest first)."""
+        buffer = self._followup_buffers.get(thread_id)
+        if not buffer:
+            return []
+
+        batch: list[_FollowupEntry] = []
+        for _ in range(min(limit, len(buffer))):
+            _, entry = buffer.popitem(last=False)
+            batch.append(entry)
+
+        if not buffer:
+            self._followup_buffers.pop(thread_id, None)
+        return batch
+
+    def _requeue_followups(self, thread_id: str, entries: list[_FollowupEntry]) -> None:
+        """Put a popped batch back at the front of the buffer (oldest-first).
+
+        Used when the drain's own ``runs.create`` call itself fails —
+        including the ``ConflictError`` edge case where something this
+        manager did not create (a manual Web UI turn, a scheduled run) is
+        occupying the thread. The entries are not lost: the next time *any*
+        run this manager creates on this thread completes, its watcher will
+        attempt another drain and find them still buffered.
+        """
+        if not entries:
+            return
+
+        existing = self._followup_buffers.get(thread_id, OrderedDict())
+        merged: OrderedDict[str, _FollowupEntry] = OrderedDict()
+        for entry in entries:
+            merged[entry.dedupe_key] = entry
+        for key, entry in existing.items():
+            merged.setdefault(key, entry)
+
+        self._enforce_followup_cap(thread_id, merged)
+        self._followup_buffers[thread_id] = merged
+
+    def _maybe_spawn_followup_watcher(
+        self,
+        thread_id: str,
+        run_result: Any,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Spawn a background watcher for a just-created run, if wired up.
+
+        No-ops (spawns nothing) when no ``get_stream_bridge`` accessor was
+        threaded in — e.g. a ``ChannelManager`` constructed directly without
+        going through ``start_channel_service()`` — so tests and any
+        not-yet-wired deployment never see a dangling background task for
+        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
+        so an unexpected watcher failure is surfaced in the logs instead of
+        silently vanishing. The task is also tracked in
+        ``self._followup_watcher_tasks`` (discarded via its own done-callback)
+        so ``stop()`` can cancel+await any watcher still in flight instead of
+        leaving it to fire a follow-up run after shutdown.
+        """
+        if self._get_stream_bridge is None:
+            return
+
+        run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
+        if not run_id:
+            logger.warning(
+                "[Manager] runs.create returned no run_id for thread_id=%s; cannot watch for follow-up drain",
+                thread_id,
+            )
+            return
+
+        task = asyncio.create_task(self._watch_run_and_drain_followups(thread_id, run_id, carrier_msg))
+        self._followup_watcher_tasks.add(task)
+        task.add_done_callback(self._followup_watcher_tasks.discard)
+        task.add_done_callback(self._log_task_error)
+
+    async def _watch_run_and_drain_followups(
+        self,
+        thread_id: str,
+        run_id: str,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Watch *run_id* until it ends, then attempt to drain thread_id's buffer.
+
+        Subscribes to the StreamBridge the same way existing consumers do
+        (``entry is END_SENTINEL``, see ``app/gateway/services.py``). Runs
+        for as long as the underlying run does — GitHub coding runs
+        routinely take several minutes, so this deliberately does not apply
+        an artificial timeout, mirroring why the dispatch path itself uses
+        ``runs.create`` instead of ``runs.wait`` in the first place. Draining
+        is a no-op when the buffer is empty, which is the common case (most
+        runs never hit a busy-thread conflict).
+        """
+        stream_bridge = self._resolve_stream_bridge()
+        if stream_bridge is None:
+            logger.warning(
+                "[Manager] no stream bridge available; cannot watch run_id=%s for thread_id=%s follow-up drain (any buffered follow-ups will be drained by a later watched run on this thread)",
+                run_id,
+                thread_id,
+            )
+            return
+
+        try:
+            async for entry in stream_bridge.subscribe(run_id):
+                if entry is END_SENTINEL:
+                    break
+        except Exception:
+            logger.exception(
+                "[Manager] error watching run_id=%s for thread_id=%s follow-up drain",
+                run_id,
+                thread_id,
+            )
+            return
+
+        client = self._get_client()
+        await self._drain_followups_for_thread(client, thread_id, carrier_msg)
+
+    async def _drain_followups_for_thread(
+        self,
+        client,
+        thread_id: str,
+        carrier_msg: InboundMessage,
+    ) -> None:
+        """Coalesce up to one batch of buffered follow-ups into a fresh run.
+
+        ``carrier_msg`` supplies routing/policy identity (channel_name,
+        metadata, owner headers) for the drained run — it is safe to reuse
+        across an entire drain chain because every buffered entry for one
+        thread_id shares that identity (thread_id itself is derived
+        deterministically from (repo, number, agent_name) for GitHub).
+
+        A batch larger than ``FOLLOWUP_DRAIN_BATCH_SIZE`` is intentionally
+        NOT drained in one shot: only the oldest batch is popped here, and
+        the run created for it is itself watched (via
+        ``_maybe_spawn_followup_watcher``), so a deeper backlog chains into
+        another drain cycle once this run ends, rather than growing one
+        unbounded coalesced input block.
+
+        If anything from here through ``runs.create`` fails — resolving run
+        params, applying channel policy, or ``runs.create`` itself
+        (including ``ConflictError`` from something this manager did not
+        create racing onto the same thread) — the popped batch is requeued
+        (not lost) and this coroutine returns without raising or looping:
+        the next run this manager successfully creates and watches on this
+        thread will attempt the drain again.
+
+        No-ops if the manager has already been ``stop()``-ped: a watcher
+        task that slips past its own cancellation and reaches this point
+        after shutdown must not fire a brand new run into a stopped manager.
+        (Deliberately keyed on ``self._stopped``, not ``self._running`` —
+        the latter is also ``False`` before the very first ``start()``,
+        which would otherwise make this guard fire for callers that invoke
+        the drain directly without going through the dispatch lifecycle.)
+        """
+        if self._stopped:
+            logger.info(
+                "[Manager] skipping follow-up drain for thread_id=%s; manager is stopped",
+                thread_id,
+            )
+            return
+
+        entries = self._pop_followup_batch(thread_id, limit=FOLLOWUP_DRAIN_BATCH_SIZE)
+        if not entries:
+            return
+
+        logger.info(
+            "[Manager] draining %d buffered follow-up(s) for thread_id=%s",
+            len(entries),
+            thread_id,
+        )
+        try:
+            # Everything from here through runs.create is covered by the
+            # same except below: a pre-create failure (e.g. the target agent
+            # config was removed mid-run, or channel-policy/credential
+            # resolution raises) must requeue the popped batch exactly like
+            # a runs.create failure does — none of these steps get to
+            # silently drop entries that were already popped off the buffer.
+            assistant_id, run_config, run_context = self._resolve_run_params(carrier_msg, thread_id)
+            await self._apply_channel_policy(carrier_msg, run_context)
+
+            human_message = _human_input_message(_format_followup_block(entries))
+            run_kwargs: dict[str, Any] = {
+                "input": {"messages": [human_message]},
+                "config": run_config,
+                "context": run_context,
+                "multitask_strategy": "reject",
+            }
+            if owner_headers := _owner_headers(carrier_msg):
+                run_kwargs["headers"] = owner_headers
+
+            result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+        except Exception as exc:
+            if _is_thread_busy_error(exc):
+                logger.warning(
+                    "[Manager] follow-up drain hit a busy thread_id=%s (a run this manager did not create is active); re-buffering %d entries",
+                    thread_id,
+                    len(entries),
+                )
+            else:
+                logger.exception(
+                    "[Manager] follow-up drain failed for thread_id=%s; re-buffering %d entries",
+                    thread_id,
+                    len(entries),
+                )
+            self._requeue_followups(thread_id, entries)
+            return
+
+        self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
+
+    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=text,
+                is_final=False,
+                thread_ts=msg.thread_ts,
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                metadata=_response_metadata(msg.metadata),
+            )
+        )
+
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
 
-        assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
+        # Per-message agent override (e.g. GitHub webhook fan-out: multiple
+        # agents may bind the same repo, each gets its own inbound message
+        # with its own agent_name in metadata).  Honors the same shape as
+        # channel/user session config: the bare agent name routes through
+        # the lead_agent + agent_name context pattern below.
+        message_assistant_id: str | None = None
+        msg_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        meta_assistant_id = msg_metadata.get("assistant_id") or msg_metadata.get("agent_name")
+        if isinstance(meta_assistant_id, str) and meta_assistant_id.strip():
+            message_assistant_id = meta_assistant_id
+
+        assistant_id = message_assistant_id or user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
@@ -671,12 +1342,25 @@ class ChannelManager:
         configurable["checkpoint_ns"] = ""
         configurable["thread_id"] = thread_id
 
-        # ``user_id`` drives user-scoped filesystem buckets that only accept
-        # ``[A-Za-z0-9_-]``, so normalize the channel id and keep the raw value
-        # under ``channel_user_id`` for platform-facing lookups.
+        # ``user_id`` drives DeerFlow-owned memory, files, and thread buckets.
+        # For browser-connected IM channels, prefer the DeerFlow account that
+        # owns the connection. Preserve the raw platform user under
+        # ``channel_user_id`` for platform-facing lookups and audits.
         run_context_identity: dict[str, Any] = {"thread_id": thread_id}
+        # ``channel_name`` lets in-graph code (e.g. ``_make_lead_agent``)
+        # decide whether a tool is safe to expose for this run. Webhook
+        # channels carry untrusted external prompts (GitHub comments,
+        # Telegram chats from non-owners, etc.), so admin-shaped tools
+        # like ``update_agent`` are dropped when the run was triggered
+        # via one. See ``_make_lead_agent`` for the gate.
+        run_context_identity["channel_name"] = msg.channel_name
+        # Single source of truth for the run identity: the same helper that scopes
+        # inbound files and outbound artifacts, so the bucket the agent reads/writes
+        # always matches where channel files are staged.
+        run_user_id = _channel_storage_user_id(msg)
+        if run_user_id:
+            run_context_identity["user_id"] = run_user_id
         if msg.user_id:
-            run_context_identity["user_id"] = make_safe_user_id(msg.user_id)
             run_context_identity["channel_user_id"] = msg.user_id
 
         run_context = _merge_dicts(
@@ -694,7 +1378,91 @@ class ChannelManager:
             run_context.setdefault("agent_name", _normalize_custom_agent_name(assistant_id))
             assistant_id = DEFAULT_ASSISTANT_ID
 
+        # Apply per-channel run policy (recursion_limit bump for webhook
+        # channels, etc.). Looking the policy up by channel_name keeps
+        # GitHub-specific knobs out of this method — adding the next
+        # webhook channel is a one-row CHANNEL_RUN_POLICY entry, not a
+        # new if-branch here.
+        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
+        if policy is not None and policy.default_recursion_limit is not None:
+            # Per-message override (via msg.metadata[channel_name]) honors
+            # the operator's explicit per-agent recursion_limit verbatim —
+            # including values below the channel default. A safety-conscious
+            # ``github.recursion_limit: 50`` on a review-only agent now halts
+            # at 50 super-steps as documented in GitHubAgentConfig, instead
+            # of being silently clamped up to the channel default. When no
+            # override is present, the channel default acts as a floor over
+            # whatever session config supplied (the higher value wins).
+            channel_meta = (msg.metadata or {}).get(msg.channel_name, {})
+            override = channel_meta.get("recursion_limit") if isinstance(channel_meta, dict) else None
+            if isinstance(override, int) and override > 0:
+                run_config["recursion_limit"] = override
+            else:
+                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 100), policy.default_recursion_limit)
+
         return assistant_id, run_config, run_context
+
+    async def _apply_channel_policy(self, msg: InboundMessage, run_context: dict[str, Any]) -> ChannelRunPolicy | None:
+        """Apply per-channel run policy that needs ``run_context`` access.
+
+        Run AFTER ``_resolve_run_params`` (which produced ``run_context``)
+        and BEFORE the agent runs. Covers:
+
+        * ``disable_clarification`` for non-interactive channels —
+          ``ClarificationMiddleware`` would otherwise dead-end a webhook
+          run waiting for a synchronous reply that only arrives as a
+          later, separate webhook delivery.
+        * Channel-specific credentials provider — e.g. the GitHub channel
+          installs a token-mint callable so ``bash_tool`` can resolve a
+          fresh installation token on every invocation (longer than the
+          1h GitHub TTL).
+
+        ``recursion_limit`` is applied inside :meth:`_resolve_run_params`
+        instead because it lives on ``run_config`` (not ``run_context``)
+        and the resolver already builds ``run_config``.
+
+        Returns the resolved :class:`ChannelRunPolicy` (or ``None`` when
+        the channel has no entry) so :meth:`_handle_chat` can branch on
+        flags like ``fire_and_forget`` without doing a second dict
+        lookup.
+        """
+        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
+        if policy is None:
+            return None
+        if not policy.is_interactive:
+            run_context["disable_clarification"] = True
+        if policy.credentials_provider is not None:
+            try:
+                await policy.credentials_provider(msg, run_context)
+            except Exception:
+                # Credential failures must NOT drop the delivery — the
+                # provider's own logging records the cause; we keep the
+                # run going (read-only is better than no response).
+                logger.warning(
+                    "[Manager] channel=%s credentials_provider raised; run proceeds without injected credentials",
+                    msg.channel_name,
+                    exc_info=True,
+                )
+        return policy
+
+    def _resolve_available_skill_names(self, msg: InboundMessage) -> set[str] | None:
+        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+        _, _, run_context = self._resolve_run_params(msg, thread_id)
+        if run_context.get("is_bootstrap"):
+            return {"bootstrap"}
+
+        agent_name = run_context.get("agent_name")
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            return None
+
+        # Read the agent config from the same owner bucket the run uses:
+        # ``run_context["user_id"]`` is the resolved owner (``_channel_storage_user_id``),
+        # but without it ``load_agent_config`` falls back to the dispatch loop's unset
+        # contextvar (``"default"``), reading the wrong user's per-user custom agent.
+        agent_config = load_agent_config(_normalize_custom_agent_name(agent_name), user_id=run_context.get("user_id"))
+        if agent_config and agent_config.skills is not None:
+            return set(agent_config.skills)
+        return None
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
@@ -713,6 +1481,11 @@ class ChannelManager:
             )
         return self._client
 
+    def _get_skill_storage(self) -> SkillStorage:
+        if self._skill_storage is None:
+            self._skill_storage = get_or_new_skill_storage()
+        return self._skill_storage
+
     # -- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
@@ -720,6 +1493,7 @@ class ChannelManager:
         if self._running:
             return
         self._running = True
+        self._stopped = False
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
         self._task = asyncio.create_task(self._dispatch_loop())
         logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
@@ -727,6 +1501,7 @@ class ChannelManager:
     async def stop(self) -> None:
         """Stop the dispatch loop."""
         self._running = False
+        self._stopped = True
         if self._task:
             self._task.cancel()
             try:
@@ -734,6 +1509,25 @@ class ChannelManager:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        # Follow-up watchers are long-lived background tasks (they await a
+        # run's full stream, which can take minutes) started outside the
+        # dispatch loop, so cancelling self._task above does not touch them.
+        # Left unmanaged, one still subscribed to a run that ends AFTER this
+        # point would drain its buffer and fire a brand new runs.create()
+        # into a manager that has already been stopped.
+        watcher_tasks = list(self._followup_watcher_tasks)
+        for task in watcher_tasks:
+            task.cancel()
+        for task in watcher_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[Manager] follow-up watcher task raised during stop()")
+        self._followup_watcher_tasks.clear()
+
         logger.info("ChannelManager stopped")
 
     # -- dispatch loop -----------------------------------------------------
@@ -748,15 +1542,90 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+            # Dedupe before logging "received" so a provider retrying an event N
+            # times does not log N accepts; duplicates are logged once as ignored.
+            # Note: this manager-level dedupe only guards the agent run / final
+            # answer. Provider adapters may emit ack side-effects (a "Working on
+            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
+            # intentionally not deduped here.
+            if await self._is_duplicate_inbound(msg):
+                continue
             logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text=%r",
+                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
                 msg.channel_name,
                 msg.chat_id,
                 msg.msg_type.value,
-                msg.text[:100] if msg.text else "",
+                len(msg.text or ""),
+                len(msg.files),
             )
             task = asyncio.create_task(self._handle_message(msg))
             task.add_done_callback(self._log_task_error)
+
+    @staticmethod
+    def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
+        metadata = msg.metadata or {}
+        message_id = None
+        for key in INBOUND_DEDUPE_METADATA_KEYS:
+            value = metadata.get(key)
+            if value:
+                message_id = str(value)
+                break
+        if message_id is None:
+            raw_message = metadata.get("raw_message")
+            if isinstance(raw_message, Mapping):
+                for key in INBOUND_DEDUPE_METADATA_KEYS:
+                    value = raw_message.get(key)
+                    if value:
+                        message_id = str(value)
+                        break
+        if message_id is None:
+            return None
+
+        # Fail closed: without a workspace/team/guild identifier we cannot tell two
+        # workspaces apart (e.g. Slack channel ids are not globally unique), so
+        # skip dedupe rather than risk collapsing distinct workspaces' messages.
+        # Both fallbacks are appended last and gated on every earlier source being
+        # absent, so they can only turn "no key" into a key — never change one.
+        # A conversation_id not reused across a provider's own redelivery would
+        # degrade to today's no-dedupe behaviour, never collapse two conversations
+        # (chat_id and message_id stay in the tuple). conversation_id covers
+        # DingTalk (group + P2P); chat-scoped providers fall back to chat_id.
+        workspace_id = msg.workspace_id or metadata.get("workspace_id") or metadata.get("team_id") or metadata.get("guild_id") or metadata.get("aibotid") or metadata.get("conversation_id")
+        if not workspace_id and msg.channel_name in CHAT_SCOPED_WORKSPACE_CHANNELS:
+            workspace_id = msg.chat_id or None
+        if not workspace_id:
+            return None
+        return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
+
+    async def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+        key = self._inbound_dedupe_key(msg)
+        if key is None:
+            return False
+
+        # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
+        # and capacity bounds; try_record returns True when the key was already
+        # present (i.e. this is a duplicate delivery to drop).
+        is_duplicate = await self._inbound_dedupe_store.try_record(key)
+        if is_duplicate:
+            logger.info(
+                "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                key[-1],
+            )
+        return is_duplicate
+
+    async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+        """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
+
+        Called only on transient/unexpected handling failures: the key was
+        recorded on receipt so retries arriving *while* the message is being
+        handled are still deduped, but if handling fails we must not turn a
+        recoverable error into a TTL-long black hole for the same message_id.
+        """
+        key = self._inbound_dedupe_key(msg)
+        if key is not None:
+            await self._inbound_dedupe_store.release(key)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -768,34 +1637,146 @@ class ChannelManager:
             logger.error("[Manager] unhandled error in message task: %s", exc, exc_info=exc)
 
     async def _handle_message(self, msg: InboundMessage) -> None:
-        async with self._semaphore:
-            try:
+        msg = _apply_effective_owner(msg)
+        try:
+            # Non-command chat can be rejected before it consumes a semaphore
+            # slot. Commands are handled below because provider adapters consume
+            # binding commands before manager dispatch, and _handle_command()
+            # applies its own admission gate for manager-level commands.
+            bound_identity_rejection = None
+            if msg.msg_type != InboundMessageType.COMMAND:
+                bound_identity_rejection = await self._get_bound_identity_rejection(msg)
+            if bound_identity_rejection is not None:
+                await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
+                return
+
+            async with self._semaphore:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
                 else:
-                    await self._handle_chat(msg)
-            except InvalidChannelSessionConfigError as exc:
-                logger.warning(
-                    "Invalid channel session config for %s (chat=%s): %s",
-                    msg.channel_name,
-                    msg.chat_id,
-                    exc,
-                )
-                await self._send_error(msg, str(exc))
-            except Exception:
-                logger.exception(
-                    "Error handling message from %s (chat=%s)",
-                    msg.channel_name,
-                    msg.chat_id,
-                )
-                await self._send_error(msg, "An internal error occurred. Please try again.")
+                    await self._handle_chat(msg, bound_identity_checked=True)
+        except InvalidChannelSessionConfigError as exc:
+            logger.warning(
+                "Invalid channel session config for %s (chat=%s): %s",
+                msg.channel_name,
+                msg.chat_id,
+                exc,
+            )
+            await self._send_error(msg, str(exc))
+        except SlashSkillCommandResolutionError as exc:
+            logger.warning(
+                "Slash skill command resolution failed for %s (chat=%s): %s",
+                msg.channel_name,
+                msg.chat_id,
+                exc,
+            )
+            await self._send_error(msg, str(exc))
+        except Exception:
+            logger.exception(
+                "Error handling message from %s (chat=%s)",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            # Transient/unexpected failure: release the dedupe key so a provider
+            # redelivery of the same message can recover instead of being dropped
+            # for the dedupe TTL.
+            await self._release_inbound_dedupe_key(msg)
+            await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
 
-    async def _create_thread(self, client, msg: InboundMessage) -> str:
-        """Create a new thread through Gateway and store the mapping."""
-        thread = await client.threads.create()
-        thread_id = thread["thread_id"]
+    async def _get_bound_identity_rejection(self, msg: InboundMessage) -> _BoundIdentityRejection | None:
+        """Return None when *msg* may proceed; otherwise return rejection routing hints.
+
+        The returned object means the message lacks a verified bound identity.
+        Its fields are intentionally limited to server-side values re-read from
+        the connection repository, so rejection outbounds never trust a rejected
+        inbound message's asserted connection metadata.
+        """
+        if not self._require_bound_identity:
+            return None
+        # Webhook-authenticated channels (GitHub) opt out via
+        # ChannelRunPolicy.requires_bound_identity=False. Authenticity is
+        # enforced at the webhook route by HMAC, and the "sender → DeerFlow
+        # user" binding is encoded in the agent's config.yaml ownership, not
+        # in the channel-connections table — there is no per-sender
+        # /connect handshake to perform.
+        policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
+        if policy is not None and not policy.requires_bound_identity:
+            return None
+        if _auth_disabled_owner_user_id():
+            return None
+
+        has_connection = bool(msg.connection_id)
+        has_owner = bool(msg.owner_user_id)
+        if not (has_connection and has_owner):
+            return _BoundIdentityRejection()
+        if self._connection_repo is None:
+            return _BoundIdentityRejection(message=BOUND_IDENTITY_UNAVAILABLE_MESSAGE)
+
+        # The manager is the run-creation security boundary, so it does not
+        # trust mutable InboundMessage identity fields by themselves. Re-read
+        # the binding by provider identity before creating DeerFlow threads or
+        # runs. If the asserted identity does not match, keep only the
+        # server-side connection fields as outbound routing hints.
+        connection = await self._connection_repo.find_connection_by_external_identity(
+            provider=msg.channel_name,
+            external_account_id=msg.user_id,
+            workspace_id=msg.workspace_id or None,
+        )
+        if connection is None:
+            return _BoundIdentityRejection()
+
+        connection_id = connection.get("id")
+        owner_user_id = connection.get("owner_user_id")
+        if connection_id == msg.connection_id and owner_user_id == msg.owner_user_id:
+            return None
+        return _BoundIdentityRejection(outbound_connection_id=connection_id, outbound_owner_user_id=owner_user_id)
+
+    async def _reject_unbound_channel_message(
+        self,
+        msg: InboundMessage,
+        *,
+        bound_identity_rejection: _BoundIdentityRejection,
+    ) -> None:
+        logger.info(
+            "[Manager] rejecting unbound channel message: channel=%s, chat_id=%s",
+            msg.channel_name,
+            msg.chat_id,
+        )
+        outbound = OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id="",
+            text=bound_identity_rejection.message,
+            thread_ts=msg.thread_ts,
+            connection_id=bound_identity_rejection.outbound_connection_id,
+            owner_user_id=bound_identity_rejection.outbound_owner_user_id,
+            metadata=_slim_metadata(msg.metadata),
+        )
+        await self.bus.publish_outbound(outbound)
+
+    async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
+        if msg.connection_id and self._connection_repo is not None:
+            return await self._connection_repo.get_thread_id(
+                msg.connection_id,
+                msg.chat_id,
+                msg.topic_id,
+            )
+        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+
+    async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
+        if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
+            await self._connection_repo.set_thread_id(
+                connection_id=msg.connection_id,
+                owner_user_id=msg.owner_user_id,
+                provider=msg.channel_name,
+                external_conversation_id=msg.chat_id,
+                external_topic_id=msg.topic_id,
+                thread_id=thread_id,
+            )
+            return
+
         self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
@@ -803,24 +1784,200 @@ class ChannelManager:
             topic_id=msg.topic_id,
             user_id=msg.user_id,
         )
+
+    async def _create_thread(self, client, msg: InboundMessage) -> str:
+        """Create a new thread through Gateway and store the mapping."""
+        metadata = _thread_channel_metadata(msg)
+        owner_headers = _owner_headers(msg)
+        # Some channels (notably GitHub) supply a deterministic preferred
+        # thread id so a (repo, PR/issue number) always lands on the same
+        # LangGraph thread, even after a store wipe. When absent, Gateway
+        # mints a random id as before.
+        meta = msg.metadata if isinstance(msg.metadata, dict) else {}
+        preferred_thread_id = meta.get("preferred_thread_id")
+        create_kwargs: dict[str, Any] = {"metadata": metadata}
+        if isinstance(preferred_thread_id, str) and preferred_thread_id:
+            create_kwargs["thread_id"] = preferred_thread_id
+        if owner_headers:
+            create_kwargs["headers"] = owner_headers
+        try:
+            thread = await client.threads.create(**create_kwargs)
+        except ConflictError as exc:
+            # True race: two webhook deliveries for the same (repo, number)
+            # land within ms with the same preferred_thread_id. The Gateway
+            # ``POST /threads`` route is idempotent on sequential reads (it
+            # returns the existing record when present), so this branch only
+            # fires for a real concurrent-create conflict that the underlying
+            # store surfaced as 409.
+            #
+            # Narrow the recovery to ConflictError specifically: any other
+            # exception (transient DB outage, network error, 5xx) used to
+            # land here too and silently wrote ``preferred_thread_id`` into
+            # the store, mapping subsequent webhooks to a thread that was
+            # never created — every later run would 404 forever with no
+            # retry path. Those non-conflict failures now propagate so the
+            # caller fails the delivery cleanly.
+            if not (isinstance(preferred_thread_id, str) and preferred_thread_id):
+                # Without a preferred id we cannot deterministically recover.
+                raise
+            # Verify the racing-write target actually exists before we
+            # cache the mapping. If ConflictError fires but threads.get
+            # also rejects, the store underneath is in an inconsistent
+            # state and we surface the failure rather than poisoning the
+            # mapping for every future delivery on this issue/PR.
+            try:
+                get_kwargs: dict[str, Any] = {}
+                if owner_headers:
+                    get_kwargs["headers"] = owner_headers
+                await client.threads.get(preferred_thread_id, **get_kwargs)
+            except Exception as verify_exc:
+                logger.warning(
+                    "[Manager] threads.create raced on preferred_thread_id=%s (%s) but follow-up threads.get failed (%s); not caching the mapping",
+                    preferred_thread_id,
+                    exc.__class__.__name__,
+                    verify_exc.__class__.__name__,
+                )
+                raise
+            logger.info(
+                "[Manager] threads.create raced on preferred_thread_id=%s (%s); reusing the deterministic id",
+                preferred_thread_id,
+                exc.__class__.__name__,
+            )
+            await self._store_thread_id(msg, preferred_thread_id)
+            return preferred_thread_id
+        thread_id = thread["thread_id"]
+        await self._store_thread_id(msg, thread_id)
         logger.info("[Manager] new thread created through Gateway: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
-    async def _handle_chat(self, msg: InboundMessage, extra_context: dict[str, Any] | None = None) -> None:
-        client = self._get_client()
+    async def _get_or_create_thread(self, client, msg: InboundMessage) -> tuple[str, bool]:
+        """Return ``(thread_id, created)``, creating a thread only if needed.
 
-        # Look up existing DeerFlow thread.
-        # topic_id may be None (e.g. Telegram private chats) — the store
-        # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        Each inbound message is dispatched on its own task, so two messages that
+        arrive close together for the same chat would both look up a missing
+        thread and then both create one — the second store silently overwrites
+        the first, orphaning a Gateway thread and splitting the conversation.
+        Serialize the create path per conversation and re-check inside the lock
+        so only the first message creates a thread and the rest reuse it.
+        """
+        thread_id = await self._lookup_thread_id(msg)
         if thread_id:
-            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+            return thread_id, False
 
-        # No existing thread found — create a new one
-        if thread_id is None:
-            thread_id = await self._create_thread(client, msg)
+        key = (msg.channel_name, msg.chat_id, msg.topic_id)
+        lock = self._thread_create_locks.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                # A concurrent message for the same chat may have created the
+                # thread while we were waiting on the lock.
+                thread_id = await self._lookup_thread_id(msg)
+                if thread_id:
+                    return thread_id, False
+                return await self._create_thread(client, msg), True
+        finally:
+            # Once the thread is stored, later messages short-circuit on the
+            # lookup above and never reach this lock, so it's safe to drop the
+            # entry and keep the registry bounded to in-flight conversations.
+            self._thread_create_locks.pop(key, None)
+
+    async def _update_thread_channel_metadata(self, client, msg: InboundMessage, thread_id: str) -> None:
+        """Best-effort source metadata backfill for existing IM-created threads."""
+        # The metadata (provider/chat/topic) is constant for a thread, so one
+        # successful backfill per manager lifetime is enough — skip the
+        # redundant PATCH on every subsequent inbound message.
+        if thread_id in self._channel_metadata_synced:
+            return
+        update_kwargs: dict[str, Any] = {"metadata": _thread_channel_metadata(msg)}
+        if owner_headers := _owner_headers(msg):
+            update_kwargs["headers"] = owner_headers
+        try:
+            await client.threads.update(thread_id, **update_kwargs)
+        except Exception:
+            logger.debug("[Manager] failed to update channel metadata for thread_id=%s", thread_id, exc_info=True)
+            return
+        if len(self._channel_metadata_synced) > 4096:
+            self._channel_metadata_synced.clear()
+        self._channel_metadata_synced.add(thread_id)
+
+    async def _handle_chat(
+        self,
+        msg: InboundMessage,
+        extra_context: dict[str, Any] | None = None,
+        *,
+        bound_identity_checked: bool = False,
+    ) -> None:
+        # Normal entry paths already run the bound-identity check in
+        # _handle_message() or _handle_command(). Keep this default False so
+        # direct callers and future internal paths still fail closed.
+        bound_identity_rejection = None if bound_identity_checked else await self._get_bound_identity_rejection(msg)
+        if bound_identity_rejection is not None:
+            await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
+            return
+
+        client = self._get_client()
+        storage_user_id = _channel_storage_user_id(msg)
+
+        # Look up the existing DeerFlow thread, creating one if this is the
+        # first message for the chat. topic_id may be None (e.g. Telegram
+        # private chats) — the store handles this by using the "channel:chat_id"
+        # key without a topic suffix.
+        thread_id, created = await self._get_or_create_thread(client, msg)
+        if not created:
+            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
+            await self._update_thread_channel_metadata(client, msg, thread_id)
+
+        serial_state, queued = self._begin_serialized_thread_run(
+            channel_name=msg.channel_name,
+            thread_id=thread_id,
+        )
+        serial_lock_acquired = False
+        try:
+            if queued:
+                await self._publish_progress_update(
+                    msg,
+                    thread_id,
+                    "Queued behind another request in this conversation. I’ll start working on this as soon as it finishes.",
+                )
+            if serial_state is not None:
+                await serial_state.lock.acquire()
+                serial_lock_acquired = True
+            if queued:
+                await self._publish_progress_update(msg, thread_id, "thinking...")
+            await self._handle_chat_on_thread(
+                client,
+                msg,
+                thread_id,
+                extra_context=extra_context,
+                storage_user_id=storage_user_id,
+            )
+        finally:
+            self._finish_serialized_thread_run(
+                channel_name=msg.channel_name,
+                thread_id=thread_id,
+                state=serial_state,
+                lock_acquired=serial_lock_acquired,
+            )
+
+    async def _handle_chat_on_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        thread_id: str,
+        *,
+        extra_context: dict[str, Any] | None = None,
+        storage_user_id: str | None = None,
+    ) -> None:
+        if storage_user_id is None:
+            storage_user_id = _channel_storage_user_id(msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+
+        # Apply per-channel policy: credentials provider (e.g. GitHub
+        # installation-token mint) and the non-interactive flag for
+        # webhook channels. Driven by CHANNEL_RUN_POLICY so each new
+        # webhook channel is a one-row registration, not a fresh
+        # if-branch here.
+        policy = await self._apply_channel_policy(msg, run_context)
 
         # If the inbound message contains file attachments, let the channel
         # materialize (download) them and update msg.text to include sandbox file paths.
@@ -832,13 +1989,13 @@ class ChannelManager:
             service = get_channel_service()
             channel = service.get_channel(msg.channel_name) if service else None
             logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
-            msg = await channel.receive_file(msg, thread_id) if channel else msg
+            msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
         if extra_context:
             run_context.update(extra_context)
 
-        uploaded = await _ingest_inbound_files(thread_id, msg)
-        if uploaded:
-            msg.text = f"{_format_uploaded_files_block(uploaded)}\n\n{msg.text}".strip()
+        original_text = msg.text
+        uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
+        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -848,22 +2005,74 @@ class ChannelManager:
                 assistant_id,
                 run_config,
                 run_context,
+                human_message,
+                storage_user_id=storage_user_id,
             )
             return
 
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        run_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            run_kwargs["headers"] = owner_headers
+
+        if policy is not None and policy.fire_and_forget:
+            # Fire-and-forget path: the channel does its own outbound
+            # during the run (GitHub agents post to the issue/PR via the
+            # ``gh`` CLI from inside the sandbox), so there is nothing
+            # for the manager to ferry back. Use ``runs.create`` — a
+            # short POST that returns once the run is ``pending`` — to
+            # avoid the SDK's 300s ``httpx.ReadTimeout`` on legitimately
+            # long autonomous runs, and the false "internal error"
+            # outbound that follows when it fires. ``ConflictError`` is
+            # still raised synchronously by ``start_run`` if a previous
+            # run on this thread is still active, so the existing
+            # busy-thread path is preserved.
+            logger.info(
+                "[Manager] invoking runs.create(thread_id=%s, text_len=%d) [fire_and_forget]",
+                thread_id,
+                len(msg.text or ""),
+            )
+            try:
+                # Capturing the return value is new (issue #4121 Slice 2):
+                # it carries ``run_id``, which the follow-up watcher below
+                # needs to subscribe to this run's StreamBridge stream. When
+                # ``buffer_followups_on_busy`` is off this is otherwise
+                # behaviorally identical to the previous bare ``await``.
+                result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+            except Exception as exc:
+                if _is_thread_busy_error(exc):
+                    logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                    if policy.buffer_followups_on_busy:
+                        self._buffer_followup(thread_id, msg)
+                    else:
+                        # Swallowed like the generic handler would not be: release the
+                        # key so the provider's redelivery can retry once the thread
+                        # frees, instead of being dropped for the dedupe TTL.
+                        await self._release_inbound_dedupe_key(msg)
+                    await self._send_error(msg, THREAD_BUSY_MESSAGE)
+                    return
+                raise
+            if policy.buffer_followups_on_busy:
+                self._maybe_spawn_followup_watcher(thread_id, result, msg)
+            return
+
+        logger.info("[Manager] invoking runs.wait(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
         try:
             result = await client.runs.wait(
                 thread_id,
                 assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
-                multitask_strategy="reject",
+                **run_kwargs,
             )
         except Exception as exc:
             if _is_thread_busy_error(exc):
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
+                # Same reason as the fire-and-forget branch above: this error is
+                # handled here rather than re-raised, so release explicitly.
+                await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -880,7 +2089,10 @@ class ChannelManager:
             len(artifacts),
         )
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        # Reuse the storage owner cached at the top of _handle_chat so uploads and
+        # artifact delivery always resolve to the same bucket, even if a future
+        # channel.receive_file returns a rewritten InboundMessage.
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -896,6 +2108,8 @@ class ChannelManager:
             artifacts=artifacts,
             attachments=attachments,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
@@ -909,59 +2123,77 @@ class ChannelManager:
         assistant_id: str,
         run_config: dict[str, Any],
         run_context: dict[str, Any],
+        human_message: dict[str, Any],
+        storage_user_id: str | None = None,
     ) -> None:
-        logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        logger.info("[Manager] invoking runs.stream(thread_id=%s, text_len=%d)", thread_id, len(msg.text or ""))
 
         last_values: dict[str, Any] | list | None = None
         streamed_buffers: dict[str, str] = {}
         current_message_id: str | None = None
         latest_text = ""
         last_published_text = ""
+        last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        stream_kwargs: dict[str, Any] = {
+            "input": {"messages": [human_message]},
+            "config": run_config,
+            "context": run_context,
+            "stream_mode": list(STREAM_MODES),
+            "multitask_strategy": "reject",
+        }
+        if owner_headers := _owner_headers(msg):
+            stream_kwargs["headers"] = owner_headers
 
         try:
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-                multitask_strategy="reject",
+                **stream_kwargs,
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
-                if event == "messages-tuple":
+                if event in MESSAGE_STREAM_EVENTS:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
-                    snapshot_text = _extract_response_text(data)
-                    if snapshot_text:
-                        latest_text = snapshot_text
+                    # Clarification text is only in the values snapshot;
+                    # publish it so the user sees the question mid-stream.
+                    if _has_current_turn_clarification(data):
+                        clarification_text = _extract_response_text(data)
+                        if clarification_text and clarification_text != latest_text:
+                            latest_text = clarification_text
 
                 if not latest_text or latest_text == last_published_text:
                     continue
 
                 now = time.monotonic()
-                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
-                    continue
+                new_chars = len(latest_text) - last_published_len
+                # OR logic: flush when interval elapsed OR enough chars accumulated
+                if last_published_text:
+                    if now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS and new_chars < STREAM_UPDATE_MIN_CHARS:
+                        continue
 
+                display_text = latest_text + " ▉"
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel_name=msg.channel_name,
                         chat_id=msg.chat_id,
                         thread_id=thread_id,
-                        text=latest_text,
+                        text=display_text,
                         is_final=False,
                         thread_ts=msg.thread_ts,
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
                         metadata=_response_metadata(msg.metadata),
                     )
                 )
                 last_published_text = latest_text
+                last_published_len = len(latest_text)
                 last_publish_at = now
         except Exception as exc:
             stream_error = exc
@@ -974,7 +2206,10 @@ class ChannelManager:
             response_text = _extract_response_text(result)
             pending_clarification = _has_current_turn_clarification(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            # Reuse the storage owner resolved by _handle_chat so artifact delivery
+            # matches the upload bucket and we avoid re-running _safe_user_id_for_run
+            # (and its possible filesystem touch) on the streaming-error path.
+            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
             if not response_text:
                 if attachments:
@@ -1004,79 +2239,181 @@ class ChannelManager:
                     attachments=attachments,
                     is_final=True,
                     thread_ts=msg.thread_ts,
+                    connection_id=msg.connection_id,
+                    owner_user_id=msg.owner_user_id,
                     metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
                 )
             )
+            if stream_error is not None:
+                # This path swallows its own errors, so _handle_message's generic
+                # handler never runs and never releases the key. Release only
+                # after publishing the final outbound so a provider redelivery
+                # cannot overtake this attempt's terminal reply.
+                await self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 
     async def _handle_command(self, msg: InboundMessage) -> None:
-        text = msg.text.strip()
-        parts = text.split(maxsplit=1)
-        command = parts[0].lower().lstrip("/")
+        # Commands are the other run-creation entry point besides chat: /new
+        # calls _create_thread() directly, and /bootstrap routes into
+        # _handle_chat(). Apply the same bound-identity admission boundary here
+        # so unbound platform users cannot create unowned threads/checkpoints or
+        # query Gateway state via commands. Provider-level binding flows
+        # (/connect <code>, /start <code>) are consumed by the provider adapter
+        # before the message reaches the manager, so they are unaffected.
+        bound_identity_rejection = await self._get_bound_identity_rejection(msg)
+        if bound_identity_rejection is not None:
+            await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
+            return
 
-        if command == "bootstrap":
+        raw_text = msg.text
+        text = raw_text.strip()
+        parts = text.split(maxsplit=1)
+        reply: str | None = None
+        if not parts:
+            command = None
+            reply = _unknown_command_reply()
+        else:
+            command = parts[0].lower().removeprefix("/")
+
+        if reply is None and not raw_text.startswith("/"):
+            reply = _unknown_command_reply(command)
+
+        if reply is None and command == "bootstrap":
             from dataclasses import replace as _dc_replace
 
             chat_text = parts[1] if len(parts) > 1 else "Initialize workspace"
             chat_msg = _dc_replace(msg, text=chat_text, msg_type=InboundMessageType.CHAT)
-            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True})
+            await self._handle_chat(chat_msg, extra_context={"is_bootstrap": True}, bound_identity_checked=True)
             return
 
-        if command == "new":
+        if reply is None and command == "new":
             # Create a new thread through Gateway
             client = self._get_client()
-            thread = await client.threads.create()
-            new_thread_id = thread["thread_id"]
-            self.store.set_thread_id(
-                msg.channel_name,
-                msg.chat_id,
-                new_thread_id,
-                topic_id=msg.topic_id,
-                user_id=msg.user_id,
-            )
+            await self._create_thread(client, msg)
             reply = "New conversation started."
-        elif command == "status":
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        elif reply is None and command == "status":
+            thread_id = await self._lookup_thread_id(msg)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
-        elif command == "models":
-            reply = await self._fetch_gateway("/api/models", "models")
-        elif command == "memory":
-            reply = await self._fetch_gateway("/api/memory", "memory")
-        elif command == "help":
+        elif reply is None and command == "models":
+            reply = await self._fetch_gateway("/api/models", "models", msg=msg)
+        elif reply is None and command == "memory":
+            reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
+        elif reply is None and command == "goal":
+            reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
+            if reply is None:
+                return
+        elif reply is None and command == "help":
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
+                "/goal [condition|clear] — Set, show, or clear an active goal\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
                 "/memory — Show memory status\n"
+                "/<skill-name> <task> — Activate an enabled skill for one turn\n"
                 "/help — Show this help"
             )
-        else:
-            available = " | ".join(sorted(KNOWN_CHANNEL_COMMANDS))
-            reply = f"Unknown command: /{command}. Available commands: {available}"
+        elif reply is None:
+            slash_resolution = await asyncio.to_thread(
+                lambda: _resolve_slash_skill_command(
+                    raw_text,
+                    self._resolve_available_skill_names(msg),
+                    self._get_skill_storage,
+                )
+            )
+            if slash_resolution and slash_resolution.failure_message:
+                reply = slash_resolution.failure_message
+            elif slash_resolution and slash_resolution.route_to_chat:
+                from dataclasses import replace as _dc_replace
+
+                chat_msg = _dc_replace(msg, msg_type=InboundMessageType.CHAT)
+                await self._handle_chat(chat_msg, bound_identity_checked=True)
+                return
+            else:
+                reply = _unknown_command_reply(command)
 
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=reply,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)
 
-    async def _fetch_gateway(self, path: str, kind: str) -> str:
+    async def _goal_request(
+        self,
+        method: str,
+        thread_id: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient() as http:
+            request = getattr(http, method.lower())
+            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
+            if json is not None:
+                kwargs["json"] = json
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response.raise_for_status()
+            return response.json() or {}
+
+    async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
+        command = parse_goal_command(args)
+        thread_id = await self._lookup_thread_id(msg)
+        headers = _owner_headers(msg) or create_internal_auth_headers()
+
+        if command.kind == "status":
+            if not thread_id:
+                return "No active goal."
+            try:
+                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            except Exception:
+                logger.exception("Failed to fetch goal from gateway")
+                return "Failed to fetch goal information."
+            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+
+        if command.kind == "clear":
+            if not thread_id:
+                return "Goal cleared."
+            try:
+                await self._goal_request("delete", thread_id, headers=headers)
+            except Exception:
+                logger.exception("Failed to clear goal through gateway")
+                return "Failed to clear goal."
+            return "Goal cleared."
+
+        if not thread_id:
+            thread_id = await self._create_thread(self._get_client(), msg)
+
+        try:
+            await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
+        except Exception:
+            logger.exception("Failed to set goal through gateway")
+            return "Failed to set goal."
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
+        await self._handle_chat(chat_msg, bound_identity_checked=True)
+        return None
+
+    async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""
         import httpx
 
         try:
+            headers = _owner_headers(msg) if msg is not None else None
             async with httpx.AsyncClient() as http:
                 resp = await http.get(
                     f"{self._gateway_url}{path}",
                     timeout=10,
-                    headers=create_internal_auth_headers(),
+                    headers=headers or create_internal_auth_headers(),
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1098,9 +2435,11 @@ class ChannelManager:
         outbound = OutboundMessage(
             channel_name=msg.channel_name,
             chat_id=msg.chat_id,
-            thread_id=self.store.get_thread_id(msg.channel_name, msg.chat_id) or "",
+            thread_id=await self._lookup_thread_id(msg) or "",
             text=error_text,
             thread_ts=msg.thread_ts,
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
             metadata=_slim_metadata(msg.metadata),
         )
         await self.bus.publish_outbound(outbound)

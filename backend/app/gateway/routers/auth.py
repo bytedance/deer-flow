@@ -3,12 +3,16 @@
 import asyncio
 import logging
 import os
+import re
+import secrets
 import time
+import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
+from starlette.responses import RedirectResponse
 
 from app.gateway.auth import (
     UserResponse,
@@ -16,8 +20,23 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.csrf_middleware import is_secure_request
+from app.gateway.auth.oidc import OIDCError, OIDCService
+from app.gateway.auth.oidc_state import (
+    OIDCStatePayload,
+    compute_code_challenge,
+    delete_state_cookie,
+    generate_code_verifier,
+    generate_nonce,
+    generate_oidc_state,
+    get_state_cookie,
+    set_state_cookie,
+)
+from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
+from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
+from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
+from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +128,7 @@ class RegisterRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -119,6 +139,7 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(..., min_length=8)
     new_email: EmailStr | None = None
+    remember_me: bool | None = None
 
     _strong_password = field_validator("new_password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -132,18 +153,9 @@ class MessageResponse(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _set_session_cookie(response: Response, token: str, request: Request) -> None:
+def _set_session_cookie(response: Response, token: str, request: Request, *, remember_me: bool | None = None) -> None:
     """Set the access_token HttpOnly cookie on the response."""
-    config = get_auth_config()
-    is_https = is_secure_request(request)
-    response.set_cookie(
-        key="access_token",
-        value=token,
-        httponly=True,
-        secure=is_https,
-        samesite="lax",
-        max_age=config.token_expiry_days * 24 * 3600 if is_https else None,
-    )
+    set_session_cookie(response, request, token, remember_me=remember_me)
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
@@ -278,6 +290,7 @@ async def login_local(
     request: Request,
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
+    remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
     client_ip = _get_client_ip(request)
@@ -294,12 +307,37 @@ async def login_local(
 
     _record_login_success(client_ip)
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=remember_me)
 
     return LoginResponse(
         expires_in=get_auth_config().token_expiry_days * 24 * 3600,
         needs_setup=user.needs_setup,
     )
+
+
+def _local_registration_enabled() -> bool:
+    """Whether visitors may self-register a local account.
+
+    Local registration bypasses the OIDC provisioning policy entirely
+    (allowed_email_domains, require_verified_email, auto_create_users are only
+    enforced in the SSO callback), so SSO-provisioned deployments need a way to
+    close this path.
+
+    ``config.yaml`` is absent in bare-app contexts that never load it (tests build the
+    gateway without one). Registration was unconditionally open before this gate existed,
+    so an absent config file falls back to that same default rather than turning these two
+    endpoints into a hard dependency on the file. Only ``FileNotFoundError`` is caught:
+    a malformed config must not silently re-open a closed deployment, so it propagates.
+
+    ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
+    change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config().auth.local.allow_registration
+    except FileNotFoundError:
+        return True
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -308,7 +346,15 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
+
+    Returns 403 when ``auth.local.allow_registration`` is false.
     """
+    if not _local_registration_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=AuthErrorResponse(code=AuthErrorCode.REGISTRATION_DISABLED, message="Self-registration is disabled on this deployment").model_dump(),
+        )
+
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
     except ValueError:
@@ -318,15 +364,19 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
 
 @router.post("/logout", response_model=MessageResponse)
 async def logout(request: Request, response: Response):
     """Logout current user by clearing the cookie."""
-    response.delete_cookie(key="access_token", secure=is_secure_request(request), samesite="lax")
+    is_https = is_secure_request(request)
+    response.delete_cookie(key=ACCESS_TOKEN_COOKIE_NAME, secure=is_https, samesite="lax")
+    response.delete_cookie(key=CSRF_COOKIE_NAME, secure=is_https, samesite="strict")
+    response.delete_cookie(key=SESSION_PERSISTENCE_COOKIE_NAME, secure=is_https, samesite="lax")
+    setattr(request.state, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR, True)
     return MessageResponse(message="Successfully logged out")
 
 
@@ -341,8 +391,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
     - Re-issues session cookie with new token_version
     """
     from app.gateway.auth.password import hash_password_async, verify_password_async
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED
 
     user = await get_current_user_from_request(request)
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_AUTH_DISABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(
+                code=AuthErrorCode.INVALID_CREDENTIALS,
+                message="Password changes are not available when DEER_FLOW_AUTH_DISABLED=1.",
+            ).model_dump(),
+        )
 
     if user.password_hash is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="OAuth users cannot change password").model_dump())
@@ -371,7 +431,8 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
     # Re-issue cookie with new token_version
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
+    _set_csrf_cookie(response, request)
 
     return MessageResponse(message="Password changed successfully")
 
@@ -380,7 +441,13 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, needs_setup=user.needs_setup)
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        system_role=user.system_role,
+        needs_setup=user.needs_setup,
+        oauth_provider=user.oauth_provider,
+    )
 
 
 # Per-IP cache: ip → (timestamp, result_dict).
@@ -431,7 +498,7 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0}
+                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled()}
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
@@ -456,6 +523,7 @@ class InitializeAdminRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=8)
+    remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
 
@@ -480,48 +548,321 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
     except ValueError:
-        # DB unique-constraint race: another concurrent request beat us.
+        admin_count = await get_local_provider().count_admin_users()
+        if admin_count == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
         )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
-    _set_session_cookie(response, token, request)
+    _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role)
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
 
 
-# ── OAuth Endpoints (Future/Placeholder) ─────────────────────────────────
+# ── OIDC / SSO Endpoints ────────────────────────────────────────────────
+
+_OIDC_PROVIDER_KEY_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _get_oidc_service() -> OIDCService:
+    """Get (or create) the singleton OIDC service instance."""
+    if not hasattr(_get_oidc_service, "_instance"):
+        _get_oidc_service._instance = OIDCService()  # type: ignore[attr-defined]
+    return _get_oidc_service._instance  # type: ignore[attr-defined]
+
+
+async def close_oidc_service() -> None:
+    service = getattr(_get_oidc_service, "_instance", None)
+    if service is not None:
+        await service.close()
+        delattr(_get_oidc_service, "_instance")
+
+
+def _set_csrf_cookie(response: Response, request: Request) -> None:
+    """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
+    csrf_token = generate_csrf_token()
+    secure, max_age = auth_csrf_cookie_settings(request)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        httponly=False,  # Must be JS-readable for Double Submit Cookie pattern
+        secure=secure,
+        samesite="strict",
+        # Persist for the same lifetime as the access_token (see _set_session_cookie)
+        # so the double-submit pair is evicted together, never leaving a logged-in
+        # session whose csrf_token was dropped (e.g. iOS Safari PWA termination).
+        max_age=max_age,
+    )
+
+
+def _resolve_oidc_redirect_uri(request: Request, provider_id: str, provider_config: OIDCProviderConfig) -> str:
+    """Resolve the redirect URI for an OIDC provider.
+
+    Prefers the explicitly configured ``redirect_uri``. Falls back to
+    constructing one from the request's own base URL for development.
+    """
+    if provider_config.redirect_uri:
+        return provider_config.redirect_uri
+
+    # Development fallback: build from the request's proxy-aware origin (honors
+    # Forwarded / X-Forwarded-* the same way CSRF origin checks do) rather than
+    # the raw Host header, so a spoofed Host cannot steer the IdP redirect_uri
+    # and the scheme reflects the real client-facing protocol behind a proxy.
+    origin = _request_origin(request)
+    if not origin:
+        origin = f"{request.url.scheme}://{request.headers.get('host', 'localhost:8001')}"
+    return f"{origin}/api/v1/auth/callback/{provider_id}"
+
+
+@router.get("/providers")
+async def list_auth_providers():
+    """List enabled SSO providers for the login page.
+
+    Returns only safe frontend metadata — no secrets, endpoints, or
+    internal configuration.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    app_config = get_app_config()
+    oidc_config = app_config.auth.oidc
+
+    if not oidc_config.enabled:
+        return {"providers": []}
+
+    providers = []
+    for provider_id, provider_cfg in oidc_config.providers.items():
+        providers.append(
+            {
+                "id": provider_id,
+                "display_name": provider_cfg.display_name,
+                "type": "oidc",
+            }
+        )
+    return {"providers": providers}
 
 
 @router.get("/oauth/{provider}")
-async def oauth_login(provider: str):
-    """Initiate OAuth login flow.
+async def oauth_login(
+    request: Request,
+    provider: str,
+    next: str | None = None,  # noqa: A002 (shadowing built-in is intentional — this is the query param name)
+    remember_me: bool = True,
+):
+    """Initiate OIDC login flow.
 
-    Redirects to the OAuth provider's authorization URL.
-    Currently a placeholder - requires OAuth provider implementation.
+    Redirects to the OIDC provider's authorization URL with state, nonce,
+    and PKCE parameters. The ``next`` query parameter specifies where to
+    redirect after successful login (default: /workspace).
     """
-    if provider not in ["github", "google"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported OAuth provider: {provider}",
-        )
+    from deerflow.config.app_config import get_app_config
 
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="OAuth login not yet implemented",
+    app_config = get_app_config()
+    oidc_config = app_config.auth.oidc
+
+    if not oidc_config.enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO authentication is not enabled")
+
+    if not _OIDC_PROVIDER_KEY_RE.match(provider):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid provider ID")
+
+    provider_config = oidc_config.providers.get(provider)
+    if not provider_config:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown SSO provider: {provider}")
+
+    # Validate `next` / open redirect prevention
+    redirect_path = validate_next_param(next) or "/workspace"
+
+    # Resolve redirect URI
+    redirect_uri = _resolve_oidc_redirect_uri(request, provider, provider_config)
+
+    # Generate state, nonce, PKCE
+    state_value = generate_oidc_state()
+    nonce_value = generate_nonce() if provider_config.nonce_enabled else None
+    code_verifier = generate_code_verifier() if provider_config.pkce_enabled else None
+    code_challenge = compute_code_challenge(code_verifier) if code_verifier else None
+
+    # Get provider metadata via discovery
+    overrides = {
+        "authorization_endpoint": provider_config.authorization_endpoint,
+        "token_endpoint": provider_config.token_endpoint,
+        "userinfo_endpoint": provider_config.userinfo_endpoint,
+        "jwks_uri": provider_config.jwks_uri,
+    }
+    service = _get_oidc_service()
+    try:
+        metadata = await service.discover(provider_config.issuer, overrides)
+    except OIDCError as exc:
+        logger.error("OIDC discovery failed for provider %s: %s", provider, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to SSO provider")
+
+    auth_url = service.build_authorization_url(
+        metadata=metadata,
+        client_id=provider_config.client_id,
+        redirect_uri=redirect_uri,
+        scopes=provider_config.scopes,
+        state=state_value,
+        nonce=nonce_value,
+        code_challenge=code_challenge,
     )
+
+    # Set signed state cookie
+    state_payload = OIDCStatePayload(
+        provider=provider,
+        state=state_value,
+        nonce=nonce_value,
+        code_verifier=code_verifier,
+        next_path=redirect_path,
+        remember_me=remember_me,
+    )
+    redirect_response = RedirectResponse(url=auth_url, status_code=status.HTTP_302_FOUND)
+    set_state_cookie(redirect_response, request, state_payload)
+
+    return redirect_response
 
 
 @router.get("/callback/{provider}")
-async def oauth_callback(provider: str, code: str, state: str):
-    """OAuth callback endpoint.
+async def oauth_callback(
+    request: Request,
+    provider: str,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """OIDC callback endpoint.
 
-    Handles the OAuth provider's callback after user authorization.
-    Currently a placeholder.
+    Handles the OIDC provider's redirect after user authorization.
+    Validates the state cookie, exchanges the code for tokens, validates
+    the ID token, provisions/links the DeerFlow user, and sets the
+    session cookie.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="OAuth callback not yet implemented",
-    )
+    from deerflow.config.app_config import get_app_config
+
+    app_config = get_app_config()
+    oidc_config = app_config.auth.oidc
+
+    # ── Provider error ───────────────────────────────────────────────
+    if error:
+        logger.warning("OIDC provider returned error for %s: %s (description: %s)", provider, error, error_description)
+        redirect = _build_error_redirect(oidc_config.frontend_base_url, "sso_failed")
+        return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
+
+    if not oidc_config.enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSO authentication is not enabled")
+
+    if not _OIDC_PROVIDER_KEY_RE.match(provider):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid provider ID")
+
+    provider_config = oidc_config.providers.get(provider)
+    if not provider_config:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown SSO provider: {provider}")
+
+    if not code or not state:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing code or state parameter")
+
+    # ── Verify state cookie ──────────────────────────────────────────
+    state_payload = get_state_cookie(request, provider)
+    if not state_payload:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing or expired OIDC state cookie")
+
+    if not secrets.compare_digest(state_payload.state, state):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OIDC state mismatch")
+
+    # ── Resolve redirect URI ─────────────────────────────────────────
+    redirect_uri = _resolve_oidc_redirect_uri(request, provider, provider_config)
+
+    # ── Get metadata ─────────────────────────────────────────────────
+    overrides = {
+        "authorization_endpoint": provider_config.authorization_endpoint,
+        "token_endpoint": provider_config.token_endpoint,
+        "userinfo_endpoint": provider_config.userinfo_endpoint,
+        "jwks_uri": provider_config.jwks_uri,
+    }
+    service = _get_oidc_service()
+    try:
+        metadata = await service.discover(provider_config.issuer, overrides)
+    except OIDCError as exc:
+        logger.error("OIDC discovery failed for provider %s during callback: %s", provider, exc)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to connect to SSO provider")
+
+    # ── Authenticate ─────────────────────────────────────────────────
+    try:
+        identity = await service.authenticate_callback(
+            provider_id=provider,
+            metadata=metadata,
+            client_id=provider_config.client_id,
+            client_secret=provider_config.client_secret,
+            code=code,
+            redirect_uri=redirect_uri,
+            code_verifier=state_payload.code_verifier,
+            nonce=state_payload.nonce,
+            auth_method=provider_config.token_endpoint_auth_method,
+        )
+    except OIDCError as exc:
+        logger.error("OIDC callback authentication failed for %s: %s", provider, exc)
+        redirect = _build_error_redirect(oidc_config.frontend_base_url, "sso_failed")
+        return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
+
+    # ── Provision / link user ────────────────────────────────────────
+    try:
+        result = await get_or_provision_oidc_user(provider, provider_config, identity, get_local_provider())
+    except HTTPException as exc:
+        error_map = {
+            status.HTTP_403_FORBIDDEN: "sso_not_allowed",
+            status.HTTP_409_CONFLICT: "sso_account_exists",
+        }
+        error_code = error_map.get(exc.status_code, "sso_failed")
+        logger.warning("OIDC user provisioning failed for %s (%s): %s", identity.email, provider, exc.detail)
+        redirect = _build_error_redirect(oidc_config.frontend_base_url, error_code)
+        return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
+
+    user = result["user"]
+
+    # ── Issue DeerFlow session ───────────────────────────────────────
+    token = create_access_token(str(user.id), token_version=user.token_version)
+
+    redirect_target = state_payload.next_path or "/workspace"
+    frontend_base = oidc_config.frontend_base_url or ""
+    callback_redirect = f"{frontend_base}/auth/callback?next={urllib.parse.quote(redirect_target)}"
+
+    redirect_response = RedirectResponse(url=callback_redirect, status_code=status.HTTP_302_FOUND)
+
+    # Set session cookie (reuse existing helper)
+    _set_session_cookie(redirect_response, token, request, remember_me=state_payload.remember_me)
+
+    # Set CSRF cookie (callback is a GET, so CSRF middleware won't set it)
+    _set_csrf_cookie(redirect_response, request)
+
+    # Delete state cookie
+    delete_state_cookie(redirect_response, request, provider)
+
+    return redirect_response
+
+
+def _build_error_redirect(frontend_base_url: str | None, error_code: str) -> str:
+    """Build a frontend redirect URL with an error parameter."""
+    base = frontend_base_url or ""
+    return f"{base}/login?error={error_code}"
+
+
+def validate_next_param(next_param: str | None) -> str | None:
+    """Validate and sanitize the ``next`` redirect parameter.
+
+    Only allows relative paths starting with ``/``. Rejects protocol-relative
+    URLs (``//``), absolute URLs, and URLs with embedded protocols.
+    """
+    if not next_param:
+        return None
+    if not next_param.startswith("/"):
+        return None
+    if next_param.startswith("//") or next_param.startswith("http://") or next_param.startswith("https://"):
+        return None
+    if ":" in next_param:
+        return None
+    return next_param

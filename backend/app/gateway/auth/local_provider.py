@@ -102,3 +102,31 @@ class LocalAuthProvider(AuthProvider):
     async def get_user_by_email(self, email: str) -> User | None:
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
+
+    async def create_oauth_user(
+        self,
+        email: str,
+        oauth_provider: str,
+        oauth_id: str,
+        system_role: str = "user",
+    ) -> User:
+        """Create a new user from an OAuth/OIDC login.
+
+        Args:
+            email: Verified email from the OIDC provider
+            oauth_provider: Provider ID (e.g. 'keycloak', 'google')
+            oauth_id: User's subject claim from the ID token
+            system_role: Role to assign ("admin" or "user")
+
+        Returns:
+            Created User instance
+        """
+        user = User(
+            email=email,
+            password_hash=None,
+            system_role=system_role,
+            needs_setup=False,
+            oauth_provider=oauth_provider,
+            oauth_id=oauth_id,
+        )
+        return await self._repo.create_user(user)

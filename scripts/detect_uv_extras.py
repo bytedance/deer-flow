@@ -5,14 +5,17 @@ Order of resolution:
 1. `UV_EXTRAS` env var. Comma- or whitespace-separated names so multiple
    extras can be layered (e.g. ``UV_EXTRAS=postgres,ollama``). The same
    parsing semantics apply in the Docker dev container via
-   ``docker/dev-entrypoint.sh``. The Docker image-build path
-   (``backend/Dockerfile``) still treats `UV_EXTRAS` as a single token, so
-   ``UV_EXTRAS=postgres,ollama`` would only install ``postgres,ollama`` as
-   one (invalid) extra at build time — author build-time values as a
-   single name.
+   ``docker/dev-entrypoint.sh`` and in the production Docker image build via
+   ``backend/Dockerfile``.
 2. Auto-detection from config.yaml — currently maps:
    - database.backend == postgres        -> postgres
    - checkpointer.type == postgres       -> postgres
+   - stream_bridge.type == redis         -> redis
+   - tools[].name == browser_navigate    -> browser
+   - sandbox.ownership.type == redis     -> redis
+3. Runtime environment toggles that enable optional backends:
+   - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
+   - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
 
 Each extra name is validated against ``^[A-Za-z][A-Za-z0-9_-]*$`` (the same
 shape uv enforces for `[project.optional-dependencies]` keys). Anything else
@@ -74,6 +77,7 @@ def find_config_file() -> Path | None:
 _SECTION_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:\s*$")
 _INDENTED_SECTION_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*$")
 _KEY_RE = re.compile(r"^\s+([A-Za-z_][\w-]*)\s*:\s*(\S.*?)\s*$")
+_LIST_ITEM_NAME_RE = re.compile(r"^\s*-\s+name\s*:\s*(\S.*?)\s*$")
 
 
 def _strip_comment(line: str) -> str:
@@ -220,6 +224,32 @@ def nested_section_value(lines: list[str], section_path: str, key: str) -> str |
     return None
 
 
+def tools_include_name(lines: list[str], tool_name: str) -> bool:
+    """Return True when the top-level tools list has an active item name."""
+    inside = False
+    for raw in lines:
+        line = _strip_comment(raw)
+        if not line.strip():
+            continue
+        sect_match = _SECTION_RE.match(line)
+        if sect_match:
+            inside = sect_match.group(1) == "tools"
+            continue
+        if not inside:
+            continue
+        name_match = _LIST_ITEM_NAME_RE.match(line)
+        if name_match:
+            if _unquote(name_match.group(1).strip()) == tool_name:
+                return True
+            continue
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            inside = False
+            continue
+    return False
+
+
 def detect_from_config(path: Path) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -231,19 +261,47 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("postgres")
     if (section_value(lines, "checkpointer", "type") or "").lower() == "postgres":
         extras.add("postgres")
+    if (section_value(lines, "stream_bridge", "type") or "").lower() == "redis":
+        extras.add("redis")
+    if (nested_section_value(lines, "sandbox.ownership", "type") or "").lower() == "redis":
+        extras.add("redis")
     if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
         extras.add("discord")
+    if tools_include_name(lines, "browser_navigate"):
+        extras.add("browser")
     return sorted(extras)
 
 
+def detect_from_runtime_env() -> list[str]:
+    extras: set[str] = set()
+    if os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "").strip():
+        extras.add("redis")
+    if os.environ.get("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", "").strip():
+        extras.add("redis")
+    return sorted(extras)
+
+
+def merge_extras(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for extra in group:
+            if extra in seen:
+                continue
+            seen.add(extra)
+            merged.append(extra)
+    return merged
+
+
 def resolve_extras() -> list[str]:
+    runtime_env_extras = detect_from_runtime_env()
     env = os.environ.get("UV_EXTRAS", "")
     if env.strip():
-        return parse_env_extras(env)
+        return merge_extras(parse_env_extras(env), runtime_env_extras)
     config = find_config_file()
     if config is None:
-        return []
-    return detect_from_config(config)
+        return runtime_env_extras
+    return merge_extras(detect_from_config(config), runtime_env_extras)
 
 
 def format_flags(extras: list[str]) -> str:
