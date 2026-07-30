@@ -13,6 +13,7 @@ const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
 const MARKDOWN_ANCHOR_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
 const PRESENTED_THREAD_ID = "00000000-0000-0000-0000-000000003123";
+const PERSISTED_PANEL_THREAD_ID = "00000000-0000-0000-0000-000000003125";
 const PDF_THREAD_ID = "00000000-0000-0000-0000-000000003124";
 
 function writeFileMessages({
@@ -324,6 +325,46 @@ test.describe("Artifact preview stability", () => {
     await expect(presentedOption).toBeVisible();
     await presentedOption.click();
     await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+  });
+
+  test("restores the artifact panel and selected file after a page refresh", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: PERSISTED_PANEL_THREAD_ID,
+          title: "Persisted artifact panel",
+          messages: presentFilesMessages(),
+          artifacts: [MARKDOWN_ARTIFACT_PATH],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${PERSISTED_PANEL_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.md`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Presented Report\n\nGenerated content",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${PERSISTED_PANEL_THREAD_ID}`);
+    await expect(page.getByText("presented-report.md")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("presented-report.md").first().click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+
+    await page.reload();
+
+    await expect(page.getByTestId("artifact-trigger")).toBeVisible();
+    await expect(
+      page.locator("#artifacts").getByText("Presented Report"),
+    ).toBeVisible();
   });
 
   test("renders sandboxed iframe for a browser-previewable non-code file (urlOfArtifact path)", async ({
