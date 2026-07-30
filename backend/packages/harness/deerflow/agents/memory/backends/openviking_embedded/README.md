@@ -127,16 +127,28 @@ process-level singleton.
 | `get_context` | `ls(memories, recursive)` → `read()` each (distilled memory), joined + truncated |
 | `search` | `find(query, target_uri=memories, limit, score_threshold, context_type="memory")` → `FindResult.memories` → fact dicts |
 | `get_memory` | `ls` extracted memory files → `read()` + `stat()` → build `display: {sections: [...]}` (only derived helper files `.abstract.md` / `.overview.md` / `.relations.json` are filtered; identity/soul/profile are legitimate memory types shown as-is). `facts[]` stays empty — the memory panel renders display sections. |
-| `clear_memory` | `rm(memories_base, recursive=True)` (all — memories are user-level) |
+| `clear_memory` | `rm(scope, recursive=True)` — ``agent_name=None`` clears **all** memories (ABC contract); an explicit ``agent_name`` clears only that agent's scoped facts |
 | `import_memory` | 2-layer waterfall: Layer 1 restores native `data.files` via stat→replace upsert (lossless round-trip); Layer 2 feeds all text through `create_session` + `add_message` + `commit_session` so the VLM re-extracts memories in OpenViking's own format (cross-backend path, e.g. from DeerMem). |
-| `create_fact` / `delete_fact` / `update_fact` | `write` / `rm(uri)` / `write(mode="replace")` (+ move on category change) |
+| `create_fact` / `delete_fact` / `update_fact` | ``create_fact`` writes to ``memories/{agent}/{category}/`` (agent-scoped); ``delete_fact`` / ``update_fact`` operate on the specific encoded URI |
 | `warm` | `initialize()` + `is_healthy()` |
 | `shutdown_flush` | `close()` |
 
-Memories are **user-level** (OpenViking's memory namespace), not agent-scoped:
-`agent_name` is accepted for API compatibility but does not partition the URI
-space in v1. `get_memory(agent_name=X)` returns the user's extracted memories
-regardless of `X`.
+### Agent scoping
+
+Manual facts (``create_fact``, ``import_memory`` Layer 1) are **agent-scoped**:
+``agent_name=None`` resolves to ``"__default__"`` (matching DeerMem's
+``DEFAULT_AGENT_BUCKET``), and explicit names are lowercased.  Facts are written
+to ``viking://user/{space}/memories/{agent}/{category}/...``.
+
+Extracted memories (the session pipeline) land at the root ``memories/`` level
+because OpenViking's extraction engine does not accept a per-agent output path.
+Reads stay at the root level so both scoped facts and shared extracted memories
+are visible to every agent.
+
+``clear_memory(agent_name=X)`` removes only agent X's scoped facts (extracted
+memories at root level survive).  ``clear_memory(agent_name=None)`` clears
+**all** memories (ABC contract: *"agent_name=None means all memory owned by the
+user"*).
 
 ### Fact ids
 
@@ -179,10 +191,10 @@ m.clear_memory(agent_name="research")
   `get_context`, and `find()`'s per-memory abstract for `search`.
 - **HTTP client-server mode** — not yet wired (a thin alternative subclass or a
   `mode` config switch).
-- **Multi-user spaces / agent scoping** — all users/agents share the configured
-  `user_space` in v1; per-`user_id` / per-`agent_name` URI spaces are a
-  follow-up (OpenViking's `actor_peer_id` is a view filter, so this is a
-  partitioning choice, not an access-control blocker).
+- **Extracted-memory isolation** — the session pipeline always writes extracted
+  memories to the root ``memories/`` level (OpenViking's extraction engine does
+  not accept a per-agent output path).  These memories are visible to every
+  agent.  Manual facts are fully agent-scoped.
 - **Re-extraction on re-add** — deleting an extracted memory does not stop a
   future `commit_session` (re-processing the same conversation) from
   re-extracting it. Acceptable for v1.

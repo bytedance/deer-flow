@@ -16,8 +16,20 @@ OpenViking's session API (``create_session`` + ``add_message`` +
 conversation into structured memories (preferences / entities / profile / ...)
 under ``viking://user/{space}/memories/``. The backend never stores raw
 transcripts -- it surfaces OpenViking's extracted memories (short L2 abstracts)
-to deerflow. Manual facts (``create_fact``) are written directly under
-``memories/{category}/`` with a ``DEERFLOW_META`` comment.
+to deerflow.
+
+Memory is partitioned per agent: ``agent_name=None`` resolves to
+``"__default__"`` (matching DeerMem's ``DEFAULT_AGENT_BUCKET``), and an
+explicit name is lowercased.  Manual writes (``create_fact``, ``update_fact``,
+``import_memory`` Layer 1) are scoped to
+``viking://user/{space}/memories/{agent}/``.  Reads stay at the root
+``memories/`` level so extracted memories (which OpenViking always lands there)
+remain visible alongside agent-scoped manual facts.  Extracted memories (the
+session pipeline) are therefore shared across all agents (documented
+limitation).
+
+Manual facts (``create_fact``) are written to
+``memories/{agent}/{category}/`` with a ``DEERFLOW_META`` comment.
 ``import_memory`` uses a 2-layer waterfall: native ``data.files`` restore
 (Layer 1) or extraction via the session pipeline (Layer 2).
 """
@@ -396,15 +408,21 @@ class OpenVikingMemoryManager(MemoryManager):
                 except Exception as exc:
                     raise MemoryManagerError("OpenViking initialize() failed: " + str(exc)) from exc
 
-    def _scope_base(self, agent_name: str | None) -> str:  # pragma: no cover - retained for back-compat/debug
-        """URI root for one agent's memories (unused since the session-pipeline redesign).
+    @staticmethod
+    def _resolve_agent_name(agent_name: str | None) -> str:
+        """Return the canonical agent scope name (same contract as DeerMem).
 
-        OpenViking memories are user-level (under ``memories/`` directly), not
-        agent-scoped. Kept only so external callers/debugging that reach for it
-        still resolve to a sensible URI.
+        ``None`` → ``"__default__"`` (``DEFAULT_AGENT_BUCKET``).
+        Explicit names are lowercased for case-insensitive matching.
         """
-        scope = agent_name or "_global"
-        return f"{self._memories_base}/{scope}"
+        return agent_name.lower() if agent_name is not None else "__default__"
+
+    def _scope_base(self, agent_name: str | None) -> str:
+        """URI root for one agent's memories under ``memories/``.
+
+        ``agent_name=None`` → ``memories/__default__``.
+        """
+        return f"{self._memories_base}/{self._resolve_agent_name(agent_name)}"
 
     def _safe_mkdir(self, uri: str) -> None:
         """mkdir, ignoring 'already exists' (OpenViking mkdir is not idempotent)."""
@@ -526,15 +544,17 @@ class OpenVikingMemoryManager(MemoryManager):
                     out.append(msg)
         return out
 
-    def _new_messages(self, thread_id: str, messages: list[Any]) -> list[Any]:
-        """Return only messages not yet ingested for this thread (content-hash dedup).
+    def _new_messages(self, thread_id: str, agent_name: str | None, messages: list[Any]) -> list[Any]:
+        """Return only messages not yet ingested for this (thread, agent) pair.
 
         Each session created by :meth:`_add` contains ONLY the new messages, so
         ``commit_session`` extracts them once -- old messages are never re-sent,
         which is what prevents the duplicate-fact flood (the same conversation
         re-extracted on every debounced ``add``).
         """
-        seen = self._seen_msgs.setdefault(thread_id, {})
+        scope = self._resolve_agent_name(agent_name)
+        key = f"{thread_id}\0{scope}"
+        seen = self._seen_msgs.setdefault(key, {})
         new: list[Any] = []
         for msg in messages:
             role = _message_role(msg)
@@ -564,8 +584,6 @@ class OpenVikingMemoryManager(MemoryManager):
         user_id: str | None = None,
         trace_id: str | None = None,
     ) -> None:
-        # NOTE: user_id and trace_id are accepted for ABC compatibility but
-        # not used -- this backend is single-user (see clear_memory docstring).
         self._add(thread_id, messages, agent_name=agent_name, wait=self._config.wait_on_write)
 
     def add_nowait(
@@ -591,6 +609,10 @@ class OpenVikingMemoryManager(MemoryManager):
         history each debounced call, so reusing one session would duplicate
         messages. OpenViking consolidates extracted memories across sessions.
 
+        Extracted memories land at the root ``memories/`` level — OpenViking's
+        extraction engine does not accept a per-agent output path.  Manual
+        facts (``create_fact``) are scoped to ``memories/{agent}/`` instead.
+
         Never breaks the agent run: any backend failure is logged and swallowed
         (mirrors DeerMem's backpressure-degrade behavior).
         """
@@ -609,7 +631,7 @@ class OpenVikingMemoryManager(MemoryManager):
         # nothing alone (e.g. the assistant asked clarifying questions) is
         # caught once a later turn engages. Duplicate facts this produces are
         # collapsed by get_memory/search content dedup.
-        if not self._new_messages(thread_id, filtered):
+        if not self._new_messages(thread_id, agent_name, filtered):
             return
         sid = f"{thread_id}-{uuid.uuid4().hex[:8]}"
         try:
@@ -679,7 +701,11 @@ class OpenVikingMemoryManager(MemoryManager):
         except MemoryManagerError as exc:
             logger.warning("OpenViking get_context skipped (backend not ready): %s", exc)
             return ""
-        # Memories are user-level (OpenViking's memory namespace), not agent-scoped.
+        # Reads stay at the memories/ root so extracted memories (which
+        # OpenViking always lands there) remain visible alongside agent-scoped
+        # manual facts.  Writes are scoped per agent (see create_fact /
+        # update_fact); clear_memory is the only read-like path that obeys
+        # agent_name for partitioning.
         uris = self._list_memory_uris(self._memories_base)
         if not uris:
             return ""
@@ -718,6 +744,8 @@ class OpenVikingMemoryManager(MemoryManager):
         except MemoryManagerError as exc:
             logger.warning("OpenViking search skipped (backend not ready): %s", exc)
             return []
+        # Reads stay at the memories/ root so extracted memories remain visible
+        # alongside agent-scoped manual facts.  See get_context for rationale.
         scope = self._memories_base
         threshold = self._config.score_threshold or None
         limit = top_k or self._config.search_limit
@@ -759,11 +787,11 @@ class OpenVikingMemoryManager(MemoryManager):
     # ── Manage ───────────────────────────────────────────────────────────
 
     # Section-type mapping for the display driven by directory layout.
-    # Memories under ``memories/{category}/`` get a section whose type is
-    # derived from the category name.  Unknown categories fall back to ``"table"``.
-    # OpenViking memory-type -> display section type mapping.
-    # Covers all 11 default types from openviking/prompts/templates/memory/*.yaml;
-    # unknown directories fall back to "table".
+    # Manual facts live under ``memories/{agent}/{category}/``; extracted
+    # memories (root level) live under ``memories/{category}/``.  Each
+    # category directory becomes a section.  Unknown categories fall back to
+    # ``"table"``.  Covers all 11 default types from
+    # openviking/prompts/templates/memory/*.yaml.
     _SECTION_TYPE_BY_CATEGORY: dict[str, str] = {
         "preferences": "list",
         "entities": "cards",
@@ -786,6 +814,12 @@ class OpenVikingMemoryManager(MemoryManager):
         ``viking://user/{space}/memories/``; each directory becomes one
         section whose ``type`` is derived from the directory name.
         Top-level files (e.g. ``profile.md``) become ``"content"`` sections.
+
+        With agent scoping the directory tree is
+        ``memories/{agent}/{category}/...`` (manual facts) or
+        ``memories/{category}/...`` (extracted memories at root level), so
+        agent subdirectories appear as top-level section groups alongside
+        category sections — the frontend panel renders both.
         """
         sections: list[dict[str, Any]] = []
         by_dir: dict[str, list[str]] = {}
@@ -895,6 +929,9 @@ class OpenVikingMemoryManager(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        # Reads use the full memories/ tree so extracted memories (root level)
+        # and agent-scoped manual facts are both visible.  Writes and clears
+        # are scoped per agent.
         uris = self._list_memory_uris(self._memories_base)
         doc = _empty_memory()
         try:
@@ -936,22 +973,27 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         self._ensure_ready()
-        # NOTE: This backend is single-user -- all memories live under one
-        # ``user_space`` (configured in backend_config, default "default").
-        # ``user_id`` and ``agent_name`` are accepted for API compatibility
-        # but do not scope the deletion. In a multi-user deployment, use
-        # separate ``user_space`` values per user (each gets its own viking
-        # URI namespace), or use the HTTP-mode ``openviking`` backend which
-        # supports server-side multi-tenancy.
-        try:
-            self._client.rm(self._memories_base, recursive=True)
-        except Exception as exc:
-            logger.debug("rm(%s) skipped: %s", self._memories_base, exc)
-        self._safe_mkdir(self._memories_base)
-        # Clear the dedup gate so the next add() in a cached thread
-        # re-extracts instead of seeing every prior hash still resident
-        # and silently returning empty.
-        self._seen_msgs.clear()
+        if agent_name is not None:
+            # Clear only the specified agent's scoped memories (manual facts).
+            scope = self._scope_base(agent_name)
+            try:
+                self._client.rm(scope, recursive=True)
+            except Exception as exc:
+                logger.debug("rm(%s) skipped: %s", scope, exc)
+            self._safe_mkdir(scope)
+            # Clear dedup cache for this agent scope.
+            scope_key = self._resolve_agent_name(agent_name)
+            keys_to_del = [k for k in self._seen_msgs if k.endswith(f"\0{scope_key}")]
+            for k in keys_to_del:
+                del self._seen_msgs[k]
+        else:
+            # agent_name=None → clear ALL memories (ABC contract).
+            try:
+                self._client.rm(self._memories_base, recursive=True)
+            except Exception as exc:
+                logger.debug("rm(%s) skipped: %s", self._memories_base, exc)
+            self._safe_mkdir(self._memories_base)
+            self._seen_msgs.clear()
         return _empty_memory()
 
     def import_memory(
@@ -976,7 +1018,7 @@ class OpenVikingMemoryManager(MemoryManager):
         data = payload.get("data")
         files = data.get("files") if isinstance(data, dict) else None
         if isinstance(files, dict) and files:
-            written = self._import_from_native(files)
+            written = self._import_from_native(files, agent_name=agent_name)
             if written == 0:
                 logger.warning("import_memory: data.files provided but _import_from_native wrote zero files; falling through to extraction")
             else:
@@ -986,7 +1028,7 @@ class OpenVikingMemoryManager(MemoryManager):
         contents = self._collect_importable_content(payload)
         if contents:
             try:
-                self._import_via_extraction(contents)
+                self._import_via_extraction(contents, agent_name=agent_name)
             except Exception as exc:
                 logger.warning("Extraction import failed; memories not imported: %s", exc)
 
@@ -1046,13 +1088,17 @@ class OpenVikingMemoryManager(MemoryManager):
 
         return contents
 
-    def _import_via_extraction(self, contents: list[str]) -> None:
+    def _import_via_extraction(self, contents: list[str], *, agent_name: str | None) -> None:
         """Feed imported content through OpenViking's extraction pipeline.
 
         Constructs a simulated conversation from the collected text and commits
         it so the VLM re-extracts memories in OpenViking's own format
         (preferences/entities/profile/...). No format mapping -- the extraction
         LLM decides how to organize the imported information.
+
+        Extracted memories land at the root ``memories/`` level (shared across
+        agents); the ``agent_name`` parameter is accepted for API compatibility
+        but does not scope the extraction output.
         """
         try:
             self._ensure_ready()
@@ -1083,17 +1129,21 @@ class OpenVikingMemoryManager(MemoryManager):
         except Exception as exc:
             logger.warning("import commit_session failed: %s", exc)
 
-    def _import_from_native(self, files: dict[str, str]) -> int:
+    def _import_from_native(self, files: dict[str, str], *, agent_name: str | None) -> int:
         """Restore the ``memories/`` directory tree from a ``data.files`` dict.
 
         Each key is a viking URI; the value is the raw file content to write.
         URIs outside ``self._memories_base`` are remapped or skipped.
 
+        Files are imported into the agent-scoped directory
+        (``memories/{agent}/``) so manual fact import respects per-agent
+        isolation.
+
         Returns the number of files actually written (0 when every URI was
         filtered or every write failed).
         """
         self._ensure_ready()
-        base = self._memories_base.rstrip("/")
+        base = self._scope_base(agent_name).rstrip("/")
         remapped: dict[str, str] = {}
         for uri, raw in files.items():
             if not isinstance(uri, str) or not isinstance(raw, str):
@@ -1103,6 +1153,18 @@ class OpenVikingMemoryManager(MemoryManager):
             rel = uri.split("/memories/", 1)[1]
             if not rel or ".." in rel or rel.startswith("/"):
                 continue
+            # Strip an old agent-scope prefix when the export already has one
+            # (e.g. ``__default__/context/abc.md`` → ``context/abc.md``) so we
+            # don't double-nest (``__default__/__default__/context/abc.md``).
+            # Agent-scoped paths have ≥3 segments (agent / category / ... /
+            # file); root-level extracted-memory paths have ≤2 segments
+            # (category / file) unless they contain nested subdirectories
+            # (category / sub / file — rare).  We only strip when there are
+            # clearly 3+ segments, which errs on the side of keeping the
+            # prefix for shallow root-level paths.
+            parts = rel.split("/")
+            if len(parts) >= 3:
+                rel = "/".join(parts[1:])
             target = f"{base}/{rel}"
             remapped[target] = raw
 
@@ -1147,7 +1209,7 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> tuple[dict[str, Any], str | None]:
-        scope = self._memories_base
+        scope = self._scope_base(agent_name)
         category = category or "context"
         dir_uri = f"{scope}/{category}"
         self._safe_mkdir(dir_uri)
@@ -1211,7 +1273,7 @@ class OpenVikingMemoryManager(MemoryManager):
         target_uri = uri
         new_dir: str | None = None
         if category:
-            new_dir = f"{self._memories_base}/{category}"
+            new_dir = f"{self._scope_base(agent_name)}/{category}"
             target_uri = f"{new_dir}/{os.path.basename(uri)}"
         if target_uri != uri:
             # Category change = move: create at the new URI, drop the old file.
@@ -1268,15 +1330,21 @@ class OpenVikingMemoryManager(MemoryManager):
 def _category_from_uri(uri: str) -> str:
     """Infer a memory's category from its URI (fallback when no DEERFLOW_META).
 
-    Extracted memories live under ``memories/{category}/...`` -- e.g.
-    ``memories/preferences/{user}/{file}.md``, ``memories/entities/{proj}/x.md``,
-    ``memories/profile.md``. The category is the path segment immediately after
-    ``memories``. Manual facts (``create_fact``) land under
-    ``memories/{category}/{slug}.md`` -- same rule applies.
+    With agent scoping the URI layout is ``memories/{agent}/{category}/...``
+    (manual facts) or ``memories/{category}/...`` (extracted memories at root
+    level).  Try the agent-scoped depth first (two levels past ``memories``),
+    then fall back to the root-level depth (one level past).  For root-level
+    files (``memories/profile.md``) the bare basename is used.
     """
     parts = [p for p in uri.split("/") if p]
     if "memories" in parts:
         i = parts.index("memories")
+        # Agent-scoped depth: memories / {agent} / {category} / ...
+        if i + 2 < len(parts):
+            cat = parts[i + 2]
+            if not cat.endswith(".md"):
+                return cat
+        # Root-level depth: memories / {category} / ... or memories / file.md
         if i + 1 < len(parts):
             cat = parts[i + 1]
             return cat[:-3] if cat.endswith(".md") else cat

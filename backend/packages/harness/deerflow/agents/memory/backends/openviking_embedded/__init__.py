@@ -18,6 +18,15 @@ entities / profile / ...) and stores them as files under
 not raw transcripts. ``add`` returns immediately when ``wait_on_write: false``;
 ``add_nowait`` (the summarization-flush path) blocks until extraction finishes.
 
+Memory partitioning: manual facts (``create_fact``, ``import_memory`` Layer 1)
+are written to ``memories/{agent}/``, where ``agent_name=None`` resolves to
+``"__default__"`` (matching DeerMem's ``DEFAULT_AGENT_BUCKET``).  Extracted
+memories (the session pipeline) land at the root ``memories/`` level because
+OpenViking's extraction engine does not accept a per-agent output path.  Reads
+stay at the root level so both scoped facts and shared extracted memories are
+visible.  ``clear_memory(agent_name=X)`` removes only agent X's facts;
+``clear_memory(agent_name=None)`` clears everything (ABC contract).
+
 Heavy ``openviking`` dependency is **auto-installed** via ``plugin.yaml`` when
 ``memory.allow_lazy_installs: true`` is set (deps land outside the venv so
 ``uv sync`` never wipes them). The ``import openviking`` is lazy (inside
