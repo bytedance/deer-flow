@@ -88,6 +88,12 @@ class TestPathRedirection:
     def test_public_skill_paths_still_use_global_root(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         assert user_storage.get_skills_root_path() == skills_root
 
+    def test_managed_integration_skill_paths_use_global_root(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        assert user_storage.get_integrations_root() == base_dir / "integrations" / "skills"
+
+    def test_user_integrations_root_is_compatibility_alias(self, user_storage: UserScopedSkillStorage):
+        assert user_storage.get_user_integrations_root() == user_storage.get_integrations_root()
+
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"
 
@@ -281,6 +287,26 @@ class TestHistoryIsolation:
 
 class TestPathSafety:
     """UserScopedSkillStorage inherits path-traversal guards from LocalSkillStorage."""
+
+    def test_accepts_skill_files_from_all_allowed_roots(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        skill_files = [
+            skills_root / "public" / "public-skill" / "SKILL.md",
+            base_dir / "users" / "test-user" / "skills" / "custom" / "custom-skill" / "SKILL.md",
+            base_dir / "integrations" / "skills" / "lark-cli" / "lark-doc" / "SKILL.md",
+        ]
+        for skill_file in skill_files:
+            skill_file.parent.mkdir(parents=True, exist_ok=True)
+            skill_file.write_text(_skill_content(skill_file.parent.name), encoding="utf-8")
+
+        assert [user_storage.validate_skill_file_path(skill_file) for skill_file in skill_files] == [skill_file.resolve() for skill_file in skill_files]
+
+    def test_rejects_skill_file_outside_allowed_roots(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        skill_file = base_dir / "untrusted" / "escaped-skill" / "SKILL.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text(_skill_content("escaped-skill"), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(skill_file)
 
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):

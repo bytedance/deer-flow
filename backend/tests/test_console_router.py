@@ -12,6 +12,7 @@ and serving TestClient requests in another never share a connection).
 """
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -262,6 +263,74 @@ _R4_COST = 600 * 8e-6 + 399 * 32e-6  # 0.017568
 
 
 class TestPricing:
+    def test_mixed_currencies_disable_cost_reporting(self, client, monkeypatch, caplog):
+        monkeypatch.setattr(
+            console,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                models=[
+                    SimpleNamespace(
+                        name="minimax-m2",
+                        model="MiniMax-M2",
+                        pricing={"currency": "CNY", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                    SimpleNamespace(
+                        name="gpt-x",
+                        model="gpt-x-1",
+                        pricing={"currency": "USD", "input_per_million": 1, "output_per_million": 4},
+                    ),
+                ]
+            ),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=console.logger.name):
+            stats = client.get("/api/console/stats").json()
+        assert stats["currency"] is None
+        assert stats["total_cost"] is None
+        # The warning names both offending models so operators can locate the misconfiguration.
+        assert any("minimax-m2" in rec.getMessage() and "gpt-x" in rec.getMessage() for rec in caplog.records)
+
+        usage = client.get("/api/console/usage").json()
+        assert usage["currency"] is None
+        assert usage["total_cost"] is None
+        assert all(day["cost"] == 0 for day in usage["days"])
+        assert all(model["cost"] is None for model in usage["by_model"].values())
+
+        runs = client.get("/api/console/runs", params={"limit": 50}).json()
+        assert all(run["cost"] is None for run in runs["runs"])
+
+    def test_shared_currency_across_models_prices_normally(self, client, monkeypatch):
+        """Multiple priced models on one currency (incl. case variants) must not trip the guard."""
+        monkeypatch.setattr(
+            console,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                models=[
+                    SimpleNamespace(
+                        name="minimax-m2",
+                        model="MiniMax-M2",
+                        pricing={"currency": "CNY", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                    SimpleNamespace(
+                        name="qwen",
+                        model="qwen",
+                        pricing={"currency": "cny", "input_per_million": 8, "output_per_million": 32},
+                    ),
+                ]
+            ),
+        )
+        # qwen's only run (r5) is now priced alongside the minimax runs.
+        qwen_cost = 40 * 8e-6 + 30 * 32e-6
+
+        stats = client.get("/api/console/stats").json()
+        assert stats["currency"] == "CNY"
+        # No cache-hit price configured → r1 billed at the miss price.
+        assert stats["total_cost"] == pytest.approx(_R1_COST_UNCACHED + _R2_COST + _R4_COST + qwen_cost)
+
+        usage = client.get("/api/console/usage").json()
+        assert usage["currency"] == "CNY"
+        assert usage["by_model"]["qwen"]["cost"] == pytest.approx(qwen_cost)
+
     def test_costs_use_cache_hit_price(self, client, monkeypatch):
         monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
         stats = client.get("/api/console/stats").json()

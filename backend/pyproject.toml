@@ -58,6 +58,7 @@ markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
+    "live: tests that call real external APIs and require explicit opt-in",
 ]
 
 [tool.uv]

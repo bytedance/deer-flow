@@ -12,7 +12,7 @@ from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, extensions_config_write_lock, get_extensions_config, reload_extensions_config
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
@@ -420,6 +420,38 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
         raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
 
 
+def _write_extensions_skill_state(skill_name: str, enabled: bool) -> None:
+    """Read-modify-write a skill's enabled state in the shared extensions_config.json.
+
+    Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
+    ``extensions_config_write_lock`` itself, so that this router and the MCP
+    router (which performs the same RMW on the same file) cannot interleave and
+    drop each other's change. The lock is held by the worker rather than by the
+    awaiting task, so cancelling the request cannot release it mid-write.
+    """
+    with extensions_config_write_lock:
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None:
+            config_path = Path.cwd().parent / "extensions_config.json"
+            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+
+        # Work on a deep copy rather than the cached singleton: mutating the
+        # singleton in place would publish the new state to readers before it is
+        # durable on disk, and leave it applied even if the write below fails.
+        # to_file_dict() serializes the full extensions_config.json shape (all
+        # top-level keys), so no field is dropped from the file.
+        extensions_config = get_extensions_config().model_copy(deep=True)
+        extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+
+        config_data = extensions_config.to_file_dict()
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2)
+
+        logger.info(f"Skills configuration updated and saved to: {config_path}")
+        reload_extensions_config()
+
+
 @router.put(
     "/skills/{skill_name}",
     response_model=SkillResponse,
@@ -434,8 +466,14 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        skills = storage.load_skills(enabled_only=False)
+
+        def _load_storage_and_skills() -> tuple[SkillStorage, list[Skill]]:
+            # Worker thread: storage construction and skill enumeration both walk
+            # the filesystem.
+            storage = _get_user_skill_storage(config)
+            return storage, storage.load_skills(enabled_only=False)
+
+        storage, skills = await asyncio.to_thread(_load_storage_and_skills)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -445,38 +483,20 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
         # so that two users with same-named custom skills can toggle independently.
         if skill.category == SkillCategory.PUBLIC:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                config_path = Path.cwd().parent / "extensions_config.json"
-                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-            extensions_config = get_extensions_config()
-            extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-
-            config_data = extensions_config.to_file_dict()
-
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=2)
-
-            logger.info(f"Skills configuration updated and saved to: {config_path}")
-            reload_extensions_config()
+            # Shared-file RMW. The worker takes extensions_config_write_lock for
+            # the whole read→write window, so it stays serialized against the MCP
+            # router even if this request is cancelled mid-write.
+            await asyncio.to_thread(_write_extensions_skill_state, skill_name, body.enabled)
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             if isinstance(storage, UserScopedSkillStorage):
-                storage.set_skill_enabled_state(skill_name, body.enabled)
+                await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
             else:
-                # Fallback for non-user-scoped storage (unlikely in practice)
-                config_path = ExtensionsConfig.resolve_config_path()
-                if config_path is None:
-                    config_path = Path.cwd().parent / "extensions_config.json"
-                extensions_config = get_extensions_config()
-                extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-                config_data = extensions_config.to_file_dict()
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, indent=2)
-                reload_extensions_config()
+                # Fallback for non-user-scoped storage (unlikely in practice):
+                # same shared-file RMW as the PUBLIC branch, same lock.
+                await asyncio.to_thread(_write_extensions_skill_state, skill_name, body.enabled)
 
         # PUBLIC skill enabled state lives in the global extensions_config.json
         # and affects every user, so the prompt cache for ALL users must be
@@ -491,7 +511,10 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         else:
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        def _reload_skills() -> list[Skill]:
+            return _get_user_skill_storage(config).load_skills(enabled_only=False)
+
+        skills = await asyncio.to_thread(_reload_skills)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:
