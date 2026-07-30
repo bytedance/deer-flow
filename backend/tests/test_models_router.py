@@ -17,9 +17,7 @@ from app.gateway.routers.models import (
     _delete_model_from_config,
     _derive_env_var_name,
     _mask_model_config,
-    _read_env_file,
     _sync_env_file,
-    _write_env_file,
     AdminModelsUpdateRequest,
     FullModelConfig,
 )
@@ -77,28 +75,6 @@ class TestMaskModelConfig:
 # ---------------------------------------------------------------------------
 
 
-class TestEnvFileHelpers:
-    def test_read_missing_env(self, tmp_path: Path):
-        assert _read_env_file(tmp_path) == {}
-
-    def test_write_and_read_env(self, tmp_path: Path):
-        _write_env_file(tmp_path, {"KEY1": "val1", "KEY2": "val2"})
-        result = _read_env_file(tmp_path)
-        assert result == {"KEY1": "val1", "KEY2": "val2"}
-
-    def test_write_removes_none_values(self, tmp_path: Path):
-        _write_env_file(tmp_path, {"A": "1", "B": "2"})
-        _write_env_file(tmp_path, {"A": "1", "B": None})
-        result = _read_env_file(tmp_path)
-        assert result == {"A": "1"}
-
-    def test_write_removes_file_when_empty(self, tmp_path: Path):
-        env_path = tmp_path / ".env"
-        env_path.write_text("X=1\n", encoding="utf-8")
-        _write_env_file(tmp_path, {})
-        assert not env_path.exists()
-
-
 class TestSyncEnvFile:
     def test_writes_new_api_key(self, tmp_path: Path):
         raw = {"models": []}
@@ -112,7 +88,7 @@ class TestSyncEnvFile:
         assert entries.get("TEST_MODEL_API_KEY") == "sk-abc"
 
     def test_removes_orphaned_key(self, tmp_path: Path):
-        _write_env_file(tmp_path, {"OLD_MODEL_API_KEY": "old-secret"})
+        (tmp_path / ".env").write_text("OLD_MODEL_API_KEY=old-secret\n", encoding="utf-8")
         raw = {
             "models": [
                 {"name": "old-model", "use": "x:Y", "model": "m1", "api_key": "$OLD_MODEL_API_KEY"}
@@ -129,7 +105,7 @@ class TestSyncEnvFile:
         assert entries.get("NEW_MODEL_API_KEY") == "sk-new"
 
     def test_preserves_shared_env_key(self, tmp_path: Path):
-        _write_env_file(tmp_path, {"SHARED_API_KEY": "shared-secret"})
+        (tmp_path / ".env").write_text("SHARED_API_KEY=shared-secret\n", encoding="utf-8")
         raw = {
             "models": [
                 {"name": "a", "use": "x:Y", "model": "m1", "api_key": "$SHARED_API_KEY"},
@@ -158,6 +134,84 @@ class TestSyncEnvFile:
         entries = dotenv_values(tmp_path / ".env")
         # $MY_CUSTOM_KEY is an env-var reference, not a new value to write.
         assert "MY_CUSTOM_KEY" not in entries
+
+    def test_preserves_non_model_lines(self, tmp_path: Path):
+        """Comments, blank lines, and non-model entries survive untouched."""
+        original = (
+            "# Database configuration\n"
+            "DATABASE_URL=postgres://localhost/db\n"
+            "\n"
+            "# Auth secrets\n"
+            "export OAUTH_CLIENT_SECRET=xyz\n"
+            "\n"
+        )
+        (tmp_path / ".env").write_text(original, encoding="utf-8")
+        raw = {"models": []}
+        incoming = [
+            FullModelConfig(
+                name="my-model", use="x:Y", model="m1", api_key="sk-123"
+            )
+        ]
+        _sync_env_file(tmp_path, raw, incoming)
+        result = (tmp_path / ".env").read_text(encoding="utf-8")
+        # All original lines should still be there.
+        assert "# Database configuration" in result
+        assert "DATABASE_URL=postgres://localhost/db" in result
+        assert "# Auth secrets" in result
+        assert "export OAUTH_CLIENT_SECRET=xyz" in result
+        # The new model-owned key should be appended.
+        assert "MY_MODEL_API_KEY=sk-123" in result
+
+    def test_updates_existing_model_key_in_place(self, tmp_path: Path):
+        """An existing model-owned key is updated in-place, not duplicated."""
+        (tmp_path / ".env").write_text(
+            "DATABASE_URL=postgres://db\n"
+            "MY_MODEL_API_KEY=old-key\n"
+            "OTHER_SECRET=keep-me\n",
+            encoding="utf-8",
+        )
+        raw = {
+            "models": [
+                {"name": "my-model", "use": "x:Y", "model": "m1", "api_key": "$MY_MODEL_API_KEY"}
+            ]
+        }
+        incoming = [
+            FullModelConfig(
+                name="my-model", use="x:Y", model="m1", api_key="sk-new-key"
+            )
+        ]
+        _sync_env_file(tmp_path, raw, incoming)
+        result = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "MY_MODEL_API_KEY=sk-new-key" in result
+        assert "old-key" not in result
+        assert "DATABASE_URL=postgres://db" in result
+        assert "OTHER_SECRET=keep-me" in result
+
+    def test_deletes_orphaned_model_key_leaving_others(self, tmp_path: Path):
+        """Deleting a model-owned key leaves all other lines intact."""
+        (tmp_path / ".env").write_text(
+            "# Top comment\n"
+            "DATABASE_URL=pg://db\n"
+            "OLD_MODEL_API_KEY=orphan-secret\n"
+            "\n"
+            "# Bottom comment\n"
+            "OTHER_KEY=val\n",
+            encoding="utf-8",
+        )
+        raw = {
+            "models": [
+                {"name": "old-model", "use": "x:Y", "model": "m1", "api_key": "$OLD_MODEL_API_KEY"}
+            ]
+        }
+        incoming: list[FullModelConfig] = []
+        _sync_env_file(tmp_path, raw, incoming)
+        result = (tmp_path / ".env").read_text(encoding="utf-8")
+        assert "# Top comment" in result
+        assert "DATABASE_URL=pg://db" in result
+        assert "OLD_MODEL_API_KEY" not in result
+        assert "orphan-secret" not in result
+        assert "# Bottom comment" in result
+        assert "OTHER_KEY=val" in result
 
 
 # ---------------------------------------------------------------------------

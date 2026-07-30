@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import dotenv_values
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -129,36 +128,23 @@ def _mask_model_config(model: FullModelConfig) -> FullModelConfig:
 _ENV_FILE_NAME = ".env"
 
 
-def _read_env_file(project_root: Path) -> dict[str, str]:
-    """Read .env entries from the project root, returning key→value dict."""
-    env_path = project_root / _ENV_FILE_NAME
-    if not env_path.exists():
-        return {}
-    return dict(dotenv_values(env_path))
+def _parse_env_line_key(line: str) -> str | None:
+    """Extract the key from a .env file line, or ``None`` if not a key-value pair.
 
-
-def _write_env_file(project_root: Path, entries: dict[str, str]) -> None:
-    """Write .env entries to the project root, preserving order.
-
-    Empty keys or values are skipped. Keys with ``None`` values are removed.
+    Recognises bare ``KEY=VALUE`` and ``export KEY=VALUE``.  Blank lines and
+    comment lines (``#``) return ``None``.
     """
-    env_path = project_root / _ENV_FILE_NAME
-    cleaned: dict[str, str] = {}
-    for k, v in entries.items():
-        if v is None:
-            continue  # remove
-        if not k or not v:
-            continue
-        cleaned[k] = v
-    lines = [f"{k}={v}" for k, v in cleaned.items()]
-    if not lines:
-        if env_path.exists():
-            env_path.unlink()
-        return
-    content = "\n".join(lines) + "\n"
-    tmp_path = project_root / f"{_ENV_FILE_NAME}.tmp"
-    tmp_path.write_text(content, encoding="utf-8")
-    os.replace(tmp_path, env_path)
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        rest = stripped[len("export "):]
+    else:
+        rest = stripped
+    eq_idx = rest.find("=")
+    if eq_idx == -1:
+        return None
+    return rest[:eq_idx].strip()
 
 
 def _sync_env_file(
@@ -168,17 +154,33 @@ def _sync_env_file(
 ) -> None:
     """Synchronize .env entries with the model configs.
 
+    Only **model-owned** keys are touched — all other lines (comments, blank
+    lines, non-model ``KEY=VALUE`` entries) are preserved byte-for-byte.
+    Model-owned keys are those that were previously referenced via ``$VAR`` in
+    ``config.yaml`` or that are derived from model names via
+    :func:`_derive_env_var_name`.
+
     * For each incoming model whose ``api_key`` is a real value (not ``$VAR``
       and not ``***``), write it to .env under a derived key.
     * For models that were present in the raw config but are absent from
       incoming_models (deleted), remove the env var IF no remaining model
       references it.
     """
-    env_entries = _read_env_file(project_root)
+    env_path = project_root / _ENV_FILE_NAME
 
-    # Build a mapping from model name → env var name for models in the
-    # raw (on-disk) config, so we can recover the previous $VAR reference
-    # when an incoming model sends the masked *** placeholder.
+    # ------------------------------------------------------------------
+    # 1. Determine the set of model-owned env var names and desired state
+    # ------------------------------------------------------------------
+
+    # Names referenced via $VAR in the on-disk (raw) config.
+    prev_env_refs: set[str] = set()
+    for raw_model in raw_config.get("models", []):
+        if isinstance(raw_model, dict):
+            raw_key = raw_model.get("api_key", "")
+            if isinstance(raw_key, str) and raw_key.startswith("$"):
+                prev_env_refs.add(raw_key[1:])
+
+    # Model name → env var name for masked (***) round-trip preservation.
     raw_name_to_env_var: dict[str, str] = {}
     for raw_model in raw_config.get("models", []):
         if isinstance(raw_model, dict):
@@ -186,16 +188,18 @@ def _sync_env_file(
             if isinstance(raw_key, str) and raw_key.startswith("$"):
                 raw_name_to_env_var[str(raw_model.get("name", ""))] = raw_key[1:]
 
-    # Collect which $VAR names are referenced by the *incoming* models.
+    # Desired state for model-owned keys: str value → write, None → delete.
+    desired: dict[str, str | None] = {}
     incoming_env_refs: set[str] = set()
+
     for m in incoming_models:
         api_key = m.api_key
         if api_key and api_key.startswith("$"):
             incoming_env_refs.add(api_key[1:])
         elif api_key and api_key != _MASKED_VALUE:
-            # Real value → write to .env
+            # Real value → write to .env, reference as $VAR in config.yaml.
             var_name = _derive_env_var_name(m.name)
-            env_entries[var_name] = api_key
+            desired[var_name] = api_key
             incoming_env_refs.add(var_name)
         elif api_key == _MASKED_VALUE or not api_key:
             # Masked round-trip or None/empty (user cleared the field) —
@@ -205,20 +209,69 @@ def _sync_env_file(
             if prev_var:
                 incoming_env_refs.add(prev_var)
 
-    # Collect which $VAR names were referenced by the *previous* config.
-    prev_env_refs: set[str] = set()
-    for raw_model in raw_config.get("models", []):
-        if isinstance(raw_model, dict):
-            raw_key = raw_model.get("api_key", "")
-            if isinstance(raw_key, str) and raw_key.startswith("$"):
-                prev_env_refs.add(raw_key[1:])
-
-    # Remove .env keys that are no longer referenced by any model.
+    # Orphaned = previously referenced but no longer referenced.
     orphaned = prev_env_refs - incoming_env_refs
     for var_name in orphaned:
-        env_entries.pop(var_name, None)
+        desired[var_name] = None
 
-    _write_env_file(project_root, env_entries)
+    # model_owned = every key we should track for modification.
+    model_owned: set[str] = prev_env_refs | set(desired.keys())
+    for raw_model in raw_config.get("models", []):
+        if isinstance(raw_model, dict):
+            model_owned.add(_derive_env_var_name(str(raw_model.get("name", ""))))
+
+    if not model_owned and not desired:
+        return
+
+    # ------------------------------------------------------------------
+    # 2. Patch the .env file line-by-line
+    # ------------------------------------------------------------------
+
+    if not env_path.exists():
+        # Create new file with only the desired entries.
+        new_lines = [f"{k}={v}\n" for k, v in desired.items() if v is not None]
+        if new_lines:
+            content = "".join(new_lines)
+            tmp_path = project_root / f"{_ENV_FILE_NAME}.tmp"
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(tmp_path, env_path)
+        return
+
+    raw_lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    seen_keys: set[str] = set()
+    patched: list[str] = []
+
+    for line in raw_lines:
+        key = _parse_env_line_key(line)
+        if key is not None and key in model_owned:
+            seen_keys.add(key)
+            if key in desired:
+                val = desired.pop(key)
+                if val is not None:
+                    patched.append(f"{key}={val}\n")
+                # val is None → delete (don't append)
+            elif key in orphaned:
+                pass  # delete
+            else:
+                # Model-owned but not being changed → keep as-is.
+                patched.append(line)
+        else:
+            # Not model-owned → preserve exactly (comments, blanks, other vars).
+            patched.append(line)
+
+    # Append new model-owned keys that weren't in the file.
+    new_entries = [(k, v) for k, v in desired.items() if v is not None and k not in seen_keys]
+    if new_entries:
+        if patched and not patched[-1].endswith("\n"):
+            patched.append("\n")
+        for key, val in new_entries:
+            patched.append(f"{key}={val}\n")
+
+    # Write back atomically.
+    content = "".join(patched)
+    tmp_path = project_root / f"{_ENV_FILE_NAME}.tmp"
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, env_path)
 
 
 # ---------------------------------------------------------------------------
