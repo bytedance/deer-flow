@@ -1156,14 +1156,13 @@ class OpenVikingMemoryManager(MemoryManager):
             # Strip an old agent-scope prefix when the export already has one
             # (e.g. ``__default__/context/abc.md`` → ``context/abc.md``) so we
             # don't double-nest (``__default__/__default__/context/abc.md``).
-            # Agent-scoped paths have ≥3 segments (agent / category / ... /
-            # file); root-level extracted-memory paths have ≤2 segments
-            # (category / file) unless they contain nested subdirectories
-            # (category / sub / file — rare).  We only strip when there are
-            # clearly 3+ segments, which errs on the side of keeping the
-            # prefix for shallow root-level paths.
+            # Only strip when the first path segment is unambiguously an agent
+            # scope: ``"__default__"`` (reserved, never a category name) or the
+            # *current* target agent name.  Root-level extracted-memory paths
+            # like ``preferences/user/file.md`` (3+ segments, but the first is
+            # a category, not an agent) are left untouched.
             parts = rel.split("/")
-            if len(parts) >= 3:
+            if len(parts) >= 3 and parts[0] in ("__default__", self._resolve_agent_name(agent_name)):
                 rel = "/".join(parts[1:])
             target = f"{base}/{rel}"
             remapped[target] = raw
@@ -1332,18 +1331,20 @@ def _category_from_uri(uri: str) -> str:
 
     With agent scoping the URI layout is ``memories/{agent}/{category}/...``
     (manual facts) or ``memories/{category}/...`` (extracted memories at root
-    level).  Try the agent-scoped depth first (two levels past ``memories``),
-    then fall back to the root-level depth (one level past).  For root-level
-    files (``memories/profile.md``) the bare basename is used.
+    level, which may be nested e.g. ``memories/preferences/{user}/{file}.md``).
+
+    Only ``"__default__"`` is treated as an unambiguous agent-scope signal
+    (it is reserved and never a category name).  Custom agent names are not
+    distinguishable from category names by pattern alone, so URIs under
+    non-``__default__`` agents fall back to root-level depth.
     """
     parts = [p for p in uri.split("/") if p]
     if "memories" in parts:
         i = parts.index("memories")
-        # Agent-scoped depth: memories / {agent} / {category} / ...
-        if i + 2 < len(parts):
-            cat = parts[i + 2]
-            if not cat.endswith(".md"):
-                return cat
+        # Agent-scoped depth (only for __default__ — unambiguous signal):
+        # memories / __default__ / {category} / ...
+        if i + 2 < len(parts) and parts[i + 1] == "__default__" and not parts[i + 2].endswith(".md"):
+            return parts[i + 2]
         # Root-level depth: memories / {category} / ... or memories / file.md
         if i + 1 < len(parts):
             cat = parts[i + 1]
