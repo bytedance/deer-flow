@@ -9,8 +9,11 @@ its ``from_config``) so that selecting a backend whose deps are missing either
 
 Install target is ``<runtime_home>/memory_deps/<backend>/`` (outside the venv),
 so ``uv sync`` never wipes it -- mirrors the hermes ``pip install --target``
-pattern (``agent/lsp/install.py``). The directory is prepended to ``sys.path``
-so the installed packages import normally.
+pattern (``agent/lsp/install.py``). The directory is inserted into ``sys.path``
+**after** the venv's ``site-packages`` entries (via :func:`_add_to_sys_path`)
+so installed packages import normally without shadowing venv packages
+(e.g. a vendored ``pydantic_core`` in the target would otherwise take
+precedence over the venv's copy).
 
 This module is dependency-light on purpose: ``read_manifest`` is pure file
 parse (no backend import), so it runs during ``_scan_backends`` without needing
