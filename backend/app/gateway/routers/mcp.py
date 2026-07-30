@@ -10,7 +10,15 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.deps import require_admin_user
-from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, extensions_config_write_lock, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    McpRoutingConfig,
+    McpToolOverride,
+    atomic_write_extensions_config,
+    extensions_config_write_lock,
+    get_extensions_config,
+    reload_extensions_config,
+)
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -394,9 +402,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
         config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
 
-        # Write the configuration to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        atomic_write_extensions_config(config_path, config_data)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
 
@@ -437,8 +443,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
 
         raw_server["enabled"] = body.enabled
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(raw_data, f, indent=2)
+        atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
         reloaded_config = reload_extensions_config()

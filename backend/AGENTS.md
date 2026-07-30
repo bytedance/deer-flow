@@ -752,7 +752,7 @@ E2B output sync records remote file versions and actual host file metadata in a 
   add a parallel routing middleware for PR1-style preference hints.
 - **Stdio file outputs**: Persistent stdio sessions are scoped by `user_id:thread_id`. For stdio transports only, DeerFlow pins the subprocess default `cwd` to the thread workspace and `TMPDIR`/`TMP`/`TEMP` to `workspace/.mcp/tmp/`, unless the operator explicitly configured `cwd` or temp env values. SSE/HTTP transports skip this filesystem prep entirely.
 - **Stdio path translation**: MCP-returned local file references are not copied. If a `ResourceLink` or conservative free-text path resolves to an existing file inside the thread's mounted user-data tree, it is translated deterministically to `/mnt/user-data/...`; paths outside that tree remain unchanged.
-- **Runtime updates**: Gateway API saves to extensions_config.json; the Gateway-embedded runtime detects changes via the resolved-path + content-signature check above, so multi-worker / stale-mtime deployments still pick up an added/removed MCP server without a restart (`PUT /api/mcp/config` keeps whole-payload validation, while `PATCH /api/mcp/config` changes only one server's `enabled` field and validates the target only when enabling it; either endpoint's reset clears the cache only in its own worker)
+- **Runtime updates**: Gateway API saves to extensions_config.json; the Gateway-embedded runtime detects changes via the resolved-path + content-signature check above, so multi-worker / stale-mtime deployments still pick up an added/removed MCP server without a restart (`PUT /api/mcp/config` keeps whole-payload validation, while `PATCH /api/mcp/config` changes only one server's `enabled` field and validates the target only when enabling it; either endpoint's reset clears the cache only in its own worker). MCP, skill, and embedded-client writers share `atomic_write_extensions_config()`, which writes and fsyncs a same-directory temporary file before `os.replace()` and preserves an existing file's mode and symlink target; failed serialization or replacement leaves the prior config intact and cleans up the temporary file.
 
 ### Skills System (`packages/harness/deerflow/skills/`)
 
@@ -1219,7 +1219,7 @@ Config is env-driven like the others — `MonocleTracingConfig`, built in `get_t
 - `skills` - Map of skill name → state (enabled)
 - `middlewares` - Zero-argument `AgentMiddleware` class paths for lead and subagent runtime extension. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
-Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; `middlewares` remains an operator-controlled config-file extension point.
+Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
