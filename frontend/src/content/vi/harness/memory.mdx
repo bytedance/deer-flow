@@ -1,0 +1,124 @@
+---
+title: Bộ nhớ (Memory)
+description: Memory là một tính năng runtime của DeerFlow Harness. Nó không đơn thuần là nhật ký cuộc trò chuyện — nó là một kho lưu trữ có cấu trúc chứa các thông tin thực tế và bản tóm tắt ngữ cảnh được duy trì xuyên suốt các session riêng biệt, giúp định hình hành vi của agent trong các cuộc trò chuyện tương lai.
+---
+
+import { Callout } from "nextra/components";
+
+# Bộ nhớ (Memory)
+
+<Callout type="info" emoji="💾">
+  Memory giúp DeerFlow mang các thông tin hữu ích xuyên suốt các session. Agent
+  sẽ ghi nhớ các tùy chọn của người dùng, ngữ cảnh dự án và các thông tin lặp đi lặp lại
+  để đưa ra phản hồi tốt hơn mà không cần phải bắt đầu lại từ đầu mỗi lần.
+</Callout>
+
+Memory là một tính năng runtime của DeerFlow Harness. Nó không đơn thuần là nhật ký cuộc trò chuyện — nó là một kho lưu trữ có cấu trúc chứa các thông tin thực tế và bản tóm tắt ngữ cảnh được duy trì xuyên suốt các session riêng biệt, giúp định hình hành vi của agent trong các cuộc trò chuyện tương lai.
+
+## Những gì được lưu trữ trong Memory
+
+Kho lưu trữ memory chứa một vài nhóm thông tin chính:
+
+- **Ngữ cảnh công việc (Work context)**: tóm tắt về các dự án đang triển khai, mục tiêu, và các chủ đề lặp đi lặp lại mà người dùng làm việc cùng.
+- **Ngữ cảnh cá nhân (Personal context)**: các tùy chọn cá nhân, phong cách giao tiếp và các chi tiết đặc thù của người dùng mà agent học được.
+- **Mối quan tâm hàng đầu (Top of mind)**: các khu vực tập trung gần đây nhất và các tác vụ đang hoạt động.
+- **Lịch sử (History)**: ngữ cảnh của những tháng gần đây, thông tin nền trước đó và các sự kiện dài hạn.
+- **Thông tin thực tế (Facts)**: các thông tin thực tế cụ thể, riêng lẻ mà agent trích xuất được từ cuộc hội thoại (ví dụ: các tool ưa thích, tên team, các ràng buộc của dự án).
+
+Mỗi nhóm thông tin này sẽ được cập nhật liên tục khi agent học hỏi từ các cuộc hội thoại đang diễn ra.
+
+## Cơ chế hoạt động
+
+Memory được quản lý bởi `MemoryMiddleware`, chạy trên mỗi lượt gọi của Lead Agent:
+
+1. **Chèn (Injection)**: khi bắt đầu mỗi cuộc hội thoại, bộ nhớ hiện tại của agent được chèn vào system prompt theo một ngân sách token được kiểm soát (`max_injection_tokens`).
+2. **Học hỏi (Learning)**: sau khi cuộc hội thoại kết thúc, một tác vụ chạy nền (background job) sẽ trích xuất các thông tin thực tế mới và cập nhật vào các nhóm memory tương ứng. Quá trình cập nhật được trì hoãn (debounced) bằng thuộc tính `debounce_seconds` để gom cụm các thay đổi nhanh chóng.
+3. **Memory riêng của từng Agent (Per-agent memory)**: khi một custom agent hoạt động, bộ nhớ của nó được lưu trữ độc lập với bộ nhớ chung toàn cục (global memory). Điều này giúp cô lập kiến thức của các agent khác nhau.
+
+## Cấu hình
+
+```yaml
+memory:
+  enabled: true
+
+  # Đường dẫn lưu trữ cho file global memory.
+  # Mặc định: {base_dir}/memory.json  (giải quyết thành backend/.deer-flow/memory.json)
+  # Đường dẫn tuyệt đối sẽ được giữ nguyên.
+  # Đường dẫn tương đối sẽ được giải quyết dựa trên base_dir (không phải thư mục làm việc backend).
+  storage_path: memory.json
+
+  # Storage class (mặc định: lưu trữ JSON dựa trên file)
+  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+
+  # Số giây chờ trước khi xử lý các bản cập nhật memory trong hàng đợi (debounce)
+  debounce_seconds: 30
+
+  # Model dùng để trích xuất cập nhật memory (null = dùng model mặc định)
+  model_name: null
+
+  # Số lượng thông tin thực tế tối đa cần lưu trữ
+  max_facts: 100
+
+  # Điểm tin cậy tối thiểu cần thiết để lưu trữ một thông tin thực tế (0.0–1.0)
+  fact_confidence_threshold: 0.7
+
+  # Có bật tính năng chèn memory vào system prompt hay không
+  injection_enabled: true
+
+  # Số lượng token tối đa để chèn memory vào system prompt
+  max_injection_tokens: 2000
+```
+
+## Global vs per-agent memory
+
+DeerFlow hỗ trợ hai cấp độ memory:
+
+- **Global memory**: được lưu trữ tại `{base_dir}/memory.json`. Được sử dụng khi không có agent cụ thể nào hoạt động hoặc khi agent không có file per-agent memory riêng.
+- **Per-agent memory**: được lưu trữ tại `{base_dir}/agents/{agent_name}/memory.json`. Được sử dụng khi một custom agent hoạt động, giúp cô lập kiến thức học được của agent đó.
+
+`MemoryMiddleware` tự động chọn file memory chính xác dựa trên thuộc tính `agent_name` đang hoạt động trong cấu hình request.
+
+Tên của agent sử dụng cho việc lưu trữ memory được xác thực dựa trên `AGENT_NAME_PATTERN` để đảm bảo an toàn cho hệ thống file.
+
+## Vị trí lưu trữ
+
+Mặc định, các file memory được lưu trữ dưới thư mục cơ sở của backend:
+
+- Thư mục cơ sở (Base directory): `backend/.deer-flow/`
+- Global memory: `backend/.deer-flow/memory.json`
+- Per-agent memory: `backend/.deer-flow/agents/{agent_name}/memory.json`
+
+Bạn có thể thay đổi đường dẫn lưu trữ bằng trường `storage_path`. Đường dẫn tương đối được giải quyết so với thư mục cơ sở. Hãy sử dụng đường dẫn tuyệt đối để lưu trữ memory ở một vị trí tùy chỉnh khác.
+
+## Custom storage backend
+
+Trường `storage_class` cho phép bạn thay thế kho lưu trữ mặc định dựa trên file bằng một triển khai tùy chỉnh. Bất kỳ lớp (class) nào kế thừa `MemoryStorage` và triển khai các phương thức `load()`, `reload()`, và `save()` đều có thể sử dụng:
+
+```yaml
+memory:
+  storage_class: mypackage.storage.RedisMemoryStorage
+```
+
+Nếu lớp cấu hình không thể tải được, hệ thống sẽ tự động chuyển về sử dụng mặc định `FileMemoryStorage` và ghi nhận một lỗi log.
+
+## Tắt tính năng Memory
+
+Để tắt hoàn toàn tính năng memory:
+
+```yaml
+memory:
+  enabled: false
+```
+
+Để giữ lại lưu trữ memory nhưng ngăn việc chèn nó vào system prompt:
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: false
+```
+
+<Cards num={2}>
+  <Cards.Card title="Cấu hình" href="/docs/harness/configuration" />
+  <Cards.Card title="Middleware" href="/docs/harness/middlewares" />
+</Cards>

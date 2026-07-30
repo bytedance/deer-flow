@@ -1,0 +1,104 @@
+---
+title: Tạo Harness đầu tiên của bạn
+description: Hướng dẫn này chỉ ra cách sử dụng DeerFlow Harness dưới dạng lập trình (programmatically) — import và sử dụng DeerFlow trực tiếp trong mã nguồn Python của bạn thay vì thông qua giao diện web.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Tạo Harness đầu tiên của bạn
+
+Hướng dẫn này chỉ ra cách sử dụng DeerFlow Harness dưới dạng lập trình (programmatically) — import và sử dụng DeerFlow trực tiếp trong mã nguồn Python của bạn thay vì thông qua giao diện web.
+
+## Yêu cầu chuẩn bị
+
+- Python 3.12+
+- Đã cài đặt `uv`
+- Đã clone repository DeerFlow
+
+## Cài đặt
+
+```bash
+cd deer-flow/backend
+uv sync
+```
+
+## Tạo cấu hình
+
+Tạo một file `config.yaml` tối giản:
+
+```yaml
+config_version: 6
+
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+```
+
+## Viết mã nguồn
+
+<Steps>
+
+### Tạo một file Python
+
+Tạo file `my_agent.py` trong thư mục `backend/`:
+
+```python
+import asyncio
+import os
+from deerflow.client import DeerFlowClient
+from deerflow.config import load_config
+
+os.environ["OPENAI_API_KEY"] = "sk-..."
+
+# Tải cấu hình config.yaml
+load_config()
+
+client = DeerFlowClient()
+
+async def main():
+    async for event in client.astream(
+        thread_id="my-first-thread",
+        message="Write a Python fibonacci function with a docstring",
+        config={
+            "configurable": {
+                "model_name": "gpt-4o",
+            }
+        },
+    ):
+        print(event)
+
+asyncio.run(main())
+```
+
+### Thực thi file
+
+```bash
+cd backend
+uv run python my_agent.py
+```
+
+</Steps>
+
+## Kết quả các sự kiện trông như thế nào
+
+Luồng stream sẽ trả về các sự kiện có cấu trúc dạng:
+
+```python
+{"type": "messages", "data": {"content": "def fibonacci..."}}
+{"type": "thread_state", "data": {"title": "Python Fibonacci Function"}}
+```
+
+## Các bước tiếp theo
+
+- [Sử dụng Công cụ và Kỹ năng](/docs/tutorials/use-tools-and-skills)
+- [Bắt đầu nhanh với Harness](/docs/harness/quick-start)

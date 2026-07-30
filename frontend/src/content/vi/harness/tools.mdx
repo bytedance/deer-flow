@@ -1,0 +1,334 @@
+---
+title: Công cụ (Tools)
+description: "Lead Agent là một agent gọi tool (tool-calling agent). Các tool là phương thức để nó tương tác với thế giới bên ngoài: tìm kiếm web, đọc và ghi file, chạy câu lệnh, ủy quyền tác vụ, và trình bày các kết quả đầu ra cho người dùng."
+---
+
+import { Callout, Tabs } from "nextra/components";
+
+# Công cụ (Tools)
+
+<Callout type="info" emoji="🔧">
+  Tools là các hành động mà Lead Agent có thể thực hiện. DeerFlow cung cấp các tool tích hợp sẵn, tích hợp từ cộng đồng, các tool MCP, và các tool đi kèm với skill — tất cả đều được điều khiển thông qua file <code>config.yaml</code>.
+</Callout>
+
+Lead Agent là một agent gọi tool (tool-calling agent). Các tool là phương thức để nó tương tác với thế giới bên ngoài: tìm kiếm web, đọc và ghi file, chạy câu lệnh, ủy quyền tác vụ, và trình bày các kết quả đầu ra cho người dùng.
+
+DeerFlow phân chia các tool thành bốn nhóm:
+
+1. **Tool tích hợp sẵn (Built-in tools)** — các khả năng runtime cốt lõi luôn khả dụng cho agent.
+2. **Tool cộng đồng (Community tools)** — tích hợp với các dịch vụ bên ngoài như tìm kiếm web, tải trang, và tìm kiếm hình ảnh.
+3. **Tool MCP (MCP tools)** — các tool được cung cấp bởi các Model Context Protocol server bên ngoài.
+4. **Tool kỹ năng (Skill tools)** — các tool đi kèm với các gói skill cụ thể.
+
+## Tool tích hợp sẵn (Built-in tools)
+
+Các tool tích hợp sẵn là một phần của Harness và luôn khả dụng mà không cần cấu hình thêm.
+
+### task
+
+Ủy quyền một tác vụ phụ cho một subagent. Lead Agent sử dụng tool này khi một tác vụ quá rộng cho một luồng lập luận đơn lẻ hoặc khi việc thực hiện song song mang lại hiệu quả tốt hơn.
+
+```
+task(agent="general-purpose", task="...", context="...")
+```
+
+Xem trang [Tác nhân phụ (Subagents)](/docs/harness/subagents) để biết cách cấu hình subagents.
+
+---
+
+### present_files
+
+Trình bày các file kết quả đầu ra cho người dùng dưới dạng các artifact. Agent gọi tool này sau khi tạo ra một file (báo cáo, biểu đồ, mã nguồn, v.v.) để hiển thị trực quan trong cuộc hội thoại.
+
+Các file tại thư mục `/mnt/user-data/uploads/*` được sao chép vào `/mnt/user-data/outputs/*` trước khi trình bày. Đường dẫn của các artifact được theo dõi trong `ThreadState.artifacts`.
+
+---
+
+### view_image
+
+Đọc một file hình ảnh và chèn nội dung của nó vào ngữ cảnh của model để tiến hành phân tích thị giác. Chỉ khả dụng khi model đang hoạt động có thuộc tính `supports_vision: true`.
+
+---
+
+### clarification
+
+Hỏi người dùng một câu hỏi làm rõ trước khi tiếp tục. Hành động này được kích hoạt bởi `ClarificationMiddleware` khi model quyết định không có đủ thông tin để thực hiện hành động.
+
+---
+
+### setup_agent
+
+Cấu hình động cho session hiện tại của agent. Được sử dụng trong luồng khởi động (bootstrap) khi thiết lập một custom agent mới.
+
+---
+
+### update_agent
+
+Lưu trữ các bản cập nhật cho file `SOUL.md` và `config.yaml` của custom agent hiện tại. Chỉ được liên kết với Lead Agent khi một custom agent đang hoạt động (`agent_name` được thiết lập trong ngữ cảnh runtime). Hãy sử dụng tool này khi người dùng yêu cầu agent tinh chỉnh phần mô tả, tính cách, danh sách trắng skill (skill whitelist), danh sách trắng nhóm tool (tool-group whitelist), hoặc model mặc định của chính nó — nó sẽ ghi trực tiếp vào thư mục phân vùng của từng người dùng `{base_dir}/users/{user_id}/agents/{agent_name}/`, để thay đổi tự động được áp dụng ở lượt tiếp theo của người dùng. Chỉ những trường bạn truyền vào rõ ràng mới được cập nhật; bỏ qua trường nào thì giá trị hiện tại của trường đó sẽ được giữ nguyên. Truyền `skills=[]` để tắt tất cả các skill, hoặc bỏ qua trường `skills` để giữ nguyên danh sách trắng hiện có.
+
+---
+
+### invoke_acp_agent
+
+Gọi một agent bên ngoài bằng giao thức [Agent Connect Protocol (ACP)](https://agentconnectprotocol.org/). Yêu cầu cấu hình `acp_agents:` trong file `config.yaml`. Xem trang [Tác nhân phụ (Subagents)](/docs/harness/subagents) để biết cấu hình ACP.
+
+---
+
+### tool_search
+
+Tìm kiếm các tool bằng tên hoặc mô tả và tải chúng vào ngữ cảnh của agent theo yêu cầu. Chỉ hoạt động khi bật `tool_search.enabled: true` trong file `config.yaml`. Hữu ích khi MCP hoặc các tập hợp tool khác cung cấp quá nhiều tool và bạn muốn giảm thiểu lượng sử dụng ngữ cảnh (context window).
+
+## Các tool file hệ thống của Sandbox
+
+Các tool dưới đây tương tác với hệ thống file của sandbox. Chúng yêu cầu một sandbox phải được cấu hình và đang hoạt động.
+
+| Công cụ (Tool) | Mô tả |
+| ------------- | ----------------------------------------------------------------- |
+| `ls`          | Liệt kê các file trong một thư mục |
+| `read_file`   | Đọc nội dung file |
+| `glob`        | Tìm kiếm file khớp với một mẫu (pattern) |
+| `grep`        | Tìm kiếm nội dung bên trong file |
+| `write_file`  | Ghi nội dung vào một file |
+| `str_replace` | Thay thế chuỗi ký tự trong một file |
+| `bash`        | Thực thi một câu lệnh shell (yêu cầu `allow_host_bash: true` hoặc một container sandbox) |
+
+Các tool này được cấu hình trong `config.yaml` dưới mục `tools:`:
+
+```yaml
+tools:
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:glob_tool
+  - use: deerflow.sandbox.tools:grep_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:str_replace_tool
+  - use: deerflow.sandbox.tools:bash_tool # yêu cầu host bash hoặc container sandbox
+```
+
+## Các tool từ cộng đồng (Community tools)
+
+Các tool cộng đồng kết nối agent với các dịch vụ bên ngoài. Chúng được cấu hình trong `config.yaml` dưới mục `tools:` bằng cách sử dụng trường `use:` để chỉ định lớp triển khai.
+
+### Tìm kiếm Web (Web search)
+
+<Tabs items={["DuckDuckGo (mặc định)", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+```
+Không yêu cầu API key. Cấu hình mặc định, phù hợp cho việc phát triển và sử dụng chung.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.tavily.tools:web_search_tool
+    api_key: $TAVILY_API_KEY
+```
+Tìm kiếm chất lượng cao với kết quả có cấu trúc. Yêu cầu API key của [Tavily](https://tavily.com).
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[tavily]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:web_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Kết quả từ chỉ mục độc lập của Brave thông qua [Brave Search API](https://brave.com/search/api/) chính thức. Yêu cầu một API key. `max_results` giới hạn tối đa là 20.
+
+Không yêu cầu cài đặt thêm thư viện phụ thuộc.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_search_tool
+    api_key: $EXA_API_KEY
+```
+Tìm kiếm ngữ nghĩa với công nghệ truy xuất mạng neural. Yêu cầu API key của [Exa](https://exa.ai).
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[exa]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:web_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+Tích hợp tìm kiếm InfoQuest.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.firecrawl.tools:web_search_tool
+    api_key: $FIRECRAWL_API_KEY
+```
+Tìm kiếm và thu thập dữ liệu web được hỗ trợ bởi Firecrawl. Yêu cầu API key của [Firecrawl](https://firecrawl.dev).
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[firecrawl]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_search_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+GroundRoute là một lớp meta search: một API đứng trước sáu công cụ tìm kiếm (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). Nó định tuyến mỗi truy vấn đến công cụ rẻ nhất đáp ứng được ngưỡng chất lượng và tự động chuyển đổi dự phòng (failover) nếu một công cụ bị sập. Cơ chế giá chia sẻ lợi ích, bạn giữ lại khoảng một nửa lượng tiết kiệm từ cache.
+
+Yêu cầu một API key của [GroundRoute](https://groundroute.ai). Ngoài ra còn hỗ trợ tính năng `web_fetch`.
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[groundroute]'`
+
+  </Tabs.Tab>
+</Tabs>
+
+### Tải trang Web (Web fetch - trích xuất nội dung trang)
+
+<Tabs items={["Jina AI (mặc định)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+    api_key: $JINA_API_KEY # tùy chọn; sử dụng ẩn danh sẽ bị giới hạn lượt gọi (rate limit)
+```
+Chuyển đổi các trang web thành định dạng Markdown sạch sẽ. Hoạt động không cần API key với giới hạn lượt gọi thấp hơn.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.browserless.tools:web_fetch_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # yêu cầu cho Browserless Cloud; bỏ qua đối với bản self-hosted
+```
+Render các trang web sử dụng nhiều JavaScript bằng Chrome không đầu (headless Chrome), sau đó trích xuất thành Markdown dễ đọc.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.exa.tools:web_fetch_tool
+    api_key: $EXA_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:web_fetch_tool
+    api_key: $INFOQUEST_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.firecrawl.tools:web_fetch_tool
+    api_key: $FIRECRAWL_API_KEY
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.groundroute.tools:web_fetch_tool
+    api_key: $GROUNDROUTE_API_KEY
+```
+  </Tabs.Tab>
+</Tabs>
+
+### Chụp ảnh màn hình Web (Web capture - chụp ảnh màn hình trang đã render)
+
+```yaml
+tools:
+  - name: web_capture
+    group: web
+    use: deerflow.community.browserless.tools:web_capture_tool
+    base_url: http://localhost:3032
+    # token: $BROWSERLESS_TOKEN # yêu cầu cho Browserless Cloud; bỏ qua đối với bản self-hosted
+    output_format: png
+    full_page: true
+    viewport_width: 1280
+    viewport_height: 720
+    # allow_private_addresses: false # SSRF guard; giữ false trong môi trường production. Chỉ đặt true để chụp các địa chỉ nội bộ.
+```
+
+Chụp lại giao diện render của các trang web thông qua Browserless API `/screenshot` và trình bày hình ảnh đó qua hệ thống artifact của DeerFlow. Tính năng này hữu ích cho việc kiểm tra giao diện trực quan, kiểm tra UI, và đối với các trang sử dụng nhiều JavaScript khi việc trích xuất Markdown thông thường là không đủ. Mặc định nó từ chối các URL phân giải về các địa chỉ IP private, loopback, hoặc các địa chỉ metadata đám mây; chỉ đặt `allow_private_addresses: true` khi bạn có chủ đích nhắm vào một host nội bộ.
+
+### Tìm kiếm hình ảnh (Image search)
+
+<Tabs items={["DuckDuckGo (mặc định)", "InfoQuest", "Serper", "Brave"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.image_search.tools:image_search_tool
+```
+Không yêu cầu API key. Cấu hình mặc định, tốt cho việc phát triển và sử dụng chung.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.infoquest.tools:image_search_tool
+    api_key: $INFOQUEST_API_KEY
+```
+Yêu cầu một API key của InfoQuest.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.serper.tools:image_search_tool
+    api_key: $SERPER_API_KEY
+```
+Kết quả Google Images thông qua Serper API. Yêu cầu một API key của [Serper](https://serper.dev). Tái sử dụng `SERPER_API_KEY` với tool `web_search` của Serper.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.brave.tools:image_search_tool
+    api_key: $BRAVE_SEARCH_API_KEY
+```
+Các kết quả hình ảnh độc lập thông qua Brave Image Search. Yêu cầu một API key của [Brave Search API](https://brave.com/search/api/). Tái sử dụng `BRAVE_SEARCH_API_KEY` với tool `web_search` của Brave.
+  </Tabs.Tab>
+</Tabs>
+
+## Nhóm công cụ (Tool groups)
+
+Các nhóm tool cho phép bạn tổ chức các tool thành các tập hợp có tên gọi cụ thể và giới hạn xem các custom agent nào có quyền truy cập nhóm đó.
+
+```yaml
+tool_groups:
+  - name: research
+    tools:
+      - web_search
+      - web_fetch
+      - image_search
+  - name: coding
+    tools:
+      - bash
+      - read_file
+      - write_file
+      - str_replace
+      - glob
+      - grep
+```
+
+Các custom agents sau đó có thể tham chiếu đến một nhóm bằng tên trong cấu hình của chúng, giới hạn quyền truy cập tool của chúng vào đúng nhóm có liên quan.
+
+## Tìm kiếm công cụ (Tool search - tải tool trì hoãn)
+
+Khi bạn có quá nhiều tool (đặc biệt là từ nhiều MCP servers khác nhau), việc tải tất cả chúng ngay từ đầu sẽ làm tăng lượng tiêu tốn ngữ cảnh (context window) và có thể gây nhầm lẫn cho model. Tính năng tìm kiếm tool giải quyết vấn đề này:
+
+```yaml
+tool_search:
+  enabled: true
+```
+
+Khi được bật, các tool không được liệt kê trực tiếp trong ngữ cảnh của model. Thay vào đó, chúng được khám phá tại runtime thông qua một tool tích hợp sẵn tên là `tool_search`. Agent sẽ tìm kiếm bằng tên hoặc mô tả và các tool khớp kết quả sẽ được tải vào ngữ cảnh theo yêu cầu.
+
+Tính năng này đặc biệt hữu ích khi các MCP server cung cấp hàng tá tool khác nhau.
+
+<Cards num={2}>
+  <Cards.Card title="Tích hợp MCP" href="/docs/harness/mcp" />
+  <Cards.Card title="Kỹ năng (Skills)" href="/docs/harness/skills" />
+</Cards>

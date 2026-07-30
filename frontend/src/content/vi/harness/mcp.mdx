@@ -1,0 +1,113 @@
+---
+title: Tích hợp MCP
+description: "**Model Context Protocol (MCP)** là một tiêu chuẩn mở để kết nối các language models với các tool và nguồn dữ liệu bên ngoài. Tích hợp MCP của DeerFlow cho phép bạn mở rộng agent với bất kỳ tool server nào triển khai giao thức MCP — mà không cần sửa đổi bản thân Harness."
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Tích hợp MCP
+
+<Callout type="info" emoji="🔌">
+  Model Context Protocol (MCP) giúp DeerFlow kết nối tới bất kỳ external tool server nào. Sau khi kết nối, các tool MCP sẽ khả dụng với Lead Agent giống hệt như các tool tích hợp sẵn.
+</Callout>
+
+**Model Context Protocol (MCP)** là một tiêu chuẩn mở để kết nối các language models với các tool và nguồn dữ liệu bên ngoài. Tích hợp MCP của DeerFlow cho phép bạn mở rộng agent với bất kỳ tool server nào triển khai giao thức MCP — mà không cần sửa đổi bản thân Harness.
+
+## Cấu hình
+
+Các server MCP được cấu hình trong file `extensions_config.json`, tách biệt với file `config.yaml`. Sự phân tách này cho phép các cấu hình MCP và skill được quản lý độc lập và cập nhật tại runtime thông qua Gateway API.
+
+Vị trí mặc định là thư mục gốc của dự án (cùng thư mục với `config.yaml`). Đường dẫn này được xác định bởi phương thức `ExtensionsConfig.resolve_config_path()`.
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"],
+      "enabled": true
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "/path/to/db.sqlite"],
+      "enabled": false
+    }
+  }
+}
+```
+
+<Callout type="warning">
+  Không nên thêm một MCP filesystem server cho các file trong workspace của DeerFlow. DeerFlow đã cung cấp sẵn các tool xử lý file tích hợp cho việc truy cập workspace trong phạm vi thread, và việc chồng chéo các tool xử lý file với ngữ nghĩa đường dẫn khác nhau có thể làm cho việc lựa chọn tool của LLM và hành vi truy cập file không ổn định. DeerFlow hiện không điều chỉnh chế độ MCP Roots cho các filesystem server: nó không xuất bản các MCP roots riêng cho từng thread hoặc ánh xạ các đường dẫn sandbox như <code>/mnt/user-data/...</code> thành các đường dẫn được chấp nhận bởi <code>@modelcontextprotocol/server-filesystem</code>.
+</Callout>
+
+Mỗi mục cấu hình server hỗ trợ:
+
+- `command`: file thực thi cần chạy (ví dụ: `npx`, `uvx`, `python`)
+- `args`: các đối số lệnh dưới dạng một mảng (array)
+- `enabled`: server có hoạt động hay không (có thể chuyển đổi mà không cần xóa cấu hình)
+- `env`: các biến môi trường tùy chọn được chèn vào tiến trình server
+
+## Quy trình tải các Tool
+
+<Steps>
+
+### Khởi tạo khi khởi động (Startup initialization)
+
+Khi máy chủ DeerFlow khởi động, hàm `initialize_mcp_tools()` được gọi. Hàm này sẽ kết nối tới tất cả các MCP server được bật, lấy schema tool của chúng và lưu vào bộ nhớ cache.
+
+### Khởi tạo trì hoãn dự phòng (Lazy initialization fallback)
+
+Nếu máy chủ khởi động trước khi các tool MCP được khởi tạo (ví dụ: trong LangGraph Studio), hàm `get_cached_mcp_tools()` sẽ thực hiện khởi tạo trì hoãn (lazy initialization) ở lượt gọi tool đầu tiên.
+
+### Giải phóng Cache (Cache invalidation)
+
+Bộ nhớ cache của MCP tools theo dõi thời gian sửa đổi (`mtime`) của file `extensions_config.json`. Khi file này thay đổi — ví dụ, khi một server được bật hoặc tắt thông qua Gateway API — cache sẽ được đánh dấu là hết hạn (stale) và các tool sẽ được tải lại ở request tiếp theo.
+
+Điều này giúp các thay đổi của MCP server có hiệu lực ngay lập tức mà không cần khởi động lại máy chủ DeerFlow.
+
+### Trạng thái khả dụng của Tool
+
+Sau khi tải, các tool MCP sẽ xuất hiện trong danh sách tool của Lead Agent bên cạnh các tool tích hợp sẵn và cộng đồng. Agent sẽ lựa chọn và gọi chúng bằng cùng một cơ chế giống như bất kỳ tool nào khác.
+
+</Steps>
+
+## Tích hợp tính năng Tìm kiếm công cụ (Tool search)
+
+Khi có nhiều MCP server cung cấp một lượng lớn các tool, việc tải tất cả chúng vào ngữ cảnh của agent cùng một lúc có thể làm tăng lượng sử dụng token và giảm độ chính xác của việc chọn tool.
+
+Hãy bật tính năng **tìm kiếm tool (tool search)** để tải các tool MCP theo yêu cầu:
+
+```yaml
+# config.yaml
+tool_search:
+  enabled: true
+```
+
+Khi bật tìm kiếm tool, các tool MCP được liệt kê theo tên trong system prompt nhưng không được bao gồm đầy đủ schema tool. Agent khám phá chúng bằng cách sử dụng tool tích hợp sẵn `tool_search` và chỉ tải những tool cần thiết cho tác vụ hiện tại.
+
+## Hỗ trợ OAuth
+
+Một số MCP server yêu cầu xác thực OAuth. Module `mcp/oauth.py` của DeerFlow xử lý luồng OAuth cho các server khai báo yêu cầu OAuth trong header của chúng.
+
+Khi một MCP server được bảo vệ bằng OAuth được kết nối, DeerFlow sẽ:
+
+1. Phát hiện yêu cầu OAuth từ header khả năng của server
+2. Xây dựng các header xác thực phù hợp bằng hàm `get_initial_oauth_headers()`
+3. Bao bọc các lượt gọi tool với một bộ chặn OAuth (OAuth interceptor) thông qua `build_oauth_tool_interceptor()`
+
+Luồng OAuth hoạt động hoàn toàn trong suốt đối với Lead Agent — nó chỉ cần gọi tool, và DeerFlow sẽ tự động xử lý việc xác thực.
+
+## Quản lý các MCP Server
+
+Có nhiều cách để quản lý các MCP server:
+
+- **Thông qua giao diện DeerFlow App UI**: bảng điều khiển extensions hiển thị các MCP server đã kết nối và cho phép bạn bật/tắt chúng.
+- **Thông qua Gateway API**: sử dụng các endpoint `POST /api/extensions/mcp/{name}/enable` và `/disable`.
+- **Bằng cách chỉnh sửa trực tiếp file `extensions_config.json`**: hữu ích cho việc cấu hình tự động bằng script hoặc chương trình.
+
+Các thay đổi được áp dụng tự động nhờ cơ chế giải phóng cache dựa trên thời gian sửa đổi file (mtime).
+
+<Cards num={2}>
+  <Cards.Card title="Công cụ (Tools)" href="/docs/harness/tools" />
+  <Cards.Card title="Cấu hình" href="/docs/harness/configuration" />
+</Cards>

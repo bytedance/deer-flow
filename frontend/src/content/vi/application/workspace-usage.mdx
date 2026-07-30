@@ -1,0 +1,111 @@
+---
+title: Sử dụng Không gian làm việc
+description: DeerFlow workspace là một giao diện trò chuyện dựa trên trình duyệt, nơi bạn có thể gửi tin nhắn cho Agent, tải lên các tệp, xem các bước trung gian và tải xuống các tạo tác (artifacts) được tạo ra.
+---
+
+import { Callout } from "nextra/components";
+
+# Sử dụng Không gian làm việc
+
+<Callout type="info" emoji="💬">
+  DeerFlow workspace là nơi bạn tương tác với Agent. Trang này bao gồm các luồng công việc chính của người dùng — tạo cuộc hội thoại, tải lên tệp, xem tạo tác (artifacts) và sử dụng kỹ năng.
+</Callout>
+
+DeerFlow workspace là một giao diện trò chuyện dựa trên trình duyệt, nơi bạn có thể gửi tin nhắn cho Agent, tải lên các tệp, xem các bước trung gian và tải xuống các tạo tác (artifacts) được tạo ra.
+
+## Tạo cuộc hội thoại mới
+
+1. Mở [http://localhost:2026](http://localhost:2026).
+2. Trên giao diện chính, nhấn vào nút **New Thread** (Tạo cuộc hội thoại mới), hoặc nhập trực tiếp tin nhắn vào khung nhập liệu.
+3. Nhập tin nhắn đầu tiên của bạn và gửi đi.
+
+Mỗi cuộc hội thoại là một **luồng trò chuyện (thread)**, có lịch sử, tạo tác và điểm kiểm tra độc lập.
+
+## Chọn mô hình (Model)
+
+Tại vùng nhập tin nhắn, nhấn vào **mô hình chọn (Model selector)** để chọn từ các mô hình được cấu hình trong tệp `config.yaml`. Mô hình đầu tiên được cấu hình sẽ được chọn theo mặc định.
+
+Bạn có thể chuyển đổi mô hình giữa cuộc hội thoại — mỗi lượt gửi tin nhắn mới sẽ sử dụng mô hình được chọn.
+
+## Chọn Agent
+
+Mở **Agent selector** để chọn từ các Agent có sẵn:
+
+- **Agent mặc định**: Agent đa dụng sử dụng tất cả công cụ và kỹ năng toàn cục.
+- **Agent tùy chỉnh**: Agent được đặt tên có tổ hợp kỹ năng chuyên biệt, quyền truy cập công cụ và lời nhắc (prompts).
+
+Xem trang [Agent và luồng trò chuyện](/docs/application/agents-and-threads) để biết cách tạo Agent tùy chỉnh.
+
+## Tải lên tệp
+
+Kéo và thả tệp vào vùng nhập tin nhắn, hoặc nhấn vào biểu tượng đính kèm để tải tệp lên. Các tệp được tải lên sẽ được gắn vào thư mục `/mnt/user-data/uploads/` của sandbox, giúp Agent có thể đọc và xử lý trực tiếp.
+
+**Các thao tác hỗ trợ**:
+
+- Đọc và phân tích nội dung tệp
+- Xử lý các tệp dữ liệu (CSV, JSON, Excel)
+- Trích xuất nội dung PDF
+- Phân tích hình ảnh (yêu cầu các mô hình hỗ trợ thị giác - vision)
+
+<Callout type="tip">
+  Khi tải lên tệp lớn, hãy mô tả cụ thể nội dung tệp cho Agent để có kết quả tốt hơn (ví dụ: "hãy phân tích tệp CSV chứa dữ liệu doanh thu quý này").
+</Callout>
+
+## Sử dụng kỹ năng
+
+Một số cấu hình Agent hiển thị **Skills selector** (Trình chọn kỹ năng). Kỹ năng cho Agent biết loại công việc cần thực hiện (nghiên cứu chuyên sâu, phân tích dữ liệu, tạo biểu đồ, v.v.).
+
+Nhấp vào trình chọn kỹ năng trong ô nhập liệu để chọn một kỹ năng. Kỹ năng được chọn sẽ chèn các hướng dẫn chuyên môn và luồng công việc vào cuộc hội thoại hiện tại.
+
+## Xem quá trình suy nghĩ của Agent
+
+Khi Agent gọi công cụ hoặc thực hiện suy luận, bạn có thể mở rộng **Thinking steps** (Các bước suy nghĩ):
+
+- **Tool calls**: Agent đang gọi công cụ nào và sử dụng các đối số (arguments) gì.
+- **Tool results**: Kết quả công cụ trả về.
+- **Thinking** (nếu mô hình hỗ trợ): Quá trình suy luận nội bộ của mô hình.
+- **Todo list** (chế độ lập kế hoạch): Danh sách tác vụ hiện tại và trạng thái hoàn thành của chúng.
+
+Nhấp vào mũi tên mở rộng bên cạnh tin nhắn để xem toàn bộ chuỗi suy luận.
+
+## Hiểu về lượng Token sử dụng
+
+Nếu tính năng hiển thị lượng token sử dụng được bật, DeerFlow sẽ hiển thị tổng số lượng ở cấp độ hội thoại ở trên cùng, và hiển thị tóm tắt mức sử dụng của từng lượt hoặc cấp độ gỡ lỗi (debug) trong danh sách tin nhắn.
+
+- **Tổng số lượng ở trên cùng**: Tổng số lượng cấp độ luồng trò chuyện được lưu trữ bền vững ở backend. Khi phản hồi hiện tại vẫn đang được truyền dữ liệu dạng luồng, lượng token đang xử lý tạm thời của phản hồi chưa hoàn thành này có thể được hiển thị cộng dồn ở trên cùng.
+- **Mức sử dụng mỗi lượt / gỡ lỗi**: Mức sử dụng được tính toán dựa trên các tin nhắn của assistant hiển thị trong giao diện trò chuyện hiện tại.
+
+Vì vậy, tổng số lượng ở trên cùng và tổng số lượng hiển thị cho mỗi lượt **không bắt buộc phải bằng nhau hoàn toàn**. Số lượng ở trên cùng thể hiện tổng số sách của toàn bộ luồng trò chuyện; số lượng hiển thị mỗi lượt thể hiện chế độ xem các tin nhắn bạn hiện tại có thể nhìn thấy.
+
+Các con số này cũng có thể khác với trang hóa đơn của nhà cung cấp mô hình. Các nguyên nhân phổ biến bao gồm các yêu cầu gửi lại, các yêu cầu thất bại, token đầu vào được lưu bộ nhớ đệm (cached input tokens), token suy luận (reasoning tokens), quy tắc tính phí của riêng nhà cung cấp và các cuộc gọi nội bộ không hiển thị dưới dạng tin nhắn trò chuyện thông thường.
+
+## Xem tạo tác (Artifacts)
+
+Khi Agent tạo ra các tệp (báo cáo, biểu đồ, tệp mã nguồn, bài trình bày), chúng sẽ xuất hiện dưới dạng các **tạo tác (artifacts)** trong cuộc hội thoại.
+
+Nhấp vào thẻ tạo tác:
+
+- Xem trước tệp trong trình duyệt.
+- Tải tệp xuống máy cục bộ.
+- Sao chép nội dung tệp.
+
+Các tạo tác được lưu trữ bền vững trong thư mục dữ liệu người dùng của luồng trò chuyện (`.deer-flow/threads/{thread_id}/user-data/outputs/`).
+
+## Quản lý luồng trò chuyện
+
+**Xem các luồng trò chuyện cũ**: Sử dụng thanh bên (sidebar) để duyệt qua các cuộc hội thoại trước đó.
+
+**Đổi tên luồng trò chuyện**: `TitleMiddleware` sẽ tự động tạo tiêu đề sau lượt tương tác đầu tiên. Bạn cũng có thể đổi tên luồng trò chuyện theo cách thủ công.
+
+**Xóa luồng trò chuyện**: Chọn xóa từ menu thanh bên của luồng trò chuyện. Thao tác này sẽ xóa trạng thái luồng trò chuyện và tất cả các tệp dữ liệu người dùng liên quan.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Agent và luồng trò chuyện"
+    href="/docs/application/agents-and-threads"
+  />
+  <Cards.Card
+    title="Vận hành & Khắc phục sự cố"
+    href="/docs/application/operations-and-troubleshooting"
+  />
+</Cards>

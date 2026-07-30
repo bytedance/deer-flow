@@ -1,0 +1,286 @@
+---
+title: Cấu hình
+description: Trang này bao gồm tất cả các tầng cấu hình của DeerFlow App — `config.yaml`, các biến môi trường của frontend, `extensions_config.json` và các biến môi trường runtime.
+---
+
+import { Callout, Tabs } from "nextra/components";
+
+# Cấu hình
+
+Trang này bao gồm tất cả các tầng cấu hình của DeerFlow App — `config.yaml`, các biến môi trường của frontend, `extensions_config.json` và các biến môi trường runtime.
+
+## Các tệp cấu hình
+
+| Tệp | Mục đích |
+| :--- | :--- |
+| `config.yaml` | Cấu hình backend: các mô hình, sandbox, công cụ, kỹ năng, bộ nhớ và tất cả các thiết lập của Harness |
+| `extensions_config.json` | Các MCP servers và trạng thái bật/tắt kỹ năng (được quản lý bởi giao diện App UI và Gateway API) |
+
+Các biến môi trường frontend kiểm soát quá trình build và hành vi runtime của Next.js.
+
+## config.yaml
+
+Bắt đầu bằng cách sao chép tệp ví dụ:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Các phần quan trọng nhất đối với cấu hình ứng dụng là:
+
+### Các mô hình (Models)
+
+Cấu hình các nhà cung cấp LLM mà tác nhân có thể sử dụng. Yêu cầu có ít nhất một mô hình.
+
+<Tabs items={["OpenAI", "Anthropic", "DeepSeek", "Ollama", "Gemini"]}>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: claude-3-5-sonnet
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-3-5-sonnet-20241022
+    api_key: $ANTHROPIC_API_KEY
+    default_request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_vision: true
+    supports_thinking: true
+    when_thinking_enabled:
+      thinking:
+        type: enabled
+    when_thinking_disabled:
+      thinking:
+        type: disabled
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: deepseek-v4
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: deepseek-v4-pro
+    api_key: $DEEPSEEK_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    supports_thinking: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: qwen3-local
+    use: langchain_ollama:ChatOllama
+    model: qwen3:32b
+    base_url: http://localhost:11434  # Không có hậu tố /v1 — sử dụng API Ollama gốc
+    num_predict: 8192
+    temperature: 0.7
+    reasoning: true
+    supports_thinking: true
+    supports_vision: false
+```
+
+Cài đặt nhà cung cấp Ollama: `cd backend && uv add 'deerflow-harness[ollama]'`
+
+<Callout type="warning">
+  Sử dụng <code>langchain_ollama:ChatOllama</code> (không phải điểm cuối tương thích với OpenAI) cho các mô hình Ollama. API gốc phân tách nội dung suy nghĩ (thinking) một cách chính xác; điểm cuối tương thích với OpenAI có thể làm phẳng hoặc làm mất nội dung này.
+</Callout>
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+models:
+  - name: gemini-2.5-pro
+    use: langchain_google_genai:ChatGoogleGenerativeAI
+    model: gemini-2.5-pro
+    gemini_api_key: $GEMINI_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    max_tokens: 8192
+    supports_vision: true
+```
+  </Tabs.Tab>
+</Tabs>
+
+### Sandbox
+
+Chọn môi trường thực thi cho các thao tác tệp và lệnh của tác nhân:
+
+<Tabs items={["Cục bộ (mặc định)", "Docker container", "K8s Provisioner"]}>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false  # chỉ đặt là true đối với các luồng công việc một người dùng đáng tin cậy
+```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+  replicas: 3
+  idle_timeout: 600
+```
+
+Cài đặt: `cd backend && uv add 'deerflow-harness[aio-sandbox]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+```
+  </Tabs.Tab>
+</Tabs>
+
+### Công cụ (Tools)
+
+Cấu hình các công cụ mà tác nhân có quyền truy cập. Cấu hình mặc định sử dụng DuckDuckGo (không yêu cầu API key) và Jina AI cho các hoạt động web:
+
+```yaml
+tools:
+  # Tìm kiếm Web (chọn một)
+  - use: deerflow.community.ddg_search.tools:web_search_tool # mặc định, không yêu cầu key
+  # - use: deerflow.community.tavily.tools:web_search_tool
+  #   api_key: $TAVILY_API_KEY
+
+  # Thu thập nội dung Web (chọn một)
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+
+  # Tìm kiếm hình ảnh
+  - use: deerflow.community.image_search.tools:image_search_tool
+
+  # Thao tác tệp
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:glob_tool
+  - use: deerflow.sandbox.tools:grep_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:str_replace_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+### Database backend
+
+DeerFlow sử dụng phần `database` cho cả dữ liệu điểm kiểm tra LangGraph và dữ liệu ứng dụng như các lượt chạy, phản hồi và siêu dữ liệu luồng trò chuyện.
+
+Theo mặc định, DeerFlow sử dụng SQLite cho việc lưu trữ cục bộ, đơn nút:
+
+```yaml
+database:
+  backend: sqlite
+  sqlite_dir: .deer-flow/data
+```
+
+Chế độ SQLite lưu trữ tất cả thông tin trong một tệp `deerflow.db` duy nhất. Điều này phù hợp cho việc phát triển hoặc triển khai một người dùng, nhưng lưu lượng truy cập đồng thời trong môi trường sản xuất có thể chạm giới hạn một người ghi của SQLite và gây ra lỗi `sqlite3.OperationalError: database is locked`.
+
+Đối với môi trường sản xuất hoặc triển khai nhiều người dùng, hãy sử dụng Postgres:
+
+```yaml
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+
+run_events:
+  backend: db
+```
+
+Đặt `DATABASE_URL` trong môi trường của bạn, ví dụ: `postgresql://user:password@localhost:5432/deerflow`.
+
+Cài đặt hỗ trợ PostgreSQL cho các lượt chạy cục bộ:
+
+```bash
+cd backend && uv sync --all-packages --extra postgres
+```
+
+Đối với Docker hoặc khởi động bằng mã lệnh, hãy thiết lập `UV_EXTRAS=postgres` trước khi cài đặt hoặc build. Phần cấu hình độc lập `checkpointer` cũ vẫn được chấp nhận để tương thích ngược, nhưng nên ưu tiên sử dụng `database` cho các triển khai mới.
+
+### Bộ nhớ (Memory)
+
+```yaml
+memory:
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  max_facts: 100
+  injection_enabled: true
+  max_injection_tokens: 2000
+```
+
+## Biến môi trường frontend
+
+Thiết lập các biến môi trường này trước khi chạy `pnpm build` hoặc khởi động frontend trong môi trường sản xuất:
+
+| Biến | Bắt buộc | Mô tả |
+| :--- | :--- | :--- |
+| `BETTER_AUTH_SECRET` | **Bắt buộc** trong sản xuất | Khóa bí mật để ký phiên làm việc. Tạo bằng `openssl rand -base64 32`. |
+| `BETTER_AUTH_URL` | Khuyên dùng | URL cơ sở công khai (ví dụ: `https://your-domain.com`) |
+| `SKIP_ENV_VALIDATION` | Tùy chọn | Đặt thành `1` để bỏ qua xác thực môi trường trong khi build (không khuyến nghị) |
+| `NEXT_PUBLIC_API_URL` | Tùy chọn | Ghi đè URL API cơ sở cho frontend |
+
+Trong quá trình phát triển, hãy thiết lập các biến này trong tệp `.env` ở thư mục gốc của kho lưu trữ:
+
+```bash
+BETTER_AUTH_SECRET=your-strong-secret-here-min-32-chars
+```
+
+## extensions_config.json
+
+Tệp này quản lý các kết nối MCP server và trạng thái bật/tắt kỹ năng. Nó được tạo tự động khi bạn lần đầu tiên quản lý các tiện ích mở rộng thông qua App UI hoặc Gateway API.
+
+Ví dụ chỉnh sửa thủ công:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"],
+      "enabled": true
+    }
+  },
+  "skills": {
+    "deep-research": { "enabled": true },
+    "data-analysis": { "enabled": true }
+  }
+}
+```
+
+## Nâng cấp cấu hình (Config upgrade)
+
+Khi cấu trúc cấu hình thay đổi, `config_version` sẽ được tăng lên. Để hợp nhất các trường mới vào cấu hình hiện tại của bạn mà không làm mất các tùy chỉnh:
+
+```bash
+make config-upgrade
+```
+
+<Cards num={2}>
+  <Cards.Card
+    title="Hướng dẫn triển khai"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card
+    title="Cấu hình Harness"
+    href="/docs/harness/configuration"
+  />
+</Cards>

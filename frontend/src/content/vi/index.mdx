@@ -1,0 +1,95 @@
+---
+title: Tài Liệu Hướng Dẫn DeerFlow
+description: Tìm hiểu DeerFlow, phát triển với Harness và triển khai App.
+---
+
+# Tài Liệu Hướng Dẫn DeerFlow
+
+DeerFlow là một framework để xây dựng và vận hành các hệ thống tác nhân (agent). Framework này cung cấp cho bạn một runtime harness để soạn thảo các tác nhân với bộ nhớ, công cụ, kỹ năng, sandbox và các tác nhân phụ, đồng thời cũng cung cấp một lớp ứng dụng giúp chuyển đổi các khả năng đó thành một trải nghiệm sản phẩm thực tế hữu ích.
+
+Tài liệu hướng dẫn này được sắp xếp xoay quanh hai phần đó:
+
+- **DeerFlow Harness**: SDK cốt lõi và lớp runtime để xây dựng hệ thống tác nhân của riêng bạn.
+- **DeerFlow App**: ứng dụng tham chiếu được xây dựng dựa trên Harness để triển khai, vận hành và phục vụ người dùng cuối.
+
+Nếu bạn muốn hiểu cách DeerFlow hoạt động, hãy bắt đầu với phần Giới thiệu. Nếu bạn muốn xây dựng trên runtime cốt lõi, hãy truy cập tài liệu Harness. Nếu bạn muốn triển khai và sử dụng DeerFlow như một ứng dụng, hãy truy cập tài liệu App.
+
+## Bắt đầu tại đây
+
+### Nếu bạn mới tiếp cận DeerFlow
+
+Hãy bắt đầu với phần tổng quan khái niệm trước.
+
+- [Giới thiệu](./docs/introduction)
+- [Tại sao chọn DeerFlow](./docs/introduction/why-deerflow)
+- [Harness so với App](./docs/introduction/harness-vs-app)
+
+### Nếu bạn muốn xây dựng với DeerFlow
+
+Hãy bắt đầu với phần Harness. Lộ trình này dành cho các nhóm muốn tích hợp các khả năng của DeerFlow vào hệ thống riêng của họ hoặc xây dựng một sản phẩm tác nhân tùy chỉnh trên nền tảng runtime của DeerFlow.
+
+- [DeerFlow Harness](./docs/harness)
+- [Bắt đầu nhanh](./docs/harness/quick-start)
+- [Cấu hình](./docs/harness/configuration)
+- [Tùy chỉnh](./docs/harness/customization)
+
+### Nếu bạn muốn triển khai và sử dụng DeerFlow
+
+Hãy bắt đầu với phần App. Lộ trình này dành cho các nhóm muốn chạy DeerFlow dưới dạng một ứng dụng hoàn chỉnh và hiểu cách cấu hình, vận hành cũng như sử dụng nó trong thực tế.
+
+- [DeerFlow App](./docs/application)
+- [Bắt đầu nhanh](./docs/app/quick-start)
+- [Hướng dẫn triển khai](./docs/app/deployment-guide)
+- [Sử dụng Không gian làm việc](./docs/app/workspace-usage)
+
+## Cấu trúc tài liệu
+
+### Giới thiệu
+
+Phần Giới thiệu giúp bạn xây dựng mô hình tư duy đúng đắn trước khi đi sâu vào chi tiết triển khai cụ thể.
+
+- **DeerFlow là gì** giải thích DeerFlow là gì và những vấn đề mà nó được thiết kế để giải quyết.
+- **Tại sao chọn DeerFlow** giải thích động lực đằng sau dự án.
+- **Khái niệm cốt lõi** giới thiệu các khái niệm xuất hiện xuyên suốt tài liệu hướng dẫn.
+- **Harness so với App** giải thích mối quan hệ giữa lớp runtime và lớp ứng dụng.
+
+### DeerFlow Harness
+
+Phần Harness là phần trọng tâm của tài liệu kỹ thuật. Nó được viết cho các lập trình viên muốn tự xây dựng hệ thống dựa trên DeerFlow của riêng họ.
+
+- **Bắt đầu nhanh** chỉ ra cách tạo harness đầu tiên của bạn với API cốt lõi của DeerFlow.
+- **Nguyên tắc thiết kế** giải thích các ý tưởng kiến trúc đằng sau Harness.
+- **Cấu hình** bao gồm các bề mặt cấu hình chính của SDK/runtime.
+- **Bộ nhớ**, **Công cụ**, **Kỹ năng**, và **Sandbox** giải thích riêng lẻ từng khả năng hệ thống lớn.
+- **Tùy chỉnh** chỉ ra cách thích ứng DeerFlow với các yêu cầu sản phẩm riêng của bạn.
+- **Hướng dẫn tích hợp** giải thích cách tích hợp Harness vào một hệ thống lớn hơn.
+
+### DeerFlow App
+
+Phần App được viết cho các nhóm muốn triển khai DeerFlow như một sản phẩm hữu dụng cho người dùng.
+
+- **Bắt đầu nhanh** giúp bạn khởi chạy ứng dụng cục bộ.
+- **Hướng dẫn triển khai** giải thích cách triển khai DeerFlow trong môi trường của riêng bạn.
+- **Cấu hình** bao gồm mô hình cấu hình cấp ứng dụng.
+- **Sử dụng Không gian làm việc** giải thích các quy trình làm việc chính của người dùng.
+- **Tác nhân và Luồng trò chuyện** giải thích cách người dùng tương tác với DeerFlow trong thực tế.
+- **Vận hành và Khắc phục sự cố** bao gồm bảo trì và sử dụng trong môi trường sản xuất.
+
+### Hướng dẫn
+
+Phần Hướng dẫn dành cho việc học tập thông qua thực hành theo định hướng tác vụ cụ thể.
+
+- [Hướng dẫn](./docs/tutorials)
+
+### Tham chiếu
+
+Phần Tham chiếu dành cho việc tra cứu tài liệu chi tiết, bao gồm cấu hình, chế độ runtime, các API và bản đồ định hướng mã nguồn.
+
+- [Tham chiếu](./docs/reference)
+
+## Chọn lộ trình phù hợp
+
+- Nếu bạn đang **đánh giá dự án**, hãy bắt đầu với [Giới thiệu](./docs/introduction).
+- Nếu bạn đang **xây dựng hệ thống tác nhân của riêng mình**, hãy bắt đầu với [DeerFlow Harness](./docs/harness).
+- Nếu bạn đang **triển khai DeerFlow cho người dùng**, hãy bắt đầu với [DeerFlow App](./docs/application).
+- Nếu bạn muốn **học thông qua thực hành**, hãy truy cập [Hướng dẫn](./docs/tutorials).

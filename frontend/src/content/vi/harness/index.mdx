@@ -1,0 +1,55 @@
+---
+title: Cài đặt DeerFlow Harness
+description: DeerFlow Harness là Python SDK và nền tảng runtime để xây dựng hệ thống Super Agent của riêng bạn.
+---
+
+import { Callout } from "nextra/components";
+
+# Cài đặt DeerFlow Harness
+
+<Callout type="info" emoji="📦">
+  Package Python của DeerFlow Harness sẽ được phát hành dưới tên gọi <code>deerflow</code>
+  . Hiện tại package này chưa được release rộng rãi, vì vậy việc cài đặt đang ở trạng thái{" "}
+  <strong>Sắp ra mắt (Coming Soon)</strong>.
+</Callout>
+
+DeerFlow Harness là Python SDK và nền tảng runtime để xây dựng hệ thống Super Agent của riêng bạn.
+
+Nếu bạn muốn xây dựng các agent đi kèm với skills, memory, tools, sandboxes và subagents bên trong sản phẩm hoặc quy trình làm việc của riêng mình, đây chính là phần của DeerFlow mà bạn sẽ sử dụng để phát triển.
+
+## Tên package
+
+Tên package sẽ là:
+
+```bash
+pip install deerflow
+```
+
+Package này hiện chưa được công bố rộng rãi, nhưng đây sẽ là cách cài đặt mà tài liệu sử dụng ngay sau khi được phát hành.
+
+## Trạng thái hiện tại
+
+Package DeerFlow Harness **sắp ra mắt**.
+
+Tại thời điểm hiện tại, phần này tồn tại để xác định entry point của SDK và danh tính package, trong khi quy trình phân phối công khai đang được hoàn thiện.
+
+## Những gì Harness sẽ cung cấp cho bạn
+
+Harness được thiết kế cho các lập trình viên muốn xây dựng hệ thống agent của riêng họ trên nền tảng runtime model của DeerFlow.
+
+Nó cung cấp nền tảng để:
+
+- Xây dựng các long-horizon agent,
+- Kết hợp các khả năng runtime như memory, tools, skills, và subagents,
+- Chạy các agent với sandboxed execution,
+- Tùy chỉnh hành vi của agent thông qua cấu hình và code, và
+- Tích hợp DeerFlow vào kiến trúc ứng dụng của riêng bạn.
+
+## Các bước tiếp theo
+
+Trong thời gian chờ đợi package được phát hành, cách tốt nhất để hiểu về DeerFlow Harness là đọc các tài liệu về khái niệm và triển khai trong phần này.
+
+<Cards num={2}>
+  <Cards.Card title="Bắt đầu nhanh" href="/docs/harness/quick-start" />
+  <Cards.Card title="Cấu hình" href="/docs/harness/configuration" />
+</Cards>

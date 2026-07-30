@@ -1,0 +1,31 @@
+---
+title: Giới thiệu
+description: DeerFlow là một runtime harness để xây dựng các hệ thống tác nhân chạy đường dài (long-horizon) với kỹ năng, bộ nhớ, công cụ và môi trường thực thi hộp cát (sandbox).
+---
+
+
+# Giới thiệu
+
+Chào mừng bạn đến với DeerFlow!
+
+DeerFlow là một framework để xây dựng và vận hành các hệ thống tác nhân (agent). Thay vì coi tác nhân AI như một trình tạo văn bản đơn giản hoặc một sơ đồ luồng công việc được lập trình cứng (hardcoded), DeerFlow cung cấp một **runtime harness** mạnh mẽ đóng gói các thành phần cốt lõi cần thiết để các tác nhân thực hiện các công việc chạy đường dài (long-horizon) có ý nghĩa.
+
+## DeerFlow là gì?
+
+DeerFlow thu hẹp khoảng cách giữa các LLM thô và các luồng công việc tác nhân sẵn sàng cho môi trường sản xuất (production-ready). Nó tập trung vào các khả năng cần thiết để hoàn thành các tác vụ phức tạp:
+
+- **Lập kế hoạch chạy đường dài (Long-Horizon Planning)**: Giữ cho các tác nhân hoạt động đúng hướng và mạch lạc qua nhiều chu kỳ suy luận và gọi công cụ.
+- **Phân rã qua Tác nhân phụ (Decomposition via Subagents)**: Chia nhỏ công việc phức tạp thành các tác vụ song song, biệt lập để không làm quá tải cửa sổ ngữ cảnh (context window) của tác nhân chính.
+- **Môi trường thực thi Hộp cát (Sandboxed Execution)**: Cung cấp cho các tác nhân một môi trường hệ thống tệp an toàn, cô lập, nơi chúng có thể viết tệp, chạy thử nghiệm và thực thi mã.
+- **Kỹ năng & Công cụ dạng mô-đun (Modular Skills & Tools)**: Tải các khả năng một cách linh hoạt để giữ cho lõi của tác nhân luôn ở dạng tổng quát trong khi vẫn thích ứng được với các khối lượng công việc cụ thể (ví dụ: nghiên cứu chuyên sâu hoặc phân tích dữ liệu).
+- **Bộ nhớ mở rộng & Kỹ nghệ ngữ cảnh (Persistent Memory & Context Engineering)**: Quản lý những gì tác nhân ghi nhớ, tóm tắt hoặc quên đi qua các lượt hội thoại và phiên làm việc.
+
+## Nội dung phần này
+
+Để giúp bạn xây dựng mô hình tư duy đúng đắn trước khi đi sâu vào chi tiết triển khai:
+
+<Cards num={3}>
+  <Cards.Card title="Tại sao chọn DeerFlow" href="/docs/introduction/why-deerflow" />
+  <Cards.Card title="Khái niệm cốt lõi" href="/docs/introduction/core-concepts" />
+  <Cards.Card title="Harness so với App" href="/docs/introduction/harness-vs-app" />
+</Cards>

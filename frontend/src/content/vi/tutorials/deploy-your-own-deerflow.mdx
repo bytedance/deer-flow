@@ -1,0 +1,79 @@
+---
+title: Triển khai DeerFlow của riêng bạn
+description: Hướng dẫn này hướng dẫn bạn cách triển khai DeerFlow lên môi trường production bằng Docker Compose để nhiều người dùng truy cập.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Triển khai DeerFlow của riêng bạn
+
+Hướng dẫn này hướng dẫn bạn cách triển khai DeerFlow lên môi trường production bằng Docker Compose để nhiều người dùng truy cập.
+
+## Yêu cầu chuẩn bị
+
+- Đã cài đặt Docker và Docker Compose
+- Một máy chủ hoặc VM (khuyên dùng Linux)
+- API key của LLM
+
+## Các bước thực hiện
+
+<Steps>
+
+### Clone repository
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### Tạo file cấu hình
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Chỉnh sửa file `config.yaml` để thêm cấu hình model của bạn.
+
+### Tạo file biến môi trường
+
+```bash
+cat > .env << EOF
+OPENAI_API_KEY=sk-your-key-here
+DEER_FLOW_ROOT=$(pwd)
+BETTER_AUTH_SECRET=$(openssl rand -base64 32)
+BETTER_AUTH_URL=https://your-domain.com
+EOF
+```
+
+### Khởi động các dịch vụ
+
+```bash
+docker compose -f docker/docker-compose-dev.yaml up -d
+```
+
+### Xác minh triển khai
+
+```bash
+# Kiểm tra xem các dịch vụ có hoạt động bình thường không
+curl http://localhost:2026/api/models
+
+# Theo dõi log
+docker compose -f docker/docker-compose-dev.yaml logs -f
+```
+
+Mở địa chỉ `http://your-server:2026` trên trình duyệt của bạn.
+
+</Steps>
+
+## Checklist cho môi trường Production
+
+- Cấu hình HTTPS/TLS cho nginx
+- Đặt `BETTER_AUTH_SECRET` thành một chuỗi ngẫu nhiên đủ mạnh (tối thiểu 32 ký tự)
+- Cấu hình các quy tắc tường lửa (firewall) để chỉ cho phép mở các cổng cần thiết
+- Tiến hành sao lưu thư mục `backend/.deer-flow/` định kỳ
+- Cân nhắc sử dụng sandbox dựa trên container (`AioSandboxProvider`) để cô lập giữa nhiều người dùng
+
+## Các bước tiếp theo
+
+- [Hướng dẫn triển khai chi tiết](/docs/application/deployment-guide)
+- [Vận hành và Khắc phục sự cố](/docs/application/operations-and-troubleshooting)

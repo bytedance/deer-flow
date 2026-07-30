@@ -1,0 +1,117 @@
+---
+title: Khái niệm cốt lõi
+description: Trước khi bạn đi sâu vào tìm hiểu DeerFlow, việc làm quen với một vài khái niệm xuất hiện xuyên suốt hệ thống sẽ rất hữu ích. Những khái niệm này giải thích những gì DeerFlow đang tối ưu hóa và tại sao kiến trúc của nó lại được thiết kế như vậy.
+---
+
+import { Callout } from "nextra/components";
+
+# Khái niệm cốt lõi
+
+<Callout type="important" emoji="🧠">
+  DeerFlow sẽ phát huy tối đa giá trị nếu bạn coi nó là một runtime dành cho các tác nhân chạy đường dài (long-horizon), chứ không chỉ là một giao diện trò chuyện hay một sơ đồ quy trình công việc thông thường.
+</Callout>
+
+Trước khi bạn đi sâu vào tìm hiểu DeerFlow, việc làm quen với một vài khái niệm xuất hiện xuyên suốt hệ thống sẽ rất hữu ích. Những khái niệm này giải thích những gì DeerFlow đang tối ưu hóa và tại sao kiến trúc của nó lại được thiết kế như vậy.
+
+## Harness
+
+Trong DeerFlow, một **harness** là một lớp runtime cung cấp cho tác nhân môi trường cần thiết để thực hiện công việc thực tế.
+
+Một framework thông thường chỉ cung cấp cho bạn các lớp trừu tượng và các khối xây dựng cốt lõi. Một harness còn tiến xa hơn thế: nó đóng gói một tập hợp các khả năng runtime có định hướng sẵn để tác nhân có thể lập kế hoạch, hành động, sử dụng công cụ, quản lý tệp và vận hành qua các tác vụ dài hạn mà bạn không cần phải xây dựng lại cơ sở hạ tầng tương tự mỗi lần.
+
+Trong thực tế, harness của DeerFlow bao gồm những thứ như:
+
+- truy cập công cụ (tool access),
+- tải kỹ năng (skill loading),
+- thực thi hộp cát (sandboxed execution),
+- bộ nhớ (memory),
+- điều phối tác nhân phụ (subagent orchestration), và
+- quản lý ngữ cảnh (context management).
+
+Đó là lý do tại sao DeerFlow không chỉ là một trình bọc mô hình (model wrapper) hay chỉ là một sơ đồ quy trình công việc. Nó là một môi trường runtime thực sự dành cho các tác nhân.
+
+## Tác nhân chạy đường dài (Long-horizon agent)
+
+Một **tác nhân chạy đường dài (long-horizon agent)** là tác nhân có khả năng duy trì tính hữu ích qua một chuỗi hành động dài thay vì chỉ đưa ra một câu trả lời duy nhất.
+
+Loại tác nhân này cần phải:
+
+1. lập kế hoạch,
+2. liên tục quyết định bước tiếp theo,
+3. gọi công cụ nhiều lần,
+4. kiểm tra và sửa đổi các tệp,
+5. lưu trữ kết quả trung gian, và
+6. trả về một tạo tác (artifact) có thể sử dụng được khi kết thúc.
+
+Điểm quan trọng ở đây không chỉ là thời gian thực thi dài. Đó là khả năng điều phối bền bỉ qua nhiều bước.
+
+DeerFlow được thiết kế cho loại công việc này. Kiến trúc của nó giả định rằng các tác vụ hữu ích thường yêu cầu nhiều hơn một lượt gọi công cụ và nhiều hơn một lượt suy luận duy nhất.
+
+## Kỹ năng (Skill)
+
+Một **kỹ năng (skill)** là một gói khả năng định hướng tác vụ nhằm hướng dẫn tác nhân cách thực hiện một loại công việc cụ thể.
+
+Một kỹ năng không chỉ là một chiếc nhãn tên. Nó thường bao gồm các hướng dẫn có cấu trúc, quy trình làm việc, thực hành tốt nhất và các tài nguyên hỗ trợ có thể tải khi có liên quan. Điều này giúp tác nhân cơ sở luôn ở dạng tổng quát, trong khi các hành vi chuyên biệt chỉ được thêm vào khi thực sự cần thiết.
+
+Trong DeerFlow, nghiên cứu chuyên sâu là một kỹ năng. Phân tích dữ liệu, tạo nội dung, quy trình làm việc định hướng thiết kế và các nhóm tác vụ khác cũng có thể được biểu diễn dưới dạng các kỹ năng.
+
+Đây là một phần quan trọng trong mô hình tư duy của DeerFlow: runtime luôn giữ tính tổng quát, trong khi các kỹ năng cung cấp tính chuyên biệt.
+
+## Hộp cát (Sandbox)
+
+Một **hộp cát (sandbox)** là môi trường thực thi cô lập nơi tác nhân làm việc với các tệp và lệnh.
+
+Thay vì coi tác nhân như một trình tạo văn bản thuần túy, DeerFlow cung cấp cho nó một không gian làm việc nơi nó có thể đọc tệp, ghi kết quả đầu ra, chạy lệnh và tạo ra các tạo tác (artifacts). Điều này làm cho hệ thống hữu ích hơn nhiều đối với việc lập trình, phân tích và các quy trình công việc nhiều bước.
+
+Tính cô lập rất quan trọng vì việc thực thi cần phải được kiểm soát và có khả năng tái lặp. Hộp cát là yếu tố giúp DeerFlow hỗ trợ hành động thực tế, chứ không chỉ dừng lại ở các cuộc hội thoại.
+
+## Tác nhân phụ (Subagent)
+
+Một **tác nhân phụ (subagent)** là một nhân tố tập trung xử lý một tác vụ phụ được ủy quyền.
+
+Khi một tác vụ quá rộng so với một luồng suy luận duy nhất, DeerFlow can thiệp bằng cách chia nhỏ công việc thành các đơn vị nhỏ hơn và chạy chúng một cách độc lập. Các tác nhân phụ giúp hỗ trợ tìm kiếm song song, thực thi có giới hạn phạm vi và giảm tải cho tác nhân chính.
+
+Ý tưởng cốt lõi ở đây là sự cô lập. Một tác nhân phụ không cần toàn bộ lịch sử trò chuyện hay mọi chi tiết từ ngữ cảnh cha. Nó chỉ cần những thông tin cần thiết để giải quyết tốt phần công việc được giao của mình.
+
+## Kỹ nghệ ngữ cảnh (Context engineering)
+
+**Kỹ nghệ ngữ cảnh (Context engineering)** là việc kiểm soát những gì tác nhân nhìn thấy, ghi nhớ và bỏ qua để nó có thể duy trì hiệu quả làm việc theo thời gian.
+
+Các tác vụ dài hạn gây áp lực lớn lên cửa sổ ngữ cảnh. Nếu mọi thứ được giữ lại trực tiếp (inline) mãi mãi, tác nhân sẽ trở nên chậm chạp hơn, nhiễu hơn và kém tin cậy hơn. DeerFlow giải quyết vấn đề này bằng các kỹ thuật như tóm tắt, giới hạn ngữ cảnh cho tác nhân phụ và sử dụng hệ thống tệp làm bộ nhớ làm việc bên ngoài.
+
+Đây là một trong những ý tưởng quan trọng nhất trong DeerFlow. Hành vi tốt của tác nhân không chỉ phụ thuộc vào một mô hình mạnh mẽ hơn. Nó còn nằm ở việc cung cấp cho mô hình tập hợp tài nguyên làm việc phù hợp vào đúng thời điểm.
+
+## Bộ nhớ (Memory)
+
+**Bộ nhớ (Memory)** là cơ chế của DeerFlow để mang thông tin hữu ích qua các phiên làm việc khác nhau.
+
+Thay vì bắt đầu từ con số không mỗi lần, hệ thống có thể giữ lại các thông tin như tùy chọn của người dùng, ngữ cảnh dự án lặp lại và các sự kiện bền vững giúp cải thiện các tương tác trong tương lai. Bộ nhớ giúp tác nhân có tính thích ứng tốt hơn và ít lặp lại hơn.
+
+Trong DeerFlow, bộ nhớ là một phần của hệ thống runtime, chứ không phải là một tính năng phụ được thêm vào sau.
+
+## Tạo tác (Artifact)
+
+Một **tạo tác (artifact)** là kết quả cụ thể từ công việc của tác nhân.
+
+Kết quả đó có thể là một báo cáo, một tệp được tạo ra, một thay đổi mã nguồn, một biểu đồ, một tài nguyên thiết kế hoặc một sản phẩm bàn giao khác có thể được xem xét và sử dụng bên ngoài chính cuộc trò chuyện đó.
+
+Điều này rất quan trọng vì DeerFlow được thiết kế xoay quanh việc hoàn thành tác vụ, chứ không chỉ đơn thuần là tạo câu trả lời. Hệ thống cố gắng tạo ra thứ mà bạn có thể kiểm tra, tinh chỉnh hoặc bàn giao để sử dụng.
+
+## Kết hợp các khái niệm lại với nhau
+
+Các khái niệm này ăn khớp với nhau thành một mô hình thống nhất:
+
+- **Harness** cung cấp runtime.
+- **Kỹ năng (Skills)** cung cấp tính chuyên biệt.
+- **Hộp cát (Sandbox)** cung cấp môi trường thực thi.
+- **Tác nhân phụ (Subagents)** cung cấp sự phân rã và tính song song.
+- **Kỹ nghệ ngữ cảnh (Context engineering)** giúp quản lý các tác vụ dài hạn dễ dàng hơn.
+- **Bộ nhớ (Memory)** bảo toàn sự liên tục hữu ích.
+- **Tạo tác (Artifacts)** là các kết quả đầu ra làm cho công việc trở nên hữu hình.
+
+Nếu bạn ghi nhớ mô hình này, việc tìm hiểu phần còn lại của tài liệu hướng dẫn DeerFlow sẽ trở nên dễ dàng hơn nhiều.
+
+<Cards num={2}>
+  <Cards.Card title="Tại sao chọn DeerFlow" href="/docs/introduction/why-deerflow" />
+  <Cards.Card title="Harness so với App" href="/docs/introduction/harness-vs-app" />
+</Cards>

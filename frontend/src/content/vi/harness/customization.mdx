@@ -1,0 +1,176 @@
+---
+title: Tùy chỉnh (Customization)
+description: Kiến trúc cắm lắp (pluggable) của DeerFlow có nghĩa là hầu hết các thành phần của hệ thống đều có thể được thay thế hoặc mở rộng mà không cần fork mã nguồn lõi. Trang này liệt kê các điểm mở rộng và hướng dẫn cách sử dụng từng thành phần.
+---
+
+import { Callout } from "nextra/components";
+
+# Tùy chỉnh (Customization)
+
+<Callout type="info" emoji="🔧">
+  DeerFlow được thiết kế để dễ dàng thích ứng. Bạn có thể mở rộng hành vi của agent bằng cách viết các middleware tùy chỉnh, thêm các tool mới, xây dựng các gói skill, và thay thế bất kỳ thành phần tích hợp sẵn nào thông qua trường <code>use:</code> trong file config.yaml.
+</Callout>
+
+Kiến trúc cắm lắp (pluggable) của DeerFlow có nghĩa là hầu hết các thành phần của hệ thống đều có thể được thay thế hoặc mở rộng mà không cần fork mã nguồn lõi. Trang này liệt kê các điểm mở rộng và hướng dẫn cách sử dụng từng thành phần.
+
+## Viết Middleware tùy chỉnh (Custom middlewares)
+
+Middleware là điểm mở rộng chính để thêm các hành vi vào Lead Agent. Chúng bao bọc mọi lượt gọi LLM và có thể đọc cũng như sửa đổi trạng thái của agent trước hoặc sau khi gọi model.
+
+Để thêm một middleware tùy chỉnh:
+
+1. Triển khai kế thừa interface `AgentMiddleware` từ `langchain.agents.middleware`.
+2. Truyền middleware của bạn vào tham số `custom_middlewares` khi khởi tạo agent.
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+from deerflow.agents.thread_state import ThreadState
+
+class AuditMiddleware(AgentMiddleware):
+    async def on_start(self, state: ThreadState, config):
+        # Chạy trước mỗi lượt gọi model
+        print(f"[audit] turn starts: {len(state.messages)} messages in context")
+        return state, config
+
+    async def on_end(self, state: ThreadState, config):
+        # Chạy sau mỗi lượt gọi model
+        print(f"[audit] turn ends: last message type = {state.messages[-1].type}")
+        return state, config
+```
+
+Các middleware tùy chỉnh được chèn vào chuỗi ngay trước `ClarificationMiddleware`, là thành phần luôn luôn chạy cuối cùng.
+
+## Thêm Công cụ tùy chỉnh (Custom tools)
+
+Thêm các tool mới cho agent bằng cách khai báo chúng trong mục `tools:` của file `config.yaml`:
+
+```yaml
+tools:
+  - use: mypackage.tools:my_custom_tool
+    api_key: $MY_TOOL_API_KEY
+```
+
+Tool của bạn bắt buộc phải kế thừa `BaseTool` của LangChain hoặc là một hàm được gán decorator `@tool`. Nó sẽ được khởi tạo thông qua đường dẫn class khai báo ở trường `use:` cùng bất kỳ trường bổ sung nào từ mục cấu hình đó.
+
+Đối với các tool kiểu cộng đồng, mô hình triển khai sẽ là một hàm ở cấp độ module hoặc một class trả về một thực thể `BaseTool`:
+
+```python
+# mypackage/tools.py
+from langchain_core.tools import tool
+
+@tool
+def my_custom_tool(query: str) -> str:
+    """Search my custom data source."""
+    return do_search(query)
+```
+
+## Viết Sandbox Provider tùy chỉnh (Custom sandbox provider)
+
+Bạn có thể thay thế sandbox mặc định bằng cách triển khai interface `SandboxProvider`:
+
+```python
+from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox import Sandbox
+
+class MyCustomSandboxProvider(SandboxProvider):
+    def acquire(self, thread_id: str | None = None) -> str:
+        # Trả về một sandbox_id
+        ...
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        # Trả về instance của sandbox cho id này
+        ...
+
+    def release(self, sandbox_id: str) -> None:
+        # Tiến hành dọn dẹp giải phóng tài nguyên
+        ...
+```
+
+Sau đó tham chiếu nó trong file `config.yaml`:
+
+```yaml
+sandbox:
+  use: mypackage.sandbox:MyCustomSandboxProvider
+```
+
+## Viết bộ lưu trữ Memory tùy chỉnh (Custom memory storage)
+
+Thay thế bộ lưu trữ memory dựa trên file bằng bất kỳ kho lưu trữ persistent nào bằng cách triển khai `MemoryStorage`:
+
+```python
+from deerflow.agents.memory.storage import MemoryStorage
+from typing import Any
+
+class RedisMemoryStorage(MemoryStorage):
+    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+        ...
+```
+
+Cấu hình nó trong file `config.yaml`:
+
+```yaml
+memory:
+  storage_class: mypackage.storage:RedisMemoryStorage
+```
+
+## Viết Skill tùy chỉnh (Custom skills)
+
+Skills là điểm mở rộng dễ dàng nhất. Hãy tạo một thư mục dưới đường dẫn `skills/custom/your-skill-name/` chứa file `SKILL.md`. Skill này sẽ tự động được phát hiện trong lần gọi `load_skills()` tiếp theo.
+
+Xem trang [Kỹ năng (Skills)](/docs/harness/skills) để biết cấu trúc thư mục chi tiết và định dạng file `SKILL.md`.
+
+## Sử dụng Model tùy chỉnh (Custom models)
+
+Bất kỳ chat model nào tương thích với LangChain đều có thể sử dụng bằng cách chỉ định ở trường `use:`:
+
+```yaml
+models:
+  - name: my-custom-model
+    use: mypackage.models:MyCustomChatModel
+    # Bất kỳ trường bổ sung nào sẽ được truyền dưới dạng kwargs tới constructor
+    base_url: http://my-model-server:8080
+    api_key: $MY_MODEL_API_KEY
+```
+
+Class của model bắt buộc phải kế thừa interface `BaseChatModel` của LangChain.
+
+## Viết Checkpointer tùy chỉnh (Custom checkpointer)
+
+Tính năng lưu trữ trạng thái của thread (Thread state persistence) có thể sử dụng bất kỳ checkpointer nào tương thích với LangGraph:
+
+```yaml
+checkpointer:
+  type: sqlite
+  connection_string: ./my-checkpoints.db
+```
+
+Đối với các backend tùy chỉnh khác, hãy triển khai interface `BaseCheckpointSaver` của LangGraph và cấu hình nó thông qua mã nguồn khi khởi tạo `DeerFlowClient`.
+
+## Rào cản bảo mật (Guardrails)
+
+Thêm quyền ủy quyền trước khi thực thi đối với các lượt gọi tool thông qua cấu hình `guardrails:`:
+
+```yaml
+guardrails:
+  enabled: true
+  provider:
+    use: deerflow.guardrails.builtin:AllowlistProvider
+    config:
+      denied_tools: ["bash", "write_file"]
+```
+
+Đối với logic guardrail tùy chỉnh phức tạp hơn, hãy triển khai một class với các phương thức `evaluate()` và `aevaluate()` và tham chiếu nó qua trường `use:`.
+
+<Cards num={2}>
+  <Cards.Card
+    title="Hướng dẫn tích hợp"
+    href="/docs/harness/integration-guide"
+  />
+  <Cards.Card title="Cấu hình" href="/docs/harness/configuration" />
+</Cards>

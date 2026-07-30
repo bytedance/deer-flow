@@ -1,0 +1,126 @@
+---
+title: Nguyên tắc thiết kế
+description: Hiểu rõ các nguyên tắc thiết kế đằng sau DeerFlow Harness giúp bạn sử dụng nó hiệu quả, mở rộng tự tin và suy luận chính xác về cách agent của bạn hoạt động trong môi trường production.
+---
+
+import { Callout } from "nextra/components";
+
+# Nguyên tắc thiết kế
+
+<Callout type="info" emoji="🏗️">
+  DeerFlow được xây dựng xung quanh một ý tưởng trung tâm: hành vi của agent nên được cấu thành
+  từ các phần nhỏ, có thể quan sát và thay thế được — chứ không phải được hardcode vào một
+  workflow graph cố định.
+</Callout>
+
+Hiểu rõ các nguyên tắc thiết kế đằng sau DeerFlow Harness giúp bạn sử dụng nó hiệu quả, mở rộng tự tin và suy luận chính xác về cách agent của bạn hoạt động trong môi trường production.
+
+## Tại sao lại là harness, không phải framework
+
+Một framework cung cấp cho bạn các lớp trừu tượng (abstraction) và các khối xây dựng (building block). Bạn phải tự lắp ráp các bộ phận và viết mã kết nối chúng.
+
+Một **harness** tiến xa hơn thế. Nó đóng gói một runtime hoàn chỉnh định hướng sẵn và sẵn sàng chạy để các agent có thể thực hiện công việc thực tế mà bạn không cần phải xây dựng lại cơ sở hạ tầng tương tự mỗi lần.
+
+DeerFlow là một harness vì nó tích hợp sẵn:
+
+- Một lead agent với cơ chế tool routing,
+- Một chuỗi middleware bao bọc mỗi lượt gọi LLM (LLM turn),
+- Môi trường sandboxed execution để thao tác với file và câu lệnh,
+- Các skills tải các khả năng chuyên môn hóa theo yêu cầu (on-demand),
+- Các subagents thực hiện công việc song song được ủy quyền,
+- Cơ chế memory giúp duy trì thông tin qua các session, và
+- Một hệ thống cấu hình điều khiển tất cả các thành phần trên.
+
+Bạn không cần phải thiết kế lớp điều phối (orchestration layer) từ đầu. Harness chính là lớp điều phối đó.
+
+## Tác vụ chạy đường dài (Long-horizon tasks) là mục tiêu chính
+
+DeerFlow được thiết kế cho các tác vụ đòi hỏi nhiều hơn một lượt trao đổi prompt-response duy nhất. Một long-horizon agent thực sự hữu ích cần phải:
+
+1. Lập kế hoạch,
+2. Gọi các tool theo trình tự,
+3. Kiểm tra và chỉnh sửa file,
+4. Phục hồi khi có lỗi xảy ra,
+5. Ủy quyền công việc cho các subagents khi tác vụ quá rộng, và
+6. Trả về một artifact cụ thể ở bước cuối cùng.
+
+Mọi quyết định kiến trúc trong DeerFlow đều được đánh giá dựa trên use case này. Các lượt trao đổi ngắn và không trạng thái (stateless) thì rất dễ dàng. Các workflow dài, nhiều bước dưới áp lực của môi trường thực tế mới là mục tiêu hướng tới.
+
+## Chuỗi middleware thay vì kế thừa (inheritance)
+
+DeerFlow không yêu cầu bạn phải tạo subclass cho agent hoặc override các phương thức để thay đổi hành vi của nó. Thay vào đó, nó sử dụng một **chuỗi middleware** bao bọc mọi lượt gọi LLM.
+
+Mỗi middleware là một plugin nhỏ, tập trung vào một nhiệm vụ duy nhất, có thể kiểm tra hoặc sửa đổi trạng thái (state) của agent trước và sau khi gọi model. Hành vi của lead agent hoàn toàn được quyết định bởi việc middleware nào đang hoạt động.
+
+Thiết kế này mang lại một số lợi ích:
+
+- Các hành vi riêng lẻ (memory, tóm tắt, yêu cầu làm rõ, phát hiện lặp) được cô lập và có thể test độc lập.
+- Chuỗi middleware có thể được mở rộng mà không cần chạm vào logic cốt lõi của agent.
+- Tác động của từng middleware là rõ ràng và có thể kiểm tra (audit) được vì nó chỉ chạm vào trạng thái mà nó khai báo.
+
+Xem trang [Middleware](/docs/harness/middlewares) để biết danh sách đầy đủ và cấu hình chi tiết.
+
+## Skills mang lại sự chuyên môn hóa mà không làm ảnh hưởng ngữ cảnh chung
+
+Một **skill** là một gói khả năng hướng tác vụ. Nó chứa các hướng dẫn, workflow, thực hành tốt nhất, cùng bất kỳ tool hay tài nguyên nào giúp agent làm việc hiệu quả trong một nhóm công việc cụ thể.
+
+Quyết định thiết kế quan trọng là các skills được tải **theo yêu cầu (on-demand)**. Agent cơ bản (base agent) vẫn giữ vai trò tổng quát. Khi một tác vụ yêu cầu nghiên cứu sâu, skill nghiên cứu sẽ được tải. Khi tác vụ yêu cầu phân tích dữ liệu, skill phân tích sẽ được tải.
+
+Điều này rất quan trọng vì nó giúp context window của base agent luôn sạch sẽ. Một prompt chuyên dụng để viết bài báo học thuật sẽ không làm ô nhiễm một session tập trung vào viết code. Các skills chỉ chèn nội dung của chúng vào đúng thời điểm có liên quan và không đi xa hơn.
+
+Skills cũng giúp hệ thống dễ dàng mở rộng. Thêm một khả năng mới cho DeerFlow có nghĩa là viết một skill pack mới, chứ không phải sửa đổi nhân lõi agent core.
+
+## Sandbox là môi trường thực thi
+
+DeerFlow cung cấp cho các agent một **sandbox**: một workspace cô lập nơi chúng có thể đọc file, ghi kết quả đầu ra, chạy lệnh và tạo ra các artifact.
+
+Điều này biến agent từ một trình tạo văn bản thông thường thành một hệ thống có thể thực hiện công việc thực tế. Thay vì chỉ mô tả code nào cần viết, agent có thể tự viết code, chạy thử và xác minh kết quả.
+
+Sự cô lập (isolation) là cực kỳ quan trọng vì việc thực thi cần phải có tính tái lặp và kiểm soát được. Sandbox là lý do DeerFlow có thể hỗ trợ các hành động thực tế thay vì chỉ trò chuyện.
+
+Hai chế độ có sẵn:
+
+- **LocalSandbox**: Các lệnh chạy trực tiếp trên host. Thích hợp cho các workflow cục bộ đáng tin cậy của một người dùng.
+- **Container-based sandbox**: Các lệnh chạy trong một container cô lập (Docker hoặc Apple Container). Thích hợp cho môi trường nhiều người dùng và triển khai production.
+
+## Kỹ thuật quản lý ngữ cảnh (Context engineering) giúp các tác vụ dài khả thi hơn
+
+Áp lực ngữ cảnh (context pressure) là thách thức lớn nhất đối với các long-horizon agent. Nếu mọi thứ tích tụ trong context window vô thời hạn, agent sẽ trở nên chậm chạp hơn, nhiễu hơn và kém tin cậy hơn.
+
+DeerFlow giải quyết vấn đề này thông qua **kỹ thuật quản lý ngữ cảnh (context engineering)** — kiểm soát có chủ đích những gì agent nhìn thấy, ghi nhớ và bỏ qua ở mỗi bước:
+
+- **Tóm tắt (Summarization)**: Khi cuộc hội thoại quá dài, các lượt trò chuyện cũ hơn sẽ được tóm tắt và thay thế. Agent giữ lại ý nghĩa cốt lõi mà không bị phình to ngữ cảnh.
+- **Phạm vi ngữ cảnh subagent (Scoped subagent context)**: Khi công việc được ủy quyền cho một subagent, subagent đó chỉ nhận thông tin cần thiết cho phần tác vụ của nó, chứ không nhận toàn bộ lịch sử của parent agent.
+- **Bộ nhớ làm việc bên ngoài (External working memory)**: Các file và artifact được tạo ra trong quá trình thực hiện tác vụ sẽ nằm trên đĩa (disk), chứ không nằm trong context window. Agent sẽ tham chiếu đến chúng khi cần thiết.
+- **Chèn bộ nhớ (Memory injection)**: Các thông tin thực tế xuyên suốt các session được chèn vào system prompt theo một ngân sách token được kiểm soát.
+
+Đây là một trong những ý tưởng quan trọng nhất trong DeerFlow. Hành vi tốt của agent không chỉ phụ thuộc vào một model mạnh hơn, mà còn phụ thuộc vào việc cung cấp cho model tập dữ liệu làm việc (working set) phù hợp vào đúng thời điểm.
+
+## Cấu hình điều khiển hành vi
+
+Tất cả các hành vi có ý nghĩa trong DeerFlow đều được điều khiển thông qua `config.yaml`. Hệ thống được thiết kế để người vận hành có thể thay đổi cách agent hoạt động — sử dụng model nào, tính năng tóm tắt có hoạt động hay không, giới hạn subagent ra sao, các tool nào khả dụng — mà không cần chỉnh sửa code.
+
+Nguyên tắc thiết kế này mang lại ba ý nghĩa lớn:
+
+1. **Tính tái lặp (Reproducibility)**: Một file cấu hình mô tả đầy đủ hành vi của agent tại một thời điểm nhất định.
+2. **Khả năng triển khai (Deployability)**: Cùng một mã nguồn có thể hoạt động khác nhau trong các môi trường khác nhau nhờ sự khác biệt của cấu hình.
+3. **Khả năng kiểm tra (Auditability)**: Những gì agent có thể và không thể làm đều hiển thị trực quan ở một nơi duy nhất.
+
+Cơ chế nội suy biến môi trường (`api_key: $OPENAI_API_KEY`) giúp bảo vệ các thông tin bảo mật khỏi các file cấu hình được commit mà vẫn giữ nguyên cấu trúc chung.
+
+## Tóm tắt
+
+| Nguyên tắc | Ý nghĩa thực tế |
+| --------------------------- | -------------------------------------------------------------- |
+| Harness, không phải framework | Runtime sẵn sàng chạy với tất cả cơ sở hạ tầng đã được kết nối |
+| Ưu tiên long-horizon | Kiến trúc giả định các tác vụ nhiều bước, nhiều tool, nhiều lượt gọi |
+| Middleware thay vì kế thừa | Hành vi được cấu thành từ các plugin nhỏ, cô lập |
+| Skills cho chuyên môn hóa | Khả năng nghiệp vụ chuyên biệt được tải theo yêu cầu, giữ base agent sạch sẽ |
+| Sandbox cho thực thi | Workspace cô lập để thao tác file và thực thi câu lệnh thực tế |
+| Context engineering | Quản lý chủ động những gì agent nhìn thấy để duy trì hiệu quả |
+| Cấu hình điều khiển (Config-driven) | Tất cả các hành vi then chốt được điều khiển qua `config.yaml` |
+
+<Cards num={2}>
+  <Cards.Card title="Tác nhân chính (Lead Agent)" href="/docs/harness/lead-agent" />
+  <Cards.Card title="Middleware" href="/docs/harness/middlewares" />
+</Cards>

@@ -4,7 +4,7 @@ import { cache } from "react";
 
 import { getLangByLocale, type Locale } from "@/core/i18n/locale";
 
-export const BLOG_LANGS = ["zh", "en"] as const;
+export const BLOG_LANGS = ["zh", "en", "vi"] as const;
 const RECENT_POST_LIMIT = 5;
 
 export type BlogLang = (typeof BLOG_LANGS)[number];
@@ -60,7 +60,7 @@ function isMdxFile(item: PageMapItem): item is BlogMdxFile {
 function normalizeBlogRoute(route: string): string {
   // Posts are sourced from locale-specific content trees but exposed
   // under the single public /blog route.
-  return route.replace(/^\/(en|zh)\/(?:posts|blog)(?=\/|$)/, "/blog");
+  return route.replace(/^\/(en|zh|vi)\/(?:posts|blog)(?=\/|$)/, "/blog");
 }
 
 export function getBlogRoute(slug: string[]): string {

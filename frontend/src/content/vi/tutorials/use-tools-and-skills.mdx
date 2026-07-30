@@ -1,0 +1,65 @@
+---
+title: Sử dụng Công cụ và Kỹ năng
+description: Hướng dẫn này chỉ ra cách cấu hình và sử dụng các tool và skill trong DeerFlow để cung cấp cho agent quyền truy cập tìm kiếm web, thao tác file và các khả năng chuyên môn hóa.
+---
+
+import { Callout } from "nextra/components";
+
+# Sử dụng Công cụ và Kỹ năng
+
+Hướng dẫn này chỉ ra cách cấu hình và sử dụng các tool và skill trong DeerFlow để cung cấp cho agent quyền truy cập tìm kiếm web, thao tác file và các khả năng chuyên môn hóa.
+
+## Cấu hình các Tool
+
+Thêm các tool vào file `config.yaml`:
+
+```yaml
+tools:
+  # Tìm kiếm Web (Web search)
+  - use: deerflow.community.ddg_search.tools:web_search_tool
+
+  # Tải nội dung Web (Web content fetching)
+  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+
+  # Các thao tác file trong Sandbox (Sandbox file operations)
+  - use: deerflow.sandbox.tools:ls_tool
+  - use: deerflow.sandbox.tools:read_file_tool
+  - use: deerflow.sandbox.tools:write_file_tool
+  - use: deerflow.sandbox.tools:bash_tool
+```
+
+## Bật các Skill
+
+Bật các skill thông qua bảng điều khiển extensions của ứng dụng DeerFlow, hoặc chỉnh sửa trực tiếp file `extensions_config.json`.
+
+**Thông qua giao diện ứng dụng UI:**
+
+1. Mở ứng dụng DeerFlow
+2. Nhấp vào biểu tượng Extensions/Skills trên thanh bên (sidebar)
+3. Tìm kiếm `deep-research` và chuyển đổi bật nó lên
+
+## Sử dụng một Skill cho việc nghiên cứu
+
+Với skill `deep-research` đã được bật, hãy chọn nó ở phần ô nhập cuộc hội thoại, sau đó gửi một yêu cầu nghiên cứu:
+
+```
+Do a deep research on the latest advances in quantum computing, focusing on practical applications.
+```
+
+Agent sẽ thực hiện một workflow nghiên cứu nhiều bước bao gồm tìm kiếm web, tổng hợp thông tin và tạo báo cáo chi tiết.
+
+## Sử dụng Skill phân tích dữ liệu (Data analysis)
+
+Bật skill `data-analysis`, sau đó upload một file CSV hoặc file dữ liệu bất kỳ lên và yêu cầu agent phân tích:
+
+```
+Analyze this CSV file and identify the top trends.
+```
+
+Agent sẽ sử dụng các sandbox tools để đọc file, thực thi phân tích và sản xuất các biểu đồ trực quan.
+
+## Các bước tiếp theo
+
+- [Làm việc với bộ nhớ (Memory)](/docs/tutorials/work-with-memory)
+- [Tham chiếu Công cụ (Tools Reference)](/docs/harness/tools)
+- [Tham chiếu Kỹ năng (Skills Reference)](/docs/harness/skills)

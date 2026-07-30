@@ -1,0 +1,65 @@
+---
+title: DeerFlow App
+description: DeerFlow App là phiên bản triển khai tham chiếu của một trải nghiệm DeerFlow trong môi trường sản xuất. Nó kết hợp Harness runtime, không gian làm việc trò chuyện trên giao diện web, một API gateway và một reverse proxy thành một hệ thống có thể triển khai duy nhất.
+---
+
+import { Callout } from "nextra/components";
+
+# DeerFlow App
+
+<Callout type="info" emoji="🚀">
+  DeerFlow App là một ứng dụng Super Agent hoàn chỉnh được xây dựng trên nền tảng DeerFlow Harness. Nó đóng gói các khả năng runtime thành một sản phẩm sẵn sàng triển khai đi kèm với giao diện web UI, API gateway và các công cụ vận hành.
+</Callout>
+
+DeerFlow App là phiên bản triển khai tham chiếu của một trải nghiệm DeerFlow trong môi trường sản xuất. Nó kết hợp Harness runtime, không gian làm việc trò chuyện trên giao diện web, một API gateway và một reverse proxy thành một hệ thống có thể triển khai duy nhất.
+
+## Những gì App cung cấp
+
+| Khả năng | Mô tả |
+| :--- | :--- |
+| **Không gian làm việc Web** | Giao diện trò chuyện trên trình duyệt hỗ trợ các luồng trò chuyện (threads), tạo tác (artifacts), tải lên tệp và lựa chọn kỹ năng |
+| **Tác nhân tùy chỉnh** | Tạo và quản lý các tác nhân được đặt tên với các mô hình, kỹ năng và tập hợp công cụ khác nhau |
+| **Quản lý luồng trò chuyện** | Các luồng trò chuyện bền vững với tính năng lưu điểm kiểm tra (checkpointing) và lịch sử |
+| **Phản hồi dạng luồng (Streaming)** | Truyền dữ liệu token theo thời gian thực hiển thị các bước suy nghĩ và việc gọi công cụ |
+| **Trình xem tạo tác (Artifact viewer)**| Xem trước trong trình duyệt và tải xuống các tệp cũng như kết quả đầu ra do tác nhân tạo ra |
+| **Giao diện tiện ích mở rộng** | Bật/tắt các MCP servers và kỹ năng mà không cần chỉnh sửa tệp cấu hình |
+| **Gateway API** | REST API dựa trên FastAPI với một LangGraph-compatible agent runtime tích hợp |
+
+## Kiến trúc
+
+DeerFlow App chạy phía sau một nginx reverse proxy duy nhất:
+
+```
+                 ┌──────────────────┐
+      Browser → │  nginx :2026      │
+                 └──────────────────┘
+                   │          │
+          ┌────────┘          └────────┐
+          ▼                            ▼
+┌──────────────────┐       ┌──────────────────────┐
+│  Frontend :3000  │       │  Gateway API :8001    │
+│  (Next.js)       │       │  (FastAPI)            │
+└──────────────────┘       └──────────────────────┘
+```
+
+- **nginx**: định tuyến các yêu cầu — `/api/*` và `/api/langgraph/*` đến Gateway, và tất cả các yêu cầu khác đến frontend.
+- **Frontend** (Next.js + React): giao diện trình duyệt. Giao tiếp với Gateway.
+- **Gateway** (FastAPI): xử lý các hoạt động API và quản lý trạng thái luồng trò chuyện, thực thi tác nhân và truyền dữ liệu dạng luồng thông qua LangGraph-compatible agent runtime tích hợp.
+
+## Công nghệ sử dụng
+
+| Tầng | Công nghệ |
+| :--- | :--- |
+| Frontend | Next.js 16, React 19, TypeScript, pnpm |
+| Gateway | FastAPI, Python 3.12, uvicorn |
+| Agent runtime | LangGraph, LangChain, DeerFlow Harness |
+| Reverse proxy | nginx |
+| State persistence | Gateway runtime + SQLite/PostgreSQL checkpointer tùy chọn |
+
+<Cards num={2}>
+  <Cards.Card title="Bắt đầu nhanh" href="/docs/application/quick-start" />
+  <Cards.Card
+    title="Hướng dẫn triển khai"
+    href="/docs/application/deployment-guide"
+  />
+</Cards>

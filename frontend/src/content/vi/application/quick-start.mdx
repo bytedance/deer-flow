@@ -1,0 +1,128 @@
+---
+title: Bắt đầu nhanh
+description: Hướng dẫn này giúp bạn khởi chạy DeerFlow App trên máy cục bộ bằng cách sử dụng luồng công việc `make dev`. Gateway, Frontend và nginx sẽ được khởi động cùng nhau và có thể truy cập qua một URL duy nhất.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Bắt đầu nhanh
+
+<Callout type="info" emoji="⚡">
+  Khởi chạy DeerFlow App cục bộ chỉ trong khoảng 10 phút. Bạn cần một máy tính đã cài đặt Python 3.12+, Node.js 22+ và ít nhất một API Key của LLM.
+</Callout>
+
+Hướng dẫn này giúp bạn khởi chạy DeerFlow App trên máy cục bộ bằng cách sử dụng luồng công việc `make dev`. Gateway, Frontend và nginx sẽ được khởi động cùng nhau và có thể truy cập qua một URL duy nhất.
+
+## Điều kiện tiên quyết
+
+Kiểm tra xem tất cả các công cụ bắt buộc đã được cài đặt chưa:
+
+```bash
+make check
+```
+
+Công cụ bắt buộc:
+
+| Công cụ | Phiên bản tối thiểu |
+| :--- | :--- |
+| Python | 3.12 |
+| uv | mới nhất |
+| Node.js | 22 |
+| pnpm | 10 |
+| nginx | bất kỳ phiên bản gần đây nào |
+
+Trên macOS, cài đặt bằng lệnh `brew install python uv node pnpm nginx`. Trên Linux, hãy sử dụng trình quản lý gói của bản phân phối của bạn.
+
+## Các bước thực hiện
+
+<Steps>
+
+### Nhân bản kho lưu trữ
+
+```bash
+git clone https://github.com/bytedance/deer-flow.git
+cd deer-flow
+```
+
+### Cài đặt các gói phụ thuộc
+
+```bash
+make install
+```
+
+Lệnh này sẽ cài đặt cả các gói phụ thuộc Python của backend (thông qua `uv`) và các gói phụ thuộc Node.js của frontend (thông qua `pnpm`).
+
+### Tạo tệp cấu hình của bạn
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Sau đó, chỉnh sửa tệp `config.yaml` để thêm ít nhất một mô hình. Thay đổi tối thiểu là thêm một mô hình vào phần `models:`:
+
+```yaml
+models:
+  - name: gpt-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    request_timeout: 600.0
+    max_retries: 2
+    supports_vision: true
+```
+
+Thiết lập biến môi trường tương ứng trước khi bắt đầu:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Xem trang [Cấu hình ứng dụng](/docs/application/configuration) để biết các ví dụ với các nhà cung cấp mô hình khác.
+
+### Khởi động tất cả các dịch vụ
+
+```bash
+make dev
+```
+
+Lệnh này khởi động:
+
+- Gateway API và agent runtime tích hợp trên cổng `8001`
+- Frontend trên cổng `3000`
+- nginx reverse proxy trên cổng `2026`
+
+Mở [http://localhost:2026](http://localhost:2026) trong trình duyệt của bạn.
+
+### Dừng tất cả các dịch vụ
+
+```bash
+make stop
+```
+
+</Steps>
+
+## Điều gì xảy ra khi bạn chạy `make dev`
+
+- Các tiến trình dịch vụ hiện có sẽ được dừng trước (an toàn để chạy sau khi quá trình khởi động trước đó bị gián đoạn).
+- Mỗi dịch vụ được khởi chạy trong chế độ nền và ghi nhật ký hoạt động vào thư mục `logs/`.
+- nginx định tuyến tất cả lưu lượng truy cập qua cổng `2026`, vì vậy bạn chỉ cần một URL duy nhất.
+
+Các tệp nhật ký (logs):
+
+| Dịch vụ | Tệp nhật ký |
+| :--- | :--- |
+| Gateway | `logs/gateway.log` |
+| Frontend | `logs/frontend.log` |
+| nginx | `logs/nginx.log` |
+
+<Callout type="tip">
+  Nếu có lỗi xảy ra, hãy kiểm tra các tệp nhật ký trước tiên. Hầu hết các lỗi khởi động (thiếu API keys, lỗi phân tích cấu hình) sẽ xuất hiện trong `logs/gateway.log`.
+</Callout>
+
+<Cards num={2}>
+  <Cards.Card
+    title="Hướng dẫn triển khai"
+    href="/docs/application/deployment-guide"
+  />
+  <Cards.Card title="Cấu hình" href="/docs/application/configuration" />
+</Cards>

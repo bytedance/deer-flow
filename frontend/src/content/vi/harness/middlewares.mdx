@@ -1,0 +1,237 @@
+---
+title: Middleware
+description: Mỗi khi Lead Agent gọi LLM, nó sẽ chạy qua một **chuỗi middleware** trước và sau lượt gọi model. Middleware có thể đọc và sửa đổi trạng thái của agent, chèn nội dung vào system prompt, chặn các lượt gọi tool và phản hồi lại kết quả đầu ra của model.
+---
+
+import { Callout } from "nextra/components";
+
+# Middleware
+
+<Callout type="info" emoji="🔌">
+  Middleware bao bọc mọi lượt gọi LLM (LLM turn) trong Lead Agent. Chúng là điểm mở rộng
+  chính để thêm các hành vi xuyên suốt như memory, tóm tắt ngữ cảnh,
+  yêu cầu làm rõ, và theo dõi lượng sử dụng token.
+</Callout>
+
+Mỗi khi Lead Agent gọi LLM, nó sẽ chạy qua một **chuỗi middleware** trước và sau lượt gọi model. Middleware có thể đọc và sửa đổi trạng thái của agent, chèn nội dung vào system prompt, chặn các lượt gọi tool và phản hồi lại kết quả đầu ra của model.
+
+Thiết kế này giúp giữ cho nhân lõi agent core luôn đơn giản và ổn định, trong khi vẫn cho phép xếp chồng các hành vi phong phú và có thể cấu thành được vào hệ thống.
+
+## Cơ chế hoạt động của chuỗi middleware
+
+Chuỗi middleware được xây dựng một lần trên mỗi lần gọi agent, dựa trên cấu hình hiện tại và các tham số request. Các middleware chạy theo một thứ tự được định nghĩa rõ ràng:
+
+1. Các runtime middlewares (xử lý lỗi, dữ liệu thread, upload, vá các lượt gọi tool bị treo)
+2. `DynamicContextMiddleware` — chèn thời gian hiện tại và ngữ cảnh memory tùy chọn
+3. `SkillActivationMiddleware` — kích hoạt các skill qua câu lệnh slash
+4. `DurableContextMiddleware` — ghi lại tóm tắt lâu bền (durable summary), trạng thái ủy quyền và các tham số skill-reference
+5. `SummarizationMiddleware` — nén ngữ cảnh (nếu được bật)
+6. `TodoMiddleware` — quản lý danh sách tác vụ (chỉ trong plan mode)
+7. `TokenUsageMiddleware` — theo dõi lượng sử dụng token (nếu được bật)
+8. `TitleMiddleware` — tự động tạo tiêu đề cho thread
+9. `MemoryMiddleware` — chèn memory xuyên suốt các session và đưa vào hàng đợi
+10. `ViewImageMiddleware` — chèn thông tin chi tiết của hình ảnh (nếu model hỗ trợ vision)
+11. `DeferredToolFilterMiddleware` — ẩn schema của các tool bị trì hoãn (nếu tính năng tìm kiếm tool được bật)
+12. `SystemMessageCoalescingMiddleware` — gộp các tin nhắn hệ thống gửi đến nhà cung cấp (provider)
+13. `SubagentLimitMiddleware` — giới hạn số lượt gọi subagent song song (nếu subagents được bật)
+14. `LoopDetectionMiddleware` — phá vỡ các vòng lặp gọi tool lặp đi lặp lại
+15. `TokenBudgetMiddleware` — áp đặt ngân sách token trên mỗi lượt chạy (nếu được bật)
+16. Middleware tùy chỉnh (nếu có)
+17. `SafetyFinishReasonMiddleware` — ngăn chặn thực thi tool sau các phản hồi bị chấm dứt do an toàn (nếu được bật)
+18. `ClarificationMiddleware` — chặn các yêu cầu làm rõ thông tin (luôn đứng cuối cùng)
+
+Thứ tự này rất quan trọng. Việc ghi lại ngữ cảnh lâu bền (durable context capture) phải chạy trước Summarization để các tác vụ được ủy quyền, kết quả terminal và tham chiếu skill đã tải không bị mất sau khi nén ngữ cảnh. Clarification luôn chạy cuối cùng để có thể chặn và xử lý sau khi tất cả các middleware khác đã thực hiện xong lượt của mình.
+
+## Tham chiếu Middleware
+
+### ClarificationMiddleware
+
+Chặn các lượt gọi tool yêu cầu làm rõ thông tin và chuyển đổi chúng thành các request tương tác chuẩn với người dùng để hỏi thêm thông tin. Khi model quyết định cần hỏi người dùng điều gì đó trước khi tiếp tục, middleware này sẽ hiển thị request đó.
+
+**Cấu hình**: được kiểm soát bởi các thiết lập `guardrails.clarification`.
+
+---
+
+### LoopDetectionMiddleware
+
+Phát hiện khi agent thực hiện lặp đi lặp lại một cuộc gọi tool mà không tạo ra tiến triển mới. Khi phát hiện vòng lặp, middleware sẽ can thiệp để phá vỡ chu kỳ này và ngăn agent tiêu tốn các lượt gọi vô hạn.
+
+Các cảnh báo can thiệp được đưa vào hàng đợi theo từng thread và lượt chạy, sau đó được giải phóng trong lượt gọi model tiếp theo dưới dạng một tin nhắn ẩn `HumanMessage(name="loop_warning")` được thêm vào sau các kết quả tool hiện tại. Điều này giữ cho cặp gọi tool của provider luôn hợp lệ. Các hook bắt đầu/kết thúc lượt chạy sẽ xóa các cảnh báo cũ hoặc chưa được gửi đi, và các lệnh dừng cứng (hard stop) vẫn sẽ loại bỏ các cuộc gọi tool trước khi buộc phải trả về một phản hồi văn bản cuối cùng.
+
+**Cấu hình**: tích hợp sẵn, không có cấu hình người dùng.
+
+---
+
+### MemoryMiddleware
+
+Đọc các thông tin thực tế được lưu trữ từ memory khi bắt đầu mỗi cuộc hội thoại và chèn chúng vào system prompt. Sau khi cuộc hội thoại kết thúc, nó sẽ xếp hàng một tiến trình cập nhật nền để tích hợp bất kỳ thông tin mới nào vào kho lưu trữ memory.
+
+**Cấu hình**: xem trang [Memory](/docs/harness/memory) và phần `memory:` trong file `config.yaml`.
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  max_injection_tokens: 2000
+  debounce_seconds: 30
+```
+
+---
+
+### SubagentLimitMiddleware
+
+Giới hạn số lượng tác vụ subagent song song mà agent có thể gọi trong một lượt duy nhất. Điều này ngăn agent tạo ra vô hạn các subagents đồng thời.
+
+**Cấu hình**: `subagent_enabled` và `max_concurrent_subagents` trong cấu hình trên mỗi request.
+
+---
+
+### TitleMiddleware
+
+Tự động tạo tiêu đề cho thread sau lượt trao đổi đầu tiên. Mặc định, tiêu đề là một bản fallback cục bộ nhanh chóng được lấy từ tin nhắn đầu tiên của người dùng. Chỉ đặt `title.model_name` khi bạn muốn sử dụng tính năng tạo tiêu đề qua LLM.
+
+**Cấu hình**: phần `title:` trong file `config.yaml`.
+
+```yaml
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null # fallback cục bộ; đặt tên model để sử dụng LLM tạo tiêu đề
+```
+
+---
+
+### TodoMiddleware
+
+Khi plan mode được kích hoạt, middleware này duy trì một danh sách tác vụ có cấu trúc hiển thị trực quan cho người dùng. Agent sử dụng tool `write_todos` để đánh dấu các tác vụ là `pending`, `in_progress`, hoặc `completed` khi nó giải quyết một mục tiêu phức tạp.
+
+**Kích hoạt**: tự động bật khi `is_plan_mode: true` được thiết lập trong cấu hình request. Không cần khai báo trong file `config.yaml`.
+
+---
+
+### TokenUsageMiddleware
+
+Theo dõi lượng tiêu thụ token LLM trên mỗi lượt gọi model và ghi log ở cấp độ `info`. Hữu ích cho việc giám sát chi phí và hiểu lượng token tiêu tốn vào đâu trong các tác vụ dài.
+
+**Cấu hình**: phần `token_usage:` trong file `config.yaml`.
+
+```yaml
+token_usage:
+  enabled: true
+```
+
+---
+
+### SandboxAuditMiddleware
+
+Kiểm tra (audit) các hoạt động trong sandbox được thực hiện trong quá trình chạy của agent. Cung cấp bản ghi lịch sử về việc file nào đã được đọc, ghi và câu lệnh nào đã được chạy.
+
+**Cấu hình**: middleware runtime tích hợp sẵn, luôn hoạt động khi có sandbox khả dụng.
+
+---
+
+### DurableContextMiddleware
+
+Ghi lại các thông tin runtime lâu bền vào các kênh thread-state tường minh trước khi Summarization nén lịch sử thô của cuộc hội thoại. Nó lưu trữ các bản tóm tắt nén, trạng thái/kết quả tác vụ được ủy quyền và các tham chiếu `SKILL.md` đã tải, sau đó đưa chúng vào các lượt gọi model tiếp theo dưới dạng dữ liệu ngữ cảnh lâu bền ẩn.
+
+Backend đóng dấu metadata giới hạn về kết quả tác vụ cấu trúc và tham chiếu skill đã đọc trước khi thực hiện ghi lại ngữ cảnh lâu bền. Thẻ tác vụ (task card) ở frontend sẽ đọc các trường trạng thái/kết quả tác vụ có cấu trúc này; văn bản kết quả tác vụ chỉ đóng vai trò hiển thị nội dung và không được parse như một giao thức mạng (wire protocol).
+
+**Cấu hình**: tích hợp sẵn. Cấu hình `summarization.skill_file_read_tool_names` kiểm soát những read tools nào được tính là đọc tham chiếu skill; đặt thành `[]` để tắt tính năng lưu trữ tham chiếu skill lâu bền.
+
+---
+
+### SummarizationMiddleware
+
+Khi cuộc trò chuyện trở nên quá dài, middleware này tóm tắt các tin nhắn cũ hơn để giảm kích thước ngữ cảnh. Bản tóm tắt được tạo ra sẽ được lưu trữ trong thread state và chèn vào các cuộc gọi model tiếp theo dưới dạng dữ liệu ngữ cảnh lâu bền ẩn, giữ lại ý nghĩa cuộc trò chuyện mà không cần giữ lại các tin nhắn gốc trong lịch sử hội thoại đang hoạt động.
+
+**Cấu hình**: phần `summarization:` trong file `config.yaml`. Xem cấu hình chi tiết bên dưới.
+
+---
+
+### ViewImageMiddleware
+
+Khi model hiện tại hỗ trợ thị giác (`supports_vision: true`), middleware này sẽ chặn các lượt gọi tool `view_image` và chèn trực tiếp nội dung hình ảnh vào ngữ cảnh của model để tiến hành phân tích.
+
+**Kích hoạt**: tự động bật khi model được chọn có thuộc tính `supports_vision: true`.
+
+---
+
+### DeferredToolFilterMiddleware
+
+Khi tính năng tìm kiếm tool được bật, middleware này ẩn schema của các tool bị trì hoãn khỏi ngữ cảnh của model. Các tool sẽ được khám phá một cách lazy thông qua tool `tool_search` thay vì được liệt kê ngay từ đầu, giúp giảm thiểu việc tiêu tốn ngữ cảnh.
+
+**Cấu hình**: thiết lập `tool_search.enabled: true` trong file `config.yaml`.
+
+## Cấu hình Summarization
+
+`SummarizationMiddleware` là một trong những middleware có ảnh hưởng lớn nhất đối với các tác vụ chạy đường dài. Dưới đây là tham chiếu cấu hình chi tiết:
+
+```yaml
+summarization:
+  enabled: true
+
+  # Model sử dụng cho việc tóm tắt (null = dùng model mặc định)
+  # Khuyến nghị dùng model nhẹ như gpt-4o-mini để giảm chi phí.
+  model_name: null
+
+  # Điều kiện kích hoạt — tóm tắt sẽ chạy khi BẤT KỲ ngưỡng nào được đáp ứng
+  trigger:
+    - type: tokens # kích hoạt khi ngữ cảnh vượt quá N tokens
+      value: 32000
+    # - type: messages  # kích hoạt khi có nhiều hơn N tin nhắn
+    #   value: 50
+    # - type: fraction  # kích hoạt khi ngữ cảnh vượt quá X% giới hạn tối đa của model
+    #   value: 0.8
+
+  # Số lượng lịch sử gần nhất cần giữ lại sau khi tóm tắt
+  keep:
+    type: messages
+    value: 10 # giữ lại 10 tin nhắn gần nhất
+    # Cách khác: giữ theo tokens
+    # type: tokens
+    # value: 3000
+
+  # Lượng token tối đa cần cắt bớt khi chuẩn bị tin nhắn gửi cho bộ tóm tắt
+  trim_tokens_to_summarize: 15564
+
+  # Prompt tóm tắt tùy chỉnh (null = dùng prompt mặc định của LangChain)
+  summary_prompt: null
+```
+
+**Các kiểu Trigger**:
+
+- `tokens`: kích hoạt khi tổng số token trong cuộc hội thoại vượt quá `value`.
+- `messages`: kích hoạt khi số lượng tin nhắn vượt quá `value`.
+- `fraction`: kích hoạt khi ngữ cảnh đạt tới tỷ lệ `value` so với giới hạn tối đa token đầu vào của model.
+
+Có thể khai báo nhiều trigger; hoạt động tóm tắt sẽ chạy khi **bất kỳ** trigger nào được kích hoạt.
+
+**Các kiểu Keep**:
+
+- `messages`: giữ lại `value` tin nhắn cuối cùng sau khi tóm tắt.
+- `tokens`: giữ lại tối đa `value` token của lịch sử gần nhất.
+- `fraction`: giữ lại tối đa tỷ lệ `value` so với giới hạn tối đa token đầu vào của model.
+
+## Viết một middleware tùy chỉnh
+
+Các middleware tùy chỉnh có thể được chèn vào chuỗi cho các use case chuyên biệt. Một middleware phải kế thừa và triển khai interface `AgentMiddleware` từ `langchain.agents.middleware`.
+
+Cấu trúc cơ bản như sau:
+
+```python
+from langchain.agents.middleware import AgentMiddleware
+
+class MyMiddleware(AgentMiddleware):
+    async def on_start(self, state, config):
+        # Chạy trước khi gọi model
+        # Sửa đổi state hoặc config tại đây
+        return state, config
+
+    async def on_end(self, state, config):
+        # Chạy sau khi gọi model
+        # Kiểm tra hoặc sửa đổi kết quả trả về
+        return state, config
+```
+
+Các middleware tùy chỉnh được truyền vào `make_lead_agent` thông qua tham số `custom_middlewares` trong hàm `build_middlewares`. Chúng được chèn vào ngay trước `ClarificationMiddleware` ở cuối chuỗi.
