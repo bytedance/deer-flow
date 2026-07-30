@@ -445,11 +445,16 @@ export function reconcileThreadHistoryRows(
   return reconciled;
 }
 
-export function mergeMessages(
+type PreparedHistoryMessages = {
+  canonical: Message[];
+  canonicalByIdentity: ReadonlyMap<string, Message>;
+  savedRunIds: ReadonlyMap<string, string>;
+  savedTurnDurations: ReadonlyMap<string, number>;
+};
+
+export function prepareHistoryMessagesForMerge(
   historyMessages: Message[],
-  threadMessages: Message[],
-  optimisticMessages: Message[],
-): Message[] {
+): PreparedHistoryMessages {
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
   for (const msg of historyMessages) {
@@ -467,13 +472,29 @@ export function mergeMessages(
   }
 
   const canonical = dedupeMessagesByIdentity(historyMessages);
-  const live = dedupeMessagesByIdentity(threadMessages);
   const canonicalByIdentity = new Map(
     canonical.flatMap((message) => {
       const identity = messageIdentity(message);
       return identity ? [[identity, message] as const] : [];
     }),
   );
+
+  return {
+    canonical,
+    canonicalByIdentity,
+    savedRunIds,
+    savedTurnDurations,
+  };
+}
+
+export function mergeMessagesWithPreparedHistory(
+  preparedHistory: PreparedHistoryMessages,
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  const { canonical, canonicalByIdentity, savedRunIds, savedTurnDurations } =
+    preparedHistory;
+  const live = dedupeMessagesByIdentity(threadMessages);
   const replacementByIdentity = new Map<string, Message>();
   // This uses the same identity-anchor weaving shape as
   // resolveTransientHistoryBridge, but intentionally remains separate: live
@@ -576,6 +597,18 @@ export function mergeMessages(
     }
     return message;
   });
+}
+
+export function mergeMessages(
+  historyMessages: Message[],
+  threadMessages: Message[],
+  optimisticMessages: Message[],
+): Message[] {
+  return mergeMessagesWithPreparedHistory(
+    prepareHistoryMessagesForMerge(historyMessages),
+    threadMessages,
+    optimisticMessages,
+  );
 }
 
 /**
@@ -2320,28 +2353,40 @@ export function useThreadStream({
   // already captured by these deps, and resolveTransientHistoryBridge is
   // idempotent for entries canonical history has absorbed, so memoizing on the
   // coalesced snapshot cannot pin a stale bridge.
-  const mergedMessages = useMemo(() => {
-    const effectiveHistory = resolveThreadTransientHistoryBridge(
-      visibleHistory,
-      transientHistoryBridgeRef.current,
-      transientHistoryThreadIdRef.current,
-      threadId,
-      transientHistoryOrder,
+  const transientHistoryBridge = transientHistoryBridgeRef.current;
+  const transientHistoryThreadId = transientHistoryThreadIdRef.current;
+  const effectiveHistory = useMemo(
+    () =>
+      resolveThreadTransientHistoryBridge(
+        visibleHistory,
+        transientHistoryBridge,
+        transientHistoryThreadId,
+        threadId,
+        transientHistoryOrder,
+        previouslyRenderedOrder,
+      ),
+    [
       previouslyRenderedOrder,
-    );
-    return mergeMessages(
-      effectiveHistory,
-      renderMessages,
-      visibleOptimisticMessages,
-    );
-  }, [
-    previouslyRenderedOrder,
-    renderMessages,
-    threadId,
-    transientHistoryOrder,
-    visibleHistory,
-    visibleOptimisticMessages,
-  ]);
+      threadId,
+      transientHistoryBridge,
+      transientHistoryOrder,
+      transientHistoryThreadId,
+      visibleHistory,
+    ],
+  );
+  const preparedHistory = useMemo(
+    () => prepareHistoryMessagesForMerge(effectiveHistory),
+    [effectiveHistory],
+  );
+  const mergedMessages = useMemo(
+    () =>
+      mergeMessagesWithPreparedHistory(
+        preparedHistory,
+        renderMessages,
+        visibleOptimisticMessages,
+      ),
+    [preparedHistory, renderMessages, visibleOptimisticMessages],
+  );
   useEffect(() => {
     const visibleMergedMessages = mergedMessages.filter(
       (message) =>
