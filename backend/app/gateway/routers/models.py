@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -155,7 +156,9 @@ def _write_env_file(project_root: Path, entries: dict[str, str]) -> None:
             env_path.unlink()
         return
     content = "\n".join(lines) + "\n"
-    env_path.write_text(content, encoding="utf-8")
+    tmp_path = project_root / f"{_ENV_FILE_NAME}.tmp"
+    tmp_path.write_text(content, encoding="utf-8")
+    os.replace(tmp_path, env_path)
 
 
 def _sync_env_file(
@@ -261,6 +264,15 @@ def _apply_models_config_update(body: AdminModelsUpdateRequest) -> list[FullMode
             if api_key == _MASKED_VALUE:
                 if existing and "api_key" in existing:
                     merged["api_key"] = existing["api_key"]
+                elif not existing:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Model '{incoming.name}': api_key is masked but the model "
+                            "does not exist in the current configuration. "
+                            "Cannot preserve a masked value without a previous value to round-trip."
+                        ),
+                    )
                 else:
                     merged.pop("api_key", None)
             elif api_key and not api_key.startswith("$"):
