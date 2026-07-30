@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import logging
 from dataclasses import dataclass
-from typing import Any, Protocol, override, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, override, runtime_checkable
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
@@ -18,6 +18,9 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
+
+if TYPE_CHECKING:
+    from deerflow_extension_api import ExtensionData
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -270,14 +273,20 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return text
         return None
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    async def _asummarize_with(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+        *,
+        task_store: ExtensionData | None = None,
+    ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
         names = self._generation_candidate_names()
         for index, name in enumerate(names):
-            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1, task_store=task_store)
             if text is not None:
                 return text
         return None
@@ -299,12 +308,35 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             self._log_summary_error(last)
             return None
 
-    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
-        """Async counterpart of :meth:`_invoke_summary`."""
+    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False, task_store: ExtensionData | None = None) -> str | None:
+        """Async counterpart of :meth:`_invoke_summary`.
+
+        This is the observed site for ``SystemOperationKind.SUMMARIZATION``: it is
+        the one place the async provider call happens, so wrapping it here — rather
+        than the candidate loop in :meth:`_asummarize_with` — keeps a failed
+        candidate visible to observers instead of hiding it behind the fallback.
+        ``observe_system_model_call`` re-raises, so the ``except`` below retains
+        ownership of the fail-open fallthrough.
+        """
         if model is None:
             return None
+        from deerflow_extension_api import SystemOperationKind
+
+        from deerflow.extensions.notify import observe_system_model_call
+
+        summary_config = {"metadata": {"lc_source": "summarization"}}
         try:
-            response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            response = await observe_system_model_call(
+                SystemOperationKind.SUMMARIZATION,
+                messages=prompt,
+                model_name=getattr(model, "model_name", None),
+                invoke_config=summary_config,
+                invoke=lambda: model.ainvoke(prompt, config=summary_config),
+                # Passed explicitly rather than recovered from `invoke_config`:
+                # the RunnableConfig here carries only tracing metadata, so the
+                # middleware's Runtime is the sole carrier of the live task scope.
+                task_store=task_store,
+            )
             return self._checked_summary(response, last)
         except Exception:
             self._log_summary_error(last)
@@ -530,7 +562,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
+        from deerflow_extension_api import task_store_from_runtime
+
+        summary = await self._asummarize_with(
+            messages_to_summarize,
+            previous_summary=previous_summary,
+            task_store=task_store_from_runtime(runtime),
+        )
         if summary is None:
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")

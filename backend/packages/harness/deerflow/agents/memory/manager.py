@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 from abc import abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -62,6 +63,30 @@ class MemoryCallbacks:
     ) -> None:
         """Pre-LLM-call: mutate ``invoke_config`` (e.g. merge trace metadata)
         before the backend invokes the model. Default: no-op."""
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Post-LLM-call: observe the outcome of the memory-update model call.
+
+        The result-side counterpart of ``on_memory_llm_call``, and the reason
+        this hook exists rather than the backend calling host code directly:
+        ``backends/deermem/`` is a vendorable package permitted exactly one
+        ``from deerflow`` import (pinned by
+        ``tests/test_deermem_self_contained.py``), so anything host-owned has
+        to arrive through this injected object.
+
+        Fires on both the success and failure paths — a memory update that
+        failed is precisely what an observability consumer wants to see.
+        Implementations must not raise; the backend treats an exception here as
+        a failed memory update. Default: no-op."""
 
 
 class MemoryManagerError(RuntimeError):
@@ -643,6 +668,49 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=trace_id,
         )
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Forward the memory-update model call to extension observers.
+
+        Runs on DeerMem's debounce timer thread, which has no event loop of its
+        own, so the notification is submitted to the host's registered loop and
+        not awaited (see
+        ``extensions.notify.dispatch_system_model_observation``).
+        Swallows everything: the backend treats an exception here as a failed
+        memory update, and an observability hook must never do that.
+        """
+        try:
+            from deerflow_extension_api import SystemModelRequest, SystemModelResult, SystemOperationKind
+
+            from deerflow.extensions import get_loaded_extensions
+            from deerflow.extensions.notify import dispatch_system_model_observation, notify_system_model_call, task_store_for_system_call
+
+            extensions = get_loaded_extensions()
+            if not extensions.has_system_model_observers:
+                # Short-circuit before building any snapshot: this runs on every
+                # memory update, extensions or not.
+                return
+            dispatch_system_model_observation(
+                notify_system_model_call(
+                    extensions,
+                    task_store_for_system_call(invoke_config),
+                    SystemOperationKind.MEMORY,
+                    SystemModelRequest(messages=prompt, model_name=model_name, invoke_config=invoke_config if isinstance(invoke_config, Mapping) else None),
+                    SystemModelResult(response=response, error=error, duration_ms=duration_ms),
+                ),
+                SystemOperationKind.MEMORY.value,
+            )
+        except BaseException:
+            logger.warning("Extension observation of the memory model call failed (non-fatal)", exc_info=True)
 
 
 def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:

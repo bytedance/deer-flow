@@ -2396,3 +2396,35 @@ authorization:
 #         # Security features (enabled by default):
 #         pkce_enabled: true               # PKCE (S256) for authorization code flow
 #         nonce_enabled: true              # Nonce validation in ID tokens
+
+# --- Plugins ----------------------------------------------------------------
+# Extension packages, loaded once at startup in the order listed here. Each
+# entry names an install entry point as "module.path:install"; the `config`
+# block is handed to that package verbatim and validated by the package itself.
+#
+# Loading is explicit on purpose: an installed package does nothing until it is
+# listed here, and the list order is what fixes middleware ordering.
+#
+# This is deliberately separate from the `extensions:` block above (MCP servers,
+# skills, config-declared middlewares). That one is backed by
+# extensions_config.json, which the Gateway can rewrite through an HTTP
+# endpoint; a list that causes code to be imported must stay in this
+# operator-controlled file only.
+#
+# For a runnable reference — an independent package using all five contribution
+# points, plus a walkthrough for loading it — see
+# examples/deerflow-extension-example/README.md:
+#
+# plugins:
+#   - use: deerflow_extension_example:install
+#     config:
+#       enabled: true
+#       recent_task_limit: 20
+#   - use: acme_observability:install
+#     config:
+#       enabled: true
+#       queue_capacity: 10000
+#   # `required: true` turns a load failure into a startup failure. Use it for
+#   # packages whose absence changes behaviour rather than just observability.
+#   - use: acme_policy:install
+#     required: true

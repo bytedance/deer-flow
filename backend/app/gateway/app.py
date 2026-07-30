@@ -407,6 +407,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         manager = None
         try:
+            # Before the memory drain below: that drain runs on a worker thread
+            # and each drained item would otherwise submit an observation onto
+            # a loop that is about to stop. Suspend only those fire-and-forget
+            # observations here. The registered loop must remain available
+            # until langgraph_runtime drains in-flight subagents and stops
+            # loop-bound extension services.
+            from deerflow.extensions.notify import suspend_extension_system_observations
+
+            suspend_extension_system_observations()
+        except Exception:
+            logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
+
+        try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:
                 from deerflow.agents.memory import get_memory_manager
@@ -563,6 +576,40 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # configure_logging() at lifespan startup) out of sync with the middleware.
     app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
 
+    # Extensions load during app construction because router contribution has
+    # to happen before the app serves; their services start later, in the
+    # lifespan, once the persistence engine exists.
+    #
+    # Contributed routers are mounted AFTER the host's own routers below, so a
+    # host path always wins a collision — see include_contributed_routers,
+    # which reports the conflict rather than shadowing.
+    from deerflow.config import get_app_config
+    from deerflow.extensions import (
+        ExtensionLoadError,
+        initialize_runtime_diagnostics,
+        load_extensions,
+        record_runtime_diagnostics,
+        set_loaded_extensions,
+    )
+
+    try:
+        _extensions, _extension_diagnostics = load_extensions(get_app_config().plugins)
+    except ExtensionLoadError:
+        # A `required: true` extension failed: fail-closed on purpose. Swallowing
+        # this would boot the Gateway with EMPTY_EXTENSIONS — silently dropping
+        # every successfully loaded extension along with the failed one.
+        raise
+    except Exception:
+        # Loading is already fail-open per spec; this guards the config read
+        # itself so a malformed plugins block cannot stop the Gateway booting.
+        logger.exception("Extension loading failed; continuing with no extensions")
+        from deerflow.extensions import EMPTY_EXTENSIONS
+
+        _extensions, _extension_diagnostics = EMPTY_EXTENSIONS, []
+    set_loaded_extensions(_extensions)
+    app.state.extensions = _extensions
+    app.state.extension_diagnostics = initialize_runtime_diagnostics(_extension_diagnostics)
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)
@@ -656,6 +703,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Last, so every host route is already claimed: an extension cannot take a
+    # path the Gateway serves, it can only be told it collided.
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    record_runtime_diagnostics(include_contributed_routers(app, _extensions))
 
     return app
 

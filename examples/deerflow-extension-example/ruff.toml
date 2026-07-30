@@ -1,0 +1,15 @@
+# Mirrors the host repo's style so the example reads like the code around it.
+# An independent package carries its own tooling config: `cd backend && make lint`
+# does not reach outside `backend/`.
+line-length = 240
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP"]
+
+[lint.isort]
+known-first-party = ["deerflow_extension_example"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

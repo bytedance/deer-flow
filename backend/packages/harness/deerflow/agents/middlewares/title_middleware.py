@@ -15,6 +15,8 @@ from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
 
 if TYPE_CHECKING:
+    from deerflow_extension_api import ExtensionData
+
     from deerflow.config.app_config import AppConfig
     from deerflow.config.title_config import TitleConfig
 
@@ -196,7 +198,12 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    async def _agenerate_title_result(
+        self,
+        state: TitleMiddlewareState,
+        *,
+        task_store: "ExtensionData | None" = None,
+    ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
@@ -218,7 +225,19 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
             model = create_chat_model(name=config.model_name, **model_kwargs)
-            response = await model.ainvoke(prompt, config=self._get_runnable_config())
+            from deerflow_extension_api import SystemOperationKind
+
+            from deerflow.extensions.notify import observe_system_model_call
+
+            title_config = self._get_runnable_config()
+            response = await observe_system_model_call(
+                SystemOperationKind.TITLE,
+                messages=prompt,
+                model_name=config.model_name,
+                invoke_config=title_config,
+                invoke=lambda: model.ainvoke(prompt, config=title_config),
+                task_store=task_store,
+            )
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
@@ -232,4 +251,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        from deerflow_extension_api import task_store_from_runtime
+
+        return await self._agenerate_title_result(
+            state,
+            task_store=task_store_from_runtime(runtime),
+        )

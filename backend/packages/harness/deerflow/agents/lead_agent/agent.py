@@ -282,6 +282,7 @@ def build_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    extensions=None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -304,6 +305,8 @@ def build_middlewares(
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
             filtering. Reused by the execution-time authorization middleware.
+        extensions: Loaded extensions whose middleware contributions are merged
+            into the final stack. Defaults to the process-wide set.
 
     Returns:
         List of middleware instances.
@@ -475,7 +478,27 @@ def build_middlewares(
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
-    return middlewares
+
+    # Extension contributions are merged only here, once the full stack exists.
+    # Doing it inside build_lead_runtime_middlewares() would place
+    # MODEL_PHYSICAL contributions above the lead-specific middlewares appended
+    # above, changing what "the final request" means for observers.
+    from deerflow_extension_api import AgentBuildContext, AgentScope
+
+    from deerflow.extensions.gateway import project_host_policy
+    from deerflow.extensions.stack import compose_with_extensions
+
+    return compose_with_extensions(
+        middlewares,
+        AgentScope.LEAD,
+        AgentBuildContext(
+            scope=AgentScope.LEAD,
+            agent_name=agent_name,
+            model_name=model_name,
+            policy=project_host_policy(resolved_app_config),
+        ),
+        extensions,
+    )
 
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:

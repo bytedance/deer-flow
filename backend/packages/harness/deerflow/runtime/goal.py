@@ -18,7 +18,7 @@ import threading
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
@@ -29,6 +29,9 @@ from deerflow.models import create_chat_model
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
+
+if TYPE_CHECKING:
+    from deerflow_extension_api import ExtensionData
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +280,7 @@ async def evaluate_goal_completion(
     thread_id: str | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: ExtensionData | None = None,
 ) -> GoalEvaluation:
     """Ask a small non-thinking model whether the active goal is satisfied.
 
@@ -320,9 +324,18 @@ async def evaluate_goal_completion(
         environment=_resolve_environment(),
         deerflow_trace_id=deerflow_trace_id,
     )
-    response = await model.ainvoke(
-        [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
-        config=invoke_config,
+    from deerflow_extension_api import SystemOperationKind
+
+    from deerflow.extensions.notify import observe_system_model_call
+
+    evaluator_messages = [SystemMessage(content=system_instruction), HumanMessage(content=user_content)]
+    response = await observe_system_model_call(
+        SystemOperationKind.GOAL,
+        messages=evaluator_messages,
+        model_name=model_name,
+        invoke_config=invoke_config,
+        invoke=lambda: model.ainvoke(evaluator_messages, config=invoke_config),
+        task_store=task_store,
     )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 

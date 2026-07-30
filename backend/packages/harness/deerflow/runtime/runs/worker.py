@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
@@ -84,6 +84,9 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
+
+if TYPE_CHECKING:
+    from deerflow_extension_api import ExtensionData
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +229,17 @@ async def _produced_output_paths(
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
 
+# Shared ceiling on each extension task-lifecycle notification in run_agent —
+# one budget for the whole start notification, one for the whole stop.
+# Extension code is arbitrary; without a bound, one hung contributor keeps the
+# run's task alive indefinitely and blocks RunManager.shutdown's drain.
+#
+# This does NOT guarantee a shutdown cannot miss the run: that drain spends one
+# 5s deadline across stop_heartbeat and every other step of run_agent's finally,
+# so a stall here can still consume whatever is left of it. The bound only
+# converts "hangs forever" into "costs at most this much".
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
 
 @dataclass
 class _LargeFileToolChunkBatcher:
@@ -349,6 +363,7 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    task_store: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -370,6 +385,13 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if task_store is not None:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        # Host-owned key. Extensions read this through
+        # task_store_from_runtime() and keep their objects inside the store,
+        # so two extensions cannot collide on a runtime-context key.
+        runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
     return runtime_ctx
 
 
@@ -519,6 +541,19 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+
+    from deerflow_extension_api import ExtensionData, TaskInfo
+
+    from deerflow.extensions import get_loaded_extensions
+    from deerflow.extensions.notify import lead_task_id, lead_task_outcome, notify_task_start, notify_task_stop
+
+    _extensions = get_loaded_extensions()
+    _task_store: ExtensionData | None = None
+    _task_info: TaskInfo | None = None
+    # Set only if a cancellation lands inside the task-stop notification; the
+    # finally re-raises it once the remaining cleanup has run.
+    deferred_stop_interrupt: BaseException | None = None
+
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -631,6 +666,30 @@ async def run_agent(
             return
         started = True
 
+        task_id = lead_task_id(run_id)
+        if _extensions.needs_task_store:
+            _task_store = ExtensionData(task_id)
+
+        if _extensions.has_task_lifecycle:
+            # After the startup barrier, so "start" means the agent really is
+            # going to run: the gateway deliberately enters run_agent for
+            # already-aborted runs, and those return above. Also after
+            # wait_for_prior_finalizing, so an interrupt-strategy replacement
+            # cannot announce its start before the run it replaced announces
+            # its stop. Still before _build_runtime_context(), which is what
+            # installs the store into the runtime context.
+            _task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert _task_store is not None
+            # Bounded for the same reason the stop side is: a contributor that
+            # hangs here would hang the run before it streams a single token.
+            await notify_task_start(_extensions, _task_store, _task_info, timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS)
+
         if not record.ownership_lost and thread_store is not None:
             try:
                 await thread_store.update_status(thread_id, "running")
@@ -698,7 +757,7 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config, _task_store)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
         if deerflow_trace_id:
@@ -926,6 +985,7 @@ async def run_agent(
                 abort_event=record.abort_event,
                 user_id=resolve_runtime_user_id(runtime),
                 deerflow_trace_id=deerflow_trace_id,
+                task_store=_task_store,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -1173,11 +1233,60 @@ async def run_agent(
                 await ctx.on_run_completed(record)
             except Exception:
                 logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+        if _task_info is not None and _task_store is not None:
+            # Placement is pinned on both sides.
+            #
+            # After every persistence step above: extension code is arbitrary
+            # and slow, so running it earlier would eat RunManager.shutdown's
+            # drain budget ahead of the checkpoint and journal flushes, and a
+            # cancellation raised at this await would skip them entirely. It
+            # also means an extension reading run state sees final values
+            # rather than a still-running snapshot.
+            #
+            # Before `set_finalizing(False)`: wait_for_prior_finalizing polls
+            # exactly that flag, so clearing it first would let an
+            # interrupt-strategy replacement run pass the barrier and fire its
+            # on_task_start while this run's on_task_stop is still pending —
+            # an extension keying state by thread_id would see two overlapping
+            # tasks. `publish_end` is an await, so it is enough for the clear
+            # to merely precede this notification for that race to open.
+            #
+            # The cost of sitting here rather than dead last: a slow
+            # contributor delays both the SSE end frame and the finalizing
+            # clear — i.e. a same-thread replacement run's barrier — by up to
+            # the timeout below. That is the accepted trade: a bounded delay
+            # beats an ordering violation extensions cannot defend against.
+            try:
+                await notify_task_stop(
+                    _extensions,
+                    _task_store,
+                    _task_info,
+                    lead_task_outcome(aborted=record.abort_event.is_set() or record.status == RunStatus.interrupted, succeeded=record.status == RunStatus.success),
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                # notify_task_stop is fail-open internally; this is the outer
+                # belt for anything it cannot anticipate, because the steps
+                # below must run.
+                logger.warning("Extension task-stop notification failed for run %s (non-fatal)", run_id, exc_info=True)
+            except BaseException as exc:
+                # A cancellation delivered at that await must not strand the
+                # steps below. Leaving record.finalizing set wedges every later
+                # run on this thread in wait_for_prior_finalizing, which has no
+                # overall bound; skipping publish_end leaves SSE consumers
+                # waiting for an end frame that never comes. Re-raised after
+                # cleanup so the task still ends up cancelled.
+                deferred_stop_interrupt = exc
+                logger.warning("Extension task-stop notification interrupted for run %s; completing cleanup first", run_id)
+
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+
+        if deferred_stop_interrupt is not None:
+            raise deferred_stop_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1452,7 @@ async def _prepare_goal_continuation_input(
     abort_event: asyncio.Event | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: ExtensionData | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1423,6 +1533,7 @@ async def _prepare_goal_continuation_input(
             thread_id=thread_id,
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
+            task_store=task_store,
         )
         if abort_event is not None and abort_event.is_set():
             return None

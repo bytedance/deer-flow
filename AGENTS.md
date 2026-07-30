@@ -45,9 +45,11 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── examples/                       # Standalone example packages, outside every build; see examples/deerflow-extension-example/
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
@@ -57,6 +59,18 @@ deer-flow/
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
+
+Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
+(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
+kept out of the API-writable `extensions_config.json`). See the Extension System section in
+[backend/AGENTS.md](backend/AGENTS.md).
+
+`examples/deerflow-extension-example/` is a runnable reference for that mechanism: an
+independent package (single dependency on `deerflow-extension-api`, not a workspace member,
+unreferenced by the host) exercising all five contribution points. Start there when writing
+an extension, and keep it working when changing the extension host — its own tests need no
+host, so nothing in CI covers the "does an independent package still load" path; the
+walkthrough in its README is what verifies that.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

@@ -48,6 +48,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.extensions.loader import ExtensionSpec
 
 load_dotenv()
 
@@ -203,6 +204,19 @@ class AppConfig(BaseModel):
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig, description="Token Budget tracking and limits configuration.")
+    plugins: list[ExtensionSpec] = Field(
+        default_factory=list,
+        description=format_field_description(
+            "plugins",
+            field_doc=(
+                "Extension packages to load at startup, in order. Each entry names an install "
+                "entry point as 'module.path:install' and carries its own private config block. "
+                "Distinct from the `extensions` field above, which configures MCP servers, skills "
+                "and config-declared middlewares and is backed by the HTTP-writable "
+                "extensions_config.json."
+            ),
+        ),
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,

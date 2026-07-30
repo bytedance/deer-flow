@@ -29,6 +29,7 @@ deer-flow/
 │   ├── Makefile               # Backend-only commands (dev, gateway, lint)
 │   ├── langgraph.json         # LangGraph Studio graph configuration
 │   ├── packages/
+│   │   ├── extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public contract, must never import deerflow
 │   │   └── harness/           # deerflow-harness package (import: deerflow.*)
 │   │       ├── pyproject.toml
 │   │       └── deerflow/
@@ -53,6 +54,7 @@ deer-flow/
 │   │           ├── skills/            # Skills discovery, loading, parsing
 │   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
 │   │           ├── community/         # Community tools (search/fetch/scrape, image search, AIO sandbox)
+│   │           ├── extensions/        # Extension host: registry, loader, placement anchors, hook plumbing
 │   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
 │   │           ├── utils/             # Utilities (network, readability)
 │   │           └── client.py          # Embedded Python client (DeerFlowClient)
@@ -281,6 +283,8 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
+- `tests/test_extension_api_contracts.py` — ensures `packages/extension-api/` never imports `deerflow.*` (an extension must be releasable independently of the harness)
+- `tests/test_deermem_self_contained.py` — ensures `agents/memory/backends/deermem/` keeps exactly **one** `from deerflow` line (the ABC contract). Anything host-owned that the backend needs must arrive through the injected `MemoryCallbacks`, not an import
 
 Memory backend async boundary:
 - `MemoryMiddleware.aafter_agent` calls `MemoryManager.aadd`; network-backed
@@ -973,6 +977,214 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 - `consolidation_max_groups_per_cycle` - Maximum categories the LLM can merge in one cycle (default: 3; range: 1–10; also controls the LLM's prompt instruction)
 - `consolidation_max_sources` - Maximum source facts per merge group; prevents over-merging (default: 8; range: 2–20)
 - `watermark_max_keys` - Soft cap on the in-memory conversation-watermark cache (one entry per distinct thread/user/agent). A bounded LRU: when over capacity the least-recently-used entry is dropped, and a dropped key re-extracts one batch on that thread's next turn (same as a restart). Bounds memory in long-lived gateways handling many threads (default: 4096; 0 = unbounded)
+
+### Extension System (`packages/harness/deerflow/extensions/` + `packages/extension-api/`)
+
+Config-driven, in-process extension mechanism. Its purpose is that a third party can ship an
+extension as an independently released pip package with **no** trace of it in core code.
+
+**Two packages, one dependency direction.** The public contract lives in a separate
+`deerflow-extension-api` package (import: `deerflow_extension_api`) that **must never import
+`deerflow`** — that is the sole criterion for "an extension can be released independently",
+and `tests/test_extension_api_contracts.py` pins it. Harness and extensions each depend on
+the contract package; neither depends on the other.
+
+**Contract rules** (all pinned by tests, all so later versions stay additive): every Protocol
+method has a real default implementation, and every *optional* dataclass field has a default.
+A required identity core (e.g. `TaskInfo`'s ids) is legitimate — do not read the rule as
+"every field must have a default".
+
+**Five contribution points**, registered on `ExtensionRegistry` and frozen into an immutable
+`LoadedExtensions`: middlewares, task lifecycle, system model observers, routers, services.
+Every entry carries a `source` string so diagnostics, provenance and ordering errors can name
+the responsible extension. Four are behavior Protocols; routers are concrete `APIRouter`
+values constructed eagerly during `install()` and registered with `registry.routers(...)`,
+not a delayed contributor callback.
+
+**Two phases.** Extensions only ever see `ExtensionRegistry` (write-only, no host
+capabilities), so an extension structurally cannot cause side effects during registration; the
+host hands real dependencies over later via `ExtensionRuntimeDeps`. The registry surface
+extensions annotate `install()` against is the `ExtensionRegistry` Protocol (plus the
+`ExtensionInstall` alias) exported from the contract package — the host's concrete registry
+subclasses it and keeps its machinery (attribution, rollback, build) out of the contract.
+`AppConfig` is never exposed — extensions get the narrow `HostPolicySnapshot` projection, or
+every extension would be pinned to the harness release cadence.
+
+Eager Router construction fixes paths, OpenAPI operations and FastAPI dependency graphs before
+the Gateway serves, while preserving the registration phase's no-capabilities rule. A routed
+extension registers the same object as an `ExtensionService`, binds `ExtensionRuntimeDeps` in
+`start()`, and exposes a bound-method dependency that route handlers resolve through request-time
+`Depends()`. It must return 503 while those deps are unbound (including a fail-open service-start
+failure) and after `stop()` clears them; authentication dependency failures remain fail-closed.
+Do not add routes or rewrite dependency graphs from the lifespan.
+
+**Placement, not indexes.** Middleware contributions declare a semantic `Placement`
+(`MODEL_LOGICAL` / `MODEL_PHYSICAL` / `TOOL_VISIBLE` / `TOOL_RAW` / `STANDARD`); the mapping
+from placement to a real stack position lives in the host's anchor table
+(`extensions/stack.py::PLACEMENT_ANCHORS`). `compose_with_extensions()` must be called once,
+at the end of the **outermost** builder — calling it inside `build_lead_runtime_middlewares()`
+would place `MODEL_PHYSICAL` contributions above the ~18 lead-specific middlewares appended
+afterwards. `MODEL_PHYSICAL` is resolved against the final shape of each scope: the lead
+uses the last core safety middleware that follows `TerminalResponseMiddleware` (and reports
+when it falls back to the terminal anchor), while the subagent anchors inside the last
+`SystemMessageCoalescingMiddleware`, after both durable-context and coalescing request
+transforms. Last-match anchors prevent a config-declared duplicate of a core middleware from
+capturing the insertion point. Guarantees are per hook chain, not per list index.
+
+`tests/test_extension_placement_guarantees.py` asserts each placement's promise against the
+**real lead and subagent stacks**, because nothing else can: appending a new
+request-transforming middleware inner of an anchor leaves the types, the anchor table and the
+pip constraints all valid while the promise silently stops holding. `TOOL_RAW` carries one
+documented carve-out
+(`ClarificationMiddleware`, which must stay last and only intercepts `ask_clarification`);
+it is a named set in the test plus a test guarding the carve-out itself, never a loosened
+assertion. **If a guarantee test fails, fix the anchor table or the middleware's position —
+do not relax the test.**
+
+**Failure isolation.** Contributed middlewares are wrapped in `IsolatedMiddleware`, one
+wrapper per contribution. `GraphBubbleUp` (LangGraph's interrupt/pause/resume control-flow
+signal) is always re-raised unchanged; swallowing it breaks the graph. Fail-open applies only
+to the extension's own failure, never to the downstream model/tool handler: the wrapper tracks
+the handler's latest attempt. If the extension fails before calling it, the host bypasses the
+extension and invokes the handler once; if post-call observation fails, the host reports the
+extension and returns the already-captured result; if the handler itself fails, the original
+exception and traceback propagate without an extension diagnostic or replay. This preserves
+the host retry policy: LangChain middleware may intentionally invoke a handler more than once,
+but isolation recovery never adds another provider call or tool side effect. Each wrapper also
+receives a deterministic, graph-safe name that is unique across the complete middleware stack;
+raw extension sources are normalized because LangGraph reserves `:` and `|` in node names.
+
+Isolation failures write directly to the process's canonical runtime diagnostic sink; wrappers
+must not retain the `append` method of the injection-time diagnostics list, because
+`compose_with_extensions()` only snapshots that list once during stack construction.
+Construction diagnostics still enter the sink as one batch, while each later isolation failure
+uses the single-record path, so neither is duplicated. Sink mutation and snapshots are guarded
+for lead/subagent calls arriving from different loops or threads. `create_app()` initializes the
+stable sink in place with load diagnostics and stores that exact live list on
+`app.state.extension_diagnostics`; router and service start/stop diagnostics must use the
+canonical recorder rather than replacing the app-state list. `get_runtime_diagnostics()` returns
+a defensive snapshot. Tests may reset the sink only when no run is active.
+
+**Hook sites.** Task lifecycle fires around lead runs (`runtime/runs/worker.py`) and subagent
+runs (`subagents/executor.py`); both classify the outcome **success-keyed** — only an
+explicitly successful run reports `COMPLETED`, so a status the host never set (a
+`BaseException` escaping, leaving the run `running`) degrades to `FAILED` rather than looking
+like a clean completion. Stop fires from `finally`, after every persistence step but **before**
+the finalizing flag is cleared: `wait_for_prior_finalizing` polls that flag, so clearing it
+first lets a replacement run announce its start before this run announces its stop. Both
+notifications are bounded (`_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS`) and fail-open per
+contributor. When a host has registered an extension loop, task notifications execute there
+even when a subagent itself runs on an isolated loop; this lets one extension object safely
+serve as both a loop-bound service and a lifecycle contributor. Same-loop calls and hosts
+without a registered loop continue to execute directly. Awaited system-model observations use
+the same dispatch rule, covering subagent summarization observers that share a loop-bound
+service object.
+
+Task-store allocation is broader than lifecycle dispatch. `LoadedExtensions.needs_task_store`
+is precomputed from middleware, task-lifecycle, and system-model-observer registrations; lead
+and subagent runs allocate and install a store whenever any of those task-scoped consumers
+exists. `has_task_lifecycle` separately controls `TaskInfo` construction and start/stop
+notifications, so middleware-only and observer-only extensions receive a live store without
+receiving lifecycle events. A directly invoked subagent without a parent `run_id` still scopes
+its store to `SubagentResult.task_id`, but cannot emit lifecycle events because it lacks a
+complete parent-task identity. Service-only, router-only, and empty registries allocate no
+task store.
+
+**Out-of-graph system model calls** (`SystemOperationKind`) are observed via
+`observe_system_model_call` at three async sites: `runtime/goal.py`,
+`middlewares/title_middleware.py`, and `summarization_middleware.py::_asummarize_with`. The
+three live async sites explicitly pass the active task's exact `ExtensionData` instance to
+the observer when one exists: title and async summarization obtain it from their middleware
+`Runtime`, while goal evaluation receives it from `run_agent` through the goal-continuation
+call chain. This is the same store passed to task lifecycle hooks and exposed to contributed
+middleware; `RunnableConfig` / `invoke_config` is not the authoritative task-store carrier.
+The DeerMem memory-update call is synchronous and runs on a debounce timer thread with no
+event loop, so it is observed through the host-owned
+`MemoryCallbacks.on_memory_llm_result` seam and dispatched to a registered loop
+(`set_extension_notify_loop`, owned by `langgraph_runtime`'s exit stack) — never
+`asyncio.run`, which would create the second event loop that code exists to avoid (issue
+#2615), and never `get_running_loop()`, since this process has several long-lived loops.
+DeerMem updates are deliberately detached from task scope: the debounced update may run
+after the originating task has stopped, so the queue does not retain its task store and the
+observer receives a detached `ExtensionData`. During Gateway shutdown, only this synchronous
+fire-and-forget path is suspended before the memory drain; the registered loop remains
+available until in-flight subagents drain and extension services stop, then the exit stack
+resets it on normal exit and every startup failure/cancellation path. **Coverage gap, by
+decision:** `_summarize_with` (the sync summarization path) is not observed; it is unreachable
+in the Gateway and in subagents, because the middleware overrides both `before_model` and
+`abefore_model`.
+
+**Gateway wiring** (`app/gateway/app.py`, `app/gateway/deps.py`): extensions load during
+`create_app()` because eager router contribution must precede serving; contributed routers mount
+**last**, after every host router, so an extension can never take a path the Gateway serves —
+`include_contributed_routers` compares Starlette's compiled path matchers (with parameter
+group names neutralized), protocol scope, and overlapping HTTP methods; it also recognizes
+common full-shadow relations between built-in converters (for example a preceding
+`/{value}` over a static child, or `/{rest:path}` over `/{id:int}`), including the implicit
+terminal path matcher of a preceding Starlette `Mount`. It reports the conflict naming both
+sides and refuses to mount. Thus `/items/{item_id}` and `/items/{id}` collide for the same
+method, while disjoint methods and equivalent HTTP/WebSocket paths may coexist. A contributed
+`APIRouter.mount()` is rejected with a diagnostic because FastAPI's `include_router()`
+silently ignores `Mount` entries.
+
+Router runtime capabilities evolve through `ExtensionRuntimeDeps`, not through delayed Router
+construction. FastAPI resolves the extension's already-declared `Depends()` callable per request;
+that callable reads the deps bound by service startup. This keeps conflict detection and OpenAPI
+stable while allowing later contract versions to add narrow host-owned capabilities such as auth
+dependencies or a read-only run view.
+
+Services start/stop in the lifespan (`start_services` / `stop_services`), where the session
+factory exists. The lifespan exit stack claims service cleanup **before** the startup batch
+begins, covering cancellation while a later `start()` is still pending after an earlier
+service acquired resources. The same stack claims engine close before engine initialization
+can await schema bootstrap; LIFO teardown stops services once, before stores/checkpointers and
+the engine close, on normal exit and every startup failure/cancellation. Service stop remains
+reverse-order, bounded per service, and fail-open, because a Gateway that cannot shut down is
+worse than a lost observation. Diagnostics accumulate on
+`app.state.extension_diagnostics`.
+
+**Startup reporting.** Every other log branch in the extension host is failure-only, so two
+success lines exist to keep a clean load distinguishable from a `plugins:` block the host
+never read: `load_extensions()` logs `Extensions loaded: x/y (sources)` at INFO whenever any
+spec was configured (x/y separates "all loaded" from "some skipped"; zero configured plugins
+stays at DEBUG, since that is the default state and an unconditional line would be boot
+noise), and `include_contributed_routers()` logs `Extension routers mounted: source -> path`
+per mounted path — which URLs the Gateway handed to third-party code is operational
+information. A router rejected by conflict detection is absent from that line and reported as
+an error instead. Note that `401` on a contributed route proves nothing about mounting:
+`AuthMiddleware` wraps the app and answers before routing, so an unauthenticated request to a
+nonexistent path also returns `401`, never `404`. `/openapi.json` is public and is the
+route-level check.
+
+Config: a top-level `plugins:` list in `config.yaml` (deliberately **not** nested under the
+pre-existing `extensions:` block, which is merged from the API-writable
+`extensions_config.json` — a list that causes code import must not be API-writable). The older
+`extensions.middlewares` mechanism coexists untouched.
+
+**Reference extension** (`examples/deerflow-extension-example/`, repo root): a runnable
+example of the whole contract — all five contribution points, four placements declared in
+pairs (`MODEL_LOGICAL`/`MODEL_PHYSICAL` and `TOOL_RAW`/`TOOL_VISIBLE`, so the gap between
+each pair's counters *is* the guarantee, observed rather than asserted), both
+`ExtensionData` scopes with the mandatory `on_task_stop` flush, and the eager-router +
+service-bound-deps + 503-while-unbound pattern. It is structurally independent on purpose:
+single dependency on `deerflow-extension-api`, **not** a uv workspace member, not
+referenced from any host module, and its tests run against a fake registry built from the
+contract alone (`ExtensionRegistry` is `runtime_checkable`) with no harness installed.
+
+Consequence to keep in mind when changing the host: **no CI test covers whether an
+independent package still loads.** `backend/tests/test_extension_*.py` exercise the host
+against in-repo fakes; they would keep passing if `load_extensions()`, the anchor table or
+`include_contributed_routers()` broke third-party packaging. The manual walkthrough in that
+example's README (install → `plugins:` entry → `curl /api/extension-example/stats`) is the
+only check on that path — run it after touching the loader, the placement anchors, or the
+Gateway wiring. Cheapest way to close the gap later is one `importorskip`-guarded load test
+in `backend/tests` plus an install step in the backend CI job.
+
+Design docs: [the extension system RFC](../docs/plans/2026-07-30-extension-system-rfc.md)
+for the motivation and the contract surface, and
+`docs/superpowers/specs/2026-07-28-sync-system-model-observation-design.md` for why the
+synchronous DeerMem call site is observed through a host-owned callback seam rather than
+directly.
 
 ### Reflection System (`packages/harness/deerflow/reflection/`)
 

@@ -46,6 +46,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Shared ceiling on each extension task-lifecycle notification, mirroring the
+# lead site's constant in runtime/runs/worker.py. It matters more here: every
+# subagent execution in the process shares one isolated event loop, so a
+# contributor that blocks stalls sibling executions, not just its own.
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
 if callable(_previous_shutdown_isolated_subagent_loop):
@@ -788,6 +794,41 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+        from deerflow_extension_api import ExtensionData, TaskInfo
+
+        from deerflow.extensions import get_loaded_extensions
+        from deerflow.extensions.notify import lead_task_id, notify_task_start, notify_task_stop, subagent_task_outcome
+
+        _extensions = get_loaded_extensions()
+        _task_store: ExtensionData | None = None
+        _task_info: TaskInfo | None = None
+        if _extensions.needs_task_store:
+            # The store belongs to this subagent task, whose identity exists
+            # even for direct invocations without a parent run.
+            _task_store = ExtensionData(result.task_id)
+
+        if _extensions.has_task_lifecycle and self.run_id:
+            # task_id lives on the result, not on self: it is either supplied by
+            # the caller's result_holder or generated in the else branch above.
+            _task_info = TaskInfo(
+                task_id=result.task_id,
+                run_id=self.run_id,
+                thread_id=self.thread_id or "",
+                kind="subagent",
+                parent_task_id=lead_task_id(self.run_id),
+                agent_name=self.config.name,
+            )
+            assert _task_store is not None
+        elif _extensions.has_task_lifecycle:
+            # A direct subagent still receives its task store, but no run_id
+            # means there is not enough identity to emit a valid lifecycle
+            # event or connect it to a parent lead task.
+            logger.debug(
+                "[trace=%s] Subagent %s has no run_id; skipping extension task lifecycle",
+                self.trace_id,
+                self.config.name,
+            )
+
         ai_messages = result.ai_messages
         if ai_messages is None:
             ai_messages = []
@@ -804,6 +845,13 @@ class SubagentExecutor:
 
         collector: SubagentTokenCollector | None = None
         try:
+            if _task_info is not None and _task_store is not None:
+                # Inside the try so the finally's stop is guaranteed to pair with
+                # it: a BaseException raised by a contributor here would
+                # otherwise escape _aexecute with a start already announced and
+                # no stop to close it.
+                await notify_task_start(_extensions, _task_store, _task_info, timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS)
+
             state, final_tools, deferred_setup = await self._build_initial_state(task)
             agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
 
@@ -866,6 +914,10 @@ class SubagentExecutor:
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id
+            if _task_store is not None:
+                from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+                context[EXTENSION_TASK_STORE_KEY] = _task_store
             if self.channel_user_id:
                 context["channel_user_id"] = self.channel_user_id
             # Authorization identity: is_internal written unconditionally
@@ -1014,6 +1066,39 @@ class SubagentExecutor:
                 error=str(e),
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
+
+        finally:
+            if _task_info is not None and _task_store is not None:
+                # In `finally` so the exception path and the pre-stream cancel
+                # check's early `return` are both covered. The outcome is read
+                # off the terminal status rather than tracked in a flag, so
+                # every branch that sets a status is classified by construction
+                # — and success-keyed, so the branches that set NO status (a
+                # BaseException escaping `except Exception`, leaving the result
+                # RUNNING) degrade to FAILED instead of reporting a clean
+                # completion. Same rule as the lead side, so an extension reads
+                # one classification for both.
+                try:
+                    await notify_task_stop(
+                        _extensions,
+                        _task_store,
+                        _task_info,
+                        subagent_task_outcome(
+                            cancelled=result.status is SubagentStatus.CANCELLED,
+                            succeeded=result.status is SubagentStatus.COMPLETED,
+                        ),
+                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    # Bounded and guarded for the same reasons as the lead site:
+                    # every subagent in the process shares one event loop, so an
+                    # unbounded contributor stalls sibling executions too.
+                    logger.warning(
+                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
+                    )
 
         return result
 

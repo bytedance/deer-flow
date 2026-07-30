@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
@@ -1375,7 +1376,16 @@ class MemoryUpdater:
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
             attempted = True
-            response = model.invoke(prompt, config=invoke_config)
+            _started = time.monotonic()
+            try:
+                response = model.invoke(prompt, config=invoke_config)
+            except BaseException as exc:
+                # Post-LLM-call observability hook, failure path. A memory
+                # update that failed is exactly what a consumer wants to see,
+                # so this fires before the error is handled below.
+                self._notify_llm_result(invoke_config, prompt=prompt, response=None, error=exc, started=_started, model_name=model_name)
+                raise
+            self._notify_llm_result(invoke_config, prompt=prompt, response=response, error=None, started=_started, model_name=model_name)
             success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
@@ -1413,6 +1423,46 @@ class MemoryUpdater:
                     response=response,
                     success=success,
                 )
+
+    def _notify_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        started: float,
+        model_name: str | None,
+    ) -> None:
+        """Fire the host's post-LLM-call hook, swallowing anything it does.
+
+        The hook is host-owned (``MemoryCallbacks``); this package must not
+        reach into host modules itself — it is vendorable and permitted exactly
+        one host import, the ABC contract, pinned by
+        ``tests/test_deermem_self_contained.py``. Observation must never turn a
+        successful memory update into a failed one, so every exception,
+        including a misbehaving host implementation, stops here.
+        """
+        if self._callbacks is None:
+            return
+        # getattr rather than the direct attribute access `on_memory_llm_call`
+        # above uses: `callbacks` is typed Any and this package cannot see
+        # MemoryCallbacks, so a duck-typed object predating this hook is skipped
+        # instead of raising. The asymmetry is deliberate, not an oversight.
+        hook = getattr(self._callbacks, "on_memory_llm_result", None)
+        if hook is None:
+            return
+        try:
+            hook(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                model_name=model_name,
+            )
+        except BaseException:
+            logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(
         self,

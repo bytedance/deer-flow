@@ -396,6 +396,25 @@ For Docker development, service startup follows `config.yaml` sandbox mode. In L
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
+#### Python Extension Packages
+
+Third-party Python extensions are independently installed packages and are enabled explicitly
+through the startup-only `plugins` list in the repository-root `config.yaml`:
+
+```yaml
+plugins:
+  - use: your_extension_package:install
+    config:
+      enabled: true
+```
+
+Installing a package alone does not activate it; restart the Gateway after adding or changing a
+plugin entry. Extension authors depend on the public `deerflow-extension-api` package rather than
+`deerflow.*` or `app.*`. Contributed FastAPI routers are constructed eagerly during `install()` so
+paths, conflict checks and OpenAPI remain stable. A routed extension obtains app-level runtime
+capabilities later in `ExtensionService.start(ExtensionRuntimeDeps)` and resolves them per request
+through its predeclared FastAPI `Depends()` callables.
+
 #### MCP Server
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
