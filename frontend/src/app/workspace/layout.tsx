@@ -11,7 +11,18 @@ export const dynamic = "force-dynamic";
 
 export default async function WorkspaceLayout({
   children,
-}: Readonly<{ children: React.ReactNode }>) {
+  searchParams,
+}: Readonly<{
+  children: React.ReactNode;
+  searchParams?: Promise<{ mock?: string }>;
+}>) {
+  // Allow unauthenticated access to mock case study pages (public demos).
+  // The chat page reads ?mock=true and renders in read-only demo mode.
+  const params = await searchParams;
+  if (params?.mock === "true") {
+    return <WorkspaceContent>{children}</WorkspaceContent>;
+  }
+
   const result = await getServerSideUser();
 
   switch (result.tag) {
