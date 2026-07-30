@@ -1749,7 +1749,9 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
-  const valuesRef = useRef<Partial<AgentThreadState> | undefined>(thread.values);
+  const valuesRef = useRef<Partial<AgentThreadState> | undefined>(
+    thread.values,
+  );
   const valuesThreadIdRef = useRef<string | null>(threadId ?? null);
   // Current-stream lifecycle bridge for messages removed from the checkpoint
   // tail before the canonical run-event page refetch observes the journal
