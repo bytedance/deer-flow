@@ -150,6 +150,8 @@ import {
   isGoalObjectiveTooLong,
   MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
+  shouldGenerateFollowupsAfterStream,
+  shouldShowFollowups,
   type SlashSuggestion,
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
@@ -417,6 +419,7 @@ export function InputBox({
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
+  const followupsInterruptedByUserRef = useRef(false);
   const messagesRef = useRef(thread.messages);
 
   const clearVoiceRestartTimer = useCallback(() => {
@@ -1148,6 +1151,16 @@ export function InputBox({
     ],
   );
 
+  const handleStop = useCallback(() => {
+    if (status === "streaming") {
+      followupsInterruptedByUserRef.current = true;
+      setFollowups([]);
+      setFollowupsHidden(true);
+      setFollowupsLoading(false);
+    }
+    onStop?.();
+  }, [onStop, status]);
+
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
@@ -1200,7 +1213,7 @@ export function InputBox({
         return handleCompactCommand();
       }
       if (submitAction.kind === "stop") {
-        onStop?.();
+        handleStop();
         return;
       }
       if (submitAction.kind === "empty") {
@@ -1215,7 +1228,7 @@ export function InputBox({
       abortVoiceInput,
       handleCompactCommand,
       handleGoalCommand,
-      onStop,
+      handleStop,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1917,13 +1930,16 @@ export function InputBox({
     });
   }, []);
 
-  const showFollowups =
-    !disabled &&
-    !isWelcomeMode &&
-    !showSkillSuggestions &&
-    !selectedSlashSkill &&
-    !followupsHidden &&
-    (followupsLoading || followups.length > 0);
+  const showFollowups = shouldShowFollowups({
+    disabled: disabled ?? false,
+    isWelcomeMode: isWelcomeMode ?? false,
+    hasSkillSuggestions: showSkillSuggestions,
+    hasSelectedSlashSkill: selectedSlashSkill !== null,
+    hidden: followupsHidden,
+    loading: followupsLoading,
+    count: followups.length,
+    status,
+  });
 
   useEffect(() => {
     onFollowupsVisibilityChange?.(showFollowups);
@@ -1941,7 +1957,24 @@ export function InputBox({
     const streaming = status === "streaming";
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
-    if (!wasStreaming || streaming) {
+    if (streaming) {
+      setFollowups([]);
+      setFollowupsHidden(true);
+      setFollowupsLoading(false);
+      return;
+    }
+
+    const interruptedByUser = followupsInterruptedByUserRef.current;
+    if (wasStreaming && interruptedByUser) {
+      followupsInterruptedByUserRef.current = false;
+    }
+    if (
+      !shouldGenerateFollowupsAfterStream({
+        wasStreaming,
+        isStreaming: streaming,
+        interruptedByUser,
+      })
+    ) {
       return;
     }
 
@@ -2666,7 +2699,7 @@ export function InputBox({
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
-                  onStop?.();
+                  handleStop();
                 }
               }}
             />

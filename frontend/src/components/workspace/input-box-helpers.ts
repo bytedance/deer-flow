@@ -6,6 +6,52 @@ export {
 
 export const MAX_SKILL_SUGGESTIONS = 6;
 
+export type FollowupVisibilityState = {
+  disabled: boolean;
+  isWelcomeMode: boolean;
+  hasSkillSuggestions: boolean;
+  hasSelectedSlashSkill: boolean;
+  hidden: boolean;
+  loading: boolean;
+  count: number;
+  status: string;
+};
+
+export function shouldShowFollowups({
+  disabled,
+  isWelcomeMode,
+  hasSkillSuggestions,
+  hasSelectedSlashSkill,
+  hidden,
+  loading,
+  count,
+  status,
+}: FollowupVisibilityState): boolean {
+  return (
+    status !== "streaming" &&
+    !disabled &&
+    !isWelcomeMode &&
+    !hasSkillSuggestions &&
+    !hasSelectedSlashSkill &&
+    !hidden &&
+    (loading || count > 0)
+  );
+}
+
+export type FollowupStreamTransition = {
+  wasStreaming: boolean;
+  isStreaming: boolean;
+  interruptedByUser: boolean;
+};
+
+export function shouldGenerateFollowupsAfterStream({
+  wasStreaming,
+  isStreaming,
+  interruptedByUser,
+}: FollowupStreamTransition): boolean {
+  return wasStreaming && !isStreaming && !interruptedByUser;
+}
+
 // Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
 // max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so
 // the composer can reject an over-length `/goal <objective>` before issuing the

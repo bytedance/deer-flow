@@ -19,6 +19,8 @@ import {
   parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
+  shouldGenerateFollowupsAfterStream,
+  shouldShowFollowups,
   type SlashSuggestion,
 } from "@/components/workspace/input-box-helpers";
 import type { Skill } from "@/core/skills";
@@ -436,5 +438,60 @@ describe("findSuggestionTemplatePlaceholder", () => {
 
   it("returns null when no placeholder is present", () => {
     expect(findSuggestionTemplatePlaceholder("no placeholder here")).toBeNull();
+  });
+});
+
+describe("shouldShowFollowups", () => {
+  const visibleState = {
+    disabled: false,
+    isWelcomeMode: false,
+    hasSkillSuggestions: false,
+    hasSelectedSlashSkill: false,
+    hidden: false,
+    loading: false,
+    count: 1,
+    status: "ready",
+  } as const;
+
+  it("shows available follow-up suggestions while the composer is idle", () => {
+    expect(shouldShowFollowups(visibleState)).toBe(true);
+  });
+
+  it("hides stale follow-up suggestions while a run is streaming", () => {
+    expect(shouldShowFollowups({ ...visibleState, status: "streaming" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("shouldGenerateFollowupsAfterStream", () => {
+  it("generates suggestions after a normally completed stream", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        isStreaming: false,
+        interruptedByUser: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("waits while the stream is still active", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        isStreaming: true,
+        interruptedByUser: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips suggestions for a user-interrupted response", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        isStreaming: false,
+        interruptedByUser: true,
+      }),
+    ).toBe(false);
   });
 });

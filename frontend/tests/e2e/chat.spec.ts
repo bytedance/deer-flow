@@ -1055,4 +1055,63 @@ test.describe("Chat workspace", () => {
     await page.waitForTimeout(1000);
     expect(suggestionsFetched).toBe(false);
   });
+
+  test("hides stale follow-up suggestions while the next run is streaming", async ({
+    page,
+  }) => {
+    const staleSuggestion = "Review the previous answer";
+    let runCount = 0;
+    let markSecondRunStarted!: () => void;
+    let releaseSecondRun!: () => void;
+    const secondRunStarted = new Promise<void>((resolve) => {
+      markSecondRunStarted = resolve;
+    });
+    const secondRunHeld = new Promise<void>((resolve) => {
+      releaseSecondRun = resolve;
+    });
+
+    await page.route("**/api/suggestions/config", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: true, max_suggestions: 3 }),
+      });
+    });
+    await page.route("**/api/threads/*/suggestions", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ suggestions: [staleSuggestion] }),
+      });
+    });
+    await page.route("**/runs/stream", async (route) => {
+      runCount += 1;
+      if (runCount === 2) {
+        markSecondRunStarted();
+        await secondRunHeld;
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("First request");
+    await textarea.press("Enter");
+
+    await expect(page.getByText(staleSuggestion)).toBeVisible({
+      timeout: 10_000,
+    });
+
+    await textarea.fill("Second request");
+    await textarea.press("Enter");
+    await secondRunStarted;
+
+    try {
+      await expect(page.getByText(staleSuggestion)).toBeHidden();
+    } finally {
+      releaseSecondRun();
+    }
+  });
 });
