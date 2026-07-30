@@ -1134,4 +1134,9 @@ def test_validate_next_param_rejects_colon_paths():
     from app.gateway.routers.auth import validate_next_param
 
     assert validate_next_param("/workspace") == "/workspace"
+    assert validate_next_param("/workspace/chats/new?tab=recent#top") == "/workspace/chats/new?tab=recent#top"
     assert validate_next_param("/:evil") is None
+    assert validate_next_param("/\\evil.example") is None
+    assert validate_next_param("/foo\\bar") is None
+    assert validate_next_param("//evil.example") is None
+    assert validate_next_param("https://evil.example") is None
