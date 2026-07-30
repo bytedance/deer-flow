@@ -197,9 +197,10 @@ def _sync_env_file(
             var_name = _derive_env_var_name(m.name)
             env_entries[var_name] = api_key
             incoming_env_refs.add(var_name)
-        elif api_key == _MASKED_VALUE:
-            # Masked round-trip — preserve the previous $VAR reference
-            # so it is not treated as orphaned and deleted from .env.
+        elif api_key == _MASKED_VALUE or not api_key:
+            # Masked round-trip or None/empty (user cleared the field) —
+            # preserve the previous $VAR reference so it is not treated
+            # as orphaned and deleted from .env.
             prev_var = raw_name_to_env_var.get(m.name)
             if prev_var:
                 incoming_env_refs.add(prev_var)
@@ -260,6 +261,7 @@ def _apply_models_config_update(body: AdminModelsUpdateRequest) -> list[FullMode
             #  - ***  → preserve existing raw value (masked round-trip)
             #  - $VAR → use as-is (explicit env var reference)
             #  - real value → write to .env, store as $VAR_NAME
+            #  - None / empty → preserve existing value (treat as "keep current")
             api_key = merged.get("api_key")
             if api_key == _MASKED_VALUE:
                 if existing and "api_key" in existing:
@@ -275,7 +277,28 @@ def _apply_models_config_update(body: AdminModelsUpdateRequest) -> list[FullMode
                     )
                 else:
                     merged.pop("api_key", None)
-            elif api_key and not api_key.startswith("$"):
+            elif not api_key:
+                # None or empty — preserve existing if available, otherwise
+                # require an explicit key so the model stays usable.
+                if existing and "api_key" in existing:
+                    merged["api_key"] = existing["api_key"]
+                elif not existing:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Model '{incoming.name}': api_key is required. "
+                            "Provide an API key or use '$' to reference an environment variable."
+                        ),
+                    )
+                else:
+                    # Existing model but with no api_key in raw config —
+                    # keep the existing raw value (which is absent) so we
+                    # don't silently drop a working key.
+                    merged.pop("api_key", None)
+            elif api_key.startswith("$"):
+                # $VAR reference — use as-is (no .env sync needed).
+                pass
+            else:
                 # Real value — .env sync happens below.
                 var_name = _derive_env_var_name(incoming.name)
                 merged["api_key"] = f"${var_name}"
