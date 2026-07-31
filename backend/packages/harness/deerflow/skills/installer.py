@@ -339,6 +339,20 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
     return static_findings
 
 
+# Singleton worker pool used to run a fresh asyncio loop inside an existing
+# loop context. Reused across calls so repeated installs do not pay the
+# ThreadPoolExecutor construction/teardown cost (one fresh worker thread per
+# install was the old behaviour).
+# Note: max_workers=1 deliberately serialises concurrent installs on this
+# path (the old per-call executor allowed them to overlap); installs are rare
+# and already mostly serialised by the skill-manage lock. The pool is never
+# shut down — the idle worker exits with the interpreter.
+_ASYNC_INSTALL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="deerflow-skill-install",
+)
+
+
 def _run_async_install(coro):
     try:
         loop = asyncio.get_running_loop()
@@ -346,6 +360,5 @@ def _run_async_install(coro):
         loop = None
 
     if loop is not None and loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(asyncio.run, coro).result()
+        return _ASYNC_INSTALL_EXECUTOR.submit(asyncio.run, coro).result()
     return asyncio.run(coro)

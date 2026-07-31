@@ -69,8 +69,15 @@ class PortAllocator:
             An available port number.
 
         Raises:
+            ValueError: If ``start_port`` is outside ``(0, 65536)`` or
+                ``max_range`` is not a positive integer.
             RuntimeError: If no available port is found in the specified range.
         """
+        if not isinstance(start_port, int) or not (0 < start_port < 65536):
+            raise ValueError(f"start_port must be a positive integer in (0, 65536); got {start_port!r}")
+        if not isinstance(max_range, int) or max_range <= 0:
+            raise ValueError(f"max_range must be a positive integer; got {max_range!r}")
+
         with self._lock:
             for port in range(start_port, start_port + max_range):
                 if self._is_port_available(port):

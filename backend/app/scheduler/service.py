@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import HTTPException
+from sqlalchemy import exc as sa_exc
 
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
 from deerflow.runtime import ConflictError, RunRecord
@@ -483,10 +484,19 @@ class ScheduledTaskService:
         while not self._stop.is_set():
             try:
                 await self.run_once(now=datetime.now(UTC))
+            except (OSError, TimeoutError, sa_exc.OperationalError) as exc:
+                # Known-transient failure (e.g. SQLite "database is locked"
+                # surfaces as sqlalchemy.exc.OperationalError wrapped around
+                # sqlite3.OperationalError): log with the concrete type and
+                # retry on the next poll interval.
+                logger.exception("Scheduled task poll failed (%s); retrying next interval", type(exc).__name__)
             except Exception:
-                # A transient DB error (e.g. SQLite "database is locked") must
-                # not kill the poller task for the rest of the process life.
-                logger.exception("Scheduled task poll failed; retrying next interval")
+                # Anything else (including programming errors such as TypeError
+                # or AttributeError) is unexpected: it is logged loudly as a bug
+                # signal, but the poller deliberately keeps running — nothing
+                # supervises/restarts this task, so raising here would silently
+                # stop all scheduled tasks until a process restart.
+                logger.exception("Scheduled task poll failed with unexpected error; retrying next interval")
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),

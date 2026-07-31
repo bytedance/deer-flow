@@ -101,15 +101,11 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             return enforce_static_scan(skill_dir, skill_name=name)
 
     try:
-        return await _to_thread(_scan_candidate)
+        return await asyncio.to_thread(_scan_candidate)
     except StaticScanBlockedError as e:
         _raise_static_block(e)
     except StaticScannerError as e:
         _raise_static_scan_failure(name, e)
-
-
-async def _to_thread(func, /, *args, **kwargs):
-    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 async def _skill_manage_impl(
@@ -141,16 +137,16 @@ async def _skill_manage_impl(
 
     async with lock:
         if action == "create":
-            if await _to_thread(skill_storage.custom_skill_exists, name):
+            if await asyncio.to_thread(skill_storage.custom_skill_exists, name):
                 raise ValueError(f"Custom skill '{name}' already exists.")
             if content is None:
                 raise ValueError("content is required for create.")
-            await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
+            await asyncio.to_thread(skill_storage.validate_skill_markdown_content, name, content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
-            await _to_thread(
+            await asyncio.to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
+            await asyncio.to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="create", file_path=SKILL_MD_FILE, prev_content=None, new_content=content, thread_id=thread_id, scanner=scan),
@@ -158,17 +154,17 @@ async def _skill_manage_impl(
             await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Created custom skill '{name}'."
         if action == "edit":
-            await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
+            await asyncio.to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if content is None:
                 raise ValueError("content is required for edit.")
-            await _to_thread(skill_storage.validate_skill_markdown_content, name, content)
+            await asyncio.to_thread(skill_storage.validate_skill_markdown_content, name, content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
             skill_file = skill_storage.get_custom_skill_file(name)
-            prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
-            await _to_thread(
+            prev_content = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
+            await asyncio.to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
+            await asyncio.to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="edit", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
@@ -177,11 +173,11 @@ async def _skill_manage_impl(
             return f"Updated custom skill '{name}'."
 
         if action == "patch":
-            await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
+            await asyncio.to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if find is None or replace is None:
                 raise ValueError("find and replace are required for patch.")
             skill_file = skill_storage.get_custom_skill_file(name)
-            prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
+            prev_content = await asyncio.to_thread(skill_file.read_text, encoding="utf-8")
             occurrences = prev_content.count(find)
             if occurrences == 0:
                 raise ValueError("Patch target not found in SKILL.md.")
@@ -189,12 +185,12 @@ async def _skill_manage_impl(
                 raise ValueError(f"Expected {expected_count} replacements but found {occurrences}.")
             replacement_count = expected_count if expected_count is not None else 1
             new_content = prev_content.replace(find, replace, replacement_count)
-            await _to_thread(skill_storage.validate_skill_markdown_content, name, new_content)
+            await asyncio.to_thread(skill_storage.validate_skill_markdown_content, name, new_content)
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: new_content})
             scan = await _scan_or_raise(new_content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
-            await _to_thread(
+            await asyncio.to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, new_content)
+            await asyncio.to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="patch", file_path=SKILL_MD_FILE, prev_content=prev_content, new_content=new_content, thread_id=thread_id, scanner=scan),
@@ -203,7 +199,7 @@ async def _skill_manage_impl(
             return f"Patched custom skill '{name}' ({replacement_count} replacement(s) applied, {occurrences} match(es) found)."
 
         if action == "delete":
-            await _to_thread(
+            await asyncio.to_thread(
                 skill_storage.delete_custom_skill,
                 name,
                 history_meta=_history_record(
@@ -219,18 +215,18 @@ async def _skill_manage_impl(
             return f"Deleted custom skill '{name}'."
 
         if action == "write_file":
-            await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
+            await asyncio.to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if path is None or content is None:
                 raise ValueError("path and content are required for write_file.")
-            target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
-            exists = await _to_thread(target.exists)
-            prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
+            target = await asyncio.to_thread(skill_storage.ensure_safe_support_path, name, path)
+            exists = await asyncio.to_thread(target.exists)
+            prev_content = await asyncio.to_thread(target.read_text, encoding="utf-8") if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            await _to_thread(skill_storage.write_custom_skill, name, path, content)
-            await _to_thread(
+            await asyncio.to_thread(skill_storage.write_custom_skill, name, path, content)
+            await asyncio.to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="write_file", file_path=path, prev_content=prev_content, new_content=content, thread_id=thread_id, scanner=scan),
@@ -239,15 +235,15 @@ async def _skill_manage_impl(
             return f"Wrote '{path}' for custom skill '{name}'."
 
         if action == "remove_file":
-            await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
+            await asyncio.to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if path is None:
                 raise ValueError("path is required for remove_file.")
-            target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
-            if not await _to_thread(target.exists):
+            target = await asyncio.to_thread(skill_storage.ensure_safe_support_path, name, path)
+            if not await asyncio.to_thread(target.exists):
                 raise FileNotFoundError(f"Supporting file '{path}' not found for skill '{name}'.")
-            prev_content = await _to_thread(target.read_text, encoding="utf-8")
-            await _to_thread(target.unlink)
-            await _to_thread(
+            prev_content = await asyncio.to_thread(target.read_text, encoding="utf-8")
+            await asyncio.to_thread(target.unlink)
+            await asyncio.to_thread(
                 skill_storage.append_history,
                 name,
                 _history_record(action="remove_file", file_path=path, prev_content=prev_content, new_content=None, thread_id=thread_id, scanner={"decision": "allow", "reason": "Deletion requested."}),
@@ -255,7 +251,7 @@ async def _skill_manage_impl(
             await refresh_user_skills_system_prompt_cache_async(user_id)
             return f"Removed '{path}' from custom skill '{name}'."
 
-        if await _to_thread(skill_storage.public_skill_exists, name):
+        if await asyncio.to_thread(skill_storage.public_skill_exists, name):
             # public_skill_exists covers both built-in (PUBLIC) and legacy (LEGACY)
             # skills; the UserScopedSkillStorage override distinguishes them in
             # ensure_custom_skill_is_editable with category-specific messages.
