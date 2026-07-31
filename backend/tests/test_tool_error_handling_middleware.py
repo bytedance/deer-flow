@@ -419,7 +419,7 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     req = _request(name="web_search", tool_call_id="tc-42")
 
     def _boom(_req):
-        raise RuntimeError("network down")
+        raise ValueError("invalid query syntax")
 
     result = middleware.wrap_tool_call(req, _boom)
 
@@ -428,7 +428,7 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert result.name == "web_search"
     assert result.status == "error"
     assert "Tool 'web_search' failed" in result.text
-    assert "network down" in result.text
+    assert "invalid query syntax" in result.text
 
 
 def test_wrap_tool_call_stamps_tool_meta_on_exception():
@@ -436,7 +436,7 @@ def test_wrap_tool_call_stamps_tool_meta_on_exception():
     req = _request(name="web_search", tool_call_id="tc-42")
 
     def _boom(_req):
-        raise ConnectionError("connection refused")
+        raise ValueError("invalid parameter")
 
     result = middleware.wrap_tool_call(req, _boom)
 
@@ -453,7 +453,7 @@ def test_task_exception_wrapper_uses_subagent_result_formatter():
     req = _request(name="task", tool_call_id="tc-task")
 
     def _boom(_req):
-        raise RuntimeError("network down")
+        raise ValueError("invalid task configuration")
 
     result = middleware.wrap_tool_call(req, _boom)
 
@@ -461,9 +461,9 @@ def test_task_exception_wrapper_uses_subagent_result_formatter():
     assert result.tool_call_id == "tc-task"
     assert result.name == "task"
     assert result.status == "error"
-    assert result.content == "Task failed. Error: RuntimeError: network down. Continue with available context, or choose an alternative tool."
+    assert result.content == "Task failed. Error: ValueError: invalid task configuration. Continue with available context, or choose an alternative tool."
     assert result.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
-    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "RuntimeError: network down"
+    assert result.additional_kwargs[SUBAGENT_ERROR_KEY] == "ValueError: invalid task configuration"
 
 
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
@@ -498,7 +498,7 @@ async def test_awrap_tool_call_returns_error_tool_message_on_exception():
     req = _request(name="mcp_tool", tool_call_id="tc-async")
 
     async def _boom(_req):
-        raise TimeoutError("request timed out")
+        raise ValueError("invalid async request")
 
     result = await middleware.awrap_tool_call(req, _boom)
 
@@ -506,7 +506,47 @@ async def test_awrap_tool_call_returns_error_tool_message_on_exception():
     assert result.tool_call_id == "tc-async"
     assert result.name == "mcp_tool"
     assert result.status == "error"
-    assert "request timed out" in result.text
+    assert "invalid async request" in result.text
+
+
+def test_wrap_tool_call_sanitizes_unsafe_exception_messages():
+    """Unsafe exception types (RuntimeError, OSError, etc.) must have their
+    messages sanitized to prevent information leakage. Only the exception class
+    name should be exposed, not the full message which may contain file paths
+    or internal state."""
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-unsafe")
+
+    def _boom(_req):
+        raise RuntimeError("/etc/passwd: permission denied for user root")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert "RuntimeError" in result.text
+    # The sensitive message content must NOT be exposed
+    assert "/etc/passwd" not in result.text
+    assert "permission denied" not in result.text
+    assert "internal error" in result.text.lower()
+
+
+def test_wrap_tool_call_preserves_safe_exception_messages():
+    """Safe exception types (ValueError, TypeError, KeyError, AttributeError)
+    should have their full messages preserved for debugging purposes."""
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="web_search", tool_call_id="tc-safe")
+
+    def _boom(_req):
+        raise ValueError("invalid parameter 'foo': must be positive")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "error"
+    assert "ValueError" in result.text
+    # Safe exceptions should expose their full message
+    assert "invalid parameter 'foo': must be positive" in result.text
 
 
 @pytest.mark.anyio

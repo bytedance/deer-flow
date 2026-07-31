@@ -69,9 +69,19 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
-        detail = str(exc).strip() or exc.__class__.__name__
-        if len(detail) > 500:
-            detail = detail[:497] + "..."
+        
+        # Sanitize exception message to prevent information leakage.
+        # Only expose safe exception types; for others, use a generic message
+        # to avoid leaking file paths, internal state, or other sensitive info.
+        safe_exception_types = (ValueError, TypeError, KeyError, AttributeError)
+        if isinstance(exc, safe_exception_types):
+            detail = str(exc).strip() or exc.__class__.__name__
+            if len(detail) > 500:
+                detail = detail[:497] + "..."
+        else:
+            # For potentially sensitive exceptions, use a generic message.
+            # The full exception is logged server-side via logger.exception().
+            detail = "An internal error occurred. Check server logs for details."
 
         content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
         message = ToolMessage(
