@@ -114,9 +114,15 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
     temp_fd, temp_path_str = tempfile.mkstemp(prefix=_ARTIFACT_EDIT_TEMP_PREFIX, dir=actual_path.parent)
     temp_path = Path(temp_path_str)
     try:
-        # A mounted sandbox may run as a different uid. Preserve the original
-        # mode while ensuring the replacement remains writable from the mount.
-        os.fchmod(temp_fd, stat.S_IMODE(file_stat.st_mode) | 0o666)
+        # Preserve ownership where possible and keep replacement permissions
+        # scoped to the owner/group. The shared outputs directory allows a
+        # mounted sandbox to reach the file without making it world-writable.
+        if hasattr(os, "fchown"):
+            try:
+                os.fchown(temp_fd, file_stat.st_uid, file_stat.st_gid)
+            except OSError:
+                logger.debug("Could not preserve artifact ownership: %s", actual_path, exc_info=True)
+        os.fchmod(temp_fd, stat.S_IMODE(file_stat.st_mode) | 0o660)
         with os.fdopen(temp_fd, "wb") as handle:
             temp_fd = -1
             handle.write(content)
@@ -389,6 +395,9 @@ async def update_artifact(
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
 
+    sandbox_provider = None
+    sandbox_id: str | None = None
+    sandbox = None
     try:
         async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
             actual_path = await asyncio.to_thread(
@@ -406,30 +415,23 @@ async def update_artifact(
             updated = _encode_artifact_update(body.content)
 
             sandbox_provider = get_sandbox_provider()
-            sandbox_id: str | None = None
-            sandbox = None
             if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
                 sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is None:
                     raise RuntimeError("Failed to acquire sandbox for artifact update")
-                await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
 
             try:
+                if sandbox is not None:
+                    await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
                 await asyncio.to_thread(_replace_artifact_atomically, actual_path, updated, file_stat)
             except Exception:
                 if sandbox is not None:
                     try:
                         await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, current)
                     except Exception:
-                        logger.exception("Failed to roll back remote artifact after local write failure: %s", virtual_path)
+                        logger.exception("Failed to roll back remote artifact after artifact update failure: %s", virtual_path)
                 raise
-            finally:
-                if sandbox_id is not None:
-                    try:
-                        await asyncio.to_thread(sandbox_provider.release, sandbox_id)
-                    except Exception:
-                        logger.warning("Failed to release sandbox after artifact update: %s", sandbox_id, exc_info=True)
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Save after the run finishes.") from None
     except HTTPException:
@@ -437,6 +439,12 @@ async def update_artifact(
     except Exception:
         logger.exception("Failed to update artifact %s for thread %s", path, thread_id)
         raise HTTPException(status_code=500, detail="Failed to update artifact") from None
+    finally:
+        if sandbox_id is not None and sandbox_provider is not None:
+            try:
+                await asyncio.to_thread(sandbox_provider.release, sandbox_id)
+            except Exception:
+                logger.warning("Failed to release sandbox after artifact update: %s", sandbox_id, exc_info=True)
 
     content_sha256 = hashlib.sha256(updated).hexdigest()
     return ArtifactUpdateResponse(

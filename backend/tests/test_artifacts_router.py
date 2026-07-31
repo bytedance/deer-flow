@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import stat
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -59,18 +60,22 @@ class _MountedSandboxProvider:
 
 
 class _RemoteSandbox:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_next_update: bool = False) -> None:
         self.updates: list[tuple[str, bytes]] = []
+        self.fail_next_update = fail_next_update
 
     def update_file(self, path: str, content: bytes) -> None:
+        if self.fail_next_update:
+            self.fail_next_update = False
+            raise RuntimeError("sandbox sync failed")
         self.updates.append((path, content))
 
 
 class _RemoteSandboxProvider:
     uses_thread_data_mounts = False
 
-    def __init__(self) -> None:
-        self.sandbox = _RemoteSandbox()
+    def __init__(self, *, fail_next_update: bool = False) -> None:
+        self.sandbox = _RemoteSandbox(fail_next_update=fail_next_update)
         self.released: list[str] = []
 
     async def acquire_async(self, _thread_id: str, *, user_id: str | None = None) -> str:
@@ -97,6 +102,7 @@ def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provid
 def test_update_artifact_replaces_utf8_text_atomically(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("before", encoding="utf-8")
+    artifact_path.chmod(0o600)
     _patch_artifact_update_dependencies(monkeypatch, artifact_path)
 
     response = asyncio.run(
@@ -113,6 +119,9 @@ def test_update_artifact_replaces_utf8_text_atomically(tmp_path, monkeypatch) ->
     assert response.path == "/mnt/user-data/outputs/note.txt"
     assert response.sha256 == _artifact_sha256("after")
     assert response.size == len(b"after")
+    replacement_mode = stat.S_IMODE(artifact_path.stat().st_mode)
+    assert replacement_mode == 0o660
+    assert not replacement_mode & stat.S_IWOTH
 
 
 def test_update_artifact_rejects_stale_revision_without_changing_file(tmp_path, monkeypatch) -> None:
@@ -193,6 +202,29 @@ def test_update_artifact_syncs_non_mounted_sandbox(tmp_path, monkeypatch) -> Non
     assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
     assert provider.released == ["sandbox-1"]
     assert artifact_path.read_text(encoding="utf-8") == "after"
+
+
+def test_update_artifact_releases_sandbox_when_initial_sync_fails(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider(fail_next_update=True)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+
+    assert exc_info.value.status_code == 500
+    assert provider.released == ["sandbox-1"]
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"before")]
+    assert artifact_path.read_text(encoding="utf-8") == "before"
 
 
 def test_update_artifact_rolls_back_remote_when_local_replace_fails(tmp_path, monkeypatch) -> None:
