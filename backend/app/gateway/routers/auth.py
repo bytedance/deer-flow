@@ -827,7 +827,8 @@ async def oauth_callback(
     # ── Issue DeerFlow session ───────────────────────────────────────
     token = create_access_token(str(user.id), token_version=user.token_version)
 
-    redirect_target = state_payload.next_path or "/workspace"
+    # Revalidate as defense-in-depth if future state writers populate this target.
+    redirect_target = validate_next_param(state_payload.next_path) or "/workspace"
     frontend_base = oidc_config.frontend_base_url or ""
     callback_redirect = f"{frontend_base}/auth/callback?next={urllib.parse.quote(redirect_target)}"
 
@@ -855,13 +856,16 @@ def validate_next_param(next_param: str | None) -> str | None:
     """Validate and sanitize the ``next`` redirect parameter.
 
     Only allows relative paths starting with ``/``. Rejects protocol-relative
-    URLs (``//``), absolute URLs, and URLs with embedded protocols.
+    URLs (``//``), absolute URLs, URLs with embedded protocols, and backslashes
+    that URL parsers may reinterpret as forward slashes.
     """
     if not next_param:
         return None
     if not next_param.startswith("/"):
         return None
     if next_param.startswith("//") or next_param.startswith("http://") or next_param.startswith("https://"):
+        return None
+    if "\\" in next_param:
         return None
     if ":" in next_param:
         return None

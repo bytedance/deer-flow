@@ -203,6 +203,20 @@ class TestRewriteLocalPathsInText:
 
         assert result == text
 
+    def test_oversized_path_like_text_is_left_untouched(self, paths: Paths):
+        workspace = paths.sandbox_work_dir("t1", user_id="u1")
+        text = f"手术室/重症监护室（OR/ICU）整体解决方案{'说明' * 200}"
+
+        with _patch_paths(paths):
+            result = mcp_tools._rewrite_local_paths_in_text(
+                text,
+                thread_id="t1",
+                user_id="u1",
+                source_base_dir=workspace,
+            )
+
+        assert result == text
+
     def test_playwright_markdown_path_is_rewritten_twice_without_copy(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         _workspace_file(paths, ".playwright-mcp/page.png", content=b"png")
