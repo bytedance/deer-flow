@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 # Command classification rules
 # ---------------------------------------------------------------------------
 
+# Executables whose output is dangerous to *execute*. Used by the command
+# substitution rules below; ``\b`` prevents matching unrelated names that merely
+# start with one of these words (``shellcheck``, ``shasum``, ``pythonic-tool``).
+_RISKY_SUBSTITUTION_EXECUTABLES = r"(?:curl|wget|bash|sh|python[\d.]*|ruby|perl|base64)\b"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
@@ -31,8 +36,8 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">+\s*/etc/"),
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
-    # --- command substitution (targeted – only dangerous executables) ---
-    re.compile(r"[`$]\(?\s*(curl|wget|bash|sh|python|ruby|perl|base64)"),
+    # --- eval/source execute a substitution regardless of its position ---
+    re.compile(rf"\b(eval|source)\s+[\"']?[`$<]\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
     # --- base64 decode piped to execution ---
     re.compile(r"base64\s+.*-d.*\|"),
     # --- overwrite system binaries ---
@@ -50,6 +55,23 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
+# Command substitution in *command position*: the substitution result becomes the
+# command that runs, so fetched or interpreted content is executed.
+#
+# These are matched anchored against a single sub-command, never against the whole
+# compound string, because position is what distinguishes the two shapes:
+#
+#   $(curl url)          → executes what was downloaded          → block
+#   x=$(curl url)        → captures the output into a variable   → pass
+#   echo $(curl url)     → passes the output as an argument      → pass
+#
+# The previous unanchored rule could not tell them apart and refused everyday
+# output capture (issue #4611).
+_HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(rf"^[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+]
+
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"chmod\s+777"),
     re.compile(r"pip3?\s+install"),
@@ -61,7 +83,7 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
-def _split_compound_command(command: str) -> list[str]:
+def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[str]:
     """Split a compound command into sub-commands (quote-aware).
 
     Scans the raw command string so unquoted shell control operators are
@@ -70,6 +92,13 @@ def _split_compound_command(command: str) -> list[str]:
     quotes are ignored. If the command ends with an unclosed quote or a
     dangling escape, return the whole command unchanged (fail-closed —
     safer to classify the unsplit string than silently drop parts).
+
+    By default only sequencing operators (``&&``, ``||``, ``;``) split, because a
+    pipeline is one logical command. Pass ``split_pipes=True`` to also split on
+    ``|``, which is what command-position detection needs — the word after a pipe
+    starts a new command. Rules that span a pipe (``| sh``, ``base64 -d | ...``)
+    are matched by the whole-command scan in :func:`_classify_command`, so they
+    are unaffected by the extra split.
     """
     parts: list[str] = []
     current: list[str] = []
@@ -113,6 +142,14 @@ def _split_compound_command(command: str) -> list[str]:
                 current = []
                 index += 2
                 continue
+            # Checked after "||" so a single "|" cannot steal that operator.
+            if split_pipes and char == "|":
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
+                continue
             if char == ";":
                 part = "".join(current).strip()
                 if part:
@@ -134,21 +171,27 @@ def _split_compound_command(command: str) -> list[str]:
     return parts if parts else [command]
 
 
+def _matches_high_risk(candidate: str) -> bool:
+    """Return True if *candidate* (one sub-command) matches any high-risk rule."""
+    if any(pattern.search(candidate) for pattern in _HIGH_RISK_PATTERNS):
+        return True
+    # Anchored: only meaningful for a single sub-command, not a compound string.
+    return any(pattern.match(candidate) for pattern in _HIGH_RISK_COMMAND_POSITION_PATTERNS)
+
+
 def _classify_single_command(command: str) -> str:
     """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
     normalized = " ".join(command.split())
 
-    for pattern in _HIGH_RISK_PATTERNS:
-        if pattern.search(normalized):
-            return "block"
+    if _matches_high_risk(normalized):
+        return "block"
 
     # Also try shlex-parsed tokens for high-risk detection
     try:
         tokens = shlex.split(command)
         joined = " ".join(tokens)
-        for pattern in _HIGH_RISK_PATTERNS:
-            if pattern.search(joined):
-                return "block"
+        if _matches_high_risk(joined):
+            return "block"
     except ValueError:
         # Heredocs and other multiline shell forms may be valid bash but
         # unparseable by shlex. Raw high-risk patterns were already checked.
@@ -178,8 +221,9 @@ def _classify_command(command: str) -> str:
         if pattern.search(normalized):
             return "block"
 
-    # Pass 2: per-sub-command classification
-    sub_commands = _split_compound_command(command)
+    # Pass 2: per-sub-command classification. Pipes split here too, because the
+    # word after a pipe starts a new command position (``echo hi | $(curl ...)``).
+    sub_commands = _split_compound_command(command, split_pipes=True)
     worst = "pass"
     for sub in sub_commands:
         verdict = _classify_single_command(sub)
