@@ -441,7 +441,7 @@ async def start_channel_service(
     ``ChannelRunPolicy.buffer_followups_on_busy`` (currently GitHub) can watch
     a run's completion and auto-drain buffered follow-ups. ``app.py``'s
     lifespan passes a closure over ``app.state.stream_bridge`` here, the same
-    pattern it already uses for ``ScheduledTaskService``'s ``launch_run``.
+    pattern it already uses for the schedule composition root's ``launch_run``.
     """
     global _channel_service
     if _channel_service is not None:

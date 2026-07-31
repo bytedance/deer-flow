@@ -22,13 +22,14 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Annotated, TypeVar, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.domain.schedule.service import ScheduleService
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
@@ -415,17 +416,25 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.persistence.thread_meta import make_thread_store
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
-        if sf is not None:
-            from deerflow.persistence.scheduled_task_runs import (
-                ScheduledTaskRunRepository,
-            )
-            from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
-        else:
-            app.state.scheduled_task_repo = None
-            app.state.scheduled_task_run_repo = None
+        # Hexagonal slices: every adapter is instantiated by the composition
+        # root and nowhere else. It is a pure function of the infrastructure
+        # built above, so what it decides — including "no SQL backend means no
+        # service, and the routes answer 503" — is covered by
+        # tests/test_composition.py rather than only by this call site.
+        from app.composition import build_domain_services, build_run_completion_hook
+        from app.gateway.services import launch_scheduled_thread_run
+
+        domain_services = build_domain_services(
+            session_factory=sf,
+            thread_store=app.state.thread_store,
+            launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),
+            scheduler_config=config.scheduler,
+        )
+        app.state.schedule_service = domain_services.schedule
+        # Built once here rather than per request: it closes over the service,
+        # and every RunContext needs the same one.
+        app.state.run_completion_hook = build_run_completion_hook(domain_services.schedule)
 
         # Run event store. The store and the matching ``run_events_config`` are
         # both frozen at startup so ``get_run_context`` does not combine a
@@ -556,25 +565,23 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
-def get_scheduled_task_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_repo", None)
+def get_schedule_service(request: Request) -> ScheduleService:
+    """The schedule context's input port.
+
+    ``None`` here means the composition root refused to build it, which today
+    means a non-SQL backend -- see ``app/composition.py`` for why that is a
+    503 rather than a degraded in-memory implementation.
+    """
+    val = getattr(request.app.state, "schedule_service", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+        raise HTTPException(status_code=503, detail="Scheduled tasks require a SQL database backend")
     return val
 
 
-def get_scheduled_task_run_repo(request: Request):
-    val = getattr(request.app.state, "scheduled_task_run_repo", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
-    return val
-
-
-def get_scheduled_task_service(request: Request):
-    val = getattr(request.app.state, "scheduled_task_service", None)
-    if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
-    return val
+# Declared as an alias so routes take the service without a default argument
+# (leaving parameter order unconstrained) and so swapping the provider is a
+# one-line change here rather than an edit to every handler signature.
+ScheduleServiceDep = Annotated[ScheduleService, Depends(get_schedule_service)]
 
 
 def get_run_context(request: Request) -> RunContext:
@@ -596,7 +603,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=getattr(request.app.state, "run_completion_hook", None),
     )
 
 
