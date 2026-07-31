@@ -1,3 +1,4 @@
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.gateway.auth.models import User
 from app.gateway.routers import browser as browser_router
-from app.gateway.routers.browser import _should_apply_browser_seed, _ws_origin_allowed
+from app.gateway.routers.browser import _send_browser_frame, _should_apply_browser_seed, _ws_origin_allowed
 
 
 class _FakeWebSocket:
@@ -205,6 +206,31 @@ def test_ws_origin_allowed_same_origin_host():
     # compares host[:port] against the upgrade target Host.
     ws = _FakeWebSocket({"origin": "https://app.example.com", "host": "app.example.com"})
     assert _ws_origin_allowed(ws) is True
+
+
+@pytest.mark.asyncio
+async def test_send_browser_frame_uses_binary_websocket_message_when_requested():
+    websocket = MagicMock()
+    websocket.send_bytes = AsyncMock()
+    websocket.send_text = AsyncMock()
+
+    await _send_browser_frame(websocket, b"\xff\xd8jpeg", binary=True)
+
+    websocket.send_bytes.assert_awaited_once_with(b"\xff\xd8jpeg")
+    websocket.send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_browser_frame_keeps_legacy_base64_json_protocol():
+    websocket = MagicMock()
+    websocket.send_bytes = AsyncMock()
+    websocket.send_text = AsyncMock()
+
+    await _send_browser_frame(websocket, b"\xff\xd8jpeg", binary=False)
+
+    websocket.send_bytes.assert_not_awaited()
+    payload = json.loads(websocket.send_text.await_args.args[0])
+    assert payload == {"type": "frame", "data": "/9hq cGVn".replace(" ", "")}
 
 
 def test_ws_origin_allowed_rejects_cross_origin():

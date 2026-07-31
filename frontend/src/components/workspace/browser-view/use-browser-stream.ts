@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { browserStreamURL } from "./api";
+import { LatestBrowserFrameBuffer } from "./frame-buffer";
 
 export interface BrowserTab {
   index: number;
@@ -38,8 +39,8 @@ function normalizeSeedUrl(url: string | null | undefined): string {
  * Manage a live browser screencast WebSocket.
  *
  * When ``enabled`` is true, opens the stream, exposes the latest JPEG frame as
- * a data URL, and returns a ``sendInput`` callback that forwards user input to
- * the live page. Closes and cleans up when disabled or unmounted.
+ * an object URL, and returns a ``sendInput`` callback that forwards user input
+ * to the live page. Closes and cleans up when disabled or unmounted.
  *
  * ``seedUrl`` is only read when a connection is first established (via a ref, so
  * it is NOT a reconnect trigger). A separate effect steers an already-open live
@@ -119,7 +120,9 @@ export function useBrowserStream(
     // after open (the server already aligns the page to the connect-time seed).
     liveUrlRef.current = seedRef.current ?? null;
     const socket = new WebSocket(browserStreamURL(threadId, seedRef.current));
+    socket.binaryType = "blob";
     socketRef.current = socket;
+    const frameBuffer = new LatestBrowserFrameBuffer(setFrameUrl);
 
     const scheduleReconnect = () => {
       if (closedByEffect || !enabled) {
@@ -156,22 +159,24 @@ export function useBrowserStream(
       setConnectionAttempt(0);
       setStatus("open");
     };
-    socket.onmessage = async (message) => {
+    socket.onmessage = (message) => {
       try {
-        const raw =
-          typeof message.data === "string"
-            ? message.data
-            : message.data instanceof Blob
-              ? await message.data.text()
-              : message.data instanceof ArrayBuffer
-                ? new TextDecoder().decode(message.data)
-                : String(message.data);
-        // The message may resolve after cleanup (async Blob/ArrayBuffer decode);
-        // do not write state for a socket the effect already tore down.
-        if (closedByEffect) {
+        if (closedByEffect) return;
+        if (message.data instanceof Blob) {
+          frameBuffer.push(
+            message.data.type === "image/jpeg"
+              ? message.data
+              : new Blob([message.data], { type: "image/jpeg" }),
+          );
           return;
         }
-        const payload = JSON.parse(raw) as {
+        if (message.data instanceof ArrayBuffer) {
+          frameBuffer.push(new Blob([message.data], { type: "image/jpeg" }));
+          return;
+        }
+        if (typeof message.data !== "string") return;
+
+        const payload = JSON.parse(message.data) as {
           type?: string;
           data?: string;
           url?: string;
@@ -179,7 +184,7 @@ export function useBrowserStream(
           tabs?: BrowserTab[];
         };
         if (payload.type === "frame" && payload.data) {
-          setFrameUrl(`data:image/jpeg;base64,${payload.data}`);
+          frameBuffer.replaceWithUrl(`data:image/jpeg;base64,${payload.data}`);
         } else if (payload.type === "url" && payload.url) {
           liveUrlRef.current = payload.url;
           setLiveUrl(payload.url);
@@ -212,6 +217,8 @@ export function useBrowserStream(
       }
       socketRef.current = null;
       socket.close();
+      frameBuffer.dispose();
+      setFrameUrl(null);
     };
   }, [connectionAttempt, enabled, threadId]);
 

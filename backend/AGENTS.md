@@ -306,6 +306,12 @@ Agentic browser sessions are process-local. The Gateway startup safety gate reje
 uvicorn worker dispatch does not provide thread affinity for browser tools, REST
 navigation, and the Live WebSocket.
 
+Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
+bounded, drop-oldest frame queue. WebSocket clients that request
+`frame_format=binary` receive binary messages; control metadata remains JSON.
+The legacy no-parameter protocol still base64-encodes frames into JSON at the
+Gateway boundary for backward compatibility.
+
 ## Architecture
 
 ### Harness / App Split
