@@ -127,7 +127,6 @@ services:
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
@@ -167,7 +166,6 @@ services:
       # plaintext config/data are never mounted into the sandbox. Supersedes
       # LARK_CLI_INIT_IMAGE when both are set. Empty ⇒ broker off.
       - LARK_CLI_BROKER_IMAGE=${LARK_CLI_BROKER_IMAGE:-}
-      - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - KUBECONFIG_PATH=/root/.kube/config

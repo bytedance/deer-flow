@@ -544,7 +544,7 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
-    def test_thread_mappings_mount_global_integrations_for_every_user(self, tmp_path):
+    def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths
 
         paths = Paths(base_dir=tmp_path / "home")
@@ -568,10 +568,11 @@ class TestLocalSandboxProviderMounts:
 
         alice_integrations = next(mapping for mapping in alice if mapping.container_path == "/mnt/skills/integrations")
         bob_integrations = next(mapping for mapping in bob if mapping.container_path == "/mnt/skills/integrations")
-        expected = str(tmp_path / "home" / "integrations" / "skills")
-        assert alice_integrations.local_path == expected
-        assert bob_integrations.local_path == expected
+        assert alice_integrations.local_path == str(paths.user_integration_skills_view_dir("alice"))
+        assert bob_integrations.local_path == str(paths.user_integration_skills_view_dir("bob"))
+        assert alice_integrations.local_path != bob_integrations.local_path
         assert alice_integrations.read_only is True
+        assert bob_integrations.read_only is True
 
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
