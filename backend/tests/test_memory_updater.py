@@ -45,6 +45,13 @@ def _memory_config(**overrides: object) -> DeerMemConfig:
     return config
 
 
+_DURABLE_USER_FACT = {
+    "scope": "user",
+    "durability": "durable",
+    "authority": "descriptive",
+}
+
+
 class _MemoryStorage(MemoryStorage):
     def __init__(self, memory: dict[str, object] | None = None, *, save_result: bool = True):
         self.memory = copy.deepcopy(memory or _make_memory())
@@ -116,9 +123,9 @@ def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None
         ]
     )
     update_data = {
-        "factsToRemove": ["fact_remove"],
+        "factsToRemove": [{"id": "fact_remove", "scope": "user", "reason": "Explicit retraction in test fixture"}],
         "newFacts": [
-            {"content": "User likes Python", "category": "preference", "confidence": 0.95},
+            {**_DURABLE_USER_FACT, "content": "User likes Python", "category": "preference", "confidence": 0.95},
         ],
     }
 
@@ -133,8 +140,8 @@ def test_apply_updates_skips_whitespace_only_facts() -> None:
     current_memory = _make_memory()
     update_data = {
         "newFacts": [
-            {"content": "   ", "category": "context", "confidence": 0.9},
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "   ", "category": "context", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
         ],
     }
 
@@ -223,9 +230,9 @@ def test_apply_updates_skips_same_batch_duplicates_and_keeps_source_metadata() -
     current_memory = _make_memory()
     update_data = {
         "newFacts": [
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.91},
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.92},
-            {"content": "User works on DeerFlow", "category": "context", "confidence": 0.87},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.91},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.92},
+            {**_DURABLE_USER_FACT, "content": "User works on DeerFlow", "category": "context", "confidence": 0.87},
         ],
     }
 
@@ -263,9 +270,9 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     )
     update_data = {
         "newFacts": [
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
-            {"content": "User uses uv", "category": "context", "confidence": 0.85},
-            {"content": "User likes noisy logs", "category": "behavior", "confidence": 0.6},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "User uses uv", "category": "context", "confidence": 0.85},
+            {**_DURABLE_USER_FACT, "content": "User likes noisy logs", "category": "behavior", "confidence": 0.6},
         ],
     }
 
@@ -289,6 +296,7 @@ def test_apply_updates_preserves_source_error() -> None:
                 "category": "correction",
                 "confidence": 0.95,
                 "sourceError": "The agent previously suggested npm start.",
+                **_DURABLE_USER_FACT,
             }
         ]
     }
@@ -309,6 +317,7 @@ def test_apply_updates_ignores_empty_source_error() -> None:
                 "category": "correction",
                 "confidence": 0.95,
                 "sourceError": "   ",
+                **_DURABLE_USER_FACT,
             }
         ]
     }
@@ -785,7 +794,9 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_wrapped_json_responses_parse(self):
         """Memory update should tolerate provider wrappers around valid JSON."""
-        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], "factsToRemove": []}'
+        valid_json = (
+            '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": []}'
+        )
         response_variants = [
             f"<think>Analyze the conversation first.</think>\n{valid_json}",
             f"<think>Analyze the conversation first.\n{valid_json}",
@@ -802,7 +813,7 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_ignores_unrelated_json_before_memory_update(self):
         """Parser should not select unrelated JSON objects before the memory update."""
-        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9}], "factsToRemove": []}'
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": []}'
         response = f'Example object: {{"user": "alice"}}\nActual memory update:\n{valid_json}'
 
         result, storage = self._run_update_with_response(response)
@@ -819,7 +830,11 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_schema_guard_ignores_invalid_update_fields(self):
         """Parsed JSON with bad field types should not break the memory update."""
-        response = '{"user": "bad", "history": [], "newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], "factsToRemove": "bad"}'
+        response = (
+            '{"user": "bad", "history": [], "newFacts": ["bad", '
+            '{"content": "User works on DeerFlow", "category": "context", "confidence": 0.91, '
+            '"scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": "bad"}'
+        )
 
         result, storage = self._run_update_with_response(response)
 
@@ -830,7 +845,7 @@ class TestUpdateMemoryStructuredResponse:
         """Malformed fact entries should be normalized per fact, not fail the whole update."""
         response = (
             '{"user": {}, "history": {}, "newFacts": ['
-            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  "}, '
+            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  ", "scope": "user", "durability": "durable", "authority": "descriptive"}, '
             '{"content": "skip invalid confidence", "category": "context", "confidence": "high"}, '
             '{"content": 12, "category": "context", "confidence": 0.9}, '
             '{"content": " ", "category": "context", "confidence": 0.9}'
@@ -1024,7 +1039,7 @@ class TestFactDeduplicationCaseInsensitive:
         update_data = {
             "factsToRemove": [],
             "newFacts": [
-                {"content": "user prefers python", "category": "preference", "confidence": 0.95},
+                {**_DURABLE_USER_FACT, "content": "user prefers python", "category": "preference", "confidence": 0.95},
             ],
         }
 
@@ -1051,7 +1066,7 @@ class TestFactDeduplicationCaseInsensitive:
         update_data = {
             "factsToRemove": [],
             "newFacts": [
-                {"content": "User prefers Go", "category": "preference", "confidence": 0.85},
+                {**_DURABLE_USER_FACT, "content": "User prefers Go", "category": "preference", "confidence": 0.85},
             ],
         }
 
@@ -1142,7 +1157,7 @@ class TestFinalizeCacheIsolation:
             {
                 "user": {},
                 "history": {},
-                "newFacts": [{"content": "new fact", "category": "context", "confidence": 0.9}],
+                "newFacts": [{**_DURABLE_USER_FACT, "content": "new fact", "category": "context", "confidence": 0.9}],
                 "factsToRemove": [],
             }
         )
