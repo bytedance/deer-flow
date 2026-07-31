@@ -60,12 +60,7 @@ export default function ChatsPage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const element = sentinelRef.current;
-    if (
-      !element ||
-      !hasNextPage ||
-      isSearching ||
-      !threadListModel.canLoadMore
-    ) {
+    if (!element || !hasNextPage || isSearching) {
       return;
     }
     const observer = new IntersectionObserver(
@@ -78,13 +73,7 @@ export default function ChatsPage() {
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, [
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-    isSearching,
-    threadListModel.canLoadMore,
-  ]);
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage, isSearching]);
 
   return (
     <WorkspaceContainer>
@@ -133,7 +122,7 @@ export default function ChatsPage() {
                     );
                   }}
                 />
-                {hasNextPage && threadListModel.canLoadMore && !isSearching && (
+                {hasNextPage && !isSearching && (
                   <div
                     ref={sentinelRef}
                     aria-hidden="true"
@@ -141,7 +130,7 @@ export default function ChatsPage() {
                     data-testid="chats-page-sentinel"
                   />
                 )}
-                {hasNextPage && threadListModel.canLoadMore && isSearching && (
+                {hasNextPage && isSearching && (
                   <div className="flex justify-center p-4">
                     <Button
                       variant="outline"

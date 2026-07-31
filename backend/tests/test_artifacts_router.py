@@ -356,6 +356,34 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
+    payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        preview = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": "bytes=0-1048575"},
+        )
+        invalid = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": f"bytes={len(payload)}-"},
+        )
+
+    assert preview.status_code == 206
+    assert preview.content == payload[:1_048_576]
+    assert preview.headers["accept-ranges"] == "bytes"
+    assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
+    assert invalid.status_code == 416
+    assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename

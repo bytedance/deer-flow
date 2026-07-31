@@ -4,7 +4,7 @@
 
 **Goal:** Restore static rendering for public routes and keep locale dictionaries, settings pages, editors, artifact panels, and Shiki out of routes that do not use them.
 
-**Architecture:** The root layout becomes locale-agnostic and static. Locale-aware route groups install scoped providers backed by one dynamically imported dictionary. Feature hosts load code at the user-interaction boundary. Syntax highlighting produces one HTML tree per code block.
+**Architecture:** The root layout becomes locale-agnostic and static. Public locale-aware routes resolve one route-owned dictionary; the interactive auth/workspace provider owns both dictionaries because formatter functions cannot cross the RSC serialization boundary and language switching must remain immediate. Feature hosts load code at the user-interaction boundary. Syntax highlighting produces one HTML tree per code block.
 
 **Tech Stack:** Next.js App Router, React 19, TypeScript, Rstest, Streamdown, Shiki, CodeMirror.
 
@@ -28,7 +28,7 @@
 - [ ] Revert root locale detection, prove RED, restore, rerun.
 - [ ] Commit: `perf(frontend): restore static public layout boundaries`.
 
-## Task 2: Load only the selected locale dictionary
+## Task 2: Scope locale dictionaries by route boundary
 
 **Files:**
 - Modify: `frontend/src/core/i18n/context.tsx`
@@ -38,11 +38,11 @@
 - Create: `frontend/tests/unit/core/i18n/context.dom.test.tsx`
 - Modify: `frontend/tests/unit/core/i18n/translations.test.ts`
 
-- [ ] Write failing tests for `loadTranslations("en-US")` and `loadTranslations("zh-CN")`, provider fallback while a locale chunk loads, and `document.documentElement.lang` synchronization.
+- [ ] Write failing tests for `loadTranslations("en-US")` and `loadTranslations("zh-CN")`, the auth/workspace provider's immediate language switch, and `document.documentElement.lang` synchronization.
 - [ ] Run focused i18n tests and capture RED.
-- [ ] Replace static imports of both dictionaries with an exhaustive loader map returning `import("./locales/en-US")` or `import("./locales/zh-CN")`. Server routes pass an already selected dictionary; client-only routes suspend behind a neutral provider fallback.
+- [ ] Replace public static imports of both dictionaries with an exhaustive server loader map returning `import("./locales/en-US")` or `import("./locales/zh-CN")`. Server layouts pass only a serializable locale. Keep both formatter-bearing dictionaries inside the interactive auth/workspace client boundary so switching does not require an RSC-invalid function prop or a loading flash.
 - [ ] Keep the public `useI18n()` contract stable and reject unsupported locale strings through the existing locale parser.
-- [ ] Run focused tests GREEN and use the route measurement output to assert a route references at most one locale chunk.
+- [ ] Run focused tests GREEN and use route measurement/source ownership tests to assert public routes do not inherit the interactive two-locale provider.
 - [ ] Revert the loader map, prove the chunk-ownership test RED, restore, rerun.
 - [ ] Commit: `perf(frontend): split locale dictionaries by route`.
 

@@ -16,5 +16,8 @@ describe("large artifact preview", () => {
     expect(source).toContain("loadFullContent");
     expect(source).toContain("!truncated &&");
     expect(source).toContain("artifactPreview.loadFullFile");
+    expect(source).toContain("ArtifactPreviewError");
+    expect(source).toContain("artifactPreview.previewFailed");
+    expect(source).toContain("download: true");
   });
 });

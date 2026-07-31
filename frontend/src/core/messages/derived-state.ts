@@ -22,10 +22,34 @@ function messageStableKey(message: Message) {
 }
 
 function sameMessageIdentity(previous: Message, next: Message) {
-  if (previous === next) return true;
   if (previous.type !== next.type) return false;
   const previousKey = messageStableKey(previous);
   return previousKey !== null && previousKey === messageStableKey(next);
+}
+
+function sameMessageValue(previous: Message, next: Message) {
+  if (previous === next) return true;
+  if (!sameMessageIdentity(previous, next)) return false;
+
+  const previousRecord = previous as unknown as Record<string, unknown>;
+  const nextRecord = next as unknown as Record<string, unknown>;
+  const previousKeys = Object.keys(previousRecord);
+  const nextKeys = Object.keys(nextRecord);
+  return (
+    previousKeys.length === nextKeys.length &&
+    previousKeys.every((key) => Object.is(previousRecord[key], nextRecord[key]))
+  );
+}
+
+function sameReusableMessage(previous: Message, next: Message) {
+  return (
+    sameMessageValue(previous, next) &&
+    getMessageRunId(previous) === getMessageRunId(next) &&
+    Object.is(
+      previous.additional_kwargs?.turn_duration,
+      next.additional_kwargs?.turn_duration,
+    )
+  );
 }
 
 function canReuseMessageGroup(
@@ -43,13 +67,7 @@ function canReuseMessageGroup(
   return previous.messages.every((message, index) => {
     const nextMessage = next.messages[index];
     return (
-      nextMessage !== undefined &&
-      sameMessageIdentity(message, nextMessage) &&
-      getMessageRunId(message) === getMessageRunId(nextMessage) &&
-      Object.is(
-        message.additional_kwargs?.turn_duration,
-        nextMessage.additional_kwargs?.turn_duration,
-      )
+      nextMessage !== undefined && sameReusableMessage(message, nextMessage)
     );
   });
 }
@@ -101,7 +119,32 @@ export function deriveStableMessageGroups(
     }
 
     if (turnStartIndex >= 0 && previousTurnStartGroupIndex >= 0) {
-      const prefix = previousGroups.slice(0, previousTurnStartGroupIndex);
+      const previousPrefix = previousGroups.slice(
+        0,
+        previousTurnStartGroupIndex,
+      );
+      const nextPrefixMessages = messages
+        .slice(0, turnStartIndex)
+        .filter((message) => !isHiddenFromUIMessage(message));
+      const previousPrefixMessages = previousPrefix.flatMap(
+        (group) => group.messages,
+      );
+      const canReusePrefix =
+        nextPrefixMessages.length === previousPrefixMessages.length &&
+        nextPrefixMessages.every((message, index) => {
+          const previousMessage = previousPrefixMessages[index];
+          return (
+            previousMessage !== undefined &&
+            sameReusableMessage(previousMessage, message)
+          );
+        });
+      const prefix = canReusePrefix
+        ? previousPrefix
+        : stabilizeGroups(
+            getMessageGroups(messages.slice(0, turnStartIndex)),
+            previousPrefix,
+            -1,
+          );
       const previousTail = previousGroups.slice(previousTurnStartGroupIndex);
       const nextTail = getMessageGroups(messages.slice(turnStartIndex), {
         isCurrentTurnLoading: true,

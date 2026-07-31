@@ -63,6 +63,8 @@ export function VirtualMessageList({
     rangeExtractor,
   });
   const virtualItems = virtualizer.getVirtualItems();
+  const shouldVirtualize = groups.length >= VIRTUALIZATION_THRESHOLD;
+  const positionedInitialVirtualWindowRef = useRef(false);
   const previousCountRef = useRef(groups.length);
   const previousFirstKeyRef = useRef<string | undefined>(undefined);
   const anchorRef = useRef<{ key: Key; viewportOffset: number } | undefined>(
@@ -70,6 +72,24 @@ export function VirtualMessageList({
   );
 
   useLayoutEffect(() => {
+    let settleFrame: number | undefined;
+    if (
+      shouldVirtualize &&
+      isAtBottom &&
+      !positionedInitialVirtualWindowRef.current
+    ) {
+      positionedInitialVirtualWindowRef.current = true;
+      const scrollToLatest = () => {
+        virtualizer.scrollToIndex(groups.length - 1, { align: "end" });
+      };
+      scrollToLatest();
+      // Dynamic row measurement changes the total after the first layout.
+      // Re-anchor once with measured sizes so a long restored conversation
+      // cannot land around the estimated midpoint.
+      settleFrame = requestAnimationFrame(scrollToLatest);
+    } else if (!shouldVirtualize) {
+      positionedInitialVirtualWindowRef.current = false;
+    }
     if (groups.length > previousCountRef.current && isAtBottom) {
       void scrollToBottom({
         animation: "instant",
@@ -77,7 +97,16 @@ export function VirtualMessageList({
       });
     }
     previousCountRef.current = groups.length;
-  }, [groups.length, isAtBottom, scrollToBottom]);
+    return () => {
+      if (settleFrame !== undefined) cancelAnimationFrame(settleFrame);
+    };
+  }, [
+    groups.length,
+    isAtBottom,
+    scrollToBottom,
+    shouldVirtualize,
+    virtualizer,
+  ]);
 
   useLayoutEffect(() => {
     const firstKey = getItemKey(0);
@@ -115,7 +144,6 @@ export function VirtualMessageList({
     }
   }, [getItemKey, groups, virtualItems, virtualizer]);
 
-  const shouldVirtualize = groups.length >= VIRTUALIZATION_THRESHOLD;
   const renderedAll = useMemo(
     () =>
       shouldVirtualize

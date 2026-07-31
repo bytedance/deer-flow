@@ -7,7 +7,6 @@ English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 <a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-
 > On February 28th, 2026, DeerFlow claimed the 🏆 #1 spot on GitHub Trending following the launch of version 2. Thanks a million to our incredible community — you made this happen! 💪🔥
 
 DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
@@ -231,11 +230,11 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
 
 Use the table below as a practical starting point when choosing how to run DeerFlow:
 
-| Deployment target                        | Starting point                    | Recommended        | Notes                                                                                                      |
-| ---------------------------------------- | --------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Local evaluation / `make dev`            | 4 vCPU, 8 GB RAM, 20 GB free SSD  | 8 vCPU, 16 GB RAM  | Good for one developer or one light session with hosted model APIs. `2 vCPU / 4 GB` is usually not enough. |
-| Docker development / `make docker-start` | 4 vCPU, 8 GB RAM, 25 GB free SSD  | 8 vCPU, 16 GB RAM  | Image builds, bind mounts, and sandbox containers need more headroom than pure local dev.                  |
-| Long-running server / `make up`          | 8 vCPU, 16 GB RAM, 40 GB free SSD | 16 vCPU, 32 GB RAM | Preferred for shared use, multi-agent runs, report generation, or heavier sandbox workloads.               |
+| Deployment target | Starting point | Recommended | Notes |
+|---------|-----------|------------|-------|
+| Local evaluation / `make dev` | 4 vCPU, 8 GB RAM, 20 GB free SSD | 8 vCPU, 16 GB RAM | Good for one developer or one light session with hosted model APIs. `2 vCPU / 4 GB` is usually not enough. |
+| Docker development / `make docker-start` | 4 vCPU, 8 GB RAM, 25 GB free SSD | 8 vCPU, 16 GB RAM | Image builds, bind mounts, and sandbox containers need more headroom than pure local dev. |
+| Long-running server / `make up` | 8 vCPU, 16 GB RAM, 40 GB free SSD | 16 vCPU, 32 GB RAM | Preferred for shared use, multi-agent runs, report generation, or heavier sandbox workloads. |
 
 - These numbers cover DeerFlow itself. If you also host a local LLM, size that service separately.
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
@@ -307,7 +306,6 @@ Prerequisite: complete the "Configuration" steps above first (`make setup`). `ma
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
-
    ```bash
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
@@ -315,29 +313,24 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm`/`pnpm.cmd` executable when available and otherwise fall back to `corepack pnpm`. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
 
 2. **Install dependencies**:
-
    ```bash
    make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
 3. **(Optional) Pre-pull sandbox image**:
-
    ```bash
    # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
 
 4. **(Optional) Load sample memory data for local review**:
-
    ```bash
    python scripts/load_memory_sample.py
    ```
-
    This copies the sample fixture into the default local runtime memory file so reviewers can immediately test `Settings > Memory`.
    See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
 
 5. **Start services**:
-
    ```bash
    make dev
    ```
@@ -348,15 +341,15 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
 
-|          | **Local Foreground**                         | **Local Daemon**                                             | **Docker Dev**                                      | **Docker Prod**                     |
-| -------- | -------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------- | ----------------------------------- |
-| **Dev**  | `./scripts/serve.sh --dev`<br/>`make dev`    | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon`    | `./scripts/docker.sh start`<br/>`make docker-start` | —                                   |
-| **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | —                                                   | `./scripts/deploy.sh`<br/>`make up` |
+| | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
+|---|---|---|---|---|
+| **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
+| **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
 
-| Action      | Local                                       | Docker Dev                                        | Docker Prod                                |
-| ----------- | ------------------------------------------- | ------------------------------------------------- | ------------------------------------------ |
-| **Stop**    | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
-| **Restart** | `./scripts/serve.sh --restart [flags]`      | `./scripts/docker.sh restart`                     | —                                          |
+| Action | Local | Docker Dev | Docker Prod |
+|---|---|---|---|
+| **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
+| **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
@@ -392,11 +385,9 @@ deploy.sh down
 ```
 
 ### Advanced
-
 #### Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
-
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
@@ -428,14 +419,14 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, or WeCom from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
-| Channel       | Transport                    | Difficulty |
-| ------------- | ---------------------------- | ---------- |
-| Telegram      | Bot API (long-polling)       | Easy       |
-| Slack         | Socket Mode                  | Moderate   |
-| Feishu / Lark | WebSocket                    | Moderate   |
-| WeChat        | Tencent iLink (long-polling) | Moderate   |
-| WeCom         | WebSocket                    | Moderate   |
-| DingTalk      | Stream Push (WebSocket)      | Moderate   |
+| Channel | Transport | Difficulty |
+|---------|-----------|------------|
+| Telegram | Bot API (long-polling) | Easy |
+| Slack | Socket Mode | Moderate |
+| Feishu / Lark | WebSocket | Moderate |
+| WeChat | Tencent iLink (long-polling) | Moderate |
+| WeCom | WebSocket | Moderate |
+| DingTalk | Stream Push (WebSocket) | Moderate |
 
 **Configuration in `config.yaml`:**
 
@@ -448,7 +439,7 @@ channels:
 
   # Optional: global session defaults for all mobile channels
   session:
-    assistant_id: lead_agent # or a custom agent name; custom agents are routed via lead_agent + agent_name
+    assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
     config:
       recursion_limit: 100
     context:
@@ -470,24 +461,24 @@ channels:
 
   slack:
     enabled: true
-    bot_token: $SLACK_BOT_TOKEN # xoxb-...
-    app_token: $SLACK_APP_TOKEN # xapp-... (Socket Mode)
-    allowed_users: [] # empty = allow all
+    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
+    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
+    allowed_users: []               # empty = allow all
 
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
     # Optional: render final Markdown replies as Telegram Rich Messages.
     rich_messages: false
-    allowed_users: [] # empty = allow all
+    allowed_users: []               # empty = allow all
 
   wechat:
     enabled: false
     bot_token: $WECHAT_BOT_TOKEN
     ilink_bot_id: $WECHAT_ILINK_BOT_ID
-    qrcode_login_enabled: true # optional: allow first-time QR bootstrap when bot_token is absent
-    allowed_users: [] # empty = allow all
-    polling_timeout: 35 # timing values must be positive finite seconds
+    qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
+    allowed_users: []               # empty = allow all
+    polling_timeout: 35             # timing values must be positive finite seconds
     polling_retry_delay: 5
     qrcode_poll_interval: 2
     qrcode_poll_timeout: 180
@@ -499,7 +490,7 @@ channels:
 
     # Optional: per-channel / per-user session settings
     session:
-      assistant_id: mobile-agent # custom agent names are also supported here
+      assistant_id: mobile-agent  # custom agent names are also supported here
       context:
         thinking_enabled: false
       users:
@@ -513,14 +504,13 @@ channels:
 
   dingtalk:
     enabled: true
-    client_id: $DINGTALK_CLIENT_ID # Client ID of your DingTalk application
-    client_secret: $DINGTALK_CLIENT_SECRET # Client Secret of your DingTalk application
-    allowed_users: [] # empty = allow all
-    card_template_id: "" # Optional: AI Card template ID for streaming typewriter effect
+    client_id: $DINGTALK_CLIENT_ID             # Client ID of your DingTalk application
+    client_secret: $DINGTALK_CLIENT_SECRET     # Client Secret of your DingTalk application
+    allowed_users: []                          # empty = allow all
+    card_template_id: ""                       # Optional: AI Card template ID for streaming typewriter effect
 ```
 
 Notes:
-
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
@@ -595,7 +585,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 1. Create a DingTalk application in the [DingTalk Developer Console](https://open.dingtalk.com/) and enable **Robot** capability.
 2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
 3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
-4. _(Optional)_ To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+
 
 When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
@@ -603,13 +594,13 @@ When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` c
 
 Once a channel is connected, you can interact with DeerFlow directly from the chat:
 
-| Command   | Description              |
-| --------- | ------------------------ |
-| `/new`    | Start a new conversation |
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new conversation |
 | `/status` | Show current thread info |
-| `/models` | List available models    |
-| `/memory` | View memory              |
-| `/help`   | Show help                |
+| `/models` | List available models |
+| `/memory` | View memory |
+| `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
 
@@ -713,7 +704,7 @@ Use it as-is. Or tear it apart and make it yours.
 
 ### Skills & Tools
 
-Skills are what make DeerFlow do _almost anything_.
+Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
@@ -777,7 +768,7 @@ set `DEER_FLOW_LARK_CLI_SANDBOX_RUNTIME_DIR` to that directory.
 > agent conversations run `lark-cli` inside the sandbox, so the per-user
 > credential directories are mounted into it: `config` (holding the long-lived
 > `appSecret`) is mounted **read-only** and `data` (refreshable OAuth tokens)
-> writable. Both remain _readable_ by any process the agent runs there, so code
+> writable. Both remain *readable* by any process the agent runs there, so code
 > reached via prompt injection in a tool result could read them. Treat the
 > sandbox as inside the Lark credential trust boundary until the sidecar
 > credential-broker follow-up removes these mounts from sandbox execution.
@@ -864,7 +855,6 @@ npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
 Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
 
 **What you can do**:
-
 - Send messages to DeerFlow and get streaming responses
 - Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
 - Check DeerFlow health, list models/skills/agents
@@ -943,7 +933,7 @@ Shutdown races retry remote cleanup after a transient kill failure.
 Reset destroys tracked active and warm E2B VMs. The old provider instance
 cannot accept new acquisitions.
 
-DeerFlow doesn't just _talk_ about doing things. It has its own computer.
+DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
@@ -983,7 +973,7 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Agentic Browser Control
 
-Reading a page is not the same as _using_ one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
+Reading a page is not the same as *using* one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
 
 Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default. It is powered by Playwright and shipped as an optional extra so the core install stays lean:
 

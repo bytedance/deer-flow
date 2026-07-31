@@ -116,14 +116,15 @@ The top-level Next layout becomes request-invariant:
   their explicit `[lang]` segment, and blog keeps its own locale selection;
 - auth and workspace layouts read the locale cookie and mount `I18nProvider`.
 
-The client provider receives the selected translation dictionary from its
-server layout and synchronizes `document.documentElement.lang` when the
-workspace/auth locale changes. `useI18n` reads the dictionary from context
-instead of statically importing both locales. Changing language dynamically
-imports the requested locale chunk before updating the cookie and context.
-This retains the existing language switch behavior without making public
-routes dynamically rendered or putting both dictionaries in every client
-bundle.
+The client provider receives only the selected locale from its server layout
+and synchronizes `document.documentElement.lang` when the workspace/auth locale
+changes. Translation dictionaries include formatter functions and therefore
+cannot cross the React Server Component serialization boundary. The
+interactive auth/workspace provider deliberately owns both small dictionaries
+so switching language remains immediate, while public landing, docs, and blog
+routes resolve one route-owned locale without mounting that provider. This
+retains the existing language switch behavior without making public routes
+dynamically rendered or putting both dictionaries in every route bundle.
 
 ### 3. Bundle boundaries
 
@@ -231,7 +232,8 @@ distinguish complete from truncated content. It shows file size and a clear
 "Load full file" action when truncated; download always returns the original
 file.
 
-The byte limit is shared by frontend and backend constants/contracts. The
+The 1 MiB preview limit is owned by the frontend, while the shared HTTP Range
+contract lets both regular files and bounded archive members honor it. The
 preview handles an incomplete UTF-8 tail safely, and tests cover ASCII,
 multibyte boundary, empty, exact-limit, oversized, skill-archive, active, and
 binary files. Large text opens in the lightweight preview first; CodeMirror is
@@ -248,9 +250,10 @@ page for older conversations instead of silently auto-loading/rendering an
 unbounded list.
 
 Channel/provider, scheduler, and other feature queries mount only with their
-visible page/panel. Static locale payloads are split by route or loaded locale;
-route-scoped CSS is verified in the build manifest rather than inferred from
-import location.
+visible page/panel. Locale payloads are route-scoped: public routes own one
+selected locale, while the interactive auth/workspace boundary owns both for
+instant switching. Route-scoped CSS is verified in the build manifest rather
+than inferred from import location.
 
 Mock route handlers use promise-based filesystem APIs and a cached,
 deterministically generated demo-thread manifest. The workspace redirect and

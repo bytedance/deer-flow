@@ -19,7 +19,9 @@ export const DEMO_THREAD_IDS = [
   "fe3f7974-1bcb-4a01-a950-79673baafefd",
 ] as const;
 
-const STATIC_DEMO_ARTIFACTS: Readonly<Record<string, readonly string[]>> = {
+export const STATIC_DEMO_ARTIFACTS: Readonly<
+  Record<string, readonly string[]>
+> = {
   "21cfea46-34bd-4aa6-9e1f-3009452fbeb9": [
     "user-data/outputs/doraemon-moe-comic.jpg",
   ],

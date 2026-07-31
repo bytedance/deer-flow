@@ -122,6 +122,8 @@ export const enUS: Translations = {
         : `Showing the first ${previewSize}.`,
     loadFullFile: "Load full file",
     loadingFullFile: "Loading full file...",
+    previewFailed:
+      "This file could not be previewed. You can still download it.",
   },
 
   // Citations

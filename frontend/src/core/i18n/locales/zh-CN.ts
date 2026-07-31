@@ -120,6 +120,7 @@ export const zhCN: Translations = {
         : `当前显示前 ${previewSize}。`,
     loadFullFile: "加载完整文件",
     loadingFullFile: "正在加载完整文件...",
+    previewFailed: "无法预览此文件，但仍可下载原始文件。",
   },
 
   // Citations

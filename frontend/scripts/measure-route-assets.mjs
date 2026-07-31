@@ -17,6 +17,23 @@ export const ROUTES = [
   "/blog/posts",
 ];
 
+/**
+ * @param {boolean} staticWebsiteOnly
+ * @param {Readonly<Record<string, string | undefined>>} baseEnvironment
+ */
+export function createBuildEnvironment(
+  staticWebsiteOnly,
+  baseEnvironment = process.env,
+) {
+  const environment = { ...baseEnvironment };
+  if (staticWebsiteOnly) {
+    environment.NEXT_PUBLIC_STATIC_WEBSITE_ONLY = "true";
+  } else {
+    delete environment.NEXT_PUBLIC_STATIC_WEBSITE_ONLY;
+  }
+  return environment;
+}
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(scriptDir, "..");
 
@@ -59,6 +76,16 @@ export function evaluateBudgets(measurements, budgets) {
     }
   }
   return failures;
+}
+
+export function formatMeasurementSummary(measurements) {
+  const lines = ["Route asset summary"];
+  for (const [route, measurement] of Object.entries(measurements)) {
+    lines.push(
+      `${route} [${measurement.buildMode}] JS ${measurement.js} B | CSS ${measurement.css} B | HTML ${measurement.html} B`,
+    );
+  }
+  return lines.join("\n");
 }
 
 async function getFreePort() {
@@ -130,10 +157,7 @@ async function measureRoute(baseUrl, route) {
 }
 
 async function measureBuild(routes, staticWebsiteOnly) {
-  const env = {
-    ...process.env,
-    NEXT_PUBLIC_STATIC_WEBSITE_ONLY: staticWebsiteOnly ? "true" : "false",
-  };
+  const env = createBuildEnvironment(staticWebsiteOnly);
   await run("pnpm", ["exec", "next", "build"], {
     env,
   });
@@ -162,11 +186,23 @@ async function measureBuild(routes, staticWebsiteOnly) {
     await waitForServer(baseUrl, server);
     const measurements = {};
     for (const route of routes) {
-      measurements[route] = await measureRoute(baseUrl, route);
+      measurements[route] = {
+        ...(await measureRoute(baseUrl, route)),
+        buildMode: staticWebsiteOnly ? "static-demo" : "normal",
+      };
     }
     return measurements;
   } finally {
-    server.kill("SIGTERM");
+    if (server.exitCode === null) {
+      await new Promise((resolve) => {
+        const forceStop = setTimeout(() => server.kill("SIGKILL"), 5_000);
+        server.once("exit", () => {
+          clearTimeout(forceStop);
+          resolve();
+        });
+        server.kill("SIGTERM");
+      });
+    }
   }
 }
 
@@ -184,6 +220,7 @@ async function main() {
     `${JSON.stringify(measurements, null, 2)}\n`,
   );
   process.stdout.write(`${JSON.stringify(measurements, null, 2)}\n`);
+  process.stdout.write(`${formatMeasurementSummary(measurements)}\n`);
 
   if (check) {
     const budgets = JSON.parse(

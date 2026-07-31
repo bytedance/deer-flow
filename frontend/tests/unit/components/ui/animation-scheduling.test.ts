@@ -32,7 +32,10 @@ describe("decorative animation scheduling", () => {
     expect(source).toContain("enableSpotlight={false}");
     expect(source).toContain('import("@/components/ui/magic-bento")');
     expect(source).toContain("ssr: false");
-    expect(source).toContain("useRenderActivity(bentoContainerRef, false)");
+    expect(source).toContain(
+      "useRenderActivity(bentoContainerRef, false, false)",
+    );
+    expect(source).toContain("disableAnimations={reducedMotion}");
     expect(source).toContain('container.addEventListener("pointermove"');
     expect(source).toContain("pendingPointerFrame");
   });

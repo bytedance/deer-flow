@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -157,6 +157,51 @@ def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | Non
     if extra_headers:
         headers.update(extra_headers)
     return headers
+
+
+def _slice_byte_range(content: bytes, range_header: str | None) -> tuple[bytes, int, dict[str, str]]:
+    """Apply one RFC 9110 byte range to an in-memory archive member."""
+    size = len(content)
+    headers = {"Accept-Ranges": "bytes"}
+    if range_header is None:
+        return content, 200, headers
+
+    def unsatisfied() -> HTTPException:
+        return HTTPException(
+            status_code=416,
+            detail="Requested range is not satisfiable",
+            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"},
+        )
+
+    if not range_header.startswith("bytes=") or "," in range_header:
+        raise unsatisfied()
+    range_spec = range_header.removeprefix("bytes=")
+    if "-" not in range_spec:
+        raise unsatisfied()
+    start_text, end_text = range_spec.split("-", 1)
+    try:
+        if start_text:
+            start = int(start_text)
+            end = size - 1 if not end_text else min(int(end_text), size - 1)
+        else:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                raise unsatisfied()
+            start = max(size - suffix_length, 0)
+            end = size - 1
+    except ValueError as exc:
+        raise unsatisfied() from exc
+
+    if size == 0 or start < 0 or start >= size or end < start:
+        raise unsatisfied()
+    ranged_content = content[start : end + 1]
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(len(ranged_content)),
+        }
+    )
+    return ranged_content, 206, headers
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -331,14 +376,28 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
 
+        # Archive members are already bounded during extraction. Preserve byte
+        # semantics here so the frontend can request only its preview budget,
+        # including a final partial UTF-8 sequence.
+        request_headers = request.headers if request is not None else {}
+        range_header = None if request_headers.get("if-range") else request_headers.get("range")
+        ranged_content, status_code, range_headers = _slice_byte_range(content, range_header)
+        inline_headers = {**cache_headers, **range_headers}
+
         if mime_type and mime_type.startswith("text/"):
-            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
+            return Response(content=ranged_content, status_code=status_code, media_type=mime_type, headers=inline_headers)
 
         # Default to plain text for unknown types that look like text
         try:
-            return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
+            content.decode("utf-8")
+            return Response(content=ranged_content, status_code=status_code, media_type="text/plain", headers=inline_headers)
         except UnicodeDecodeError:
-            return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
+            return Response(
+                content=ranged_content,
+                status_code=status_code,
+                media_type=mime_type or "application/octet-stream",
+                headers=inline_headers,
+            )
 
     actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path, user_id=owner_user_id)
 

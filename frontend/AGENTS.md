@@ -114,8 +114,10 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 - **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
   chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
   locale provider; docs derive locale from their route, and blog owns its preference
-  cookie. Locale dictionaries load through `core/i18n/translations.ts` one locale at a
-  time. Keep public `/` static and keep rich-content CSS on the routes that render it.
+  cookie. Public server routes load one dictionary at a time through
+  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
+  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
+  Keep public `/` static and keep rich-content CSS on the routes that render it.
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`

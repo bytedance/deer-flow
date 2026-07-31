@@ -88,7 +88,21 @@ export function RecentChatList() {
     () => buildThreadListModel(infiniteThreads?.pages ?? []),
     [infiniteThreads?.pages],
   );
-  const { displayedThreads, threads } = threadListModel;
+  const { threads } = threadListModel;
+  const displayedThreads = useMemo(() => {
+    if (
+      !threadIdFromPath ||
+      threadListModel.displayedThreads.some(
+        (thread) => thread.thread_id === threadIdFromPath,
+      )
+    ) {
+      return threadListModel.displayedThreads;
+    }
+    const activeThread = threadListModel.byId.get(threadIdFromPath);
+    return activeThread
+      ? [...threadListModel.displayedThreads, activeThread]
+      : threadListModel.displayedThreads;
+  }, [threadIdFromPath, threadListModel]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {

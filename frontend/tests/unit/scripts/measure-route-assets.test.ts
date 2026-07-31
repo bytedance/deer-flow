@@ -1,14 +1,28 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  createBuildEnvironment,
   evaluateBudgets,
   extractAssetPaths,
+  formatMeasurementSummary,
   ROUTES,
 } from "../../../scripts/measure-route-assets.mjs";
 
 describe("route asset measurement", () => {
   it("covers every approved representative route", () => {
     expect(ROUTES).toContain("/login");
+  });
+
+  it("removes an inherited static-mode flag from the normal build", () => {
+    expect(
+      createBuildEnvironment(false, {
+        KEEP_ME: "yes",
+        NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true",
+      }),
+    ).toEqual({ KEEP_ME: "yes" });
+    expect(createBuildEnvironment(true, {})).toEqual({
+      NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true",
+    });
   });
 
   it("extracts unique Next.js scripts and styles", () => {
@@ -41,5 +55,15 @@ describe("route asset measurement", () => {
       "/ css: 101 bytes exceeds 100 bytes by 1 byte",
       "/en/docs js: 301 bytes exceeds 300 bytes by 1 byte",
     ]);
+  });
+
+  it("formats a stable human-readable route summary", () => {
+    expect(
+      formatMeasurementSummary({
+        "/": { css: 12, js: 345, html: 67, buildMode: "static-demo" },
+      }),
+    ).toBe(
+      "Route asset summary\n/ [static-demo] JS 345 B | CSS 12 B | HTML 67 B",
+    );
   });
 });

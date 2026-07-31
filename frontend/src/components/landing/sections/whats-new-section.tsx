@@ -4,7 +4,10 @@ import dynamic from "next/dynamic";
 import { useEffect, useRef, type RefObject } from "react";
 
 import { type BentoCardProps } from "@/components/ui/magic-bento";
-import { useRenderActivity } from "@/core/dom/render-activity";
+import {
+  usePrefersReducedMotion,
+  useRenderActivity,
+} from "@/core/dom/render-activity";
 import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
@@ -58,8 +61,9 @@ const features: BentoCardProps[] = [
 
 export function WhatsNewSection({ className }: { className?: string }) {
   const bentoContainerRef = useRef<HTMLDivElement>(null);
-  const renderBento = useRenderActivity(bentoContainerRef, false);
-  useBentoSpotlight(bentoContainerRef, renderBento);
+  const renderBento = useRenderActivity(bentoContainerRef, false, false);
+  const reducedMotion = usePrefersReducedMotion();
+  useBentoSpotlight(bentoContainerRef, renderBento && !reducedMotion);
 
   return (
     <Section
@@ -71,7 +75,13 @@ export function WhatsNewSection({ className }: { className?: string }) {
         ref={bentoContainerRef}
         className="flex min-h-96 w-full items-center justify-center"
       >
-        {renderBento && <MagicBento data={features} enableSpotlight={false} />}
+        {renderBento && (
+          <MagicBento
+            data={features}
+            disableAnimations={reducedMotion}
+            enableSpotlight={false}
+          />
+        )}
       </div>
     </Section>
   );
