@@ -115,6 +115,15 @@ export const enUS: Translations = {
     saveFailed: "Failed to save artifact",
   },
 
+  artifactPreview: {
+    limited: (previewSize, totalSize) =>
+      totalSize
+        ? `Showing the first ${previewSize} of ${totalSize}.`
+        : `Showing the first ${previewSize}.`,
+    loadFullFile: "Load full file",
+    loadingFullFile: "Loading full file...",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) =>
