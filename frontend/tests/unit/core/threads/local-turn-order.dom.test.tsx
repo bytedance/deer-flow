@@ -5,6 +5,7 @@ import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 
 const streamMockState = rs.hoisted(() => ({
@@ -52,6 +53,7 @@ test("keeps early streamed steps behind a local user message after finish", asyn
           value: {
             locale: "en-US",
             setLocale: () => undefined,
+            t: enUS,
           },
         },
         children,
