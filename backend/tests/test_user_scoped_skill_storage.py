@@ -539,11 +539,9 @@ class TestSkillLoadingRespectsGlobalDisable:
                         skills={"shared-skill": SimpleNamespace(enabled=False)},
                         is_skill_enabled=lambda name, _cat: not (name == "shared-skill"),
                     )
-                    # The function inside ``load_skills`` does a
-                    # function-local ``from deerflow.config.extensions_config
-                    # import get_extensions_config``, so patch the
-                    # extension_config module symbol.
-                    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=ext_cfg):
+                    # User-scoped loading re-reads disk state so another
+                    # worker's global disable is not hidden by a stale cache.
+                    with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=ext_cfg):
                         storage = get_or_new_user_skill_storage("alice", app_config=cfg)
                         loaded = storage.load_skills(enabled_only=False)
                         shared = [s for s in loaded if s.name == "shared-skill" and s.category == SkillCategory.LEGACY]

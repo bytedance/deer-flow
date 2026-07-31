@@ -1,8 +1,8 @@
-"""End-to-end tests for three-way skills mount across sandbox providers.
+"""End-to-end tests for enabled-only skill mounts across sandbox providers.
 
-Verifies that (a) public, (b) per-user custom, and (c) legacy global-custom
-skills all resolve to correct container paths that the sandbox providers
-actually mount — covering ``LocalSandboxProvider`` and
+Verifies that public, per-user custom, legacy global-custom, and managed
+integration skills all resolve to correct container paths that the sandbox
+providers actually mount — covering ``LocalSandboxProvider`` and
 ``AioSandboxProvider`` (DooD / local-backend path).
 
 Includes a full-pipeline test that exercises the actual path the model
@@ -16,9 +16,12 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+from deerflow.skills.projection import rebuild_skill_projections
+from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
 
 _AIO_MODULE = "deerflow.community.aio_sandbox.aio_sandbox_provider"
@@ -93,6 +96,32 @@ class TestThreeWayMountEndToEnd:
             idx = _local_mounts(provider, "thread-1", user_id="user-1")
         assert "/mnt/skills/public" in idx
         assert idx["/mnt/skills/public"].read_only is True
+        assert Path(idx["/mnt/skills/public"].local_path) == paths.public_skills_view_dir
+
+    def test_local_acquire_recovers_public_mount_after_initial_projection_failure(self, skills_fs):
+        cfg = _build_config(skills_fs["root"])
+        paths = Paths(base_dir=skills_fs["users_dir"].parent)
+        projection = SimpleNamespace(
+            public=paths.public_skills_view_dir,
+            custom=paths.user_custom_skills_view_dir("user-1"),
+            legacy=paths.user_legacy_skills_view_dir("user-1"),
+            integrations=paths.user_integration_skills_view_dir("user-1"),
+        )
+        for root in (projection.public, projection.custom, projection.legacy, projection.integrations):
+            root.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch.object(LocalSandboxProvider, "_ensure_skills_projection", side_effect=[OSError("transient"), projection]),
+        ):
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire("thread-1", user_id="user-1")
+            sandbox = provider.get(sandbox_id)
+
+        mappings = {mapping.container_path: mapping for mapping in sandbox.path_mappings}
+        assert Path(mappings["/mnt/skills/public"].local_path) == projection.public
+        assert mappings["/mnt/skills/public"].read_only is True
 
     def test_local_per_user_custom_skill_mounted(self, skills_fs):
         cfg = _build_config(skills_fs["root"])
@@ -101,7 +130,17 @@ class TestThreeWayMountEndToEnd:
             provider = LocalSandboxProvider()
             idx = _local_mounts(provider, "thread-1", user_id="user-1")
         assert "/mnt/skills/custom" in idx
-        assert str(skills_fs["user_custom"]) in idx["/mnt/skills/custom"].local_path
+        assert Path(idx["/mnt/skills/custom"].local_path) == paths.user_custom_skills_view_dir("user-1")
+
+    def test_local_managed_integrations_use_per_user_projection(self, skills_fs):
+        cfg = _build_config(skills_fs["root"])
+        paths = Paths(base_dir=skills_fs["users_dir"].parent)
+        with patch("deerflow.config.get_app_config", return_value=cfg), patch("deerflow.config.paths.get_paths", return_value=paths):
+            provider = LocalSandboxProvider()
+            idx = _local_mounts(provider, "thread-1", user_id="user-1")
+        assert "/mnt/skills/integrations" in idx
+        assert Path(idx["/mnt/skills/integrations"].local_path) == paths.user_integration_skills_view_dir("user-1")
+        assert idx["/mnt/skills/integrations"].read_only is True
 
     def test_local_legacy_mounted_for_user_without_custom(self, skills_fs):
         cfg = _build_config(skills_fs["root"])
@@ -110,7 +149,7 @@ class TestThreeWayMountEndToEnd:
             provider = LocalSandboxProvider()
             idx = _local_mounts(provider, "thread-1", user_id="noob")
         assert "/mnt/skills/legacy" in idx
-        assert str(skills_fs["legacy_global"]) in idx["/mnt/skills/legacy"].local_path
+        assert Path(idx["/mnt/skills/legacy"].local_path) == paths.user_legacy_skills_view_dir("noob")
 
     def test_local_legacy_not_mounted_when_user_has_custom(self, skills_fs):
         cfg = _build_config(skills_fs["root"])
@@ -118,7 +157,8 @@ class TestThreeWayMountEndToEnd:
         with patch("deerflow.config.get_app_config", return_value=cfg), patch("deerflow.config.paths.get_paths", return_value=paths):
             provider = LocalSandboxProvider()
             idx = _local_mounts(provider, "thread-1", user_id="user-1")
-        assert "/mnt/skills/legacy" not in idx
+        assert "/mnt/skills/legacy" in idx
+        assert list(Path(idx["/mnt/skills/legacy"].local_path).iterdir()) == []
 
     def test_local_legacy_still_mounted_when_user_has_only_non_skill_subdir(self, skills_fs):
         (skills_fs["users_dir"] / "ghost" / "skills" / "custom" / "dangling-dir").mkdir(parents=True, exist_ok=True)
@@ -204,6 +244,40 @@ class TestThreeWayMountEndToEnd:
         assert cp == "/mnt/skills/legacy/leg-skill/SKILL.md"
         assert "leg-skill" in sandbox_noob.read_file(cp)
 
+    def test_local_bash_observes_toggle_without_sandbox_recreation(self, tmp_path):
+        skills_root = tmp_path / "skills"
+        _write_skill(skills_root / "public", "secret-skill", "SECRET_PROCEDURE")
+        paths = Paths(base_dir=tmp_path)
+        cfg = _build_config(skills_root)
+        extensions = ExtensionsConfig(skills={"secret-skill": SkillStateConfig(enabled=False)})
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions),
+            patch("deerflow.config.extensions_config.get_extensions_config", return_value=extensions),
+        ):
+            storage = UserScopedSkillStorage("user-1", host_path=str(skills_root), app_config=cfg)
+            rebuild_skill_projections(storage)
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire("thread-1", user_id="user-1")
+            sandbox = provider.get(sandbox_id)
+            assert sandbox is not None
+
+            disabled = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            assert "SECRET_PROCEDURE" not in disabled
+
+            extensions.skills["secret-skill"] = SkillStateConfig(enabled=True)
+            rebuild_skill_projections(storage)
+            enabled = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            assert "SECRET_PROCEDURE" in enabled
+            assert provider.acquire("thread-1", user_id="user-1") == sandbox_id
+
+            extensions.skills["secret-skill"] = SkillStateConfig(enabled=False)
+            rebuild_skill_projections(storage)
+            disabled_again = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            assert "SECRET_PROCEDURE" not in disabled_again
+
     # ── AioSandboxProvider ──────────────────────────────────────────────
 
     def test_aio_public_skill_mount(self, skills_fs, aio_mod):
@@ -212,6 +286,8 @@ class TestThreeWayMountEndToEnd:
             mounts = aio_mod.AioSandboxProvider._get_skills_mounts(user_id="user-1")
         idx = {m[1]: m for m in mounts}
         assert "/mnt/skills/public" in idx
+        host, _, _ = idx["/mnt/skills/public"]
+        assert "skills_view/public" in host.replace("\\", "/")
 
     def test_aio_per_user_custom_skill_mount(self, skills_fs, aio_mod, monkeypatch):
         cfg = _build_config(skills_fs["root"])
@@ -222,7 +298,7 @@ class TestThreeWayMountEndToEnd:
         idx = {m[1]: m for m in mounts}
         assert "/mnt/skills/custom" in idx
         host, _, _ = idx["/mnt/skills/custom"]
-        assert "users/user-1/skills/custom" in host.replace("\\", "/")
+        assert "users/user-1/skills_view/custom" in host.replace("\\", "/")
 
     def test_aio_legacy_mounted_for_user_without_custom(self, skills_fs, aio_mod, monkeypatch):
         cfg = _build_config(skills_fs["root"])
@@ -240,7 +316,7 @@ class TestThreeWayMountEndToEnd:
         with patch(_AIO_GET_CONFIG, return_value=cfg), patch("deerflow.config.paths.get_paths", return_value=paths):
             mounts = aio_mod.AioSandboxProvider._get_skills_mounts(user_id="user-1")
         idx = {m[1]: m for m in mounts}
-        assert "/mnt/skills/legacy" not in idx
+        assert "/mnt/skills/legacy" in idx
 
     def test_aio_legacy_still_mounted_when_user_has_only_non_skill_subdir(self, skills_fs, aio_mod, monkeypatch):
         (skills_fs["users_dir"] / "ghost" / "skills" / "custom" / "dangling-dir").mkdir(parents=True, exist_ok=True)
@@ -286,7 +362,11 @@ class TestThreeWayMountEndToEnd:
 
         assert "/mnt/skills/custom" in mount_entries
         assert "dst=/mnt/skills/custom" in mount_entries["/mnt/skills/custom"]
-        assert "users/noob/skills/custom" in mount_entries["/mnt/skills/custom"]
+        assert "users/noob/skills_view/custom" in mount_entries["/mnt/skills/custom"]
+
+        assert "/mnt/skills/integrations" in mount_entries
+        assert "dst=/mnt/skills/integrations" in mount_entries["/mnt/skills/integrations"]
+        assert "users/noob/skills_view/integrations" in mount_entries["/mnt/skills/integrations"]
 
         # noob has no per-user custom → legacy is mounted
         assert "/mnt/skills/legacy" in mount_entries

@@ -12,6 +12,18 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
+  projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
+  used; Docker/AIO and hostPath deployments derive projection paths from
+  `DEER_FLOW_HOST_BASE_DIR`. E2B operator mounts targeting `/mnt/skills` or any
+  child path are skipped with a warning so they cannot shadow the managed
+  projection; move extra E2B content to a different container path. User
+  projections re-read global enable state from disk so toggles propagate across
+  Gateway workers on the next sandbox acquire. Existing E2B sandboxes retain
+  their creation-time snapshot until they are recreated. PVC-backed provisioner
+  deployments still mount the operator-supplied PVC snapshot directly, so
+  disabled-skill filesystem isolation does not apply in PVC mode until dynamic
+  PVC materialization is implemented. ([#4178])
 - **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
   limit. The default `wait` policy waits for `acquire_timeout`, then fails the
   agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
@@ -1264,6 +1276,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4170]: https://github.com/bytedance/deer-flow/pull/4170
 [#4171]: https://github.com/bytedance/deer-flow/pull/4171
 [#4174]: https://github.com/bytedance/deer-flow/pull/4174
+[#4178]: https://github.com/bytedance/deer-flow/pull/4178
 [#4181]: https://github.com/bytedance/deer-flow/pull/4181
 [#4187]: https://github.com/bytedance/deer-flow/pull/4187
 [#4188]: https://github.com/bytedance/deer-flow/pull/4188

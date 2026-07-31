@@ -44,7 +44,6 @@ from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
-from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -868,41 +867,34 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         that ``Skill.get_container_path()`` category-aware paths resolve
         correctly inside the sandbox.
 
-        Mount sources use ``DEER_FLOW_HOST_SKILLS_PATH`` and
-        ``DEER_FLOW_HOST_BASE_DIR`` when running inside Docker (DooD) so the
-        host Docker daemon can resolve the paths.
+        Mount sources use ``DEER_FLOW_HOST_BASE_DIR`` when running inside
+        Docker (DooD) so the host Docker daemon can resolve the projection
+        paths.
         """
         mounts: list[tuple[str, str, bool]] = []
         try:
             config = get_app_config()
-            skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
-
-            # When running inside Docker with DooD, use host-side skills path.
-            host_skills_root = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH") or str(skills_path)
+            effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
+            AioSandboxProvider._ensure_skills_projection(effective_user_id)
+            paths = get_paths()
+            host_base_dir = str(paths.host_base_dir)
 
             # 1. Public skills: global, read-only — static, shared by all threads
-            public_skills_path = skills_path / "public"
-            if public_skills_path.exists():
-                mounts.append(
-                    (
-                        join_host_path(host_skills_root, "public"),
-                        f"{container_path}/public",
-                        True,
-                    )
+            mounts.append(
+                (
+                    join_host_path(host_base_dir, "skills_view", "public"),
+                    f"{container_path}/public",
+                    True,
                 )
+            )
 
             # 2. Per-user custom skills: read-only, per-thread/per-user
-            effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
-            paths = get_paths()
-            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
-            user_custom_path.mkdir(parents=True, exist_ok=True)
-
             host_user_custom = join_host_path(
-                str(paths.host_base_dir),
+                host_base_dir,
                 "users",
                 effective_user_id,
-                "skills",
+                "skills_view",
                 "custom",
             )
             mounts.append(
@@ -913,38 +905,66 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 )
             )
 
-            # 3. Legacy (pre-migration global-custom) skills: only mount for
-            #    users who have no per-user custom skills yet, mirroring
-            #    ``UserScopedSkillStorage._iter_skill_files`` visibility rule.
-            legacy_skills_path = skills_path / "custom"
-            if user_should_see_legacy_skills(effective_user_id, host_path=str(skills_path)) and legacy_skills_path.exists():
-                mounts.append(
-                    (
-                        join_host_path(host_skills_root, "custom"),
-                        f"{container_path}/legacy",
-                        True,
-                    )
+            # 3. Legacy visibility is encoded by projection contents. Keep the
+            # mount stable even when the directory is empty so a later state
+            # change is visible without recreating the sandbox.
+            mounts.append(
+                (
+                    join_host_path(host_base_dir, "users", effective_user_id, "skills_view", "legacy"),
+                    f"{container_path}/legacy",
+                    True,
                 )
+            )
         except Exception as e:
             logger.warning("Could not setup skills mounts: %s", e)
 
         return mounts
 
     @staticmethod
+    def _ensure_skills_projection(user_id: str):
+        """Best-effort: a projection failure must not fail sandbox acquire.
+
+        Called directly (for its side effect) from ``_acquire_internal`` /
+        ``_acquire_internal_async`` outside any try/except, as well as from
+        within ``_get_skills_mounts``'s own guarded block — swallowing here
+        keeps both call sites safe without duplicating the guard.
+        """
+        from deerflow.skills.projection import ensure_skill_projections
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        try:
+            storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
+            return ensure_skill_projections(storage)
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return None
+
+    @staticmethod
     def _get_user_skill_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
-        """Mount managed integration skills into AIO sandboxes.
+        """Mount enabled managed integration skills into AIO sandboxes.
 
         Per-user custom skills are already mounted by ``_get_skills_mounts``.
-        This helper adds the shared integration skill root so sandbox paths match
-        the skill registry without duplicating ``/mnt/skills/custom``.
+        Integration packages are shared, but their enabled state is per-user, so
+        this helper mounts the user's projection instead of the raw shared root.
         """
         try:
             config = get_app_config()
             paths = get_paths()
             skills_container_path = config.skills.container_path
-            paths.integration_skills_dir().mkdir(parents=True, exist_ok=True)
+            effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
+            AioSandboxProvider._ensure_skills_projection(effective_user_id)
             return [
-                (paths.host_integration_skills_dir(), f"{skills_container_path}/integrations", True),
+                (
+                    join_host_path(
+                        str(paths.host_base_dir),
+                        "users",
+                        effective_user_id,
+                        "skills_view",
+                        "integrations",
+                    ),
+                    f"{skills_container_path}/integrations",
+                    True,
+                ),
             ]
         except Exception as e:
             logger.warning(f"Could not setup user skill mounts: {e}")
@@ -1810,6 +1830,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                  sandbox_id is deterministic from thread_id so no shared state file
                  is needed — any process can derive the same container name)
         """
+        self._ensure_skills_projection(user_id)
         cached_id = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
         if cached_id is not None:
             return cached_id
@@ -1837,6 +1858,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
+        await asyncio.to_thread(self._ensure_skills_projection, user_id)
         cached_id = await asyncio.to_thread(self._reuse_in_process_sandbox, thread_id, user_id=user_id)
         if cached_id is not None:
             return cached_id

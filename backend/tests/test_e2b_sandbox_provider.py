@@ -10,6 +10,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -311,6 +312,100 @@ def _install_fake_sdk(monkeypatch, provider) -> FakeSandboxClass:
     fake_cls = FakeSandboxClass()
     monkeypatch.setattr(provider, "_get_sandbox_cls", lambda: fake_cls)
     return fake_cls
+
+
+def _write_skill(root: Path, name: str) -> None:
+    target = root / name / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"---\nname: {name}\ndescription: test\n---\n", encoding="utf-8")
+
+
+def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    paths = Paths(base_dir=tmp_path)
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public", "enabled-skill")
+    _write_skill(skills_root / "public", "disabled-skill")
+    (skills_root / "custom").mkdir()
+    _write_skill(paths.integration_skills_dir() / "lark-cli", "enabled-integration")
+    _write_skill(paths.integration_skills_dir() / "lark-cli", "disabled-integration")
+    user_skills_root = paths.user_skills_dir("user-1")
+    user_skills_root.mkdir(parents=True, exist_ok=True)
+    (user_skills_root / "_skill_states.json").write_text(
+        json.dumps({"disabled-integration": {"enabled": False}}),
+        encoding="utf-8",
+    )
+    extensions = ExtensionsConfig(skills={"disabled-skill": SkillStateConfig(enabled=False)})
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.extensions_config.ExtensionsConfig.from_file", lambda *_args, **_kwargs: extensions)
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions)
+
+    provider = _make_provider()
+    client = FakeClient()
+    provider._apply_mounts(client, user_id="user-1")
+
+    uploaded_paths = {path for path, _content in client.files.write_calls}
+    assert "/mnt/skills/public/enabled-skill/SKILL.md" in uploaded_paths
+    assert "/mnt/skills/public/disabled-skill/SKILL.md" not in uploaded_paths
+    assert "/mnt/skills/integrations/lark-cli/enabled-integration/SKILL.md" in uploaded_paths
+    assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
+
+
+def test_skill_projection_mounts_swallows_projection_failure(monkeypatch):
+    """``_skill_projection_mounts`` must not raise — a projection failure used
+    to propagate out of ``_apply_mounts`` before the configured-mounts loop
+    ran, dropping the operator's own configured mounts as collateral (#4107
+    review)."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_skill_projections",
+        lambda storage: (_ for _ in ()).throw(RuntimeError("simulated projection failure")),
+    )
+
+    provider = _make_provider()
+
+    assert provider._skill_projection_mounts("user-1") == []
+
+
+def test_apply_mounts_keeps_configured_mounts_when_projection_fails(monkeypatch, tmp_path):
+    """End-to-end: a skills-projection failure must not drop the operator's
+    own configured mounts too — the two mount sources are independent."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    host_dir = tmp_path / "operator-mount"
+    host_dir.mkdir()
+    (host_dir / "notes.txt").write_text("hello", encoding="utf-8")
+
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_skill_projections",
+        lambda storage: (_ for _ in ()).throw(RuntimeError("simulated projection failure")),
+    )
+
+    provider = _make_provider()
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(host_dir), container_path="/mnt/operator", read_only=True),
+    ]
+
+    client = FakeClient()
+    provider._apply_mounts(client, user_id="user-1")
+
+    uploaded_paths = {path for path, _content in client.files.write_calls}
+    assert "/mnt/operator/notes.txt" in uploaded_paths
 
 
 def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:

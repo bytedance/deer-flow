@@ -628,7 +628,6 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     mock_storage = _FakeUserScopedStorage()
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: mock_storage)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda config_path=None: config_path))
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
@@ -705,7 +704,6 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
         return config_path
 
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve))
-    monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: __import__("deerflow.config.extensions_config", fromlist=["ExtensionsConfig"]).ExtensionsConfig.from_file(config_path))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", _clear)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
@@ -723,6 +721,107 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     # The global state file must reflect the toggle.
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["skills"]["public-skill"]["enabled"] is False
+
+
+def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    monkeypatch.chdir(backend_dir)
+    config_path = tmp_path / "extensions_config.json"
+
+    def _load_skills(*, enabled_only: bool):
+        enabled = True
+        if config_path.exists():
+            enabled = json.loads(config_path.read_text(encoding="utf-8"))["skills"]["public-skill"]["enabled"]
+        skill = _make_skill("public-skill", enabled=enabled)
+        return [] if enabled_only and not enabled else [skill]
+
+    storage = SimpleNamespace(load_skills=_load_skills)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+
+    def _resolve_config_path(explicit_path=None):
+        if explicit_path is None:
+            return None
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return path
+
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve_config_path))
+    monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
+
+    with TestClient(_make_test_app(SimpleNamespace())) as client:
+        response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["enabled"] is False
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "mcpServers": {},
+        "skills": {"public-skill": {"enabled": False}},
+        "middlewares": [],
+    }
+
+
+def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, reset_extensions_config, set_extensions_config
+    from deerflow.config.paths import Paths
+    from deerflow.skills.projection import rebuild_skill_projections
+
+    skills_root = tmp_path / "skills"
+    skill_file = skills_root / "public" / "public-skill" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(_skill_content("public-skill"), encoding="utf-8")
+    (skills_root / "custom").mkdir()
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {
+                    "public-skill": {"enabled": True},
+                    "untouched-skill": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+    paths = Paths(base_dir=tmp_path)
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
+    # Simulate another worker having updated the file after this worker cached
+    # an older snapshot. The public toggle must reload from disk under the
+    # cross-process projection lock before its read-modify-write.
+    set_extensions_config(ExtensionsConfig(skills={"public-skill": SkillStateConfig(enabled=True)}))
+
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root), app_config=config)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+    projected = rebuild_skill_projections(storage)
+    assert (projected.public / "public-skill" / "SKILL.md").is_file()
+
+    try:
+        with TestClient(_make_test_app(config)) as client:
+            response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["enabled"] is False
+        assert not (projected.public / "public-skill").exists()
+        persisted = json.loads(config_path.read_text(encoding="utf-8"))
+        assert persisted["skills"]["untouched-skill"] == {"enabled": False}
+    finally:
+        reset_extensions_config()
 
 
 class TestMultiUserSkillIsolation:
@@ -955,7 +1054,6 @@ class TestMultiUserSkillIsolation:
         )
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
         monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "alice")
-        monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
         monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
 
         app = _make_test_app(config)
@@ -1009,7 +1107,6 @@ class TestMultiUserSkillIsolation:
 
         monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: alice_storage)
         monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "alice")
-        monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
         monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
         monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _noop_async)
 
