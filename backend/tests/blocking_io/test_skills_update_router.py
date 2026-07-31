@@ -20,8 +20,8 @@ performs the same RMW on the same file.
   go back to separate module-local locks.
 
 Only the config-infra boundaries (storage / ``get_extensions_config`` / reload /
-path resolution) are stubbed; the real ``open(config_path, "w")`` write to a tmp
-file is exercised.
+path resolution) are stubbed; the real same-directory temporary write and atomic
+replacement are exercised.
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ async def test_update_skill_serializes_concurrent_writes(tmp_path: Path, monkeyp
         update_skill("demo-skill", SkillUpdateRequest(enabled=True), _admin_request(), SimpleNamespace()),
     )
 
-    # The shared asyncio.Lock must serialize the offloaded read-modify-write.
+    # The shared threading.Lock must serialize the offloaded read-modify-write.
     assert counters["max"] == 1
 
 

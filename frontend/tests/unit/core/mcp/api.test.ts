@@ -28,6 +28,7 @@ import {
   MCPConfigRequestError,
   loadMCPConfig,
   updateMCPConfig,
+  updateMCPServerState,
 } from "@/core/mcp/api";
 
 const mockedFetch = rs.mocked(fetcher);
@@ -113,6 +114,44 @@ describe("updateMCPConfig", () => {
       status: 500,
       isAdminRequired: false,
       message: "Failed to update MCP configuration",
+    });
+  });
+});
+
+describe("updateMCPServerState", () => {
+  test("patches only the requested server state", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        mcp_servers: { github: { enabled: false } },
+      }),
+    );
+
+    await expect(updateMCPServerState("github", false)).resolves.toEqual({
+      mcp_servers: { github: { enabled: false } },
+    });
+    expect(mockedFetch).toHaveBeenCalledWith("/api/mcp/config", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        server_name: "github",
+        enabled: false,
+      }),
+    });
+  });
+
+  test("surfaces backend validation detail", async () => {
+    const detail =
+      "MCP server 'semantic-scholar' uses disallowed stdio command 's2-mcp-server'.";
+    mockedFetch.mockResolvedValueOnce(jsonResponse(400, { detail }));
+
+    await expect(
+      updateMCPServerState("semantic-scholar", true),
+    ).rejects.toMatchObject({
+      name: "MCPConfigRequestError",
+      status: 400,
+      message: detail,
     });
   });
 });

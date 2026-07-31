@@ -1,7 +1,10 @@
+import { usePathname } from "next/navigation";
 import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -27,6 +30,46 @@ const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
   undefined,
 );
 
+const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v1";
+
+type PersistedArtifactsState = {
+  artifacts: string[];
+  selectedArtifact: string | null;
+  open: boolean;
+};
+
+function storageKey(pathname: string) {
+  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
+}
+
+function readPersistedState(pathname: string): PersistedArtifactsState | null {
+  try {
+    const raw = window.sessionStorage.getItem(storageKey(pathname));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<PersistedArtifactsState>;
+    if (
+      !Array.isArray(parsed.artifacts) ||
+      !parsed.artifacts.every((artifact) => typeof artifact === "string") ||
+      !(
+        parsed.selectedArtifact === null ||
+        typeof parsed.selectedArtifact === "string"
+      ) ||
+      typeof parsed.open !== "boolean"
+    ) {
+      return null;
+    }
+    return {
+      artifacts: parsed.artifacts,
+      selectedArtifact: parsed.selectedArtifact,
+      open: parsed.open,
+    };
+  } catch {
+    return null;
+  }
+}
+
 interface ArtifactsProviderProps {
   children: ReactNode;
 }
@@ -40,6 +83,36 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   );
   const [autoOpen, setAutoOpen] = useState(true);
   const { setOpen: setSidebarOpen } = useSidebar();
+  const pathname = usePathname();
+  const hydratedPathRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pathname) {
+      return;
+    }
+
+    const persisted = readPersistedState(pathname);
+    setArtifacts(persisted?.artifacts ?? []);
+    setSelectedArtifact(persisted?.selectedArtifact ?? null);
+    setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
+    setAutoOpen(true);
+    setAutoSelect(!persisted?.selectedArtifact);
+    hydratedPathRef.current = pathname;
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!pathname || hydratedPathRef.current !== pathname) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(
+        storageKey(pathname),
+        JSON.stringify({ artifacts, selectedArtifact, open }),
+      );
+    } catch {
+      // Browser storage can be disabled or full; panel state must keep working.
+    }
+  }, [artifacts, open, pathname, selectedArtifact]);
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {
