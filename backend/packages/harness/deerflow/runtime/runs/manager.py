@@ -1618,21 +1618,36 @@ class RunManager:
             for interrupted_record in interrupted_records:
                 await self._persist_status(interrupted_record, RunStatus.interrupted)
         except asyncio.CancelledError:
+            # Spawn a cleanup task to close the admitted run. Use shield so
+            # repeated cancellations of the outer coroutine do not abort the
+            # cleanup itself.
             cleanup = asyncio.create_task(self._close_cancelled_admission(record))
             cleanup.set_name(f"deerflow-close-cancelled-admission-{record.run_id}")
+            # Wait for the cleanup task to finish, ignoring spurious
+            # CancelledError propagations from the outer scope.
             while not cleanup.done():
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
+                    # Outer cancellation — cleanup is shielded and keeps
+                    # running; loop until it completes.
                     pass
-                except Exception:
-                    break
+            # Surface any exception raised by the cleanup task itself.
+            # CancelledError means the cleanup was cancelled despite the
+            # shield (e.g. event-loop shutdown); other exceptions indicate
+            # a real failure that must be logged.
             try:
                 cleanup.result()
             except asyncio.CancelledError:
-                logger.error("Cancelled admission cleanup task was itself cancelled for run %s", record.run_id)
+                logger.error(
+                    "Cancelled admission cleanup task was itself cancelled for run %s",
+                    record.run_id,
+                )
             except Exception:
-                logger.exception("Failed to close run %s after admission was cancelled", record.run_id)
+                logger.exception(
+                    "Failed to close run %s after admission was cancelled",
+                    record.run_id,
+                )
             raise
 
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
