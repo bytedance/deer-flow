@@ -4,7 +4,12 @@ import math
 
 import pytest
 
-from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _coerce_confidence, format_memory_for_injection
+from deerflow.agents.memory.backends.deermem.deermem.core.prompt import (
+    FACT_EXTRACTION_PROMPT,
+    _coerce_confidence,
+    format_memory_for_injection,
+    load_prompt_messages,
+)
 
 
 def test_format_memory_includes_facts_section() -> None:
@@ -820,3 +825,56 @@ def test_format_memory_tolerates_non_string_summary() -> None:
     result = format_memory_for_injection(memory_data, max_tokens=2000)
 
     assert "Current Focus: 12345" in result
+
+
+def test_format_memory_includes_cognitive_style() -> None:
+    memory_data = {
+        "user": {
+            "cognitiveStyle": {
+                "summary": "Prefers conclusions first, then details.",
+                "updatedAt": "2026-01-01T00:00:00Z",
+            }
+        },
+        "history": {},
+        "facts": [],
+    }
+
+    result = format_memory_for_injection(memory_data, max_tokens=2000)
+
+    assert "Thinking Style:" in result
+    assert "Prefers conclusions first, then details." in result
+
+
+def test_cognitive_fact_category_is_documented_and_rendered() -> None:
+    messages = load_prompt_messages(
+        "memory_update",
+        {
+            "current_memory": "{}",
+            "conversation": "",
+            "correction_hint": "",
+            "staleness_review_section": "",
+            "consolidation_section": "",
+        },
+    )
+    memory_update_prompt = messages[0].content
+    assert isinstance(memory_update_prompt, str)
+    assert "cognitive|goal|correction" in memory_update_prompt
+    assert "cognitive|goal|correction" in FACT_EXTRACTION_PROMPT
+    assert "- cognitive:" in FACT_EXTRACTION_PROMPT
+
+    result = format_memory_for_injection(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "content": "User prefers conclusions first.",
+                    "category": "cognitive",
+                    "confidence": 0.9,
+                }
+            ],
+        },
+        max_tokens=2000,
+    )
+
+    assert "[cognitive | 0.90] User prefers conclusions first." in result

@@ -211,6 +211,7 @@ def test_import_empty_summary_sections_replace_existing_summaries_with_complete_
         "workContext": {"summary": "", "updatedAt": ""},
         "personalContext": {"summary": "", "updatedAt": ""},
         "topOfMind": {"summary": "", "updatedAt": ""},
+        "cognitiveStyle": {"summary": "", "updatedAt": ""},
     }
     assert imported["history"] == {
         "recentMonths": {"summary": "", "updatedAt": ""},
@@ -681,3 +682,53 @@ def test_from_backend_config_null_values_do_not_warn_as_unknown(caplog):
     with caplog.at_level("WARNING", logger=cfg_logger):
         DeerMemConfig.from_backend_config({"model": None})
     assert not any("Unknown backend_config keys" in r.message for r in caplog.records)
+
+
+def test_apply_updates_cognitive_style_and_fact_category(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    current_memory = dm.get_memory(user_id="cognitive-user")
+
+    result = dm._updater._apply_updates(
+        current_memory,
+        {
+            "user": {
+                "cognitiveStyle": {
+                    "summary": "Prefers conclusions first, then details.",
+                    "shouldUpdate": True,
+                }
+            },
+            "newFacts": [
+                {
+                    "content": "User prefers conclusions before implementation details.",
+                    "category": "cognitive",
+                    "confidence": 0.92,
+                }
+            ],
+        },
+        thread_id="thread-cognitive",
+    )
+
+    assert result["user"]["cognitiveStyle"]["summary"] == "Prefers conclusions first, then details."
+    assert result["user"]["cognitiveStyle"]["updatedAt"]
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["source"] == "thread-cognitive"
+
+
+def test_import_memory_persists_normalized_legacy_payload(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    legacy = {
+        "version": "1.0",
+        "lastUpdated": "",
+        "user": {},
+        "history": {},
+        "facts": [{"content": "User prefers conclusions first.", "category": "cognitive"}],
+    }
+
+    result = dm.import_memory(legacy, user_id="legacy-user")
+
+    assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert result["facts"][0]["id"].startswith("fact_")
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["confidence"] == 0.0
+    assert result["facts"][0]["createdAt"] == ""
+    assert result["facts"][0]["source"] == "unknown"

@@ -12,13 +12,14 @@ from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     MemoryStorage,
     create_empty_memory,
     create_storage,
+    normalize_memory_data,
 )
 
 
 def _storage_at(memory_file) -> FileMemoryStorage:
-    """A FileMemoryStorage whose absolute storage_path is a single shared file."""
-    resolved = str(memory_file.resolve())
-    return FileMemoryStorage(DeerMemConfig(storage_path=resolved))
+    """A FileMemoryStorage rooted at the directory containing ``memory_file``."""
+    root = str(memory_file.parent.resolve())
+    return FileMemoryStorage(DeerMemConfig(storage_path=root))
 
 
 class TestCreateEmptyMemory:
@@ -32,6 +33,45 @@ class TestCreateEmptyMemory:
         assert isinstance(memory["user"], dict)
         assert isinstance(memory["history"], dict)
         assert isinstance(memory["facts"], list)
+
+
+class TestNormalizeMemoryData:
+    """Test backward-compatible memory schema normalization."""
+
+    def test_normalizes_legacy_facts_without_mutating_input(self):
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+
+        normalized = normalize_memory_data(legacy)
+
+        assert legacy == {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+        assert len(normalized["facts"]) == 1
+        fact = normalized["facts"][0]
+        assert fact["id"].startswith("fact_")
+        assert fact["content"] == "User prefers conclusions first"
+        assert fact["category"] == "cognitive"
+        assert fact["confidence"] == 0.0
+        assert fact["createdAt"] == ""
+        assert fact["source"] == "unknown"
 
 
 class TestMemoryStorageInterface:
@@ -178,3 +218,33 @@ class TestCreateStorage:
     def test_dotted_storage_class_resolves(self):
         storage = create_storage(DeerMemConfig(storage_class="deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage"))
         assert isinstance(storage, FileMemoryStorage)
+
+
+def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{"workContext":{"summary":"work","updatedAt":""}},"history":{},"facts":[]}',
+        encoding="utf-8",
+    )
+    storage = _storage_at(memory_file)
+
+    loaded = storage.load()
+
+    assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert loaded["user"]["workContext"]["summary"] == "work"
+
+
+def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{},"history":{},"facts":[{"content":"Legacy cached fact"}]}',
+        encoding="utf-8",
+    )
+
+    storage = _storage_at(memory_file)
+    first = storage.load()
+    second = storage.load()
+
+    assert second == first
+    assert second is not first
+    assert second["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}

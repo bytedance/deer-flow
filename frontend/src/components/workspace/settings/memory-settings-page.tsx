@@ -33,6 +33,7 @@ import {
   useMemory,
   useUpdateMemoryFact,
 } from "@/core/memory/hooks";
+import { normalizeMemoryPayload } from "@/core/memory/import-memory";
 import type {
   MemoryFactInput,
   MemoryFactPatchInput,
@@ -63,60 +64,6 @@ type PendingImport = {
   fileName: string;
   memory: UserMemory;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isMemorySection(value: unknown): value is {
-  summary: string;
-  updatedAt: string;
-} {
-  return (
-    isRecord(value) &&
-    typeof value.summary === "string" &&
-    typeof value.updatedAt === "string"
-  );
-}
-
-function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.content === "string" &&
-    typeof value.category === "string" &&
-    typeof value.confidence === "number" &&
-    Number.isFinite(value.confidence) &&
-    typeof value.createdAt === "string" &&
-    typeof value.source === "string"
-  );
-}
-
-function isImportedMemory(value: unknown): value is UserMemory {
-  if (!isRecord(value)) {
-    return false;
-  }
-
-  if (
-    typeof value.version !== "string" ||
-    typeof value.lastUpdated !== "string" ||
-    !isRecord(value.user) ||
-    !isRecord(value.history) ||
-    !Array.isArray(value.facts)
-  ) {
-    return false;
-  }
-
-  return (
-    isMemorySection(value.user.workContext) &&
-    isMemorySection(value.user.personalContext) &&
-    isMemorySection(value.user.topOfMind) &&
-    isMemorySection(value.history.recentMonths) &&
-    isMemorySection(value.history.earlierContext) &&
-    isMemorySection(value.history.longTermBackground) &&
-    value.facts.every(isMemoryFact)
-  );
-}
 
 type FactFormState = {
   content: string;
@@ -185,6 +132,11 @@ function buildMemorySectionGroups(
           summary: memory.user.topOfMind.summary,
           updatedAt: memory.user.topOfMind.updatedAt,
         },
+        {
+          title: t.settings.memory.markdown.cognitiveStyle,
+          summary: memory.user.cognitiveStyle.summary,
+          updatedAt: memory.user.cognitiveStyle.updatedAt,
+        },
       ],
     },
     {
@@ -251,6 +203,7 @@ function isMemorySummaryEmpty(memory: UserMemory) {
     memory.user.workContext.summary.trim() === "" &&
     memory.user.personalContext.summary.trim() === "" &&
     memory.user.topOfMind.summary.trim() === "" &&
+    memory.user.cognitiveStyle.summary.trim() === "" &&
     memory.history.recentMonths.summary.trim() === "" &&
     memory.history.earlierContext.summary.trim() === "" &&
     memory.history.longTermBackground.summary.trim() === ""
@@ -271,6 +224,13 @@ function truncateFactPreview(content: string, maxLength = 140) {
 
 function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function formatFactCreatedAt(createdAt: string, unknownLabel: string) {
+  if (!createdAt || Number.isNaN(Date.parse(createdAt))) {
+    return unknownLabel;
+  }
+  return formatTimeAgo(createdAt);
 }
 
 export function MemorySettingsPage() {
@@ -420,13 +380,14 @@ export function MemorySettingsPage() {
 
     try {
       const parsed: unknown = JSON.parse(await file.text());
-      if (!isImportedMemory(parsed)) {
+      const memory = normalizeMemoryPayload(parsed);
+      if (!memory) {
         toast.error(t.settings.memory.importInvalidFile);
         return;
       }
       setPendingImport({
         fileName: file.name,
-        memory: parsed,
+        memory,
       });
     } catch {
       toast.error(t.settings.memory.importInvalidFile);
@@ -690,7 +651,10 @@ export function MemorySettingsPage() {
                                 <span className="text-muted-foreground">
                                   {t.settings.memory.markdown.table.createdAt}:
                                 </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
+                                {formatFactCreatedAt(
+                                  fact.createdAt,
+                                  t.settings.memory.markdown.table.unknown,
+                                )}
                               </span>
                               <span>
                                 <span className="text-muted-foreground">
@@ -698,13 +662,15 @@ export function MemorySettingsPage() {
                                 </span>{" "}
                                 {fact.source === "manual" ? (
                                   t.settings.memory.manualFactSource
-                                ) : (
+                                ) : fact.source && fact.source !== "unknown" ? (
                                   <Link
                                     href={pathOfThread(fact.source)}
                                     className="text-primary underline-offset-4 hover:underline"
                                   >
                                     {t.settings.memory.markdown.table.view}
                                   </Link>
+                                ) : (
+                                  t.settings.memory.markdown.table.unknown
                                 )}
                               </span>
                             </div>

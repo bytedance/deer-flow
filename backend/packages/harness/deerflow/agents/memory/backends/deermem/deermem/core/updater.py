@@ -25,6 +25,7 @@ from .storage import (
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    normalize_memory_data,
     utc_now_iso_z,
 )
 
@@ -715,19 +716,7 @@ class MemoryUpdater:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
-        memory_data = copy.deepcopy(memory_data)
-        empty = create_empty_memory()
-        for section in ("user", "history"):
-            incoming_section = memory_data.get(section, {})
-            if not isinstance(incoming_section, dict):
-                raise ValueError(f"memory_data.{section}")
-            complete_section = copy.deepcopy(empty[section])
-            for key, value in incoming_section.items():
-                if key in complete_section and isinstance(complete_section[key], dict) and isinstance(value, dict):
-                    complete_section[key].update(copy.deepcopy(value))
-                else:
-                    complete_section[key] = copy.deepcopy(value)
-            memory_data[section] = complete_section
+        memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -1510,7 +1499,7 @@ class MemoryUpdater:
 
         # Update user sections
         user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
+        for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
             if section_data.get("shouldUpdate") and section_data.get("summary"):
                 current_memory["user"][section] = {

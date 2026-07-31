@@ -30,6 +30,9 @@ messages:
         Example: Primary project work, parallel technical investigations, ongoing learning/tracking
         Include: Active implementation work, troubleshooting issues, market/research interests
         Note: This captures SEVERAL concurrent focus areas, not just one task
+      - cognitiveStyle: Stable reasoning and collaboration habits (2-4 sentences)
+        Include: Preferred answer structure, desired depth, feedback/correction style, decision-making patterns
+        Update conservatively only when durable cross-session evidence is clear
 
       **History** (Temporal context - rich paragraphs):
       - recentMonths: Detailed summary of recent activities (4-6 sentences or 1-2 paragraphs)
@@ -51,6 +54,7 @@ messages:
         * knowledge: Specific expertise, technologies mastered, domain knowledge
         * context: Background facts (job title, projects, locations, languages)
         * behavior: Working patterns, communication habits, problem-solving approaches
+        * cognitive: Stable reasoning, response-structure, and collaboration habits
         * goal: Stated objectives, learning targets, project ambitions
         * correction: Explicit agent mistakes or user corrections, including the correct approach
       - Fact lifetime (``expected_valid_days``, optional integer):
@@ -73,6 +77,7 @@ messages:
       - personalContext: Languages, personality, interests outside direct work tasks
       - topOfMind: Multiple ongoing priorities and focus areas user cares about recently (gets updated most frequently)
         Should capture 3-5 concurrent themes: main work, side explorations, learning/tracking interests
+      - cognitiveStyle: Stable preferences for how the assistant should reason, structure answers, and collaborate
       - recentMonths: Detailed account of recent technical explorations and work
       - earlierContext: Patterns from slightly older interactions still relevant
       - longTermBackground: Unchanging foundational facts about the user
@@ -88,6 +93,7 @@ messages:
           "workContext": {{ "summary": "...", "shouldUpdate": true/false }},
           "personalContext": {{ "summary": "...", "shouldUpdate": true/false }},
           "topOfMind": {{ "summary": "...", "shouldUpdate": true/false }}
+          "cognitiveStyle": {{ "summary": "...", "shouldUpdate": true/false }}
         }},
         "history": {{
           "recentMonths": {{ "summary": "...", "shouldUpdate": true/false }},
@@ -95,7 +101,7 @@ messages:
           "longTermBackground": {{ "summary": "...", "shouldUpdate": true/false }}
         }},
         "newFacts": [
-          {{ "content": "...", "category": "preference|knowledge|context|behavior|goal|correction", "confidence": 0.0-1.0, "expected_valid_days": 90 }}
+          {{ "content": "...", "category": "preference|knowledge|context|behavior|cognitive|goal|correction", "confidence": 0.0-1.0, "expected_valid_days": 90 }}
         ],
         "factsToRemove": ["fact_id_1", "fact_id_2"],
         "staleFactsToRemove": [{{ "id": "fact_id", "reason": "brief explanation" }}],

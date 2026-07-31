@@ -16,6 +16,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import os
 import shutil
 import threading
@@ -36,7 +37,7 @@ from .paths import DEFAULT_AGENT_BUCKET, agent_facts_directory, fact_file_path, 
 logger = logging.getLogger(__name__)
 
 DOCUMENT_VERSION = "2.0"
-CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "identity", "constraint", "decision", "other"})
+CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "cognitive", "identity", "constraint", "decision", "other"})
 
 
 class MemoryStorageError(RuntimeError):
@@ -91,6 +92,7 @@ def create_empty_memory() -> dict[str, Any]:
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -99,6 +101,77 @@ def create_empty_memory() -> dict[str, Any]:
         },
         "facts": [],
     }
+
+
+def _normalize_context_section(value: Any) -> dict[str, Any]:
+    """Return a canonical summary section while preserving extension fields."""
+    if not isinstance(value, dict):
+        return {"summary": "", "updatedAt": ""}
+    section = copy.deepcopy(value)
+    section["summary"] = value.get("summary") if isinstance(value.get("summary"), str) else ""
+    section["updatedAt"] = value.get("updatedAt") if isinstance(value.get("updatedAt"), str) else ""
+    return section
+
+
+def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
+    """Canonicalize recoverable public/legacy fact fields before repository writes."""
+    if not isinstance(value, dict):
+        return None
+    content = value.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    fact = copy.deepcopy(value)
+    fact["content"] = content.strip()
+    fact_id = fact.get("id")
+    fact["id"] = fact_id.strip() if isinstance(fact_id, str) and fact_id.strip() else f"fact_{uuid.uuid4().hex[:8]}"
+    category = fact.get("category")
+    fact["category"] = category.strip() if isinstance(category, str) and category.strip() else "context"
+
+    confidence = fact.get("confidence", 0.0)
+    if isinstance(confidence, bool):
+        numeric_confidence = 0.5
+    else:
+        try:
+            numeric_confidence = float(confidence)
+        except (TypeError, ValueError):
+            numeric_confidence = 0.5
+    fact["confidence"] = min(1.0, max(0.0, numeric_confidence)) if math.isfinite(numeric_confidence) else 0.5
+
+    created_at = fact.get("createdAt")
+    fact["createdAt"] = created_at.strip() if isinstance(created_at, str) else ""
+    source = fact.get("source")
+    fact["source"] = source.strip() if isinstance(source, str) and source.strip() else "unknown"
+    if "sourceError" in fact and fact["sourceError"] is not None and not isinstance(fact["sourceError"], str):
+        fact.pop("sourceError")
+    return fact
+
+
+def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a canonical compatibility document without mutating the caller."""
+    normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
+    empty = create_empty_memory()
+
+    for section_name, section_keys in (
+        ("user", ("workContext", "personalContext", "topOfMind", "cognitiveStyle")),
+        ("history", ("recentMonths", "earlierContext", "longTermBackground")),
+    ):
+        incoming = normalized.get(section_name)
+        incoming = incoming if isinstance(incoming, dict) else {}
+        complete = copy.deepcopy(empty[section_name])
+        for key, value in incoming.items():
+            complete[key] = _normalize_context_section(value) if key in section_keys else copy.deepcopy(value)
+        for key in section_keys:
+            complete[key] = _normalize_context_section(complete.get(key))
+        normalized[section_name] = complete
+
+    facts = normalized.get("facts")
+    normalized["facts"] = [fact for value in facts if (fact := _normalize_legacy_import_fact(value)) is not None] if isinstance(facts, list) else []
+    if not isinstance(normalized.get("version"), str):
+        normalized["version"] = "1.0"
+    if not isinstance(normalized.get("lastUpdated"), str):
+        normalized["lastUpdated"] = ""
+    return normalized
 
 
 def _has_meaningful_data(value: Any) -> bool:
@@ -871,7 +944,7 @@ class FileMemoryStorage(MemoryStorage):
         if not sources:
             return False, from_version, []
 
-        base = global_memory or create_empty_memory()
+        base = normalize_memory_data(global_memory or create_empty_memory())
         migrated_summaries = {
             "user": copy.deepcopy(base.get("user", {})),
             "history": copy.deepcopy(base.get("history", {})),
@@ -967,6 +1040,17 @@ class FileMemoryStorage(MemoryStorage):
             raise MemoryStorageCorruption(f"Legacy facts in {path} must be a list or mapping")
         result = {key: copy.deepcopy(value) for key, value in memory_file.items() if key != "facts"}
         result.setdefault("revision", 0)
+        summary_view = normalize_memory_data(
+            {
+                "version": result.get("version"),
+                "lastUpdated": result.get("lastUpdated"),
+                "user": result.get("user"),
+                "history": result.get("history"),
+                "facts": [],
+            }
+        )
+        result["user"] = summary_view["user"]
+        result["history"] = summary_view["history"]
         result["facts"] = facts
         return result
 
