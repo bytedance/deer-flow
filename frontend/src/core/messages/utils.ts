@@ -845,7 +845,11 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
-  const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
+  // The filename itself may contain parentheses (e.g. "photo (1).png"), so
+  // the size group is anchored on the trailing "(<number> <unit>)" pair the
+  // backend emits instead of stopping the filename at the first "(".
+  const fileRegex =
+    /- (.+)\s*\(([\d.]+\s*(?:B|KB|MB|GB|TB))\)\s*\n\s*Path:\s*([^\n]+)/gi;
   const files: FileInMessage[] = [];
   let fileMatch;
 

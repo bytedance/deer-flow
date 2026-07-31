@@ -41,6 +41,10 @@ def next_run_at(
             # A naive run_at means "wall-clock time in the task's declared
             # timezone", matching how cron schedules interpret it.
             run_at = run_at.replace(tzinfo=ZoneInfo(timezone_name))
+        # Normalize to UTC like the cron branch: next_run_at is persisted to
+        # timezone-discarding columns (SQLite), where a non-UTC offset shifts
+        # the effective fire time by the whole offset.
+        run_at = run_at.astimezone(UTC)
         return run_at if run_at > now else None
 
     if schedule_type == "cron":

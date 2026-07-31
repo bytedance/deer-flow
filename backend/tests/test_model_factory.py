@@ -141,6 +141,19 @@ def test_pricing_metadata_never_reaches_the_provider_client(monkeypatch):
     assert "pricing" not in FakeChatModel.captured_kwargs
 
 
+def test_context_window_never_reaches_the_provider_client(monkeypatch):
+    """Context sizing metadata belongs to DeerFlow, not the provider SDK."""
+    model = _make_model("large-context")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="large-context")
+
+    assert "context_window" not in FakeChatModel.captured_kwargs
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)

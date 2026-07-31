@@ -476,6 +476,37 @@ class TestMem0ManagerGetContext:
         ctx = mgr.get_context("u1")
         assert len(ctx) <= 20
 
+    def test_truncates_on_entry_boundary(self) -> None:
+        """Budget truncation must keep whole entries, never cut a memory
+        mid-line and leave a dangling partial entry in the prompt."""
+        mgr, fake = _manager({"max_injection_chars": 20})
+        fake.list_results = [
+            {"id": "m1", "memory": "a" * 10},  # "- aaaaaaaaaa" = 12 chars, fits
+            {"id": "m2", "memory": "b" * 10},  # + "\n" + 12 = 25 > 20, must be dropped whole
+        ]
+        ctx = mgr.get_context("u1")
+        assert ctx == "- " + "a" * 10
+
+    def test_skips_oversized_entry_and_keeps_later_fitting_one(self) -> None:
+        """An entry that does not fit whole is skipped; a shorter later entry
+        may still fit within the remaining budget."""
+        mgr, fake = _manager({"max_injection_chars": 20})
+        fake.list_results = [
+            {"id": "m1", "memory": "x" * 30},  # 32-char line, does not fit whole
+            {"id": "m2", "memory": "short"},  # "- short" = 7 chars, fits
+        ]
+        ctx = mgr.get_context("u1")
+        assert ctx == "- short"
+
+    def test_oversized_entries_return_empty_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When no memory fits the budget, keep the entry-boundary guarantee by
+        returning empty context and logging a diagnosable warning."""
+        mgr, fake = _manager({"max_injection_chars": 20})
+        fake.list_results = [{"id": "m1", "memory": "x" * 30}]
+        ctx = mgr.get_context("u1")
+        assert ctx == ""
+        assert any("max_injection_chars=20" in r.message and "shortest recalled memory" in r.message for r in caplog.records)
+
     def test_async_get_context_offloads_sync_http_client(self) -> None:
         mgr, fake = _manager()
         event_loop_thread = threading.get_ident()

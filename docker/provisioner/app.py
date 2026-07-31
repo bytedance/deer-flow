@@ -85,7 +85,6 @@ LARK_BROKER_SIDECAR_DATA_PATH = "/var/lark/data"
 LARK_BROKER_CONFIG_VOLUME_NAME = "lark-cli-config"
 LARK_BROKER_DATA_VOLUME_NAME = "lark-cli-data"
 LARK_BROKER_URL = "http://127.0.0.1:8788"
-SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
 DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
@@ -494,6 +493,7 @@ def _build_volumes(
     ``LocalSandboxProvider`` and ``AioSandboxProvider``.
     """
     volumes: list[k8s_client.V1Volume] = []
+    del include_legacy_skills  # retained for request compatibility
 
     # ── Skills volumes ────────────────────────────────────────────────
 
@@ -512,7 +512,7 @@ def _build_volumes(
         )
     else:
         # hostPath mode: three-way layout
-        public_path = join_host_path(SKILLS_HOST_PATH, "public")
+        public_path = join_host_path(DEER_FLOW_HOST_BASE_DIR, "skills_view", "public")
         volumes.append(
             k8s_client.V1Volume(
                 name="skills-public",
@@ -527,7 +527,7 @@ def _build_volumes(
             DEER_FLOW_HOST_BASE_DIR,
             "users",
             user_id,
-            "skills",
+            "skills_view",
             "custom",
         )
         volumes.append(
@@ -535,22 +535,23 @@ def _build_volumes(
                 name="skills-custom",
                 host_path=k8s_client.V1HostPathVolumeSource(
                     path=user_custom_path,
-                    type="DirectoryOrCreate",
+                    type="Directory",
                 ),
             )
         )
 
-        if include_legacy_skills:
-            legacy_path = join_host_path(SKILLS_HOST_PATH, "custom")
-            volumes.append(
-                k8s_client.V1Volume(
-                    name="skills-legacy",
-                    host_path=k8s_client.V1HostPathVolumeSource(
-                        path=legacy_path,
-                        type="Directory",
-                    ),
-                )
+        legacy_path = join_host_path(
+            DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills_view", "legacy"
+        )
+        volumes.append(
+            k8s_client.V1Volume(
+                name="skills-legacy",
+                host_path=k8s_client.V1HostPathVolumeSource(
+                    path=legacy_path,
+                    type="Directory",
+                ),
             )
+        )
 
     # ── User-data volume ──────────────────────────────────────────────
 
@@ -638,6 +639,7 @@ def _build_volume_mounts(
     scope that mount with ``SKILLS_PVC_SUBPATH_TEMPLATE``.
     """
     mounts: list[k8s_client.V1VolumeMount] = []
+    del include_legacy_skills  # retained for request compatibility
 
     if SKILLS_PVC_NAME:
         skills_mount = k8s_client.V1VolumeMount(
@@ -664,16 +666,13 @@ def _build_volume_mounts(
                     mount_path="/mnt/skills/custom",
                     read_only=True,
                 ),
-            ]
-        )
-        if include_legacy_skills:
-            mounts.append(
                 k8s_client.V1VolumeMount(
                     name="skills-legacy",
                     mount_path="/mnt/skills/legacy",
                     read_only=True,
-                )
-            )
+                ),
+            ]
+        )
 
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",

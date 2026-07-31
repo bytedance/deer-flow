@@ -12,8 +12,8 @@ Configuration example (``config.yaml``)::
       template: code-interpreter-v1     # e2b template id; defaults to e2b code-interpreter
       domain: e2b.dev                  # optional e2b domain (e.g. self-hosted)
       idle_timeout: 600                # forwarded to e2b ``set_timeout`` (seconds)
-      replicas: 3                      # max concurrent sandboxes (LRU eviction beyond)
-      ownership:                       # required for safe multi-worker reconciliation
+      replicas: 3                      # hard capacity shared when ownership is Redis
+      ownership:                       # multi-worker ownership + capacity coordination
         type: redis
         redis_url: $REDIS_URL
       reconciliation_interval_seconds: 60

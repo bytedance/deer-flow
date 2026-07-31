@@ -3,6 +3,8 @@
 import json
 import logging
 import os
+import stat
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from deerflow.config.runtime_paths import existing_project_file
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_mcp_transport_alias(data: Any) -> Any:
+    """Promote MCP-spec ``transport`` to ``type`` when ``type`` is absent."""
+    if isinstance(data, dict):
+        transport = data.get("transport")
+        if transport and not data.get("type"):
+            return {**data, "type": transport}
+    return data
 
 
 class McpRoutingConfig(BaseModel):
@@ -105,11 +116,7 @@ class McpServerConfig(BaseModel):
         ``stdio`` (the default). This validator normalizes the two so either
         spelling works, with ``type`` taking precedence when both are provided.
         """
-        if isinstance(data, dict):
-            transport = data.get("transport")
-            if transport and not data.get("type"):
-                data = {**data, "type": transport}
-        return data
+        return normalize_mcp_transport_alias(data)
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
@@ -321,6 +328,70 @@ class ExtensionsConfig(BaseModel):
 
 
 _extensions_config: ExtensionsConfig | None = None
+
+
+def _fsync_directory_best_effort(directory: Path) -> None:
+    """Persist a directory entry update where the platform supports it."""
+    if os.name == "nt":
+        return
+
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        logger.debug("Could not fsync extensions config directory: %s", directory, exc_info=True)
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
+
+
+def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
+    """Write extensions config without exposing a truncated or partial file."""
+    path = Path(path)
+    target_path = path.resolve(strict=False) if path.is_symlink() else path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+    except FileNotFoundError:
+        pass
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_path.parent,
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(data, temporary_file, indent=2)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        os.replace(temporary_path, target_path)
+        _fsync_directory_best_effort(target_path.parent)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Could not remove temporary extensions config file: %s",
+                    temporary_path,
+                    exc_info=True,
+                )
 
 
 def get_extensions_config() -> ExtensionsConfig:

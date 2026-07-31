@@ -94,7 +94,15 @@ max_recursion_limit: 1000
 # ============================================================================
 # Models Configuration
 # ============================================================================
-# Configure available LLM models for the agent to use
+# Configure available LLM models for the agent to use.
+#
+# Two token fields look similar but mean different things:
+# - `max_tokens` is the per-call OUTPUT cap passed to the provider.
+# - `context_window` is a positive integer for the total context capacity
+#   (prompt + completion) and drives the real-time "% context used" indicator
+#   in the chat UI.
+# Leave `context_window` unset if the provider limit is unknown; the percentage
+# will not render. Verify configured values against the provider's model docs.
 #
 # Optional per-model pricing (powers the real-cost display on the workspace
 # console). Add a `pricing` block to any model entry; use ONE currency across
@@ -118,6 +126,7 @@ models:
   #   api_key: $VOLCENGINE_API_KEY
   #   timeout: 600.0
   #   max_retries: 2
+  #   context_window: 262144     # Total prompt + completion capacity
   #   supports_thinking: true
   #   supports_vision: true
   #   supports_reasoning_effort: true
@@ -182,7 +191,8 @@ models:
   #   api_key: $OPENAI_API_KEY # Use environment variable
   #   request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 4096
+  #   max_tokens: 4096          # Per-call output cap
+  #   context_window: 128000    # Total prompt + completion capacity
   #   temperature: 0.7
   #   supports_vision: true # Enable vision support for view_image tool
 
@@ -196,6 +206,7 @@ models:
   #   max_retries: 2
   #   use_responses_api: true
   #   output_version: responses/v1
+  #   context_window: 400000
   #   supports_vision: true
 
   # Example: Ollama (native provider — preserves thinking/reasoning content)
@@ -216,6 +227,7 @@ models:
   #   num_predict: 8192
   #   temperature: 0.7
   #   reasoning: true                    # Passes think:true to Ollama native API
+  #   context_window: 32768              # Match the context length served by Ollama
   #   supports_thinking: true
   #   supports_vision: false
   #
@@ -227,6 +239,7 @@ models:
   #   num_predict: 8192
   #   temperature: 0.7
   #   reasoning: true
+  #   context_window: 32768
   #   supports_thinking: true
   #   supports_vision: true
   #
@@ -245,7 +258,8 @@ models:
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 16000
+  #   max_tokens: 16000         # Per-call output cap
+  #   context_window: 200000    # Total prompt + completion capacity
   #   supports_vision: true
   #   supports_thinking: true
   #   when_thinking_enabled:
@@ -265,6 +279,7 @@ models:
   #   timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 8192
+  #   context_window: 1048576
   #   supports_vision: true
 
   # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
@@ -281,6 +296,7 @@ models:
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
+  #   context_window: 1048576
   #   supports_thinking: true
   #   supports_vision: true
   #   when_thinking_enabled:
@@ -739,7 +755,7 @@ tools:
   #   use: deerflow.community.groundroute.tools:web_search_tool
   #   max_results: 5                  # Clamped to 1-50 by GroundRoute
   #   # api_key: $GROUNDROUTE_API_KEY  # Optional if the env var is set
-  
+
   # Web search tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
   # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
   # - name: web_search
@@ -913,7 +929,7 @@ tools:
   #   group: web
   #   use: deerflow.community.groundroute.tools:web_fetch_tool
   #   # api_key: $GROUNDROUTE_API_KEY
-  
+
   # Web fetch tool (uses fastCRW - Firecrawl-compatible web scraper, single binary,
   # self-host or cloud. Cloud requires CRW_API_KEY; self-host may need no key.)
   # NOTE: Only one web_fetch provider can be active at a time.
