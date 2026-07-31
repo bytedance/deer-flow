@@ -832,7 +832,8 @@ class MemoryUpdater:
 
         Duplicate rejection is enforced here (not only by callers): the
         candidate's normalized content key is checked against the fresh
-        memory snapshot inside the revision-conflict retry loop, so
+        memory snapshot inside the revision-conflict retry loop of both
+        storage paths (apply_changes and legacy single-file save), so
         concurrent creators cannot both store the same content. Raises
         ``ValueError("Duplicate fact")`` on a normalized-content match.
         """
@@ -887,16 +888,24 @@ class MemoryUpdater:
                         raise
                     logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
             raise AssertionError("bounded create retry did not return or raise")
-        memory_data = self.get_memory_data(agent_name, user_id=user_id)
-        _raise_if_duplicate_fact_content(memory_data, candidate_key)
-        updated_memory = dict(memory_data)
-        updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), candidate], self._config.max_facts)
-        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
-            raise OSError("Failed to save memory data after creating fact")
-        # If the cap evicted the just-added (lower-confidence) fact, signal via
-        # None so callers don't report a dangling id as "added".
-        stored = any(f.get("id") == fact_id for f in updated_memory["facts"])
-        return updated_memory, (fact_id if stored else None)
+        # Legacy single-file path: same duplicate-rejection contract as the
+        # apply_changes path above. A revision-conflicted save (False) reloads
+        # the fresh snapshot and re-runs the duplicate check, so a concurrent
+        # creator's commit is rejected with ValueError("Duplicate fact")
+        # instead of surfacing as a generic save failure.
+        for attempt in range(3):
+            memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+            _raise_if_duplicate_fact_content(memory_data, candidate_key)
+            updated_memory = dict(memory_data)
+            updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+            if self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+                # If the cap evicted the just-added (lower-confidence) fact,
+                # signal via None so callers don't report a dangling id as
+                # "added".
+                stored = any(f.get("id") == fact_id for f in updated_memory["facts"])
+                return updated_memory, (fact_id if stored else None)
+            logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
+        raise OSError("Failed to save memory data after creating fact")
 
     def delete_memory_fact(self, fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Delete a fact by its id and persist the updated memory data."""
