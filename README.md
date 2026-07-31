@@ -19,6 +19,7 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## Official Website
 
 Learn more and see **real demos** on our [**official website**](https://deerflow.tech).
+The landing-page case studies open as allowlisted, read-only showcases without requiring a sign-in.
 
 ## Sister Projects
 
