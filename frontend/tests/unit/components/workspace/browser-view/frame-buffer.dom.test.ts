@@ -20,8 +20,9 @@ describe("LatestBrowserFrameBuffer", () => {
       .spyOn(URL, "createObjectURL")
       .mockReturnValueOnce("blob:first");
     const revokeObjectURL = rs.spyOn(URL, "revokeObjectURL");
-    const commit = rs.fn();
-    const frames = new LatestBrowserFrameBuffer(commit);
+    const listener = rs.fn();
+    const frames = new LatestBrowserFrameBuffer();
+    frames.subscribe(listener);
     const dropped = new Blob(["dropped"], { type: "image/jpeg" });
     const latest = new Blob(["latest"], { type: "image/jpeg" });
 
@@ -29,11 +30,12 @@ describe("LatestBrowserFrameBuffer", () => {
     frames.push(latest);
 
     expect(requestFrame).toHaveBeenCalledOnce();
-    expect(commit).not.toHaveBeenCalled();
+    expect(listener).not.toHaveBeenCalled();
     scheduled?.(16);
     expect(createObjectURL).toHaveBeenCalledOnce();
     expect(createObjectURL).toHaveBeenCalledWith(latest);
-    expect(commit).toHaveBeenCalledWith("blob:first");
+    expect(frames.getSnapshot()).toBe("blob:first");
+    expect(listener).toHaveBeenCalledOnce();
     expect(revokeObjectURL).not.toHaveBeenCalled();
   });
 
@@ -51,7 +53,7 @@ describe("LatestBrowserFrameBuffer", () => {
       .mockReturnValueOnce("blob:first")
       .mockReturnValueOnce("blob:second");
     const revokeObjectURL = rs.spyOn(URL, "revokeObjectURL");
-    const frames = new LatestBrowserFrameBuffer(rs.fn());
+    const frames = new LatestBrowserFrameBuffer();
 
     frames.push(new Blob(["one"]));
     callbacks.shift()?.(16);
@@ -61,5 +63,6 @@ describe("LatestBrowserFrameBuffer", () => {
 
     frames.dispose();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:second");
+    expect(frames.getSnapshot()).toBeNull();
   });
 });

@@ -1,9 +1,10 @@
+import { useEffect, useState, type RefObject } from "react";
+
 export type RenderActivityListener = (active: boolean) => void;
 
 /**
  * Reports whether an element is both on screen and in a visible document.
- * Consumers can use this to suspend expensive animation loops without
- * unmounting and rebuilding their rendering state.
+ * Consumers can use this to suspend expensive animation loops.
  */
 export function observeRenderActivity(
   element: Element,
@@ -42,4 +43,18 @@ export function observeRenderActivity(
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     observer?.disconnect();
   };
+}
+
+export function useRenderActivity(ref: RefObject<Element | null>) {
+  // Keep server and first client render aligned; the observer corrects this
+  // immediately after mount.
+  const [active, setActive] = useState(true);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    return observeRenderActivity(element, setActive);
+  }, [ref]);
+
+  return active;
 }

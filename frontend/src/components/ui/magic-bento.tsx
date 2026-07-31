@@ -380,21 +380,20 @@ const GlobalSpotlight: React.FC<{
     `;
     document.body.appendChild(spotlight);
     spotlightRef.current = spotlight;
-    const section = gridRef.current;
-    let pendingPointerFrame: number | undefined;
-    let pendingPointerEvent: PointerEvent | undefined;
 
-    const renderPointerMove = (e: PointerEvent) => {
+    const handleMouseMove = (e: MouseEvent) => {
       if (!spotlightRef.current || !gridRef.current) return;
 
-      const rect = section.getBoundingClientRect();
+      const section = gridRef.current.closest(".bento-section");
+      const rect = section?.getBoundingClientRect();
       const mouseInside =
+        rect &&
         e.clientX >= rect.left &&
         e.clientX <= rect.right &&
         e.clientY >= rect.top &&
         e.clientY <= rect.bottom;
 
-      isInsideSection.current = mouseInside;
+      isInsideSection.current = mouseInside ?? false;
       const cards = gridRef.current.querySelectorAll(".magic-bento-card");
 
       if (!mouseInside) {
@@ -463,17 +462,6 @@ const GlobalSpotlight: React.FC<{
       });
     };
 
-    const handlePointerMove = (event: PointerEvent) => {
-      pendingPointerEvent = event;
-      if (pendingPointerFrame !== undefined) return;
-      pendingPointerFrame = requestAnimationFrame(() => {
-        pendingPointerFrame = undefined;
-        const latestEvent = pendingPointerEvent;
-        pendingPointerEvent = undefined;
-        if (latestEvent) renderPointerMove(latestEvent);
-      });
-    };
-
     const handleMouseLeave = () => {
       isInsideSection.current = false;
       gridRef.current?.querySelectorAll(".magic-bento-card").forEach((card) => {
@@ -488,17 +476,12 @@ const GlobalSpotlight: React.FC<{
       }
     };
 
-    section.addEventListener("pointermove", handlePointerMove, {
-      passive: true,
-    });
-    section.addEventListener("pointerleave", handleMouseLeave);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseleave", handleMouseLeave);
 
     return () => {
-      if (pendingPointerFrame !== undefined) {
-        cancelAnimationFrame(pendingPointerFrame);
-      }
-      section.removeEventListener("pointermove", handlePointerMove);
-      section.removeEventListener("pointerleave", handleMouseLeave);
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseleave", handleMouseLeave);
       spotlightRef.current?.parentNode?.removeChild(spotlightRef.current);
     };
   }, [gridRef, disableAnimations, enabled, spotlightRadius, glowColor]);

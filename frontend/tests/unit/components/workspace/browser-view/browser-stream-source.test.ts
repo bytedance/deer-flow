@@ -18,6 +18,7 @@ describe("browser stream transport", () => {
 
     expect(apiSource).toContain('query.set("frame_format", "binary")');
     expect(hookSource).toContain('socket.binaryType = "blob"');
+    expect(hookSource).toContain("useSyncExternalStore");
     expect(hookSource).toContain("frameBuffer.push");
     expect(hookSource).not.toContain("await message.data.text()");
   });

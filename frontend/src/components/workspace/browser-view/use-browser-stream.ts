@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { browserStreamURL } from "./api";
 import { LatestBrowserFrameBuffer } from "./frame-buffer";
@@ -57,7 +63,12 @@ export function useBrowserStream(
   ) => void,
 ) {
   const [status, setStatus] = useState<BrowserStreamStatus>("idle");
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
+  const [frameBuffer] = useState(() => new LatestBrowserFrameBuffer());
+  const frameUrl = useSyncExternalStore(
+    frameBuffer.subscribe,
+    frameBuffer.getSnapshot,
+    () => null,
+  );
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
@@ -98,11 +109,11 @@ export function useBrowserStream(
       return;
     }
     setConnectionAttempt(0);
-    setFrameUrl(null);
+    frameBuffer.dispose();
     setLiveUrl(null);
     setTabs([]);
     liveUrlRef.current = null;
-  }, [enabled, threadId]);
+  }, [enabled, frameBuffer, threadId]);
 
   useEffect(() => {
     if (!enabled) {
@@ -122,7 +133,6 @@ export function useBrowserStream(
     const socket = new WebSocket(browserStreamURL(threadId, seedRef.current));
     socket.binaryType = "blob";
     socketRef.current = socket;
-    const frameBuffer = new LatestBrowserFrameBuffer(setFrameUrl);
 
     const scheduleReconnect = () => {
       if (closedByEffect || !enabled) {
@@ -218,9 +228,8 @@ export function useBrowserStream(
       socketRef.current = null;
       socket.close();
       frameBuffer.dispose();
-      setFrameUrl(null);
     };
-  }, [connectionAttempt, enabled, threadId]);
+  }, [connectionAttempt, enabled, frameBuffer, threadId]);
 
   // Steer an already-open stream toward a changed seed in-band instead of
   // rebuilding the socket. Only navigates when the live page differs from the

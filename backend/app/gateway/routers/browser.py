@@ -185,6 +185,24 @@ async def _send_browser_frame(websocket: WebSocket, data: bytes, *, binary: bool
     await websocket.send_text(json.dumps(payload))
 
 
+async def _negotiate_browser_frame_format(websocket: WebSocket) -> bool | None:
+    """Accept the socket and resolve the optional frame transport capability."""
+    requested_format = websocket.query_params.get("frame_format")
+    await websocket.accept()
+    if requested_format not in {None, "binary"}:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"Unsupported frame_format: {requested_format}",
+                },
+            ),
+        )
+        await websocket.close(code=1008)
+        return None
+    return requested_format == "binary"
+
+
 @router.websocket("/threads/{thread_id}/browser/stream")
 async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     """Bidirectional live browser stream.
@@ -234,11 +252,12 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4501)
         return
 
-    await websocket.accept()
+    use_binary_frames = await _negotiate_browser_frame_format(websocket)
+    if use_binary_frames is None:
+        return
 
     token = set_current_user(user)
     loop = asyncio.get_running_loop()
-    use_binary_frames = websocket.query_params.get("frame_format") == "binary"
     frame_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
     send_lock = asyncio.Lock()
     input_event = asyncio.Event()

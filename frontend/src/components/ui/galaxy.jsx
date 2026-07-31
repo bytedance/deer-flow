@@ -1,6 +1,5 @@
 import { Renderer, Program, Mesh, Color, Triangle } from "ogl";
 import { useEffect, useRef } from "react";
-import { observeRenderActivity } from "@/core/dom/render-activity";
 import "./galaxy.css";
 
 const vertexShader = `
@@ -286,12 +285,8 @@ export default function Galaxy({
 
     const mesh = new Mesh(gl, { geometry, program });
     let animateId;
-    let renderActive = false;
 
     function update(t) {
-      animateId = undefined;
-      if (!renderActive) return;
-
       animateId = requestAnimationFrame(update);
       if (!disableAnimation) {
         program.uniforms.uTime.value = t * 0.001;
@@ -313,16 +308,8 @@ export default function Galaxy({
 
       renderer.render({ scene: mesh });
     }
+    animateId = requestAnimationFrame(update);
     ctn.appendChild(gl.canvas);
-    const stopObservingRenderActivity = observeRenderActivity(ctn, (active) => {
-      renderActive = active;
-      if (!renderActive) {
-        if (animateId !== undefined) cancelAnimationFrame(animateId);
-        animateId = undefined;
-      } else if (animateId === undefined) {
-        animateId = requestAnimationFrame(update);
-      }
-    });
 
     function handleMouseMove(e) {
       const rect = ctn.getBoundingClientRect();
@@ -342,8 +329,7 @@ export default function Galaxy({
     }
 
     return () => {
-      stopObservingRenderActivity();
-      if (animateId !== undefined) cancelAnimationFrame(animateId);
+      cancelAnimationFrame(animateId);
       window.removeEventListener("resize", resize);
       if (mouseInteraction) {
         ctn.removeEventListener("mousemove", handleMouseMove);
