@@ -37,6 +37,7 @@ from deerflow.domain.schedule.commands import (
 from deerflow.domain.schedule.exceptions import (
     InvalidScheduleError,
     LaunchFailedError,
+    LaunchIndeterminateError,
     TaskNotFoundError,
     TaskNotMutableError,
     ThreadBusyError,
@@ -352,6 +353,147 @@ class TestDispatchOutcomes:
 
         assert result.outcome is DispatchOutcome.CONFLICT
         assert result.record_id is not None, "the attempt itself is still recorded"
+
+
+class _RecordWriteFailsOnce(InMemoryScheduledRunRepository):
+    """`update_status` raises once -- the queued->running write dies mid-flight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_update = False
+
+    async def update_status(self, record_id, **kwargs):
+        if self.fail_next_update:
+            self.fail_next_update = False
+            raise RuntimeError("db down: update_status")
+        return await super().update_status(record_id, **kwargs)
+
+
+class _TaskWriteFailsOnce(InMemoryScheduledTaskRepository):
+    """`record_launch` raises once -- the parent-task write dies mid-flight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_record_launch = False
+
+    async def record_launch(self, task_id, **kwargs):
+        if self.fail_next_record_launch:
+            self.fail_next_record_launch = False
+            raise RuntimeError("db down: record_launch")
+        return await super().record_launch(task_id, **kwargs)
+
+
+class TestPostLaunchRetention:
+    """Regression for issue #4452 (fixed on main by #4504), ported to the
+    domain service.
+
+    Once `launch()` has returned -- or has raised without being able to say
+    whether a run started -- a live run may exist. A bookkeeping failure after
+    that point must NOT release the task's single active slot or reclassify
+    the run: the record stays active, the dispatch still reports LAUNCHED,
+    and the next dispatch must observe the held slot instead of launching a
+    duplicate.
+    """
+
+    async def test_post_launch_record_write_failure_does_not_release_active_slot(self):
+        runs = _RecordWriteFailsOnce()
+        launcher = FakeRunLauncher()
+        service = make_service(runs=runs, launcher=launcher)
+        task = await create_cron_task(service)
+        runs.fail_next_update = True
+
+        first = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        # The run launched despite the bookkeeping error; the result says so
+        # and surfaces the error instead of hiding it.
+        assert first.outcome is DispatchOutcome.LAUNCHED
+        assert first.run_id == "run-1"
+        assert first.error is not None
+
+        # The row never reached RUNNING, but queued is still active: the slot
+        # is held and the next dispatch is an overlap, not a duplicate.
+        assert runs.all_runs()[0].is_active
+        second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert len(launcher.calls) == 1, "a duplicate launch is the #4452 bug"
+        assert second.outcome is DispatchOutcome.SKIPPED
+
+        # The bookkeeping transient is not the run's verdict: record_launch
+        # still ran, cleared last_error, and counted the execution.
+        after = await service.get_task(task.task_id, user_id="user-1")
+        assert after.last_error is None
+        assert after.run_count == 1
+
+    async def test_post_launch_task_write_failure_does_not_release_active_slot(self):
+        tasks = _TaskWriteFailsOnce()
+        launcher = FakeRunLauncher()
+        service = make_service(tasks=tasks, launcher=launcher)
+        task = await create_cron_task(service)
+        tasks.fail_next_record_launch = True
+
+        first = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        assert first.outcome is DispatchOutcome.LAUNCHED
+        assert first.run_id == "run-1"
+        assert first.error is not None
+
+        # The record write landed before the task write failed, so the row is
+        # RUNNING with the launched id retained for recovery and cancellation.
+        stored = (await service.list_task_runs(task.task_id, user_id="user-1"))[0]
+        assert stored.status is RunStatus.RUNNING
+        assert stored.run_id == "run-1"
+
+        second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert len(launcher.calls) == 1, "a duplicate launch is the #4452 bug"
+        assert second.outcome is DispatchOutcome.SKIPPED
+
+    async def test_indeterminate_launch_retains_active_slot(self):
+        """The port-contract form of main's malformed-launch-result case: the
+        adapter knows the launch side effect may have happened but cannot
+        decode the run's identity. The slot must be retained with the identity
+        unknown, never released via the LaunchFailedError path."""
+        runs = InMemoryScheduledRunRepository()
+        launcher = FakeRunLauncher(fail_with=LaunchIndeterminateError("launch result undecodable"))
+        service = make_service(runs=runs, launcher=launcher)
+        task = await create_cron_task(service)
+
+        first = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        assert first.outcome is DispatchOutcome.LAUNCHED
+        assert first.run_id is None, "the identity is unknown, not invented"
+        assert "launch result undecodable" in first.error
+
+        stored = runs.all_runs()[0]
+        assert stored.status is RunStatus.RUNNING
+        assert stored.run_id is None
+        assert stored.is_active
+
+        launcher.fail_with = None
+        second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert len(launcher.calls) == 1, "a duplicate launch is the #4452 bug"
+        assert second.outcome is DispatchOutcome.SKIPPED
+
+        # The execution is counted and the task keeps no stale identity.
+        after = await service.get_task(task.task_id, user_id="user-1")
+        assert after.last_run_id is None
+        assert after.run_count == 1
+
+    async def test_pre_launch_failure_still_releases_active_slot(self):
+        """Complement pinning the boundary: LaunchFailedError means the
+        adapter is CERTAIN no run started, so the failure path stays -- the
+        row goes terminal and the slot is released for the next dispatch."""
+        runs = InMemoryScheduledRunRepository()
+        launcher = FakeRunLauncher(fail_with=LaunchFailedError("provider exploded"))
+        service = make_service(runs=runs, launcher=launcher)
+        task = await create_cron_task(service)
+
+        first = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert first.outcome is DispatchOutcome.FAILED
+        assert not runs.all_runs()[0].is_active, "a certain failure must not hold the slot"
+
+        launcher.fail_with = None
+        second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert second.outcome is DispatchOutcome.LAUNCHED
+        assert len(launcher.calls) == 2
 
 
 class TestConflictCollapse:

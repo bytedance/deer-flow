@@ -64,4 +64,22 @@ class ThreadBusyError(ScheduleError):
 
 
 class LaunchFailedError(ScheduleError):
-    """The run could not be launched for any non-conflict reason."""
+    """The launch definitely did not start a run.
+
+    The adapter may raise this only when it is CERTAIN no run exists -- the
+    service releases the task's active slot on this path, so raising it after
+    the launch side effect may have happened reopens the #4452 duplicate
+    execution. When in doubt, raise LaunchIndeterminateError instead.
+    """
+
+
+class LaunchIndeterminateError(ScheduleError):
+    """The launch side effect may have happened, but its identity is unknown.
+
+    Raised by the RunLauncher adapter when the launch call did not fail
+    cleanly -- the response could not be decoded, the connection dropped after
+    the request was sent, and so on. The service treats this as launched with
+    an unknown run id: the execution record stays active so the task's single
+    active slot remains held (#4452 / #4504), and reconciliation later settles
+    what actually happened.
+    """

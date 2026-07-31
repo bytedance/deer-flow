@@ -288,12 +288,16 @@ class RunLauncher(Protocol):
     The contract the adapter MUST honour, because it is what keeps the run
     runtime and the web framework out of the inner ring:
 
-      - the execution thread is already busy  -> ThreadBusyError
-      - anything else goes wrong              -> LaunchFailedError
+      - the execution thread is already busy       -> ThreadBusyError
+      - certainly failed, no run exists            -> LaunchFailedError
+      - a run may exist but its identity is lost   -> LaunchIndeterminateError
 
-    Nothing else may escape. The domain distinguishes those two because they
-    lead to different outcomes -- a busy thread on a scheduled dispatch is a
-    skipped occurrence, while a genuine failure is recorded as one.
+    Nothing else may escape. The distinction is load-bearing: ThreadBusyError
+    on a scheduled dispatch is a skipped occurrence; LaunchFailedError
+    releases the task's single active slot, so the adapter may raise it only
+    when it is CERTAIN no run started; LaunchIndeterminateError covers every
+    doubt after the launch request was sent -- an undecodable response, a
+    dropped connection -- and keeps the slot held (#4452 / #4504).
     """
 
     async def launch(

@@ -6,14 +6,16 @@ to the aggregate -- and knows nothing about HTTP, SQL, or the run runtime.
 `user_id` is always passed in explicitly; resolving the current user is the
 primary adapter's job.
 
-The dispatch path deliberately mirrors the structure of the pre-migration
-`app/scheduler/service.py` (since deleted), including its ordering and its
-comments, because its concurrency and idempotency semantics are load-bearing
-and are pinned by tests that must keep passing unchanged.
+The dispatch path deliberately mirrors the structure of the legacy
+`app/scheduler/service.py` (still present until the adapter slice replaces
+it), including its ordering, its comments, and its post-launch retention
+semantics (#4452 / #4504), because its concurrency and idempotency semantics
+are load-bearing and are pinned by tests that must keep passing unchanged.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -29,6 +31,7 @@ from deerflow.domain.schedule.commands import (
 from deerflow.domain.schedule.exceptions import (
     ActiveRunConflictError,
     LaunchFailedError,
+    LaunchIndeterminateError,
     TaskNotFoundError,
     ThreadBusyError,
     ThreadNotFoundError,
@@ -50,6 +53,8 @@ from deerflow.domain.schedule.ports import (
     ScheduledTaskRepository,
     ThreadLookup,
 )
+
+logger = logging.getLogger(__name__)
 
 # Shared so the has_active fast path and the active-slot race path produce
 # byte-identical outcomes for the same "task already has an active run"
@@ -260,10 +265,13 @@ class ScheduleService:
                 return self._conflict(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
 
-        # Only the launch is guarded. The port contract admits exactly two
-        # escapes, so a failure of the bookkeeping writes below is a genuine
-        # fault and propagates instead of being recorded as a failed launch --
-        # which would mark an already-running execution as failed.
+        # Only the launch is guarded, and only its two certain outcomes may
+        # release the slot. Past this point a live run may exist, so every
+        # failure -- an indeterminate launch, a bookkeeping write dying -- must
+        # take the retention path below rather than mark the record failed:
+        # "failed" is terminal, terminal records do not hold the task's single
+        # active slot, and a released slot lets the next dispatch launch a
+        # duplicate of a run that is still alive (#4452, fixed by #4504).
         try:
             launched = await self._launcher.launch(
                 thread_id=execution_thread_id,
@@ -284,30 +292,16 @@ class ScheduleService:
                 return await self._finalize_skip(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, error=str(exc))
             return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome=DispatchOutcome.CONFLICT)
         except LaunchFailedError as exc:
+            # The adapter certifies no run started (see the port contract), so
+            # releasing the slot is safe.
             return await self._fail(task, record_id=record.record_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc), outcome=DispatchOutcome.FAILED)
+        except LaunchIndeterminateError as exc:
+            # The launch side effect may have happened but its identity could
+            # not be decoded. Retain the slot with the identity unknown;
+            # reconciliation settles what actually happened.
+            return await self._retain_launched(task, record_id=record.record_id, run_id=None, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc))
 
-        await self._runs.update_status(
-            record.record_id,
-            status=RunStatus.RUNNING,
-            run_id=launched.run_id,
-            started_at=now,
-            # A fast-failing run can reach handle_run_completion before this
-            # write lands; never clobber its terminal verdict.
-            protect_terminal=True,
-        )
-        await self._tasks.record_launch(
-            task.task_id,
-            status=task.status_after_launch(trigger=trigger),
-            next_run_at=task.schedule.next_after(now),
-            last_run_at=now,
-            last_run_id=launched.run_id,
-            last_thread_id=launched.thread_id,
-            last_error=None,
-            increment_run_count=True,
-            # Same race as the record write above.
-            protect_terminal=True,
-        )
-        return DispatchResult(DispatchOutcome.LAUNCHED, record.record_id, launched.run_id, launched.thread_id, None)
+        return await self._retain_launched(task, record_id=record.record_id, run_id=launched.run_id, thread_id=launched.thread_id, now=now, trigger=trigger, error=None)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -380,6 +374,64 @@ class ScheduleService:
         if saved is None:
             raise TaskNotFoundError("Scheduled task not found")
         return saved
+
+    async def _retain_launched(
+        self,
+        task: ScheduledTask,
+        *,
+        record_id: str,
+        run_id: str | None,
+        thread_id: str,
+        now: datetime,
+        trigger: TriggerKind,
+        error: str | None,
+    ) -> DispatchResult:
+        """Record a launch whose run is (or may be) live. Best-effort by design.
+
+        Both writes are attempted independently and their failures logged
+        rather than raised: the run is already in flight, so there is no
+        outcome these writes could change -- only bookkeeping they could lose.
+        A failed record write leaves the row queued, a failed task write
+        leaves the claim held; both states still hold the task's single
+        active slot, which is the invariant that matters (#4452). The first
+        error is surfaced on the result so the caller knows the bookkeeping
+        is behind, while the outcome stays LAUNCHED.
+        """
+        try:
+            await self._runs.update_status(
+                record_id,
+                status=RunStatus.RUNNING,
+                run_id=run_id,
+                started_at=now,
+                # A fast-failing run can reach handle_run_completion before
+                # this write lands; never clobber its terminal verdict.
+                protect_terminal=True,
+            )
+        except Exception:
+            logger.exception("Scheduled run record %s: post-launch bookkeeping failed; run %s is still live (task %s)", record_id, run_id, task.task_id)
+            if error is None:
+                error = f"post-launch bookkeeping failed for record {record_id}"
+        try:
+            await self._tasks.record_launch(
+                task.task_id,
+                status=task.status_after_launch(trigger=trigger),
+                next_run_at=task.schedule.next_after(now),
+                last_run_at=now,
+                last_run_id=run_id,
+                last_thread_id=thread_id,
+                # A bookkeeping transient is not the run's verdict: the launch
+                # succeeded, so the task list must not show an error while the
+                # run is in flight. handle_run_completion writes the real one.
+                last_error=None,
+                increment_run_count=True,
+                # Same race as the record write above.
+                protect_terminal=True,
+            )
+        except Exception:
+            logger.exception("Scheduled task %s: post-launch update failed; run %s is still live", task.task_id, run_id)
+            if error is None:
+                error = f"post-launch bookkeeping failed for task {task.task_id}"
+        return DispatchResult(DispatchOutcome.LAUNCHED, record_id, run_id, thread_id, error)
 
     def _conflict(self, thread_id: str) -> DispatchResult:
         """A manual trigger against an active run.
