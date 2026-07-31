@@ -1,12 +1,17 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useRef, type RefObject } from "react";
 
-import MagicBento, { type BentoCardProps } from "@/components/ui/magic-bento";
+import { type BentoCardProps } from "@/components/ui/magic-bento";
 import { useRenderActivity } from "@/core/dom/render-activity";
 import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
+
+const MagicBento = dynamic(() => import("@/components/ui/magic-bento"), {
+  ssr: false,
+});
 
 const COLOR = "#0a0a0a";
 const features: BentoCardProps[] = [
@@ -53,7 +58,7 @@ const features: BentoCardProps[] = [
 
 export function WhatsNewSection({ className }: { className?: string }) {
   const bentoContainerRef = useRef<HTMLDivElement>(null);
-  const renderBento = useRenderActivity(bentoContainerRef);
+  const renderBento = useRenderActivity(bentoContainerRef, false);
   useBentoSpotlight(bentoContainerRef, renderBento);
 
   return (

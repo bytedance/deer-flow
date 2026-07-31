@@ -14,6 +14,9 @@ describe("decorative animation scheduling", () => {
 
     expect(source).toContain("useRenderActivity");
     expect(source).toContain("renderGalaxy && (");
+    expect(source).toContain(
+      'dynamic(() => import("@/components/ui/galaxy"), { ssr: false })',
+    );
   });
 
   it("scopes and coalesces Magic Bento spotlight pointer work", () => {
@@ -27,7 +30,24 @@ describe("decorative animation scheduling", () => {
 
     expect(source).toContain("useRenderActivity");
     expect(source).toContain("enableSpotlight={false}");
+    expect(source).toContain('import("@/components/ui/magic-bento")');
+    expect(source).toContain("ssr: false");
+    expect(source).toContain("useRenderActivity(bentoContainerRef, false)");
     expect(source).toContain('container.addEventListener("pointermove"');
     expect(source).toContain("pendingPointerFrame");
+  });
+
+  it("does not load the skills animation before its section is visible", () => {
+    const source = readFileSync(
+      join(frontendRoot, "src/components/landing/sections/skills-section.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain('import("../progressive-skills-animation")');
+    expect(source).toContain("ssr: false");
+    expect(source).toContain("useRenderActivity(animationRef, false)");
+    expect(source).toContain(
+      "renderAnimation && <ProgressiveSkillsAnimation />",
+    );
   });
 });

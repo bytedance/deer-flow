@@ -9,9 +9,11 @@ export type RenderActivityListener = (active: boolean) => void;
 export function observeRenderActivity(
   element: Element,
   listener: RenderActivityListener,
+  initialElementVisible = true,
 ) {
   let documentVisible = !document.hidden;
-  let elementVisible = true;
+  let elementVisible =
+    typeof IntersectionObserver === "undefined" ? true : initialElementVisible;
   let lastActive: boolean | undefined;
 
   const notify = () => {
@@ -45,16 +47,19 @@ export function observeRenderActivity(
   };
 }
 
-export function useRenderActivity(ref: RefObject<Element | null>) {
+export function useRenderActivity(
+  ref: RefObject<Element | null>,
+  initialActive = true,
+) {
   // Keep server and first client render aligned; the observer corrects this
   // immediately after mount.
-  const [active, setActive] = useState(true);
+  const [active, setActive] = useState(initialActive);
 
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
-    return observeRenderActivity(element, setActive);
-  }, [ref]);
+    return observeRenderActivity(element, setActive, initialActive);
+  }, [initialActive, ref]);
 
   return active;
 }
