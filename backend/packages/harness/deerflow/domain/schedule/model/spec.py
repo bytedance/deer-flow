@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from croniter import croniter
+from croniter import CroniterError, croniter
 
 from deerflow.domain.schedule.exceptions import InvalidScheduleError
 from deerflow.domain.schedule.model.enums import ScheduleType
@@ -75,7 +75,16 @@ class ScheduleSpec:
             fields = [part for part in self.cron.split() if part]
             if len(fields) != CRON_FIELD_COUNT:
                 raise InvalidScheduleError(f"Cron expression must contain exactly {CRON_FIELD_COUNT} fields")
-            object.__setattr__(self, "cron", " ".join(fields))
+            normalized = " ".join(fields)
+            # Counting fields is not parsing: five fields of garbage would
+            # otherwise construct fine and surface later, deep in next_after,
+            # as a croniter error outside the ScheduleError family the router
+            # maps -- an input error turned unclassified 500.
+            try:
+                croniter(normalized)
+            except CroniterError as exc:
+                raise InvalidScheduleError(f"Invalid cron expression: {normalized}") from exc
+            object.__setattr__(self, "cron", normalized)
 
         if self.schedule_type is ScheduleType.ONCE:
             if self.run_at is None:

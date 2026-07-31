@@ -94,6 +94,21 @@ class TestScheduleSpecInvariants:
     def test_cron_whitespace_is_normalized_on_construction(self):
         assert ScheduleSpec(ScheduleType.CRON, "UTC", cron="  0   9  *  *  * ").cron == "0 9 * * *"
 
+    @pytest.mark.parametrize("expr", ["x x x x x", "60 * * * *", "* * * * 99"])
+    def test_a_five_field_expression_the_parser_rejects_is_invalid_at_construction(self, expr):
+        """Counting fields is not parsing: garbage with five fields used to
+        construct successfully and only blow up later, deep in `next_after`,
+        as a croniter exception outside the ScheduleError family -- turning a
+        422-mappable input error into an unclassified 500."""
+        with pytest.raises(InvalidScheduleError, match="Invalid cron expression"):
+            ScheduleSpec.cron_schedule(expr, "UTC")
+
+    @pytest.mark.parametrize("expr", ["*/5 * * * *", "0 9 * * mon-fri", "0 0 1,15 * *"])
+    def test_real_cron_vocabulary_still_constructs(self, expr):
+        """The validity probe must not over-reject: steps, ranges, lists, and
+        named weekdays are everyday croniter vocabulary."""
+        assert ScheduleSpec.cron_schedule(expr, "UTC").cron == expr
+
     def test_naive_run_at_is_localized_to_the_schedule_timezone(self):
         spec = ScheduleSpec.once_at(datetime(2026, 8, 1, 9, 0), "Asia/Shanghai")  # noqa: DTZ001 -- naive input is the subject
         assert spec.run_at.utcoffset() == timedelta(hours=8)
