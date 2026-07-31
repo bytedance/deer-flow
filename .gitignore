@@ -69,3 +69,7 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+
+# Local runtime artifacts (may contain tokens / caches)
+logs-server.log
+.uv-cache/

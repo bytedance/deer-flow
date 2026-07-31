@@ -18,10 +18,16 @@ def query_review_rating(
     offset: int = 0,
     length: int = 20,
 ) -> list[dict]:
-    """查询评论管理 Review。返回 review_id/asin/last_star/last_title/last_content/author 等。
+    """查询Review明细列表（lx_review_list）。覆盖指标 #20 新增差评，辅助 #19 评分变化。
 
     API: POST /basicOpen/openapi/service/v3/data/mws/reviews。
+    返回 review_id/asin/last_star(星级)/last_title/last_content(评论内容)/
+    review_date/author/is_vp/images/videos/amazon_order_list(关联订单)/marketplace。
     date_field: review_time / create_time / last_update_time。
+    star 支持逗号分隔多值，如 "1,2,3" 拉取低星差评。
+
+    闭环：查询"昨天新增差评" → lx_list_stores 得 sids → 本工具
+    (star="1,2,3", 起止日期=昨天, search_field="asin" 可选)。
     评论实时性强，TTL=0（不缓存，每次真实拉取）。
     """
     params = {

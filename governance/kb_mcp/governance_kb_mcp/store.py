@@ -79,18 +79,25 @@ class KBStore:
         return ids
 
     def search(self, query: str, level: str, top_k: int = 5) -> list[SearchResult]:
-        query_embedding = self._embedding.embed(query)
-        if not query_embedding:
-            logger.warning("Empty query embedding, returning no results")
-            return []
         try:
             collection = self._get_collection(level)
             if collection.count() == 0:
                 return []
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=min(top_k, collection.count()),
-            )
+            n = min(top_k, collection.count())
+
+            query_embedding = self._embedding.embed(query)
+            if query_embedding:
+                results = collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=n,
+                )
+            else:
+                logger.info("External embedding unavailable, using ChromaDB default")
+                results = collection.query(
+                    query_texts=[query],
+                    n_results=n,
+                )
+
             search_results = []
             if results["documents"] and results["documents"][0]:
                 for i, doc in enumerate(results["documents"][0]):

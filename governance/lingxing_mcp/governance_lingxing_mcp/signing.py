@@ -1,6 +1,7 @@
+import base64
 import hashlib
 import urllib.parse
-import base64
+
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 

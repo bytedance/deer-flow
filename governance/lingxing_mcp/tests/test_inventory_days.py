@@ -145,6 +145,25 @@ def test_query_inventory_days_empty_stock_data_returns_zero():
     assert out["available_days"] == 0.0
 
 
+def test_query_inventory_days_stock_envelope_shape():
+    """fbaList 真实返回为 {"total": n, "list": [...]} 信封结构（2026-07-30 探测确认）。"""
+    stock = {
+        "code": 0,
+        "message": "success",
+        "data": {"total": 1, "list": [
+            {"asin": "B0XXX", "afn_fulfillable_quantity": 66, "afn_inbound_shipped_quantity": 7}
+        ]},
+    }
+    sales = _sales_result({"2026-01-31": [0, 3, 0]})
+    client = _make_two_call_client(stock, sales)
+
+    out = query_inventory_days(client, sid=136, asin="B0XXX")
+
+    assert out["in_stock"] == 66
+    assert out["in_transit"] == 7
+    assert out["available_days"] == 22.0
+
+
 def test_query_inventory_days_mode_passed_through():
     """mode 参数透传到销量预测端点。"""
     stock = _stock_result(

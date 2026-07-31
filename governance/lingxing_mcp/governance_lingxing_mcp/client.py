@@ -1,10 +1,12 @@
 import json
-import time
 import logging
+import time
+
 import httpx
+
+from governance_lingxing_mcp.auth import LingXingAuth
 from governance_lingxing_mcp.config import LXConfig
 from governance_lingxing_mcp.signing import sign_request
-from governance_lingxing_mcp.auth import LingXingAuth
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +48,40 @@ class LingXingClient:
         # JSON-serialize list/dict values so signing (key=value) and URL encoding
         # stay consistent — otherwise httpx encodes sid=[1] as sid=1, mismatching
         # the signature computed from sid=[1, 2].
+        # 必须用紧凑分隔符（无空格）：领星按 "[8074,8075]" 形式重建签名串，
+        # Python 默认 json.dumps 产生 "[8074, 8075]"（带空格）会导致多元素
+        # 数组签验失败（api sign not correct，2026-07-30 真实探测确认）。
         for k, v in list(sign_params.items()):
             if isinstance(v, (list, dict)):
-                sign_params[k] = json.dumps(v, ensure_ascii=False)
+                sign_params[k] = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
         sign = sign_request(sign_params, app_id=self._config.app_id)
         sign_params["sign"] = sign
 
         url = f"{self._config.api_base}{path}"
         try:
-            # 领星 OpenAPI 期望鉴权参数（access_token/sign/timestamp/app_key）
-            # 作为 URL query params 传递。广告 API（/pb/openapi/*）额外要求
-            # 业务参数放在 JSON body 中（控制器声明了 @RequestBody），
-            # 其余端点（/bd/、/erp/、/basicOpen/）所有参数都走 query params。
-            if method.upper() == "GET":
-                r = httpx.get(url, params=sign_params, timeout=30)
-            elif path.startswith("/pb/openapi"):
-                # 鉴权参数走 query，业务参数走 JSON body
-                auth_keys = {"access_token", "app_key", "timestamp", "sign"}
-                query_params = {k: v for k, v in sign_params.items() if k in auth_keys}
-                body_params = {k: v for k, v in sign_params.items() if k not in auth_keys}
-                r = httpx.post(url, params=query_params, json=body_params, timeout=30)
-            else:
-                r = httpx.post(url, params=sign_params, timeout=30)
+            # 领星 OpenAPI 传输约定（2026-07-30 全端点真实探测确认）：
+            # - GET：所有参数（业务+鉴权）走 URL query params。
+            # - POST：业务参数走 JSON body（保持原始类型），鉴权参数
+            #   （access_token/app_key/timestamp/sign）走 query params；
+            #   签名仍覆盖全部业务参数（list/dict 取 JSON 序列化值）。
+            #   query 方式调 POST 会被领星返回"查询异常/参数有误"。
+            # 429（频率限制）按指数退避重试，最多 3 次。
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                if method.upper() == "GET":
+                    r = httpx.get(url, params=sign_params, timeout=30)
+                else:
+                    auth_keys = {"access_token", "app_key", "timestamp", "sign"}
+                    query_params = {k: v for k, v in sign_params.items() if k in auth_keys}
+                    r = httpx.post(url, params=query_params, json=params, timeout=30)
+                if r.status_code == 429 and attempt < max_attempts - 1:
+                    backoff = 0.5 * (2**attempt)
+                    logger.warning("lingxing API %s %s rate limited (429), retry in %.1fs", method, path, backoff)
+                    time.sleep(backoff)
+                    continue
+                break
+            if r.status_code == 429:
+                return {"code": 429, "message": "rate limited after 3 retries", "data": []}
             result = r.json()
         except Exception as e:
             logger.warning("lingxing API %s %s failed: %s", method, path, e)

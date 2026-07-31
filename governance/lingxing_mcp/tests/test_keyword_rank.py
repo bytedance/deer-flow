@@ -30,7 +30,8 @@ def test_query_keyword_rank_basic_returns_data():
 
 def test_query_keyword_rank_with_mid_and_dates():
     """mid/start_date/end_date 透传到 params。"""
-    client = _make_client({"code": 0, "data": []})
+    data = [{"key_word": "blender", "rank": 10}]
+    client = _make_client({"code": 0, "data": data})
 
     query_keyword_rank(
         client,
@@ -50,20 +51,40 @@ def test_query_keyword_rank_with_mid_and_dates():
     assert client.request.call_args.kwargs["ttl_seconds"] == 21600
 
 
-def test_query_keyword_rank_non_zero_code_returns_warning():
-    """code != 0（端点失效/鉴权失败）时返回 warning 列表，不抛异常。"""
+def test_query_keyword_rank_with_search_params():
+    """search_field/search_value 透传到 params（按关键词/ASIN 搜索）。"""
+    data = [{"key_word": "yoga mat", "rank": 8, "is_sponsored": 0}]
+    client = _make_client({"code": 0, "data": data})
+
+    out = query_keyword_rank(
+        client, search_field="key_word", search_value="yoga mat"
+    )
+
+    assert out == data
+    call_params = client.request.call_args.kwargs["params"]
+    assert call_params["search_field"] == "key_word"
+    assert call_params["search_value"] == "yoga mat"
+
+
+def test_query_keyword_rank_non_zero_code_returns_error():
+    """code != 0（端点失效/鉴权失败）时返回 error 列表，不抛异常。"""
     client = _make_client({"code": 10001, "message": "invalid token", "data": []})
     out = query_keyword_rank(client)
     assert isinstance(out, list)
-    assert (
-        out
-        and out[0].get("warning")
-        == "keyword rank API not available, endpoint may have changed"
-    )
+    assert out and "error" in out[0]
 
 
-def test_query_keyword_rank_missing_data_field_returns_empty():
-    """code == 0 但无 data 字段时安全返回空列表。"""
+def test_query_keyword_rank_empty_data_returns_not_monitored_hint():
+    """data 为空（关键词未监控）时返回闭环提示，引导 lx_add_keyword_monitor。"""
+    client = _make_client({"code": 0, "message": "success", "data": []})
+    out = query_keyword_rank(client)
+    assert isinstance(out, list)
+    assert out and out[0].get("info") == "keyword not monitored or no rank data"
+    assert "lx_add_keyword_monitor" in out[0].get("hint", "")
+
+
+def test_query_keyword_rank_missing_data_field_returns_hint():
+    """code == 0 但无 data 字段时同样按未监控处理。"""
     client = _make_client({"code": 0, "message": "success"})
     out = query_keyword_rank(client)
-    assert out == []
+    assert out and "hint" in out[0]

@@ -1,6 +1,8 @@
 from governance_lingxing_mcp.client import LingXingClient
 
-FBA_STOCK_API_PATH = "/basicOpen/openapi/storage/fbaWarehouseDetail"
+# 2026-07-30 真实探测：fbaWarehouseDetail 端点两种传输方式均报错（疑似失效），
+# 库存数据改用 fbaList（含 afn_fulfillable_quantity / afn_inbound_shipped_quantity）。
+FBA_STOCK_API_PATH = "/erp/sc/routing/fba/fbaStock/fbaList"
 SALES_FORECAST_API_PATH = "/erp/sc/routing/fbaSug/asin/getDailySalesInfoFeature"
 
 
@@ -14,7 +16,7 @@ def query_inventory_days(
     """查询 FBA 库存 + 销量预测并合并，返回可售天数。
 
     合并两个端点：
-    - FBA 库存: POST /basicOpen/openapi/storage/fbaWarehouseDetail （按 asin 检索）
+    - FBA 库存: POST /erp/sc/routing/fba/fbaStock/fbaList （按 asin 检索）
     - 销量预测: POST /erp/sc/routing/fbaSug/asin/getDailySalesInfoFeature （sid+asin）
 
     返回 {asin, in_stock, in_transit, daily_sales, available_days}：
@@ -40,9 +42,14 @@ def query_inventory_days(
     in_stock = 0
     in_transit = 0
     if stock_result.get("code") == 0:
-        stock_data = stock_result.get("data", [])
-        if stock_data:
-            row = stock_data[0]
+        stock_data = stock_result.get("data")
+        # fbaList 返回信封结构 {"total": n, "list": [...]}
+        if isinstance(stock_data, dict):
+            stock_rows = stock_data.get("list") or []
+        else:
+            stock_rows = stock_data or []
+        if stock_rows:
+            row = stock_rows[0]
             in_stock = row.get("afn_fulfillable_quantity", 0) or 0
             in_transit = row.get("afn_inbound_shipped_quantity", 0) or 0
 
