@@ -69,7 +69,7 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
-from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -1000,13 +1000,14 @@ async def ensure_checkpoint_history_seeded(
     shim is dead.
     """
     event_store = request.app.state.run_event_store
-    # Resolve the user explicitly instead of relying on the store's AUTO
-    # default: AUTO raises when no user contextvar is set (e.g. the scheduler
-    # launch path for ownerless internal tasks), which would abort the run
-    # before admission. With no user in context there is nobody to filter by,
-    # so fall back to an unscoped emptiness check.
-    current_user = get_current_user()
-    if await event_store.list_messages(thread_id, limit=1, user_id=str(current_user.id) if current_user is not None else None):
+    # The emptiness check is deliberately thread-scoped, never user-scoped:
+    # seed rows may be stamped with a different principal (NULL for ownerless
+    # seeds, or another user on a shared NULL-owner thread), so a user-scoped
+    # query would miss them and re-seed a duplicate history per principal.
+    # Passing user_id=None also opts out of AUTO resolution explicitly, which
+    # would raise when no user contextvar is set (e.g. the scheduler launch
+    # path for ownerless internal tasks).
+    if await event_store.list_messages(thread_id, limit=1, user_id=None):
         return
 
     checkpoint_config = {

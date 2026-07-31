@@ -1061,20 +1061,24 @@ async def test_checkpoint_history_seed_is_skipped_when_journal_already_has_messa
 
 
 @pytest.mark.anyio
+@pytest.mark.no_auto_user
 async def test_checkpoint_history_seed_guard_tolerates_missing_user_context():
     """Scheduler/internal launch paths can run without a user contextvar.
     DbRunEventStore resolves user_id=AUTO strictly and raises in that case;
-    the seed guard must resolve the user explicitly and fall back to an
-    unscoped emptiness check instead of aborting the run."""
+    the seed guard must pass user_id=None explicitly instead of aborting the
+    run."""
     from unittest.mock import AsyncMock
 
     from app.gateway.services import ensure_checkpoint_history_seeded
     from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
+    captured: dict[str, object] = {}
+
     async def list_messages(thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=AUTO):
         # Mirror DbRunEventStore: AUTO with no user context raises.
         if isinstance(user_id, _AutoSentinel):
             raise RuntimeError("list_messages called with user_id=AUTO but no user context is set")
+        captured["user_id"] = user_id
         return []
 
     event_store = SimpleNamespace(list_messages=list_messages, put_batch=AsyncMock())
@@ -1094,7 +1098,111 @@ async def test_checkpoint_history_seed_guard_tolerates_missing_user_context():
         assistant_id="lead_agent",
     )
 
+    assert captured["user_id"] is None
     event_store.put_batch.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_checkpoint_history_seed_guard_is_thread_scoped_under_user_context():
+    """Regression: the emptiness guard must stay thread-scoped (user_id=None)
+    even when a user is authenticated. Seed rows stamped by another principal
+    (or NULL) are invisible to a user-scoped query, which would re-seed a
+    duplicate history per principal."""
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import ensure_checkpoint_history_seeded
+    from deerflow.runtime.user_context import AUTO
+
+    captured: dict[str, object] = {}
+
+    async def list_messages(thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=AUTO):
+        captured["user_id"] = user_id
+        return [{"seq": 1}]
+
+    event_store = SimpleNamespace(list_messages=list_messages, put_batch=AsyncMock())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_event_store=event_store)))
+
+    with patch(
+        "app.gateway.services.build_checkpoint_state_accessor",
+        side_effect=AssertionError("checkpoint state should not be loaded"),
+    ):
+        await ensure_checkpoint_history_seeded(
+            request,
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+        )
+
+    assert captured["user_id"] is None
+    event_store.put_batch.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_checkpoint_history_seed_runs_exactly_once_across_principals(tmp_path):
+    """DbRunEventStore regression: an ownerless seed stamps rows with
+    user_id=NULL; a later authenticated run on the same thread must still
+    see them and skip re-seeding (the MemoryRunEventStore-based tests above
+    cannot catch this because the memory store ignores user_id)."""
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import ensure_checkpoint_history_seeded
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.runtime.events.store.db import DbRunEventStore
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'events.db'}"
+    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    try:
+        event_store = DbRunEventStore(get_session_factory())
+        checkpointer = SimpleNamespace(
+            aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={})),
+        )
+        snapshot = SimpleNamespace(
+            values={
+                "messages": [
+                    HumanMessage(id="legacy-human", content="old question"),
+                    AIMessage(id="legacy-ai", content="old answer"),
+                ]
+            }
+        )
+        accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    checkpointer=checkpointer,
+                    run_event_store=event_store,
+                )
+            )
+        )
+
+        with patch(
+            "app.gateway.services.build_checkpoint_state_accessor",
+            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        ):
+            # First seed: ownerless (no user contextvar) — rows stamped NULL.
+            await ensure_checkpoint_history_seeded(
+                request,
+                thread_id="thread-1",
+                assistant_id="lead_agent",
+            )
+            # Second attempt: authenticated user on the same thread — must
+            # see the NULL-stamped rows and skip.
+            token = set_current_user(SimpleNamespace(id="user-a"))
+            try:
+                await ensure_checkpoint_history_seeded(
+                    request,
+                    thread_id="thread-1",
+                    assistant_id="lead_agent",
+                )
+            finally:
+                reset_current_user(token)
+
+        rows = await event_store.list_messages("thread-1", limit=100, user_id=None)
+        assert [row["content"]["id"] for row in rows] == ["legacy-human", "legacy-ai"]
+    finally:
+        await close_engine()
 
 
 def test_apply_checkpoint_to_run_config_rejects_missing_checkpoint():
