@@ -372,6 +372,20 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: str | None) -> None:
+    """Reject a candidate fact whose normalized content already exists.
+
+    Callers must invoke this against the freshest snapshot available inside
+    their read-check-write critical section (i.e. on every revision-conflict
+    retry), so two concurrent creators of the same content cannot both pass
+    the check and store duplicate facts."""
+    if content_key is None:
+        return
+    for fact in memory_data.get("facts", []):
+        if isinstance(fact, dict) and _fact_content_key(fact.get("content")) == content_key:
+            raise ValueError("Duplicate fact")
+
+
 # ── Staleness review helpers ──────────────────────────────────────────────
 
 
@@ -815,6 +829,12 @@ class MemoryUpdater:
         "added" status. This restores both the max_facts cap and the post-trim
         existence check (upstream's ``create_memory_fact_with_created_fact``),
         which the vendored copy had dropped together to avoid the dangling id.
+
+        Duplicate rejection is enforced here (not only by callers): the
+        candidate's normalized content key is checked against the fresh
+        memory snapshot inside the revision-conflict retry loop, so
+        concurrent creators cannot both store the same content. Raises
+        ``ValueError("Duplicate fact")`` on a normalized-content match.
         """
         if agent_name is None:
             raise ValueError("agent_name")
@@ -823,6 +843,7 @@ class MemoryUpdater:
             raise ValueError("content")
         normalized_category = category.strip() or "context"
         validated_confidence = _validate_confidence(confidence)
+        candidate_key = _fact_content_key(normalized_content)
         now = utc_now_iso_z()
         fact_id = f"fact_{uuid.uuid4().hex[:8]}"
         candidate = {
@@ -836,6 +857,12 @@ class MemoryUpdater:
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                # Duplicate rejection lives inside the conflict-retry loop so
+                # it is re-evaluated against the fresh snapshot after every
+                # revision conflict: two concurrent creators of the same
+                # content cannot both store it (the loser reloads, sees the
+                # winner's fact, and is rejected here).
+                _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
                 updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
                 kept_ids = {str(fact.get("id")) for fact in updated_memory["facts"]}
@@ -861,6 +888,7 @@ class MemoryUpdater:
                     logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
             raise AssertionError("bounded create retry did not return or raise")
         memory_data = self.get_memory_data(agent_name, user_id=user_id)
+        _raise_if_duplicate_fact_content(memory_data, candidate_key)
         updated_memory = dict(memory_data)
         updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), candidate], self._config.max_facts)
         if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
