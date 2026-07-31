@@ -5,6 +5,16 @@ import type { AgentThreadState } from "../threads";
 import { buildWriteFileDraftContent } from "./preview";
 import { urlOfArtifact } from "./utils";
 
+async function sha256OfText(content: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(content),
+  );
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 export async function loadArtifactContent({
   filepath,
   threadId,
@@ -20,8 +30,14 @@ export async function loadArtifactContent({
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Failed to load artifact: HTTP ${response.status}`);
+  }
   const text = await response.text();
-  return { content: text, url };
+  const etag = response.headers.get("etag");
+  const sha256 =
+    etag?.match(/^"([0-9a-f]{64})"$/)?.[1] ?? (await sha256OfText(text));
+  return { content: text, url, sha256 };
 }
 
 export function loadArtifactContentFromToolCall({

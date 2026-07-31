@@ -41,6 +41,8 @@ export function CodeEditor({
   readonly,
   disabled,
   autoFocus,
+  onChange,
+  onSave,
   settings,
 }: {
   className?: string;
@@ -49,6 +51,8 @@ export function CodeEditor({
   readonly?: boolean;
   disabled?: boolean;
   autoFocus?: boolean;
+  onChange?: (value: string) => void;
+  onSave?: () => void;
   settings?: unknown;
 }) {
   const {
@@ -76,6 +80,15 @@ export function CodeEditor({
         "flex cursor-text flex-col overflow-hidden rounded-md",
         className,
       )}
+      onKeyDown={(event) => {
+        if (
+          (event.metaKey || event.ctrlKey) &&
+          event.key.toLowerCase() === "s"
+        ) {
+          event.preventDefault();
+          onSave?.();
+        }
+      }}
     >
       {isLoading ? (
         <Textarea
@@ -89,7 +102,8 @@ export function CodeEditor({
         />
       ) : (
         <CodeMirror
-          readOnly={readonly ?? disabled}
+          editable={readonly !== true && disabled !== true}
+          readOnly={readonly === true || disabled === true}
           placeholder={placeholder}
           className={cn(
             "h-full overflow-auto font-mono [&_.cm-editor]:h-full [&_.cm-focused]:outline-none!",
@@ -106,6 +120,7 @@ export function CodeEditor({
               (settings as { lineNumbers?: boolean })?.lineNumbers ?? false,
           }}
           autoFocus={autoFocus}
+          onChange={onChange}
           value={value}
         />
       )}
