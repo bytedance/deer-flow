@@ -81,9 +81,14 @@ def _client(user):
     app.state.thread_store = _make_thread_store()
     app.state.stream_bridge = MagicMock()
     app.state.checkpointer = MagicMock()
+    # start_run's checkpoint-history seeding runs before admission: give the
+    # store/checkpointer async stubs so the seed path sees an empty feed and
+    # no checkpoint head, then skips.
+    app.state.checkpointer.aget_tuple = AsyncMock(return_value=None)
     app.state.store = MagicMock()
     app.state.run_events_config = None
     app.state.run_event_store = MagicMock()
+    app.state.run_event_store.list_messages = AsyncMock(return_value=[])
     run_manager = MagicMock()
     run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("sentinel: owner check passed"))
     app.state.run_manager = run_manager

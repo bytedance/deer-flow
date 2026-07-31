@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -36,6 +36,30 @@ def test_next_run_at_for_once_returns_none_after_fire_time():
         now=now,
     )
     assert result is None
+
+
+def test_next_run_at_for_once_normalizes_naive_run_at_to_utc():
+    now = datetime(2026, 7, 31, 0, 0, tzinfo=UTC)
+    result = next_run_at(
+        "once",
+        {"run_at": "2026-08-01T09:00:00"},
+        "Asia/Shanghai",
+        now=now,
+    )
+    assert result == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
+    assert result.utcoffset() == timedelta(0)
+
+
+def test_next_run_at_for_once_normalizes_aware_run_at_to_utc():
+    now = datetime(2026, 7, 31, 0, 0, tzinfo=UTC)
+    result = next_run_at(
+        "once",
+        {"run_at": "2026-08-01T09:00:00+08:00"},
+        "UTC",
+        now=now,
+    )
+    assert result == datetime(2026, 8, 1, 1, 0, tzinfo=UTC)
+    assert result.utcoffset() == timedelta(0)
 
 
 def test_next_run_at_for_cron_uses_timezone():

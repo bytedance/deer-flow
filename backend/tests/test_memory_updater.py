@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
+    MemoryManifestRevisionConflict,
+    MemoryStorage,
+)
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     MemoryUpdater,
     _build_staleness_section,
@@ -442,6 +445,154 @@ def test_create_memory_fact_rejects_invalid_confidence() -> None:
             assert exc.args == ("confidence",)
         else:
             raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
+class _ConcurrentCommitStorage(_MemoryStorage):
+    """apply_changes stand-in that simulates a concurrent writer committing a
+    duplicate fact between the caller's snapshot read and its first apply.
+
+    The first apply commits ``concurrent_fact`` (as a winning concurrent
+    writer would) and then raises a manifest revision conflict, forcing the
+    caller into its conflict-retry path with a fresh snapshot. Later applies
+    succeed and persist the upserts so test assertions can observe what the
+    caller actually stored.
+    """
+
+    def __init__(self, concurrent_fact: dict[str, object], memory: dict[str, object] | None = None):
+        super().__init__(memory)
+        self._concurrent_fact = concurrent_fact
+        self._conflict_injected = False
+
+    def apply_changes(self, change_set, **scope):  # noqa: ANN001, ANN201, ANN202 - test fake
+        if not self._conflict_injected:
+            self._conflict_injected = True
+            self.memory["facts"] = [*self.memory.get("facts", []), copy.deepcopy(self._concurrent_fact)]
+            self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+            raise MemoryManifestRevisionConflict("simulated concurrent commit")
+        self.memory["facts"] = [*self.memory.get("facts", []), *change_set.get("upserts", [])]
+        self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+        return {"complete": False}
+
+
+def test_create_memory_fact_rejects_duplicate_content() -> None:
+    """Backend-level dedup: create_memory_fact itself must reject content that
+    already exists (normalized), not just the tool layer's pre-check."""
+    existing = _make_memory(
+        facts=[
+            {
+                "id": "fact_existing",
+                "content": "User prefers dark mode",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    updater = _make_updater(memory=existing)
+    try:
+        updater.create_memory_fact(content="  user prefers DARK mode ", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+
+def test_create_memory_fact_rejects_duplicate_committed_during_conflict_retry() -> None:
+    """Race regression: a concurrent writer commits the same content between
+    this caller's snapshot read and its first apply. After the revision
+    conflict, the retry must detect the duplicate from the fresh snapshot
+    instead of storing a second copy."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "User prefers dark mode",
+        "category": "preference",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _ConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    try:
+        updater.create_memory_fact(content="user prefers DARK mode", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent"]
+
+
+class _LegacyConcurrentCommitStorage(_MemoryStorage):
+    """Legacy-path stand-in (no apply_changes override) that simulates a
+    concurrent writer committing a fact between the caller's snapshot read
+    and its first save: the first save commits ``concurrent_fact`` and
+    returns False (revision conflict), later saves persist normally."""
+
+    def __init__(self, concurrent_fact: dict[str, object], memory: dict[str, object] | None = None):
+        super().__init__(memory)
+        self._concurrent_fact = concurrent_fact
+        self._conflict_injected = False
+
+    def save(self, memory_data, agent_name=None, *, user_id=None, expected_revision=None):  # noqa: ANN001, ANN201, ANN202 - test fake
+        self.save_calls.append((agent_name, user_id, expected_revision))
+        if not self._conflict_injected:
+            self._conflict_injected = True
+            self.memory["facts"] = [*self.memory.get("facts", []), copy.deepcopy(self._concurrent_fact)]
+            self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+            return False
+        self.memory = memory_data
+        return True
+
+
+def test_create_memory_fact_legacy_path_rejects_duplicate_committed_during_save_conflict() -> None:
+    """Legacy single-file path race regression: a concurrent writer commits
+    the same content between this caller's snapshot read and its first save.
+    After the revision conflict, the retry must detect the duplicate from the
+    fresh snapshot and raise ValueError("Duplicate fact") instead of the
+    generic OSError save failure."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "User prefers dark mode",
+        "category": "preference",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _LegacyConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    try:
+        updater.create_memory_fact(content="user prefers DARK mode", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent"]
+
+
+def test_create_memory_fact_legacy_path_retries_save_conflict_and_stores() -> None:
+    """Legacy single-file path: a save conflict without a duplicate reloads
+    the fresh snapshot and retries instead of failing the create."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "An unrelated concurrent fact",
+        "category": "context",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _LegacyConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    _, fact_id = updater.create_memory_fact(content="Brand new fact", agent_name="researcher")
+
+    assert fact_id is not None
+    assert len(storage.save_calls) == 2
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent", fact_id]
 
 
 def test_delete_memory_fact_raises_for_unknown_id() -> None:
