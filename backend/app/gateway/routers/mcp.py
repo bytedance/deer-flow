@@ -32,6 +32,48 @@ _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
 _DEFAULT_MCP_STDIO_COMMAND_ALLOWLIST = frozenset({"npx", "uvx"})
 _SHELL_METACHARS = frozenset(";|&`$<>\n\r")
 
+# Flags that turn an allowlisted launcher into an arbitrary code evaluator.
+# Validating only the command name leaves the allowlist naming a binary
+# without constraining what that binary runs, so these are screened too.
+# The spellings below mean "evaluate this string" across every launcher an
+# operator would plausibly allowlist (npx/uvx `--call`, python/sh `-c`,
+# node/perl/ruby `-e`/`--eval`, node `--print`), plus npx's pass-through into
+# node's own argv.
+#
+# This is defense in depth, not a trust boundary. `npx`/`uvx` exist to fetch
+# and run remote code, so an admin can still point one at a package they
+# published; the boundary remains admin authentication plus not exposing the
+# Gateway to untrusted networks. `-p` is deliberately absent: it means
+# `--package` for npx and `--python` for uvx, both ordinary usage.
+_ARBITRARY_EXEC_ARGS = frozenset(
+    {
+        "-c",
+        "--call",
+        "-e",
+        "--eval",
+        "--print",
+        "--shell",
+        "--node-arg",
+        "--node-options",
+    }
+)
+
+# Environment variables that inject code into a process at startup, which is
+# the same bypass as an exec flag by another name.
+_CODE_INJECTING_ENV_VARS = frozenset(
+    {
+        "BASH_ENV",
+        "DYLD_INSERT_LIBRARIES",
+        "ENV",
+        "LD_AUDIT",
+        "LD_PRELOAD",
+        "NODE_OPTIONS",
+        "PERL5OPT",
+        "PYTHONSTARTUP",
+        "RUBYOPT",
+    }
+)
+
 
 class McpOAuthConfigResponse(BaseModel):
     """OAuth configuration for an MCP server."""
@@ -193,12 +235,37 @@ def _stdio_command_name(command: str | None, *, server_name: str) -> str:
     return stripped
 
 
+def _arbitrary_exec_arg(args: list[str]) -> str | None:
+    """Return the offending flag when an argument makes the launcher eval a string.
+
+    Handles both ``--call value`` and ``--call=value`` spellings. Every
+    argument is inspected, including those after a bare ``--``: the launchers
+    in scope treat the token after ``--`` as a package name rather than a
+    flag, so nothing legitimate is lost and an unknown launcher cannot smuggle
+    an exec flag past the check by prefixing it.
+
+    Only the normalized flag is returned, never the caller's value, so the
+    rejection message does not echo a payload string back into the response.
+    """
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        flag = arg.split("=", 1)[0].strip().lower()
+        if flag in _ARBITRARY_EXEC_ARGS:
+            return flag
+    return None
+
+
 def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
     """Validate API-submitted MCP config before it is persisted.
 
     Local config files can still express arbitrary advanced setups, but the
     HTTP API is an untrusted boundary. Restricting stdio commands here reduces
     the blast radius of a compromised authenticated browser session.
+
+    The command name alone is not a meaningful restriction, so the launcher's
+    ``args`` and ``env`` are screened for the flags and variables that turn an
+    allowlisted binary into an arbitrary code evaluator.
     """
     allowed_commands = _allowed_stdio_commands()
     for name, server in request.mcp_servers.items():
@@ -213,6 +280,20 @@ def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
             )
+
+        exec_flag = _arbitrary_exec_arg(server.args)
+        if exec_flag is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(f"MCP server '{name}' passes '{exec_flag}' to '{command_name}', which would run arbitrary code. Point the server at a package or module instead."),
+            )
+
+        for env_name in server.env:
+            if env_name.strip().upper() in _CODE_INJECTING_ENV_VARS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(f"MCP server '{name}' sets environment variable '{env_name}', which would run arbitrary code at process startup."),
+                )
 
 
 def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigResponse:
