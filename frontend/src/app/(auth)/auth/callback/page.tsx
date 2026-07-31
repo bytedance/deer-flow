@@ -1,19 +1,9 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-/**
- * Validates the next parameter — only allows relative paths starting with /.
- */
-function validateNextParam(next: string | null): string {
-  if (!next) return "/workspace";
-  if (!next.startsWith("/") || next.startsWith("//")) return "/workspace";
-  if (next.startsWith("http://") || next.startsWith("https://"))
-    return "/workspace";
-  if (next.includes(":")) return "/workspace";
-  return next;
-}
+import { resolveAuthNextPath } from "@/core/auth/next-path";
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -27,7 +17,7 @@ export default function AuthCallbackPage() {
     if (calledRef.current) return;
     calledRef.current = true;
 
-    const next = validateNextParam(searchParams.get("next"));
+    const next = resolveAuthNextPath(searchParams.get("next"));
 
     try {
       const res = await fetch("/api/v1/auth/me", { credentials: "include" });

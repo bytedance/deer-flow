@@ -18,12 +18,10 @@ Usage:
 import asyncio
 import concurrent.futures
 import copy
-import json
 import logging
 import mimetypes
 import os
 import shutil
-import tempfile
 import uuid
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,7 +39,13 @@ from deerflow.agents.thread_state import get_thread_state_schema, normalize_midd
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    SkillStateConfig,
+    atomic_write_extensions_config,
+    get_extensions_config,
+    reload_extensions_config,
+)
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
 from deerflow.runtime import CheckpointStateAccessor
@@ -229,20 +233,7 @@ class DeerFlowClient:
     @staticmethod
     def _atomic_write_json(path: Path, data: dict) -> None:
         """Write JSON to *path* atomically (temp file + replace)."""
-        fd = tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=path.parent,
-            suffix=".tmp",
-            delete=False,
-        )
-        try:
-            json.dump(data, fd, indent=2)
-            fd.close()
-            Path(fd.name).replace(path)
-        except BaseException:
-            fd.close()
-            Path(fd.name).unlink(missing_ok=True)
-            raise
+        atomic_write_extensions_config(path, data)
 
     def _get_runnable_config(self, thread_id: str, **overrides) -> RunnableConfig:
         """Build a RunnableConfig for agent invocation."""

@@ -446,6 +446,16 @@ class AppConfig(BaseModel):
         if previous_checkpointer_config != config.checkpointer:
             # These runtime singletons derive their backend from checkpointer config.
             # Keep imports local to avoid cycles: both providers import get_app_config.
+            #
+            # The unified ``database`` section is intentionally NOT handled here.
+            # ``database`` is a restart-required field (reload_boundary.STARTUP_ONLY_FIELDS):
+            # ``init_engine_from_config()`` builds the ORM engine once at startup and
+            # never rebuilds it on a config.yaml edit. Resetting only the sync
+            # checkpointer/store singletons on a live ``database``/``postgres_schema``
+            # change would half-migrate the deployment -- new checkpoint/store tables
+            # would land in the new schema while ORM rows keep landing in the old one,
+            # with no error surfaced. Requiring the documented restart keeps the
+            # deployment self-consistent.
             from deerflow.runtime.checkpointer import reset_checkpointer
             from deerflow.runtime.store import reset_store
 
