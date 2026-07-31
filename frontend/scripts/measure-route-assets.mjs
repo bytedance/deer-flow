@@ -8,8 +8,9 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const DEMO_THREAD_ID = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
-const ROUTES = [
+export const ROUTES = [
   "/",
+  "/login",
   "/workspace/chats",
   `/workspace/chats/${DEMO_THREAD_ID}`,
   "/en/docs",
@@ -128,10 +129,13 @@ async function measureRoute(baseUrl, route) {
   return { ...totals, assets, html: Buffer.byteLength(html) };
 }
 
-async function main() {
-  const check = process.argv.includes("--check");
+async function measureBuild(routes, staticWebsiteOnly) {
+  const env = {
+    ...process.env,
+    NEXT_PUBLIC_STATIC_WEBSITE_ONLY: staticWebsiteOnly ? "true" : "false",
+  };
   await run("pnpm", ["exec", "next", "build"], {
-    env: { ...process.env, NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true" },
+    env,
   });
 
   const port = await getFreePort();
@@ -148,7 +152,7 @@ async function main() {
     ],
     {
       cwd: frontendDir,
-      env: { ...process.env, NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true" },
+      env,
       stdio: ["ignore", "inherit", "inherit"],
     },
   );
@@ -157,29 +161,41 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${port}`;
     await waitForServer(baseUrl, server);
     const measurements = {};
-    for (const route of ROUTES) {
+    for (const route of routes) {
       measurements[route] = await measureRoute(baseUrl, route);
     }
-    await writeFile(
-      path.join(frontendDir, ".next", "performance-results.json"),
-      `${JSON.stringify(measurements, null, 2)}\n`,
-    );
-    process.stdout.write(`${JSON.stringify(measurements, null, 2)}\n`);
-
-    if (check) {
-      const budgets = JSON.parse(
-        await readFile(
-          path.join(frontendDir, "performance-budgets.json"),
-          "utf8",
-        ),
-      );
-      const failures = evaluateBudgets(measurements, budgets);
-      if (failures.length > 0) {
-        throw new Error(`Route asset budgets failed:\n${failures.join("\n")}`);
-      }
-    }
+    return measurements;
   } finally {
     server.kill("SIGTERM");
+  }
+}
+
+async function main() {
+  const check = process.argv.includes("--check");
+  const measurements = {
+    ...(await measureBuild(["/login"], false)),
+    ...(await measureBuild(
+      ROUTES.filter((route) => route !== "/login"),
+      true,
+    )),
+  };
+  await writeFile(
+    path.join(frontendDir, ".next", "performance-results.json"),
+    `${JSON.stringify(measurements, null, 2)}\n`,
+  );
+  process.stdout.write(`${JSON.stringify(measurements, null, 2)}\n`);
+
+  if (check) {
+    const budgets = JSON.parse(
+      await readFile(
+        path.join(frontendDir, "performance-budgets.json"),
+        "utf8",
+      ),
+    );
+    const failures = evaluateBudgets(measurements, budgets);
+    if (failures.length > 0) {
+      throw new Error(`Route asset budgets failed:\n${failures.join("\n")}`);
+    }
   }
 }
 

@@ -99,4 +99,4 @@
 - [ ] Run `cd frontend && pnpm check && pnpm test`.
 - [ ] Run `NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true pnpm build` and `pnpm perf:check`.
 - [ ] Inspect the five route asset lists and confirm each heavy chunk has one owning route/interaction.
-- [ ] Commit any measurement fixture refresh separately as `test(frontend): lock optimized route budgets`; never raise a limit above the approved ceilings.
+- [ ] Commit the one-time post-optimization calibration separately as `test(frontend): lock optimized route budgets`; each ceiling must stay below the captured baseline where the route improved and must not be raised afterward.

@@ -3,9 +3,14 @@ import { describe, expect, it } from "@rstest/core";
 import {
   evaluateBudgets,
   extractAssetPaths,
+  ROUTES,
 } from "../../../scripts/measure-route-assets.mjs";
 
 describe("route asset measurement", () => {
+  it("covers every approved representative route", () => {
+    expect(ROUTES).toContain("/login");
+  });
+
   it("extracts unique Next.js scripts and styles", () => {
     const html = `
       <link rel="stylesheet" href="/_next/static/css/app.css?dpl=1">

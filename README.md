@@ -1212,9 +1212,10 @@ The JSON includes compact review records with `priority`, `location`,
 Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
 
 Frontend route asset budgets can be checked with `cd frontend && pnpm
-perf:check`. The command performs a production static-demo build, measures the
-unique JavaScript and CSS referenced by representative routes, and writes the
-detailed result to `.next/performance-results.json`.
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
 
 ## License
 
