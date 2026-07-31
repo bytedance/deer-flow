@@ -196,19 +196,36 @@ class Mem0Manager(MemoryManager):
                 max_items=top_k,
             ),
         )
+        budget = self._config.max_injection_chars
         seen: set[str] = set()
         lines: list[str] = []
+        used = 0
+        first_line: str | None = None
         for record in records:
             rid = record.get("id")
             if rid in seen:
                 continue
             seen.add(rid)
             text = str(record.get("memory") or "").strip()
-            if text:
-                lines.append(f"- {text}")
+            if not text:
+                continue
+            line = f"- {text}"
+            if first_line is None:
+                first_line = line
+            # Truncate on entry boundaries: keep only memories that fit whole
+            # within the remaining budget (+1 for the joining newline), so the
+            # injection never ends mid-entry with a dangling partial line. An
+            # oversized entry is skipped -- a shorter later one may still fit.
+            added = len(line) if not lines else len(line) + 1
+            if used + added > budget:
+                continue
+            lines.append(line)
+            used += added
         context = "\n".join(lines)
-        if len(context) > self._config.max_injection_chars:
-            context = context[: self._config.max_injection_chars]
+        if not context and first_line is not None:
+            # Not even the first memory fits the budget; fall back to a hard
+            # truncation of that entry rather than injecting nothing at all.
+            context = first_line[:budget]
         return context
 
     async def aget_context(

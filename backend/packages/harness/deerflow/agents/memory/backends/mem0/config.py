@@ -38,7 +38,8 @@ class Mem0Config:
     top_k: int = 8
     #: Minimum relevance score for search() results (mem0 `threshold`, 0-1).
     score_threshold: float = 0.1
-    #: Hard cap on the injection text returned by get_context.
+    #: Hard cap on the injection text returned by get_context; memories that
+    #: do not fit whole are skipped (truncation happens on entry boundaries).
     max_injection_chars: int = 12000
     #: Per-request HTTP timeout in seconds.
     timeout_seconds: float = 10.0
