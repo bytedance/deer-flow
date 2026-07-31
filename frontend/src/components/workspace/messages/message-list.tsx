@@ -28,16 +28,18 @@ import { Button } from "@/components/ui/button";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  deriveAssistantTurnUsageState,
+  deriveStableMessageGroups,
+  type AssistantTurnUsageState,
+} from "@/core/messages/derived-state";
+import {
   deriveHumanInputThreadState,
   extractHumanInputRequest,
   shouldClearPendingHumanInputOnThreadError,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import {
-  getMessageRunId,
-  getRunDurationDisplaysByGroupIndex,
-} from "@/core/messages/run-duration";
+import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -48,10 +50,8 @@ import {
   extractPresentFilesFromMessage,
   extractTextFromMessage,
   getAssistantTurnCopyData,
-  getAssistantTurnUsageMessages,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
-  getMessageGroups,
   getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
@@ -98,62 +98,6 @@ import { SubtaskCard } from "./subtask-card";
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
-function messageStableKey(message: Message) {
-  if (
-    message.type === "tool" &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
-  if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
-  }
-  return null;
-}
-
-function sameMessageIdentity(previous: Message, next: Message) {
-  if (previous === next) {
-    return true;
-  }
-  if (previous.type !== next.type) {
-    return false;
-  }
-  const previousKey = messageStableKey(previous);
-  const nextKey = messageStableKey(next);
-  return previousKey !== null && previousKey === nextKey;
-}
-
-function sameRunDurationMetadata(previous: Message, next: Message) {
-  return (
-    getMessageRunId(previous) === getMessageRunId(next) &&
-    Object.is(
-      previous.additional_kwargs?.turn_duration,
-      next.additional_kwargs?.turn_duration,
-    )
-  );
-}
-
-function canReuseMessageGroup(
-  previous: ThreadMessageGroup | undefined,
-  next: ThreadMessageGroup,
-): previous is ThreadMessageGroup {
-  if (
-    !previous ||
-    previous.id !== next.id ||
-    previous.type !== next.type ||
-    previous.messages.length !== next.messages.length
-  ) {
-    return false;
-  }
-  return previous.messages.every(
-    (message, index) =>
-      next.messages[index] !== undefined &&
-      sameMessageIdentity(message, next.messages[index]) &&
-      sameRunDurationMetadata(message, next.messages[index]),
-  );
-}
-
 function sameStrings(previous: readonly string[], next: readonly string[]) {
   return (
     previous.length === next.length &&
@@ -181,22 +125,13 @@ function useStableMessageGroups(
   const previousGroupsRef = useRef<ThreadMessageGroup[]>([]);
   const previousIsLoadingRef = useRef(false);
   return useMemo(() => {
-    const nextGroups = getMessageGroups(messages, {
-      isCurrentTurnLoading: isLoading,
-    });
     const previousGroups = previousGroupsRef.current;
-    const activeGroupIndex =
-      isLoading || previousIsLoadingRef.current ? nextGroups.length - 1 : -1;
-    const stableGroups = nextGroups.map((group, index) => {
-      // Keep the actively streaming group fresh even if the SDK mutates a
-      // message object in place while appending token content.
-      if (index === activeGroupIndex) {
-        return group;
-      }
-      return canReuseMessageGroup(previousGroups[index], group)
-        ? previousGroups[index]
-        : group;
-    });
+    const stableGroups = deriveStableMessageGroups(
+      messages,
+      isLoading,
+      previousGroups,
+      previousIsLoadingRef.current,
+    );
     previousGroupsRef.current = stableGroups;
     previousIsLoadingRef.current = isLoading;
     return stableGroups;
@@ -490,8 +425,17 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
-  const turnUsageMessagesByGroupIndex =
-    getAssistantTurnUsageMessages(groupedMessages);
+  const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
+    undefined,
+  );
+  const turnUsageMessagesByGroupIndex = useMemo(() => {
+    const state = deriveAssistantTurnUsageState(
+      groupedMessages,
+      previousTurnUsageStateRef.current,
+    );
+    previousTurnUsageStateRef.current = state;
+    return state.byGroupIndex;
+  }, [groupedMessages]);
   const runDurationDisplaysByGroupIndex = useMemo(
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
     [groupedMessages],
