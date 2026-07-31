@@ -7,10 +7,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import require_admin_user
-from deerflow.config.extensions_config import ExtensionsConfig, McpRoutingConfig, McpToolOverride, extensions_config_write_lock, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    McpRoutingConfig,
+    McpToolOverride,
+    atomic_write_extensions_config,
+    extensions_config_write_lock,
+    get_extensions_config,
+    normalize_mcp_transport_alias,
+    reload_extensions_config,
+)
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -60,6 +69,12 @@ class McpServerConfigResponse(BaseModel):
     tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
     model_config = ConfigDict(extra="allow")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_transport_alias(cls, data: Any) -> Any:
+        """Keep API parsing aligned with the runtime MCP config model."""
+        return normalize_mcp_transport_alias(data)
+
 
 class McpConfigResponse(BaseModel):
     """Response model for MCP configuration."""
@@ -77,6 +92,17 @@ class McpConfigUpdateRequest(BaseModel):
         ...,
         description="Map of MCP server name to configuration",
     )
+
+
+class McpServerStateUpdateRequest(BaseModel):
+    """Request model for enabling or disabling one MCP server."""
+
+    server_name: str = Field(
+        ...,
+        min_length=1,
+        description="Name of the MCP server to update",
+    )
+    enabled: bool = Field(..., description="Whether the MCP server is enabled")
 
 
 class McpCacheResetResponse(BaseModel):
@@ -383,15 +409,50 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
         config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
 
-        # Write the configuration to file
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        atomic_write_extensions_config(config_path, config_data)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
 
         # Reload the Gateway configuration and update the global cache. The
         # agent runtime lives in Gateway, so this keeps API reads and tool
         # execution aligned after extensions_config.json changes.
+        reloaded_config = reload_extensions_config()
+        return reloaded_config.mcp_servers
+
+
+def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
+    """Update one server state while preserving the raw extensions config."""
+    with extensions_config_write_lock:
+        config_path = ExtensionsConfig.resolve_config_path()
+        if config_path is None or not config_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        with open(config_path, encoding="utf-8") as f:
+            raw_data = json.load(f)
+
+        raw_servers = raw_data.get("mcpServers", {})
+        raw_server = raw_servers.get(body.server_name) if isinstance(raw_servers, dict) else None
+        if not isinstance(raw_server, dict):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"MCP server '{body.server_name}' not found",
+            )
+
+        if body.enabled:
+            target_server = McpServerConfigResponse(**raw_server)
+            _validate_mcp_update_request(
+                McpConfigUpdateRequest(
+                    mcp_servers={body.server_name: target_server},
+                )
+            )
+
+        raw_server["enabled"] = body.enabled
+        atomic_write_extensions_config(config_path, raw_data)
+
+        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
         reloaded_config = reload_extensions_config()
         return reloaded_config.mcp_servers
 
@@ -475,3 +536,25 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
     except Exception as e:
         logger.error(f"Failed to update MCP configuration: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to update MCP configuration: {str(e)}")
+
+
+@router.patch(
+    "/mcp/config",
+    response_model=McpConfigResponse,
+    summary="Update MCP Server State",
+    description="Enable or disable one MCP server without replacing the full extensions configuration.",
+)
+async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRequest) -> McpConfigResponse:
+    """Enable or disable one MCP server and reload the MCP tool cache."""
+    try:
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
+
+        servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
+        reset_mcp_tools_cache()
+        return McpConfigResponse(mcp_servers=servers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update MCP server %s state: %s", body.server_name, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update MCP server state: {str(e)}")

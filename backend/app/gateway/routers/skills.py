@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -12,7 +11,14 @@ from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, extensions_config_write_lock, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    SkillStateConfig,
+    atomic_write_extensions_config,
+    extensions_config_write_lock,
+    get_extensions_config,
+    reload_extensions_config,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
@@ -445,8 +451,7 @@ def _write_extensions_skill_state(skill_name: str, enabled: bool) -> None:
 
         config_data = extensions_config.to_file_dict()
 
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, indent=2)
+        atomic_write_extensions_config(config_path, config_data)
 
         logger.info(f"Skills configuration updated and saved to: {config_path}")
         reload_extensions_config()
