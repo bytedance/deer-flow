@@ -8,7 +8,7 @@ import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
-import { getI18n } from "@/core/i18n/server";
+import { detectLocaleServer } from "@/core/i18n/server";
 
 import { WorkspaceContent } from "./workspace-content";
 
@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const { locale, t } = await getI18n();
+  const locale = await detectLocaleServer();
   const result = await getServerSideUser();
 
   let content: React.ReactNode;
@@ -52,9 +52,5 @@ export default async function WorkspaceLayout({
       assertNever(result);
   }
 
-  return (
-    <I18nProvider initialLocale={locale} initialTranslations={t}>
-      {content}
-    </I18nProvider>
-  );
+  return <I18nProvider initialLocale={locale}>{content}</I18nProvider>;
 }

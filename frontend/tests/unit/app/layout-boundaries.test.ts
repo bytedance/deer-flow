@@ -31,4 +31,15 @@ describe("layout performance boundaries", () => {
       'import "katex/dist/katex.min.css"',
     );
   });
+
+  it("passes only serializable locale state through server layouts", () => {
+    for (const layout of [
+      source("src/app/(auth)/layout.tsx"),
+      source("src/app/workspace/layout.tsx"),
+    ]) {
+      expect(layout).toContain("detectLocaleServer");
+      expect(layout).not.toContain("initialTranslations");
+      expect(layout).not.toContain("getI18n");
+    }
+  });
 });

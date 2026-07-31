@@ -5,7 +5,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -13,7 +12,7 @@ import {
 import type { Locale } from "@/core/i18n";
 import type { Translations } from "@/core/i18n/locales";
 
-import { loadTranslations } from "./translations";
+import { clientTranslations } from "./client-translations";
 
 export interface I18nContextType {
   locale: Locale;
@@ -26,23 +25,18 @@ export const I18nContext = createContext<I18nContextType | null>(null);
 export function I18nProvider({
   children,
   initialLocale,
-  initialTranslations,
 }: {
   children: ReactNode;
   initialLocale: Locale;
-  initialTranslations: Translations;
 }) {
   const [locale, setLocale] = useState<Locale>(initialLocale);
-  const [t, setTranslations] = useState(initialTranslations);
-  const requestIdRef = useRef(0);
+  const [t, setTranslations] = useState<Translations>(
+    clientTranslations[initialLocale],
+  );
 
   const handleSetLocale = useCallback((newLocale: Locale) => {
-    const requestId = ++requestIdRef.current;
-    void loadTranslations(newLocale).then((translations) => {
-      if (requestId !== requestIdRef.current) return;
-      setLocale(newLocale);
-      setTranslations(translations);
-    });
+    setLocale(newLocale);
+    setTranslations(clientTranslations[newLocale]);
   }, []);
 
   useEffect(() => {

@@ -6,7 +6,7 @@ import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
-import { getI18n } from "@/core/i18n/server";
+import { detectLocaleServer } from "@/core/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,7 @@ export default async function AuthLayout({
 }: {
   children: ReactNode;
 }) {
-  const { locale, t } = await getI18n();
+  const locale = await detectLocaleServer();
   const result = await getServerSideUser();
 
   let content: ReactNode;
@@ -53,9 +53,5 @@ export default async function AuthLayout({
       assertNever(result);
   }
 
-  return (
-    <I18nProvider initialLocale={locale} initialTranslations={t}>
-      {content}
-    </I18nProvider>
-  );
+  return <I18nProvider initialLocale={locale}>{content}</I18nProvider>;
 }
