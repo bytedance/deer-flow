@@ -283,7 +283,11 @@ export function RecentChatList() {
         </SidebarGroupLabel>
         <SidebarGroupContent className="group-data-[collapsible=icon]:pointer-events-none group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0">
           <SidebarMenu>
-            <div className="flex w-full flex-col gap-1">
+            {/* Keep pagination at the old list boundary when this switches to virtual rows. */}
+            <div
+              className="flex w-full flex-col gap-1"
+              style={{ overflowAnchor: "none" }}
+            >
               <VirtualThreadList
                 estimateSize={36}
                 gap={4}
