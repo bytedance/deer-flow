@@ -2,10 +2,10 @@
 
 import logging
 
-from app.gateway.auth.models import User
+from app.gateway.auth.models import SystemRole, User
 from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
 from app.gateway.auth.providers import AuthProvider
-from app.gateway.auth.repositories.base import UserRepository
+from app.gateway.auth.repositories.base import UserRepository, UserRoleChange
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,24 @@ class LocalAuthProvider(AuthProvider):
     async def update_user(self, user: User) -> User:
         """Update an existing user."""
         return await self._repo.update_user(user)
+
+    async def list_users(self, *, offset: int = 0, limit: int = 100) -> tuple[list[User], int]:
+        """Return a stable page of registered users."""
+        return await self._repo.list_users(offset=offset, limit=limit)
+
+    async def change_user_role(
+        self,
+        *,
+        actor_id: str,
+        user_id: str,
+        system_role: SystemRole,
+    ) -> UserRoleChange:
+        """Atomically change a role and revoke the target's active JWTs."""
+        return await self._repo.change_user_role(
+            actor_id=actor_id,
+            user_id=user_id,
+            system_role=system_role,
+        )
 
     async def get_user_by_email(self, email: str) -> User | None:
         """Get user by email."""

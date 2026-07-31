@@ -96,7 +96,7 @@ async def authenticate(request):
     if user.token_version != payload.ver:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Token revoked (password changed)",
+            detail="Session revoked (account changed)",
         )
 
     return payload.sub

@@ -11,6 +11,7 @@ import {
 
 const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "account",
+  "users",
   "appearance",
   "channels",
   "integrations",

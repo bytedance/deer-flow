@@ -1,8 +1,9 @@
 """User repository interface for abstracting database operations."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
-from app.gateway.auth.models import User
+from app.gateway.auth.models import SystemRole, User
 
 
 class UserNotFoundError(LookupError):
@@ -15,11 +16,28 @@ class UserNotFoundError(LookupError):
     """
 
 
+class LastAdminError(RuntimeError):
+    """Raised when a role change would remove the final administrator."""
+
+
+class AdminRoleRequiredError(PermissionError):
+    """Raised when the transaction actor is no longer an administrator."""
+
+
+@dataclass(frozen=True)
+class UserRoleChange:
+    """Result of an atomic, security-sensitive user role update."""
+
+    user: User
+    previous_role: SystemRole
+    changed: bool
+
+
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 
-    Implement this interface to support different storage backends
-    (SQLite)
+    Implement this interface to support the shared SQLAlchemy storage backends
+    (SQLite and PostgreSQL).
     """
 
     @abstractmethod
@@ -80,6 +98,26 @@ class UserRepository(ABC):
             UserNotFoundError: If no row exists for ``user.id``. This is
                 a hard failure (not a no-op) so callers cannot mistake a
                 concurrent-delete race for a successful update.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_users(self, *, offset: int, limit: int) -> tuple[list[User], int]:
+        """Return a stable page of users and the total user count."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def change_user_role(
+        self,
+        *,
+        actor_id: str,
+        user_id: str,
+        system_role: SystemRole,
+    ) -> UserRoleChange:
+        """Atomically change a role, revoke sessions, and protect the last admin.
+
+        Implementations must serialize all role changes across processes and
+        re-check ``actor_id`` under that serialization boundary.
         """
         raise NotImplementedError
 

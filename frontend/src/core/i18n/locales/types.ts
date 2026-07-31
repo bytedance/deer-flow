@@ -625,6 +625,7 @@ export interface Translations {
     description: string;
     sections: {
       account: string;
+      users: string;
       appearance: string;
       channels: string;
       integrations: string;
@@ -850,6 +851,51 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+    };
+    users: {
+      title: string;
+      description: string;
+      adminRequired: string;
+      searchPlaceholder: string;
+      empty: string;
+      noResults: string;
+      loadFailed: string;
+      retry: string;
+      currentUser: string;
+      localAccount: string;
+      ssoAccount: (provider: string) => string;
+      roles: {
+        admin: string;
+        user: string;
+      };
+      actions: {
+        promote: string;
+        demote: string;
+        changing: string;
+        promoteUser: (email: string) => string;
+        demoteUser: (email: string) => string;
+      };
+      confirm: {
+        title: string;
+        promote: (email: string) => string;
+        demote: (email: string) => string;
+        sessionWarning: string;
+      };
+      blocked: {
+        lastAdmin: string;
+      };
+      success: {
+        promoted: (email: string) => string;
+        demoted: (email: string) => string;
+      };
+      errors: {
+        forbidden: string;
+        lastAdmin: string;
+        notFound: string;
+        conflict: string;
+        network: string;
+        unknown: string;
+      };
     };
     account: {
       profileTitle: string;
