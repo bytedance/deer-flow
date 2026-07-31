@@ -43,8 +43,7 @@ _SHELL_METACHARS = frozenset(";|&`$<>\n\r")
 # This is defense in depth, not a trust boundary. `npx`/`uvx` exist to fetch
 # and run remote code, so an admin can still point one at a package they
 # published; the boundary remains admin authentication plus not exposing the
-# Gateway to untrusted networks. `-p` is deliberately absent: it means
-# `--package` for npx and `--python` for uvx, both ordinary usage.
+# Gateway to untrusted networks.
 _ARBITRARY_EXEC_ARGS = frozenset(
     {
         "-c",
@@ -58,8 +57,37 @@ _ARBITRARY_EXEC_ARGS = frozenset(
     }
 )
 
+# Launchers where `-p` is an ordinary selector rather than an exec flag:
+# `--package` for npx, `--python` for uv. They are also the only allowlisted
+# commands by default, so scoping the two rules below to everything *else*
+# leaves the default allowlist's behavior untouched.
+_PACKAGE_SELECTOR_LAUNCHERS = frozenset({"npx", "uvx"})
+
+# `-p` is `--print` (evaluate and print) on node, so exempting it everywhere
+# left the short and long spellings of one flag disagreeing as soon as an
+# operator extended the allowlist.
+_EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS = frozenset({"-p"})
+
+# Short options combine into one token (`node -pe`, `perl -we`, `python -Ic`),
+# which whole-token matching does not see. Derived rather than restated so a
+# new single-letter entry above cannot forget its clustered spelling.
+_CLUSTERED_EXEC_LETTERS = frozenset(flag[1] for flag in _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS if len(flag) == 2 and flag.startswith("-"))
+
 # Environment variables that inject code into a process at startup, which is
 # the same bypass as an exec flag by another name.
+#
+# `PYTHONPATH` matters most: `site` imports `sitecustomize.py` from any
+# `sys.path` entry before the tool's entry point runs, so a caller-controlled
+# directory is code execution under `uvx` -- on the *default* allowlist.
+# `PYTHONSTARTUP` is inert for the non-interactive launchers in scope and is
+# kept only as belt-and-braces for an operator who allowlists a REPL.
+#
+# Known residual, accepted: `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` can also
+# reach a constructor via a shadowed dependency, but only if the process
+# happens to load a library whose name the caller can shadow -- unlike the
+# unconditional startup execution the entries below all provide. They stay out
+# because native-dependency servers legitimately set them, and a denylist is
+# not what makes MCP registration safe for an untrusted admin anyway.
 _CODE_INJECTING_ENV_VARS = frozenset(
     {
         "BASH_ENV",
@@ -69,6 +97,8 @@ _CODE_INJECTING_ENV_VARS = frozenset(
         "LD_PRELOAD",
         "NODE_OPTIONS",
         "PERL5OPT",
+        "PYTHONHOME",
+        "PYTHONPATH",
         "PYTHONSTARTUP",
         "RUBYOPT",
     }
@@ -235,7 +265,7 @@ def _stdio_command_name(command: str | None, *, server_name: str) -> str:
     return stripped
 
 
-def _arbitrary_exec_arg(args: list[str]) -> str | None:
+def _arbitrary_exec_arg(args: list[str], *, command: str) -> str | None:
     """Return the offending flag when an argument makes the launcher eval a string.
 
     Handles both ``--call value`` and ``--call=value`` spellings. Every
@@ -244,15 +274,31 @@ def _arbitrary_exec_arg(args: list[str]) -> str | None:
     flag, so nothing legitimate is lost and an unknown launcher cannot smuggle
     an exec flag past the check by prefixing it.
 
+    Outside :data:`_PACKAGE_SELECTOR_LAUNCHERS` two extra rules apply, because
+    those commands are interpreters rather than package runners: ``-p`` is an
+    exec flag (node's ``--print``) instead of a package/python selector, and
+    combined short-option clusters are decomposed so ``-pe`` cannot smuggle
+    past a check that only splits on ``=``. Both stay scoped: npx/uvx do not
+    cluster short options, and their trailing arguments belong to a
+    third-party server's own CLI where ``-name``-style flags are ordinary.
+
     Only the normalized flag is returned, never the caller's value, so the
     rejection message does not echo a payload string back into the response.
     """
+    is_package_launcher = command.lower() in _PACKAGE_SELECTOR_LAUNCHERS
+    denied = _ARBITRARY_EXEC_ARGS if is_package_launcher else _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS
+
     for arg in args:
         if not isinstance(arg, str):
             continue
         flag = arg.split("=", 1)[0].strip().lower()
-        if flag in _ARBITRARY_EXEC_ARGS:
+        if flag in denied:
             return flag
+        if is_package_launcher or not flag.startswith("-") or flag.startswith("--"):
+            continue
+        for letter in flag[1:]:
+            if letter in _CLUSTERED_EXEC_LETTERS:
+                return f"-{letter}"
     return None
 
 
@@ -281,7 +327,7 @@ def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
                 detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
             )
 
-        exec_flag = _arbitrary_exec_arg(server.args)
+        exec_flag = _arbitrary_exec_arg(server.args, command=command_name)
         if exec_flag is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

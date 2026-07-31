@@ -1103,7 +1103,142 @@ def test_validate_mcp_update_allows_ordinary_env(monkeypatch):
                 type="stdio",
                 command="npx",
                 args=["-y", "@modelcontextprotocol/server-github"],
-                env={"GITHUB_TOKEN": "$GITHUB_TOKEN", "PYTHONPATH": "/opt/lib"},
+                env={"GITHUB_TOKEN": "$GITHUB_TOKEN", "MCP_LOG_LEVEL": "debug"},
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"PYTHONPATH": "/tmp/payload-dir"},
+        {"pythonpath": "/tmp/payload-dir"},
+        {"PYTHONHOME": "/tmp/fake-prefix"},
+    ],
+)
+def test_validate_mcp_update_rejects_python_import_path_env(monkeypatch, env):
+    """`PYTHONPATH` runs code at startup, and `uvx` is on the default allowlist.
+
+    `site` searches every `sys.path` entry -- which includes `PYTHONPATH` --
+    for `sitecustomize.py` and imports it before the tool's entry point runs,
+    so a directory the caller controls is arbitrary code execution. Verified
+    against the real launcher: `PYTHONPATH=<dir> uvx <tool>` executes
+    `<dir>/sitecustomize.py`. `PYTHONHOME` is the same class, by repointing
+    the stdlib at a caller-controlled prefix.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "python-path-inject": McpServerConfigResponse(
+                type="stdio",
+                command="uvx",
+                args=["mcp-server-fetch"],
+                env=env,
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "environment variable" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("node", ["-p", "require('child_process').execSync('id')"]),
+        ("node", ["-p=1"]),
+        ("python", ["-p", "whatever"]),
+    ],
+)
+def test_validate_mcp_update_rejects_dash_p_outside_package_launchers(monkeypatch, command, args):
+    """`-p` is only `--package`/`--python` on npx/uvx; elsewhere it evaluates.
+
+    `node -p` is the short form of `--print`, which is blocked as a long flag,
+    so exempting `-p` for every command left the two spellings of one flag
+    disagreeing whenever an operator extended the allowlist.
+    """
+    monkeypatch.setenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, "node,python")
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "dash-p": McpServerConfigResponse(
+                type="stdio",
+                command=command,
+                args=args,
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "arbitrary code" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "expected_flag"),
+    [
+        ("node", ["-pe", "1"], "-p"),
+        ("node", ["-ep", "1"], "-e"),
+        ("python", ["-Ic", "import os"], "-c"),
+        ("perl", ["-we", "print 1"], "-e"),
+    ],
+)
+def test_validate_mcp_update_decomposes_short_flag_clusters(monkeypatch, command, args, expected_flag):
+    """A combined short-option cluster is the same flag with the dash shared.
+
+    Splitting only on `=` left `node -pe <code>` unscreened while `node -p`
+    and `node --print` were both caught. The reported flag stays normalized to
+    a single option so the message never echoes the caller's payload.
+    """
+    monkeypatch.setenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, "node,python,perl")
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "clustered": McpServerConfigResponse(
+                type="stdio",
+                command=command,
+                args=args,
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert f"'{expected_flag}'" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("npx", ["-y", "@scope/server", "-name", "value"]),
+        ("npx", ["-y", "@scope/server", "-exclude", "node_modules"]),
+        ("uvx", ["mcp-server-git", "-repo", "/srv/repo"]),
+    ],
+)
+def test_validate_mcp_update_does_not_decompose_package_launcher_args(monkeypatch, command, args):
+    """Cluster decomposition is deliberately scoped to non-package launchers.
+
+    npx/uvx do not combine short options, and everything after the package
+    name belongs to a third-party server's own CLI, where single-dash
+    multi-letter flags are ordinary. Decomposing there would reject
+    `-name`/`-exclude` for containing an `e` while buying no coverage, so the
+    default allowlist keeps whole-token matching only.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "third-party-args": McpServerConfigResponse(
+                type="stdio",
+                command=command,
+                args=args,
             )
         }
     )
