@@ -314,7 +314,24 @@ class ScheduleService:
             # reconciliation settles what actually happened.
             return await self._retain_launched(task, record_id=record.record_id, run_id=None, thread_id=execution_thread_id, now=now, trigger=trigger, error=str(exc))
 
-        return await self._retain_launched(task, record_id=record.record_id, run_id=launched.run_id, thread_id=launched.thread_id, now=now, trigger=trigger, error=None)
+        if launched.thread_id != execution_thread_id:
+            # Contract violation: the launcher redirected the run. A run is
+            # live somewhere, so retention still applies -- but the bookkeeping
+            # stays on the requested thread the record row was created with,
+            # and the violation is surfaced instead of letting history and
+            # task silently diverge.
+            logger.error("RunLauncher violated its contract: requested thread %s, launched on %s (task %s)", execution_thread_id, launched.thread_id, task.task_id)
+            return await self._retain_launched(
+                task,
+                record_id=record.record_id,
+                run_id=launched.run_id,
+                thread_id=execution_thread_id,
+                now=now,
+                trigger=trigger,
+                error=f"launcher redirected the run to thread {launched.thread_id!r}; the contract requires the requested thread",
+            )
+
+        return await self._retain_launched(task, record_id=record.record_id, run_id=launched.run_id, thread_id=execution_thread_id, now=now, trigger=trigger, error=None)
 
     # ------------------------------------------------------------------ lifecycle
 

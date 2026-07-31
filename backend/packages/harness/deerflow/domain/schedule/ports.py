@@ -26,9 +26,12 @@ from deerflow.domain.schedule.model import (
 class LaunchedRun:
     """What the launcher reports back once a run is admitted.
 
-    `thread_id` is echoed rather than assumed: the launcher is free to return a
-    different thread than the one requested, and the task's bookkeeping records
-    what actually ran.
+    `thread_id` is an echo of the requested thread, for verification only:
+    the contract requires the adapter to launch on exactly the thread it was
+    given, because the execution record is created with that thread before
+    the launch and cannot be corrected afterwards. The service treats a
+    mismatch as an adapter bug -- it keeps the bookkeeping on the requested
+    thread and surfaces the violation on the dispatch result.
     """
 
     run_id: str
@@ -325,7 +328,11 @@ class RunLauncher(Protocol):
         owner_user_id: str | None,
         metadata: dict[str, str],
     ) -> LaunchedRun:
-        """Start one execution and return its identity.
+        """Start one execution on `thread_id` and return its identity.
+
+        The run MUST be launched on the given thread -- redirection is a
+        contract violation (see LaunchedRun) -- and the echoed thread exists
+        so the service can verify that.
 
         `metadata` is opaque correlation data the domain attaches so the
         eventual outcome can be traced back to this task and record; the

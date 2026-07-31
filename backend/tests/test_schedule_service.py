@@ -53,7 +53,7 @@ from deerflow.domain.schedule.model import (
     TaskStatus,
     TriggerKind,
 )
-from deerflow.domain.schedule.ports import RunOutcome
+from deerflow.domain.schedule.ports import LaunchedRun, RunOutcome
 from deerflow.domain.schedule.service import ScheduleService
 
 pytestmark = pytest.mark.asyncio
@@ -495,6 +495,63 @@ class TestPostLaunchRetention:
         second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
         assert second.outcome is DispatchOutcome.LAUNCHED
         assert len(launcher.calls) == 2
+
+
+class _RedirectingLauncher(FakeRunLauncher):
+    """Violates the port contract by launching on a thread of its own choosing."""
+
+    async def launch(self, **kwargs):
+        launched = await super().launch(**kwargs)
+        return LaunchedRun(run_id=launched.run_id, thread_id="somewhere-else")
+
+
+class TestLauncherThreadEcho:
+    """The launcher must launch on the requested thread and echo it back.
+
+    The run record is created with the requested thread before the launch and
+    `update_status` cannot correct it, so a redirecting launcher would leave
+    history pointing at a thread nothing ever ran on while the task points at
+    the actual one. The contract therefore forbids redirection; the echo
+    exists to catch an adapter that breaks it.
+    """
+
+    async def test_the_echoed_thread_matches_the_record_and_the_task(self):
+        runs = InMemoryScheduledRunRepository()
+        service = make_service(runs=runs)
+        task = await create_cron_task(service)
+
+        result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        after = await service.get_task(task.task_id, user_id="user-1")
+        stored = runs.all_runs()[0]
+        assert result.thread_id == stored.thread_id == after.last_thread_id
+
+    async def test_a_redirecting_launcher_is_flagged_without_diverging_the_bookkeeping(self):
+        """A run is live somewhere, so retention still applies -- but the
+        bookkeeping must stay on the requested thread the record row was
+        created with, and the violation must be surfaced, not absorbed."""
+        runs = InMemoryScheduledRunRepository()
+        launcher = _RedirectingLauncher()
+        service = make_service(runs=runs, launcher=launcher)
+        task = await create_cron_task(service)
+
+        result = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+
+        assert result.outcome is DispatchOutcome.LAUNCHED
+        assert result.error is not None and "somewhere-else" in result.error
+
+        requested = launcher.calls[0]["thread_id"]
+        after = await service.get_task(task.task_id, user_id="user-1")
+        stored = runs.all_runs()[0]
+        assert result.thread_id == requested
+        assert stored.thread_id == requested
+        assert after.last_thread_id == requested, "history and task must not diverge"
+
+        # A live run exists somewhere: the slot stays held.
+        assert stored.is_active
+        second = await service.dispatch_task(task, now=NOW, trigger=TriggerKind.SCHEDULED)
+        assert second.outcome is DispatchOutcome.SKIPPED
+        assert len(launcher.calls) == 1
 
 
 class TestConflictCollapse:
