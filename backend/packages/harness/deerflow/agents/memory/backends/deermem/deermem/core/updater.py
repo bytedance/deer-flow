@@ -153,10 +153,13 @@ def _fact_scope_gate_reason(fact: dict[str, Any]) -> str | None:
 def _summary_scope_gate_reason(section_data: dict[str, Any]) -> str | None:
     """Return the deterministic rejection reason for a summary update."""
     scope = _normalize_gate_label(section_data.get("scope"))
-    if scope is None:
+    authority = _normalize_gate_label(section_data.get("authority"))
+    if scope is None or authority is None:
         return "missing"
     if scope != "user":
         return "scope"
+    if authority != "descriptive":
+        return "authority"
     return None
 
 
@@ -1586,7 +1589,7 @@ class MemoryUpdater:
         now = utc_now_iso_z()
         scope_gate_rejections: dict[str, dict[str, int]] = {
             "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
-            "summaries": {"missing": 0, "scope": 0},
+            "summaries": {"missing": 0, "scope": 0, "authority": 0},
             "removals": {"missing": 0, "scope": 0, "replacement": 0},
             "consolidations": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
         }

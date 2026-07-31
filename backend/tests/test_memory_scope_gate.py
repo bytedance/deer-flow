@@ -114,24 +114,26 @@ def test_fact_gate_accepts_only_durable_descriptive_user_facts() -> None:
     assert metrics["rejected_by_scope_gate"] == 4
     assert metrics["scope_gate_rejections"] == {
         "facts": {"missing": 1, "scope": 1, "durability": 1, "authority": 1},
-        "summaries": {"missing": 0, "scope": 0},
+        "summaries": {"missing": 0, "scope": 0, "authority": 0},
         "removals": {"missing": 0, "scope": 0, "replacement": 0},
         "consolidations": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
     }
 
 
-def test_summary_gate_is_fail_closed_and_does_not_persist_scope() -> None:
+def test_summary_gate_requires_user_scope_and_descriptive_authority() -> None:
     updater = _updater()
     current = _memory()
     current["user"]["personalContext"]["summary"] = "Existing summary"
     metrics: dict[str, object] = {}
     update = {
         "user": {
-            "workContext": {"summary": "User is a software engineer", "shouldUpdate": True, "scope": "user"},
-            "personalContext": {"summary": "Constraint for this PR", "shouldUpdate": True, "scope": "project"},
-            "topOfMind": {"summary": "Current one-off request", "shouldUpdate": True},
+            "workContext": {"summary": "User is a software engineer", "shouldUpdate": True, "scope": "user", "authority": "descriptive"},
+            "personalContext": {"summary": "Constraint for this PR", "shouldUpdate": True, "scope": "project", "authority": "descriptive"},
+            "topOfMind": {"summary": "User granted push access", "shouldUpdate": True, "scope": "user", "authority": "transactional"},
         },
-        "history": {},
+        "history": {
+            "recentMonths": {"summary": "Missing authority label", "shouldUpdate": True, "scope": "user"},
+        },
         "newFacts": [],
         "factsToRemove": [],
     }
@@ -142,7 +144,8 @@ def test_summary_gate_is_fail_closed_and_does_not_persist_scope() -> None:
     assert set(result["user"]["workContext"]) == {"summary", "updatedAt"}
     assert result["user"]["personalContext"]["summary"] == "Existing summary"
     assert result["user"]["topOfMind"]["summary"] == ""
-    assert metrics["scope_gate_rejections"]["summaries"] == {"missing": 1, "scope": 1}
+    assert result["history"]["recentMonths"]["summary"] == ""
+    assert metrics["scope_gate_rejections"]["summaries"] == {"missing": 1, "scope": 1, "authority": 1}
 
 
 def test_thread_scoped_removal_cannot_delete_user_fact() -> None:
@@ -196,6 +199,32 @@ def test_paired_removal_is_skipped_when_replacement_fails_scope_gate() -> None:
     result = updater._apply_updates(current, update, metrics=metrics)
 
     assert [fact["id"] for fact in result["facts"]] == ["fact_api"]
+    assert metrics["scope_gate_rejections"]["removals"]["replacement"] == 1
+
+
+def test_paired_removal_is_skipped_when_replacement_fails_confidence_gate() -> None:
+    updater = _updater(fact_confidence_threshold=0.7)
+    current = _memory([_stored_fact("fact_api", "User generally prefers API compatibility")])
+    metrics: dict[str, object] = {}
+    update = {
+        "user": {},
+        "history": {},
+        "newFacts": [_fact("User no longer requires API compatibility", confidence=0.69)],
+        "factsToRemove": [
+            {
+                "id": "fact_api",
+                "scope": "user",
+                "reason": "Preference changed",
+                "replacementFactIndex": 0,
+            }
+        ],
+    }
+
+    result = updater._apply_updates(current, update, metrics=metrics)
+
+    assert [fact["id"] for fact in result["facts"]] == ["fact_api"]
+    assert metrics["facts_passed_scope_gate"] == 1
+    assert metrics["rejected_low_confidence"] == 1
     assert metrics["scope_gate_rejections"]["removals"]["replacement"] == 1
 
 
@@ -273,6 +302,26 @@ def test_missing_classification_rejects_one_fact_without_aborting_other_updates(
     }
 
 
+def test_legacy_string_removal_fails_closed_and_reports_missing_scope() -> None:
+    updater = _updater()
+    current = _memory([_stored_fact("fact_api", "User generally prefers API compatibility")])
+    metrics: dict[str, object] = {}
+    normalized = _normalize_memory_update_data(
+        {
+            "user": {},
+            "history": {},
+            "newFacts": [],
+            "factsToRemove": ["fact_api"],
+        }
+    )
+
+    result = updater._apply_updates(current, normalized, metrics=metrics)
+
+    assert normalized["factsToRemove"] == [{"id": "fact_api"}]
+    assert [fact["id"] for fact in result["facts"]] == ["fact_api"]
+    assert metrics["scope_gate_rejections"]["removals"]["missing"] == 1
+
+
 def test_signal_hints_require_cross_task_user_scope() -> None:
     updater = _updater()
 
@@ -297,6 +346,7 @@ def test_prompt_requires_scope_labels_for_every_mutating_path() -> None:
     assert 'scope="user"' in prompt_text
     assert 'durability="durable"' in prompt_text
     assert 'authority="transactional"' in prompt_text
+    assert '"scope": "user|thread|project", "authority": "descriptive|transactional"' in prompt_text
     assert "replacementFactIndex" in prompt_text
     assert "unrelated future thread" in prompt_text
 
@@ -349,7 +399,7 @@ def test_default_observability_warns_when_fact_scope_gate_rejects_most_items(cap
         "rejected_by_scope_gate": 2,
         "scope_gate_rejections": {
             "facts": {"missing": 2, "scope": 0, "durability": 0, "authority": 0},
-            "summaries": {"missing": 0, "scope": 0},
+            "summaries": {"missing": 0, "scope": 0, "authority": 0},
             "removals": {"missing": 0, "scope": 0, "replacement": 0},
             "consolidations": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
         },
