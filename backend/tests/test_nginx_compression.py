@@ -29,7 +29,4 @@ def test_nginx_compresses_only_safe_textual_responses(config_path: Path) -> None
         "image/svg+xml",
     ]
     assert "text/event-stream" not in gzip_types
-    assert not any(
-        content_type.startswith(("font/", "audio/", "video/"))
-        for content_type in gzip_types
-    )
+    assert not any(content_type.startswith(("font/", "audio/", "video/")) for content_type in gzip_types)
