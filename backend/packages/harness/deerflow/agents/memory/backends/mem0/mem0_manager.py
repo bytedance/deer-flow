@@ -200,7 +200,7 @@ class Mem0Manager(MemoryManager):
         seen: set[str] = set()
         lines: list[str] = []
         used = 0
-        first_line: str | None = None
+        shortest_line: int | None = None
         for record in records:
             rid = record.get("id")
             if rid in seen:
@@ -210,22 +210,27 @@ class Mem0Manager(MemoryManager):
             if not text:
                 continue
             line = f"- {text}"
-            if first_line is None:
-                first_line = line
+            line_len = len(line)
+            shortest_line = line_len if shortest_line is None else min(shortest_line, line_len)
             # Truncate on entry boundaries: keep only memories that fit whole
             # within the remaining budget (+1 for the joining newline), so the
             # injection never ends mid-entry with a dangling partial line. An
             # oversized entry is skipped -- a shorter later one may still fit.
-            added = len(line) if not lines else len(line) + 1
+            added = line_len if not lines else line_len + 1
             if used + added > budget:
                 continue
             lines.append(line)
             used += added
         context = "\n".join(lines)
-        if not context and first_line is not None:
-            # Not even the first memory fits the budget; fall back to a hard
-            # truncation of that entry rather than injecting nothing at all.
-            context = first_line[:budget]
+        if not context and shortest_line is not None:
+            # Every recalled memory was longer than the configured budget.
+            # Keep the entry-boundary guarantee and surface the config problem
+            # with a warning rather than injecting a partial fact.
+            logger.warning(
+                "max_injection_chars=%d is smaller than the shortest recalled memory (%d chars); returning empty context",
+                budget,
+                shortest_line,
+            )
         return context
 
     async def aget_context(

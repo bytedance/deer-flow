@@ -498,14 +498,14 @@ class TestMem0ManagerGetContext:
         ctx = mgr.get_context("u1")
         assert ctx == "- short"
 
-    def test_oversized_first_entry_falls_back_to_hard_truncation(self) -> None:
-        """When not even the first memory fits the budget, fall back to a hard
-        truncation of that first entry rather than injecting nothing."""
+    def test_oversized_entries_return_empty_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When no memory fits the budget, keep the entry-boundary guarantee by
+        returning empty context and logging a diagnosable warning."""
         mgr, fake = _manager({"max_injection_chars": 20})
         fake.list_results = [{"id": "m1", "memory": "x" * 30}]
         ctx = mgr.get_context("u1")
-        assert ctx == "- " + "x" * 18
-        assert len(ctx) == 20
+        assert ctx == ""
+        assert any("max_injection_chars=20" in r.message and "shortest recalled memory" in r.message for r in caplog.records)
 
     def test_async_get_context_offloads_sync_http_client(self) -> None:
         mgr, fake = _manager()
