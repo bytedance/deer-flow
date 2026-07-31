@@ -41,7 +41,10 @@ import {
   filterThreadSearchResults,
   type ThreadSearchParams,
 } from "./thread-search-query";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import {
+  retainThreadTokenUsagePlaceholder,
+  threadTokenUsageQueryKey,
+} from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
@@ -2771,6 +2774,10 @@ export function useThreadTokenUsage(
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnWindowFocus: false,
+    // Keep same-thread data visible during refetches without carrying usage
+    // from the previous route into a newly selected thread.
+    placeholderData: (previous) =>
+      retainThreadTokenUsagePlaceholder(previous, threadId),
   });
 }
 
