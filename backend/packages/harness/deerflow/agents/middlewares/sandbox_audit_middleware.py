@@ -67,9 +67,18 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
 #
 # The previous unanchored rule could not tell them apart and refused everyday
 # output capture (issue #4611).
+#
+# A command position is not always the first character: POSIX shell allows leading
+# variable assignments, and exec wrappers keep what follows in command position
+# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
+# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
+# between the assignment and the substitution, so value position stays allowed.
+# The repetition is bounded to keep the alternation from backtracking on long input.
+_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
+
 _HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(rf"^[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
-    re.compile(rf"^[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
 ]
 
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
