@@ -30,7 +30,18 @@ class LaunchPlan:
     thread_id: str | None = None
     continue_recent: bool = False
     forced_tui: bool = False
+    recursion_limit: int | None = None
     reason: str = ""
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cli", action="store_true", help="force headless/classic mode for one invocation")
     parser.add_argument("--continue", dest="continue_recent", action="store_true", help="resume the most recent thread")
     parser.add_argument("--resume", dest="resume", metavar="THREAD", default=None, help="resume a thread by id or title")
+    parser.add_argument(
+        "--recursion-limit",
+        type=_positive_int,
+        metavar="N",
+        help="headless agent-loop super-step limit (default: 100)",
+    )
     return parser
 
 
@@ -85,29 +102,60 @@ def plan_launch(
     env: dict[str, str],
 ) -> LaunchPlan:
     """Decide what surface to launch. Pure: no I/O, no client construction."""
-    args = build_parser().parse_args(_strip_chat(argv))
+    parser = build_parser()
+    args = parser.parse_args(_strip_chat(argv))
     positional = " ".join(args.message).strip() or None
     resume = args.resume
     continue_recent = bool(args.continue_recent)
+    headless_requested = args.print is not _UNSET or args.json is not _UNSET or args.cli
+    if args.recursion_limit is not None and not headless_requested:
+        parser.error("--recursion-limit requires --print, --json, or --cli")
 
     if args.print is not _UNSET:
         message = args.print if isinstance(args.print, str) else None
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--print needs a MESSAGE argument or piped stdin.")
-        return LaunchPlan(mode="print", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent)
+        return LaunchPlan(
+            mode="print",
+            message=message,
+            read_stdin=message is None,
+            thread_id=resume,
+            continue_recent=continue_recent,
+            recursion_limit=args.recursion_limit,
+        )
 
     if args.json is not _UNSET:
         message = args.json if isinstance(args.json, str) else None
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--json needs a MESSAGE argument or piped stdin.")
-        return LaunchPlan(mode="json", message=message, read_stdin=message is None, thread_id=resume, continue_recent=continue_recent)
+        return LaunchPlan(
+            mode="json",
+            message=message,
+            read_stdin=message is None,
+            thread_id=resume,
+            continue_recent=continue_recent,
+            recursion_limit=args.recursion_limit,
+        )
 
     if args.cli:
         if positional:
-            return LaunchPlan(mode="print", message=positional, thread_id=resume, continue_recent=continue_recent)
+            return LaunchPlan(
+                mode="print",
+                message=positional,
+                thread_id=resume,
+                continue_recent=continue_recent,
+                recursion_limit=args.recursion_limit,
+            )
         # Mirror --print: a piped message or --continue is enough to run headless.
         if continue_recent or not stdin_isatty:
-            return LaunchPlan(mode="print", message=None, read_stdin=True, thread_id=resume, continue_recent=continue_recent)
+            return LaunchPlan(
+                mode="print",
+                message=None,
+                read_stdin=True,
+                thread_id=resume,
+                continue_recent=continue_recent,
+                recursion_limit=args.recursion_limit,
+            )
         return LaunchPlan(
             mode="headless-help",
             reason='--cli needs a message. Try: deerflow --print "your question".',
@@ -145,6 +193,8 @@ deerflow — DeerFlow terminal workbench
   deerflow --resume THREAD      resume a thread by id or title
   deerflow --print "question"   one-shot answer to stdout
   deerflow --json "question"    stream newline-delimited JSON events
+  deerflow --recursion-limit N --print "question"
+                              set the headless agent-loop super-step limit
   echo "question" | deerflow --print
 """
 
@@ -153,6 +203,12 @@ def _resolve_message(plan: LaunchPlan) -> str:
     if plan.read_stdin:
         return sys.stdin.read().strip()
     return plan.message or ""
+
+
+def _run_overrides(plan: LaunchPlan) -> dict[str, int]:
+    if plan.recursion_limit is None:
+        return {}
+    return {"recursion_limit": plan.recursion_limit}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -195,7 +251,7 @@ def _run_print(plan: LaunchPlan) -> int:
         return 2
     session = _make_session()
     thread_id = session.resolve_thread(plan)
-    answer = session.client.chat(message, thread_id=thread_id)
+    answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan))
     print(answer)
     return 0
 
@@ -207,7 +263,7 @@ def _run_json(plan: LaunchPlan) -> int:
         return 2
     session = _make_session()
     thread_id = session.resolve_thread(plan)
-    for event in session.client.stream(message, thread_id=thread_id):
+    for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
         payload = {"type": event.type, "data": event.data}
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
         sys.stdout.flush()
