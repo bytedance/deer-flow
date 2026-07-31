@@ -25,6 +25,15 @@ local function initialize(hard_limit)
         'meta:revision', '0')
 end
 
+local function mark_present(sandbox_id)
+    local field = 's:' .. sandbox_id
+    if redis.call('HGET', KEYS[1], field) == '1' then
+        return false
+    end
+    redis.call('HSET', KEYS[1], field, '1')
+    return true
+end
+
 local operation = ARGV[1]
 local hard_limit = ARGV[2]
 local state = redis.call('HGET', KEYS[1], 'meta:state')
@@ -76,7 +85,7 @@ if operation == 'track' then
     if ARGV[3] ~= '' and redis.call('HDEL', KEYS[1], 'r:' .. ARGV[3]) == 1 then
         changed = true
     end
-    if redis.call('HSETNX', KEYS[1], 's:' .. ARGV[4], '1') == 1 then
+    if mark_present(ARGV[4]) then
         changed = true
     end
     if changed then
@@ -105,7 +114,7 @@ for index = 6, #ARGV, 2 do
     if token ~= '' and redis.call('HDEL', KEYS[1], 'r:' .. token) == 1 then
         changed = true
     end
-    if redis.call('HSETNX', KEYS[1], 's:' .. sandbox_id, '1') == 1 then
+    if mark_present(sandbox_id) then
         changed = true
     end
 end
@@ -116,8 +125,14 @@ if complete then
         local prefix = string.sub(field, 1, 2)
         local identifier = string.sub(field, 3)
         if prefix == 's:' and remote_ids[identifier] ~= true then
-            redis.call('HDEL', KEYS[1], field)
-            changed = true
+            local missing_since_ms = tonumber(string.match(redis.call('HGET', KEYS[1], field) or '', '^m:(%d+)$'))
+            if missing_since_ms == nil then
+                redis.call('HSET', KEYS[1], field, 'm:' .. now_ms())
+                changed = true
+            elseif missing_since_ms <= stale_before_ms then
+                redis.call('HDEL', KEYS[1], field)
+                changed = true
+            end
         elseif prefix == 'r:' then
             local created_ms = tonumber(redis.call('HGET', KEYS[1], field))
             if created_ms ~= nil and created_ms <= stale_before_ms then

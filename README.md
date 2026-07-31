@@ -912,8 +912,8 @@ per deployment. To change the limit, stop its Gateways, delete the capacity
 Hash, and restart; mismatched workers fail closed.
 
 The Hash counts remote VMs and in-flight creates, repairs interrupted creates
-from E2B metadata, and blocks new creates while Redis or initial inventory is
-unavailable. Run Redis with persistence, non-evicting memory, and HA.
+from E2B metadata, grace-protects stale inventory omissions, and blocks new
+creates while Redis or initial inventory is unavailable. Run Redis with persistence, non-evicting memory, and HA.
 
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.

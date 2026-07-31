@@ -105,6 +105,14 @@ def test_two_gateways_atomically_share_one_hash(make_store) -> None:
     gateway_a.track("sandbox-a", reservation_token=winner)
     gateway_a.track("sandbox-a", reservation_token=winner)
     assert _counts(gateway_a) == (1, 0)
+    # A successful but stale list must not release a just-tracked slot.
+    assert gateway_b.reconcile(
+        expected_revision=gateway_b.revision(),
+        remote_sandboxes={},
+        complete=True,
+        reservation_max_age_ms=120_000,
+    )
+    assert gateway_b.reserve("stale-inventory") is ReserveStatus.FULL
     gateway_b.release("sandbox-a")
     gateway_b.release("sandbox-a")
     assert _counts(gateway_a) == (0, 0)
@@ -151,13 +159,14 @@ def test_reconcile_keeps_incomplete_inventory_and_fresh_reservations(make_store)
         reservation_max_age_ms=120_000,
     )
     assert _counts(store) == (1, 1)
+    store._redis.hset(store.key, "s:sandbox-a", "m:0")
     assert store.reconcile(
         expected_revision=store.revision(),
-        remote_sandboxes={"sandbox-a": None},
+        remote_sandboxes={},
         complete=True,
         reservation_max_age_ms=0,
     )
-    assert _counts(store) == (1, 0)
+    assert _counts(store) == (0, 0)
 
 
 def test_mismatched_hard_limits_fail_closed(make_store) -> None:

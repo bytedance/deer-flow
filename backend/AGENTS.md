@@ -622,7 +622,7 @@ that cannot tell sibling branches apart.
   burst) deployment-wide. Lua atomically manages VM and in-flight-create
   entries; missing or unavailable state fails closed. E2B reservation metadata
   repairs interrupted creates. Inventory replacement is revision-CAS guarded,
-  and incomplete inventories never remove entries.
+  and incomplete inventories never remove entries; complete omissions get a grace period.
   Uncertain cleanup keeps a tombstone slot. Shutdown tracks owned remote
   operation IDs. Discovery can find a VM from another Gateway. Shutdown closes
   an unowned discovery client without destroying its VM. Release ends its
