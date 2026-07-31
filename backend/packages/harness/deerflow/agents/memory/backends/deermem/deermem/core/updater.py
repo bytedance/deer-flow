@@ -1726,13 +1726,16 @@ class MemoryUpdater:
         # Creation-time lifetime cap shared with the consolidation path below, so
         # both fact-creation sites apply the identical bound in one place.
         creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
-        # Counted at the confidence-gate site (the only real accept filter for new
-        # facts) so the ``facts_passed_confidence`` metric mirrors the actual
-        # filter and cannot drift from it. Facts below the threshold are the
-        # reject count; duplicate / empty / over-cap facts that pass the
-        # threshold are still counted here -- the metric is a confidence-gate
-        # signal (the host's rejection-rate warning monitors confidence
-        # filtering, not dedup / over-cap), not a persisted-fact count.
+        # Two independent accept filters govern new facts: the deterministic
+        # scope gate and this confidence threshold. Each is counted at its own
+        # filter site so neither metric can drift from the filter it reports:
+        # ``facts_passed_confidence`` counts threshold-passers even when the
+        # scope gate rejects them, and the scope-gate counters increment
+        # whether or not the confidence check passes. Duplicate / empty /
+        # over-cap facts that pass the threshold are still counted here -- the
+        # metric is a confidence-gate signal (the host's rejection-rate
+        # warning monitors confidence filtering, not dedup / over-cap), not a
+        # persisted-fact count.
         passed_threshold = 0
         replacement_fact_keys: dict[int, str] = {}
         for fact_index, fact in enumerate(new_facts):
