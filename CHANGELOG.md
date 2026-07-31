@@ -263,8 +263,12 @@ This section accumulates work toward the **2.1.0** milestone
   `for` word list all run normally, while a substitution in command position
   (`$(curl url)`, after a `|`/`&&`/`;`, behind leading assignments or an
   `env`/`nohup`/`time` style wrapper, or as an `eval`/`source` argument) still
-  blocks because it executes fetched
-  content. Variable expansions whose name merely starts with a risky executable
+  blocks because it executes fetched content. An interpreter's code-string flag
+  (`bash -c`, `python -c`, `perl -e`, `node -p`, `php -r`, and the `<<<`
+  here-string) is treated as an execution context wherever it appears, so
+  `bash -c "$(curl url)"` blocks; `source <(curl url)` and the backtick spelling
+  of `eval`/`source` now block too, neither of which was detected before.
+  Variable expansions whose name merely starts with a risky executable
   (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
   (`shellcheck`, `shasum`) are no longer false positives.
   ([#4611])

@@ -26,6 +26,26 @@ logger = logging.getLogger(__name__)
 # start with one of these words (``shellcheck``, ``shasum``, ``pythonic-tool``).
 _RISKY_SUBSTITUTION_EXECUTABLES = r"(?:curl|wget|bash|sh|python[\d.]*|ruby|perl|base64)\b"
 
+# A substitution opening one of those executables, in any of its spellings:
+# ``$(cmd``, ``<(cmd``, or the backtick form, which has no parenthesis. Sharing
+# one opener is what keeps ``eval `curl u` `` from slipping past a rule written
+# only for ``eval $(curl u)``.
+_RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
+
+# Interpreters that execute a *code string* handed to them as an argument, and
+# the flags that receive it: ``-c`` (shells, python), ``-e`` (perl/ruby/node),
+# ``-p`` (perl/node print loop), ``-r`` (php). Whatever the flag receives is
+# executed, so a risky substitution there is executed too -- the same class as
+# ``eval``/``source``, spelled with a flag instead. A here-string (``<<<``)
+# reaches the same place through stdin.
+#
+# These are position-blind on purpose: ``bash -c`` is an execution context
+# wherever it appears, including as an argument to something else
+# (``xargs sh -c "$(curl url)"``). The leading-flag repetition is bounded so the
+# alternation cannot backtrack on long input.
+_CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
+_LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
@@ -37,7 +57,10 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
     # --- eval/source execute a substitution regardless of its position ---
-    re.compile(rf"\b(eval|source)\s+[\"']?[`$<]\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"\b(eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # --- an interpreter's code-string flag is an execution context too ---
+    re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}-[cepr]\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<<<\s*[\"']?{_RISKY_SUBSTITUTION}"),
     # --- base64 decode piped to execution ---
     re.compile(r"base64\s+.*-d.*\|"),
     # --- overwrite system binaries ---
