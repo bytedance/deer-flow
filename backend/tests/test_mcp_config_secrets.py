@@ -1149,6 +1149,41 @@ def test_validate_mcp_update_rejects_python_import_path_env(monkeypatch, env):
 
 
 @pytest.mark.parametrize(
+    "env",
+    [
+        {"NODE_PATH": "/tmp/payload-dir"},
+        {"LD_LIBRARY_PATH": "/tmp/payload-dir"},
+        {"DYLD_LIBRARY_PATH": "/tmp/payload-dir"},
+    ],
+)
+def test_validate_mcp_update_allows_caller_controlled_search_path_env(monkeypatch, env):
+    """Search-path variables are a deliberate residual, not an oversight.
+
+    `_CODE_INJECTING_ENV_VARS` holds names that execute code unconditionally at
+    startup. A search path reaches code only if the process happens to load a
+    name the caller can shadow, so it belongs to a weaker class. `NODE_PATH` is
+    the weakest of the three and the one most easily mistaken for `PYTHONPATH`:
+    verified against node v22, it is searched *after* the local `node_modules`
+    chain, so `NODE_PATH=<evil> node main.js` still resolves an installed `dep`
+    to the real one, and ESM `import` ignores it entirely -- unlike `site`,
+    which imports `sitecustomize.py` from `sys.path` before any user code runs.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "search-path-env": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-github"],
+                env=env,
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+@pytest.mark.parametrize(
     ("command", "args"),
     [
         ("node", ["-p", "require('child_process').execSync('id')"]),

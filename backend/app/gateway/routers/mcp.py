@@ -82,12 +82,25 @@ _CLUSTERED_EXEC_LETTERS = frozenset(flag[1] for flag in _ARBITRARY_EXEC_ARGS | _
 # `PYTHONSTARTUP` is inert for the non-interactive launchers in scope and is
 # kept only as belt-and-braces for an operator who allowlists a REPL.
 #
-# Known residual, accepted: `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` can also
-# reach a constructor via a shadowed dependency, but only if the process
-# happens to load a library whose name the caller can shadow -- unlike the
-# unconditional startup execution the entries below all provide. They stay out
-# because native-dependency servers legitimately set them, and a denylist is
-# not what makes MCP registration safe for an untrusted admin anyway.
+# Known residual, accepted. Every entry below executes code *unconditionally*
+# at process startup. Caller-controlled *search paths* are a different, weaker
+# shape -- they reach code only if the process happens to load a name the
+# caller can shadow -- and they stay out:
+#
+#   `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` run a shadowed library's constructor,
+#   and native-dependency servers legitimately set them.
+#
+#   `NODE_PATH` is narrower still, and not for the reason it first looks like.
+#   Node searches it *after* the local `node_modules` chain -- the resolver
+#   unshifts the requiring module's own paths ahead of it -- so it cannot
+#   shadow an installed dependency, and ESM `import` ignores it entirely. It
+#   can only supply a CJS module that would otherwise fail to resolve, i.e. an
+#   optional `try { require(...) } catch {}` dependency absent from the install.
+#
+# Adding them would make the "unconditional" rule above untrue, and a
+# defense-in-depth list that grows because each entry was cheap is how it ends
+# up mistaken for a boundary. A denylist is not what makes MCP registration
+# safe for an untrusted admin anyway.
 _CODE_INJECTING_ENV_VARS = frozenset(
     {
         "BASH_ENV",
