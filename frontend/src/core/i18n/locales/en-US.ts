@@ -776,6 +776,13 @@ export const enUS: Translations = {
       filterFacts: "Facts",
       filterSummaries: "Summaries",
       noMatches: "No matching memory found.",
+      agentScopeLabel: "Agent",
+      agentScopeDefault: "Main memory",
+      clearAgent: "Clear agent facts",
+      clearAgentConfirmTitle: "Clear this agent's facts?",
+      clearAgentConfirmDescription:
+        "This will remove all facts saved for this agent. Shared summaries and other agents' facts are preserved. This action cannot be undone.",
+      clearAgentSuccess: "Agent facts cleared",
       markdown: {
         overview: "Overview",
         userContext: "User context",

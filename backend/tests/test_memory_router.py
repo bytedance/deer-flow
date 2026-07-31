@@ -52,7 +52,7 @@ def test_get_memory_route_offloads_manager_call_from_event_loop() -> None:
     called_from: list[int] = []
     manager = MagicMock()
 
-    def get_memory(*, user_id: str) -> dict:
+    def get_memory(*, user_id: str, agent_name: str | None = None) -> dict:
         called_from.append(threading.get_ident())
         return _sample_memory()
 
@@ -388,7 +388,7 @@ def _internal_owner_request(owner_user_id: str) -> SimpleNamespace:
 def test_get_memory_honors_bound_owner_header() -> None:
     seen: dict[str, str] = {}
 
-    def fake_get_memory(*, user_id: str) -> dict:
+    def fake_get_memory(*, user_id: str, agent_name: str | None = None) -> dict:
         seen["user_id"] = user_id
         return _sample_memory(facts=[{"id": "f", "content": "owner fact", "category": "context", "confidence": 0.9, "createdAt": "", "source": "owner"}])
 
@@ -406,7 +406,7 @@ def test_get_memory_sanitizes_unsafe_owner_header() -> None:
     raw_owner = "feishu|ou_AbC/123"
     seen: dict[str, str] = {}
 
-    def fake_get_memory(*, user_id: str) -> dict:
+    def fake_get_memory(*, user_id: str, agent_name: str | None = None) -> dict:
         seen["user_id"] = user_id
         return _sample_memory()
 
@@ -424,7 +424,7 @@ def test_get_memory_falls_back_to_effective_user_for_browser_requests() -> None:
 
     seen: dict[str, str] = {}
 
-    def fake_get_memory(*, user_id: str) -> dict:
+    def fake_get_memory(*, user_id: str, agent_name: str | None = None) -> dict:
         seen["user_id"] = user_id
         return _sample_memory()
 
@@ -453,7 +453,7 @@ def _browser_request_with_spoofed_owner_header() -> SimpleNamespace:
 def test_clear_memory_scopes_destructive_write_to_bound_owner() -> None:
     seen: dict[str, str] = {}
 
-    def fake_clear(*, user_id: str) -> dict:
+    def fake_clear(*, user_id: str, agent_name: str | None = None) -> dict:
         seen["user_id"] = user_id
         return _sample_memory()
 
@@ -472,7 +472,7 @@ def test_import_memory_scopes_overwrite_to_bound_owner() -> None:
     seen: dict[str, str] = {}
     payload = memory.MemoryResponse(**_sample_memory())
 
-    def fake_import(_data: dict, *, user_id: str) -> dict:
+    def fake_import(_data: dict, *, user_id: str, agent_name: str | None = None) -> dict:
         seen["user_id"] = user_id
         return _sample_memory()
 
@@ -485,6 +485,150 @@ def test_import_memory_scopes_overwrite_to_bound_owner() -> None:
         with patch("app.gateway.routers.memory.get_effective_user_id", return_value="real-user"):
             asyncio.run(memory.import_memory(payload, _browser_request_with_spoofed_owner_header()))
         assert seen["user_id"] == "real-user"
+
+
+# ── agent-scoped fact buckets ──────────────────────────────────────────────
+# Facts are bucketed per (user_id, agent_name); summaries are user-global. The
+# optional agent_name query parameter selects the bucket on every data endpoint
+# (omitted = default bucket), so a custom agent's facts are reachable from the
+# Settings UI without disturbing shared summaries.
+
+
+def test_get_memory_route_forwards_agent_name_to_manager() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.get("/api/memory", params={"agent_name": "coding-agent"})
+    assert response.status_code == 200
+    assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "coding-agent"
+
+
+def test_get_memory_route_defaults_agent_name_to_none() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.get("/api/memory")
+    assert response.status_code == 200
+    assert mock_mgr.get_memory.call_args.kwargs["agent_name"] is None
+
+
+def test_get_memory_route_rejects_invalid_agent_name() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            traversal = client.get("/api/memory", params={"agent_name": "../evil"})
+            reserved = client.get("/api/memory", params={"agent_name": "__default__"})
+    assert traversal.status_code == 422
+    # The reserved default bucket sentinel never travels the wire; omitting the
+    # parameter selects it.
+    assert reserved.status_code == 422
+    mock_mgr.get_memory.assert_not_called()
+
+
+def test_fact_crud_routes_forward_agent_name() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.create_fact.return_value = (_sample_memory(), "fact_new")
+    mock_mgr.update_fact.return_value = _sample_memory()
+    mock_mgr.delete_fact.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            created = client.post("/api/memory/facts", params={"agent_name": "coding-agent"}, json={"content": "fact"})
+            updated = client.patch("/api/memory/facts/fact_new", params={"agent_name": "coding-agent"}, json={"content": "edited"})
+            deleted = client.delete("/api/memory/facts/fact_new", params={"agent_name": "coding-agent"})
+    assert created.status_code == 200
+    assert updated.status_code == 200
+    assert deleted.status_code == 200
+    assert mock_mgr.create_fact.call_args.kwargs["agent_name"] == "coding-agent"
+    assert mock_mgr.update_fact.call_args.kwargs["agent_name"] == "coding-agent"
+    assert mock_mgr.delete_fact.call_args.kwargs["agent_name"] == "coding-agent"
+
+
+def test_agent_scoped_fact_crud_roundtrip(tmp_path) -> None:
+    """Facts created under an agent bucket stay invisible to the default bucket."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        created = client.post("/api/memory/facts", params={"agent_name": "coding-agent"}, json={"content": "Agent-owned fact", "category": "context", "confidence": 0.8})
+        assert created.status_code == 200
+        assert [fact["content"] for fact in created.json()["facts"]] == ["Agent-owned fact"]
+        fact_id = created.json()["facts"][0]["id"]
+
+        # The default bucket never sees the agent's fact.
+        default_view = client.get("/api/memory")
+        assert default_view.status_code == 200
+        assert default_view.json()["facts"] == []
+
+        # The agent bucket does.
+        agent_view = client.get("/api/memory", params={"agent_name": "coding-agent"})
+        assert agent_view.status_code == 200
+        assert [fact["id"] for fact in agent_view.json()["facts"]] == [fact_id]
+
+        # Fact CRUD without the bucket selector cannot touch the agent's fact.
+        wrong_bucket = client.patch(f"/api/memory/facts/{fact_id}", json={"content": "hijacked"})
+        assert wrong_bucket.status_code == 404
+
+        updated = client.patch(f"/api/memory/facts/{fact_id}", params={"agent_name": "coding-agent"}, json={"content": "Agent-owned fact v2"})
+        assert updated.status_code == 200
+        assert updated.json()["facts"][0]["content"] == "Agent-owned fact v2"
+
+        deleted = client.delete(f"/api/memory/facts/{fact_id}", params={"agent_name": "coding-agent"})
+        assert deleted.status_code == 200
+        assert deleted.json()["facts"] == []
+
+    facts_root = tmp_path / "users" / "alice" / "agents" / "coding-agent" / "facts"
+    assert facts_root.exists()
+    assert not list(facts_root.glob("**/*.md"))
+
+
+def test_clear_memory_with_agent_name_keeps_summaries_and_other_buckets(tmp_path) -> None:
+    """An agent-scoped clear removes only that bucket's facts."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    memory_path = tmp_path / "users" / "alice" / "memory.json"
+    memory_path.parent.mkdir(parents=True)
+    seeded = _sample_memory()
+    seeded["user"]["workContext"] = {"summary": "Shared user summary", "updatedAt": "2026-03-26T12:00:00Z"}
+    memory_path.write_text(json.dumps(seeded), encoding="utf-8")
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        assert client.post("/api/memory/facts", json={"content": "Default bucket fact", "category": "context", "confidence": 0.8}).status_code == 200
+        assert client.post("/api/memory/facts", params={"agent_name": "coding-agent"}, json={"content": "Agent bucket fact", "category": "context", "confidence": 0.8}).status_code == 200
+
+        cleared = client.delete("/api/memory", params={"agent_name": "coding-agent"})
+        assert cleared.status_code == 200
+
+        # Shared summaries survive the agent-scoped clear.
+        assert cleared.json()["user"]["workContext"]["summary"] == "Shared user summary"
+        # The cleared agent bucket is empty...
+        assert cleared.json()["facts"] == []
+
+        # ...and the default bucket is untouched.
+        default_view = client.get("/api/memory")
+        assert default_view.status_code == 200
+        assert [fact["content"] for fact in default_view.json()["facts"]] == ["Default bucket fact"]
+        assert default_view.json()["user"]["workContext"]["summary"] == "Shared user summary"
 
 
 # ── unsupported-backend 501s ────────────────────────────────────────────────

@@ -652,6 +652,12 @@ export interface Translations {
       filterFacts: string;
       filterSummaries: string;
       noMatches: string;
+      agentScopeLabel: string;
+      agentScopeDefault: string;
+      clearAgent: string;
+      clearAgentConfirmTitle: string;
+      clearAgentConfirmDescription: string;
+      clearAgentSuccess: string;
       markdown: {
         overview: string;
         userContext: string;

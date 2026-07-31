@@ -14,10 +14,19 @@ import type {
   UserMemory,
 } from "./types";
 
-export function useMemory() {
+/**
+ * Memory queries are keyed by fact bucket: `["memory", agentName]`, where a
+ * null agentName selects the default bucket. Summaries are user-global and
+ * therefore identical across buckets, but facts are per-agent, so every
+ * bucket keeps its own cache entry. Mutations carry the agentName they
+ * operated on and refresh exactly that cache entry, so switching the
+ * selection while a mutation is in flight cannot write the response into the
+ * wrong bucket's cache.
+ */
+export function useMemory(agentName: string | null = null) {
   const { data, isLoading, error } = useQuery({
-    queryKey: ["memory"],
-    queryFn: () => loadMemory(),
+    queryKey: ["memory", agentName],
+    queryFn: () => loadMemory(agentName),
   });
   return { memory: data ?? null, isLoading, error };
 }
@@ -26,9 +35,14 @@ export function useClearMemory() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: () => clearMemory(),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    mutationFn: (agentName: string | null) => clearMemory(agentName),
+    onSuccess: (memory, agentName) => {
+      queryClient.setQueryData<UserMemory>(["memory", agentName], memory);
+      if (agentName === null) {
+        // An unscoped clear wipes every agent's facts and the shared
+        // summaries, so all bucket caches are stale.
+        void queryClient.invalidateQueries({ queryKey: ["memory"] });
+      }
     },
   });
 }
@@ -37,9 +51,15 @@ export function useDeleteMemoryFact() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (factId: string) => deleteMemoryFact(factId),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    mutationFn: ({
+      factId,
+      agentName,
+    }: {
+      factId: string;
+      agentName: string | null;
+    }) => deleteMemoryFact(factId, agentName),
+    onSuccess: (memory, { agentName }) => {
+      queryClient.setQueryData<UserMemory>(["memory", agentName], memory);
     },
   });
 }
@@ -48,9 +68,18 @@ export function useImportMemory() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (memory: UserMemory) => importMemory(memory),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    mutationFn: ({
+      memory,
+      agentName,
+    }: {
+      memory: UserMemory;
+      agentName: string | null;
+    }) => importMemory(memory, agentName),
+    onSuccess: (memory, { agentName }) => {
+      queryClient.setQueryData<UserMemory>(["memory", agentName], memory);
+      // An import also replaces the user-global summaries shared by every
+      // bucket, so refresh the other buckets' caches too.
+      void queryClient.invalidateQueries({ queryKey: ["memory"] });
     },
   });
 }
@@ -59,9 +88,15 @@ export function useCreateMemoryFact() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: MemoryFactInput) => createMemoryFact(input),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    mutationFn: ({
+      input,
+      agentName,
+    }: {
+      input: MemoryFactInput;
+      agentName: string | null;
+    }) => createMemoryFact(input, agentName),
+    onSuccess: (memory, { agentName }) => {
+      queryClient.setQueryData<UserMemory>(["memory", agentName], memory);
     },
   });
 }
@@ -73,12 +108,14 @@ export function useUpdateMemoryFact() {
     mutationFn: ({
       factId,
       input,
+      agentName,
     }: {
       factId: string;
       input: MemoryFactPatchInput;
-    }) => updateMemoryFact(factId, input),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
+      agentName: string | null;
+    }) => updateMemoryFact(factId, input, agentName),
+    onSuccess: (memory, { agentName }) => {
+      queryClient.setQueryData<UserMemory>(["memory", agentName], memory);
     },
   });
 }
