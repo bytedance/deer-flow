@@ -1,0 +1,10 @@
+{
+  "/": { "css": 150000, "js": 1050000 },
+  "/workspace/chats": { "css": 150000, "js": 2750000 },
+  "/workspace/chats/7cfa5f8f-a2f8-47ad-acbd-da7137baf990": {
+    "css": 150000,
+    "js": 3500000
+  },
+  "/en/docs": { "css": 230000, "js": 3000000 },
+  "/blog/posts": { "css": 230000, "js": 3000000 }
+}

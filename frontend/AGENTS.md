@@ -165,3 +165,10 @@ When adding features:
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
+
+Route asset budgets are enforced with `pnpm perf:check`. The command builds in
+static-demo mode, starts the production server on a temporary local port, measures
+the unique JavaScript and CSS files referenced by representative routes, writes the
+detailed result to `.next/performance-results.json`, and compares totals with
+`performance-budgets.json`. Fix route ownership or split points when a budget fails;
+do not raise a ceiling without documenting and reviewing the measured regression.

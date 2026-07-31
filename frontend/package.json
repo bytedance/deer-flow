@@ -12,6 +12,7 @@
     "format:write": "prettier --write .",
     "lint": "eslint . --ext .ts,.tsx",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "perf:check": "node scripts/measure-route-assets.mjs --check",
     "preview": "next build && next start",
     "start": "next start",
     "test": "rstest",
