@@ -603,6 +603,31 @@ describe("human message internal context stripping", () => {
     ]);
   });
 
+  test("parses uploaded filenames that contain parentheses", () => {
+    // Browsers name duplicate downloads "photo (1).png"; the backend emits the
+    // filename verbatim, so the parser must not stop the name at the first "(".
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- photo (1).png (12.3 KB)\n  Path: /mnt/user-data/uploads/photo (1).png\n- report (final) (2).docx (1.5 MB)\n  Path: /mnt/user-data/uploads/report (final) (2).docx\n- normal.pdf (3.0 KB)\n  Path: /mnt/user-data/uploads/normal.pdf\n</current_uploads>\n\nSummarize";
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "photo (1).png",
+        size: Math.round(12.3 * 1024),
+        path: "/mnt/user-data/uploads/photo (1).png",
+      },
+      {
+        filename: "report (final) (2).docx",
+        size: Math.round(1.5 * 1024 * 1024),
+        path: "/mnt/user-data/uploads/report (final) (2).docx",
+      },
+      {
+        filename: "normal.pdf",
+        size: 3 * 1024,
+        path: "/mnt/user-data/uploads/normal.pdf",
+      },
+    ]);
+  });
+
   test("stripInternalMarkers removes current_uploads blocks on export", () => {
     const content =
       "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";

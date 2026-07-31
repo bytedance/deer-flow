@@ -435,6 +435,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="orcarouter",
+        display_name="OrcaRouter",
+        description="OpenAI-compatible adaptive routing gateway",
+        use="langchain_openai:ChatOpenAI",
+        models=["openai/gpt-5.5", "anthropic/claude-opus-4.8", "google/gemini-3.5-flash", "orcarouter/auto"],
+        default_model="openai/gpt-5.5",
+        env_var="ORCAROUTER_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.orcarouter.ai/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",

@@ -61,6 +61,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
+from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -983,6 +984,63 @@ async def apply_checkpoint_to_run_config(
         configurable["checkpoint_map"] = checkpoint_map
 
 
+async def ensure_checkpoint_history_seeded(
+    request: Request,
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+) -> None:
+    """Backfill an empty run-event feed from an existing checkpoint head.
+
+    No-op unless the feed is empty AND a checkpoint head with messages
+    exists — i.e. a legacy checkpoint-only thread facing its first journaled
+    run. This is a migration shim: remove it once pre-journal threads are no
+    longer a supported upgrade source. The info log on a successful seed is
+    the observability hook for that decision — when it stops appearing, the
+    shim is dead.
+    """
+    event_store = request.app.state.run_event_store
+    # The emptiness check is deliberately thread-scoped, never user-scoped:
+    # seed rows may be stamped with a different principal (NULL for ownerless
+    # seeds, or another user on a shared NULL-owner thread), so a user-scoped
+    # query would miss them and re-seed a duplicate history per principal.
+    # Passing user_id=None also opts out of AUTO resolution explicitly, which
+    # would raise when no user contextvar is set (e.g. the scheduler launch
+    # path for ownerless internal tasks).
+    if await event_store.list_messages(thread_id, limit=1, user_id=None):
+        return
+
+    checkpoint_config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": "",
+        }
+    }
+    if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
+        return
+
+    accessor, config = build_checkpoint_state_accessor(
+        request,
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+    )
+    snapshot = await accessor.aget(config)
+    values = getattr(snapshot, "values", None)
+    messages = values.get("messages") if isinstance(values, dict) else None
+    if not isinstance(messages, list) or not messages:
+        return
+
+    events = build_checkpoint_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=f"checkpoint-seed-{thread_id}",
+    )
+    if not events:
+        return
+    await event_store.put_batch(events)
+    logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -1156,6 +1214,11 @@ async def start_run(
 
         try:
             async with goal_thread_lock(thread_id):
+                await ensure_checkpoint_history_seeded(
+                    request,
+                    thread_id=thread_id,
+                    assistant_id=body.assistant_id,
+                )
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,

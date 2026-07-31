@@ -1,6 +1,16 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { toast } from "sonner";
 
-import { loadMCPConfig, MCPConfigRequestError, updateMCPConfig } from "./api";
+import {
+  loadMCPConfig,
+  MCPConfigRequestError,
+  updateMCPServerState,
+} from "./api";
 
 export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
@@ -12,35 +22,23 @@ export function useMCPConfig() {
   return { config: data, isLoading, error };
 }
 
+interface EnableMCPServerVariables {
+  serverName: string;
+  enabled: boolean;
+}
+
+export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
+  return {
+    mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
+      updateMCPServerState(serverName, enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+    onError: (error: Error) => {
+      toast.error(error.message);
+    },
+  };
+}
+
 export function useEnableMCPServer() {
   const queryClient = useQueryClient();
-  const { config } = useMCPConfig();
-  return useMutation({
-    mutationFn: async ({
-      serverName,
-      enabled,
-    }: {
-      serverName: string;
-      enabled: boolean;
-    }) => {
-      if (!config) {
-        throw new Error("MCP config not found");
-      }
-      if (!config.mcp_servers[serverName]) {
-        throw new Error(`MCP server ${serverName} not found`);
-      }
-      await updateMCPConfig({
-        mcp_servers: {
-          ...config.mcp_servers,
-          [serverName]: {
-            ...config.mcp_servers[serverName],
-            enabled,
-          },
-        },
-      });
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["mcpConfig"] });
-    },
-  });
+  return useMutation(getEnableMCPServerMutationOptions(queryClient));
 }

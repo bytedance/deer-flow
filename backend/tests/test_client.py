@@ -1861,10 +1861,8 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
 
-        ext_config = ExtensionsConfig()
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({}, f)
+            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
             tmp_path = Path(f.name)
 
         try:
@@ -1881,12 +1879,37 @@ class TestSkillsManagement:
                     side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
                 ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
             assert client._agent is None  # M2: agent invalidated
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"]["untouched-skill"] == {"enabled": False}
+        finally:
+            tmp_path.unlink()
+
+    def test_update_skill_persists_state_when_source_omits_skills(self, client):
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"mcpServers": {}}, f)
+            tmp_path = Path(f.name)
+
+        try:
+            with (
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                patch("deerflow.client.reload_extensions_config"),
+            ):
+                client.update_skill("test-skill", enabled=False)
+
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"] == {"test-skill": {"enabled": False}}
         finally:
             tmp_path.unlink()
 

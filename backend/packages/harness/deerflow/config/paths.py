@@ -258,6 +258,32 @@ class Paths:
         """
         return self.base_dir / "integrations" / "skills"
 
+    @property
+    def skills_view_dir(self) -> Path:
+        """Global sandbox-visible skills projection: ``{base_dir}/skills_view/``."""
+        return self.base_dir / "skills_view"
+
+    @property
+    def public_skills_view_dir(self) -> Path:
+        """Enabled public skills exposed to sandboxes."""
+        return self.skills_view_dir / "public"
+
+    def user_skills_view_dir(self, user_id: str) -> Path:
+        """Per-user sandbox-visible skills projection root."""
+        return self.user_dir(user_id) / "skills_view"
+
+    def user_custom_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled custom skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "custom"
+
+    def user_legacy_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled legacy skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "legacy"
+
+    def user_integration_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled managed integration skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "integrations"
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.

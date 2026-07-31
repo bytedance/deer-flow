@@ -393,6 +393,36 @@ deployment needs additional trusted launchers.
 }
 ```
 
+#### Update One MCP Server State
+
+Enable or disable one configured MCP server without replacing the full
+extensions configuration.
+
+```http
+PATCH /api/mcp/config
+Content-Type: application/json
+```
+
+Requires an authenticated admin session. Enabling a `stdio` server validates
+that server's `command` against the same allowlist used by the full `PUT`
+endpoint. Disabling a server does not require its command to be allowlisted, and
+invalid commands on other servers do not block the update. The endpoint
+preserves secrets, environment-variable placeholders, skills, custom server
+fields, and other top-level extensions config. SSE/HTTP targets may use either
+DeerFlow's `type` field or the MCP-spec `transport` field.
+
+**Request Body:**
+```json
+{
+  "server_name": "semantic-scholar",
+  "enabled": false
+}
+```
+
+The response is the full masked MCP configuration, matching `GET` and `PUT`.
+An unknown `server_name` returns `404`; attempting to enable a server with a
+disallowed `stdio` command returns `400`.
+
 #### Reset MCP Tools Cache
 
 Clear cached MCP tools and persistent MCP sessions process-wide. This affects
