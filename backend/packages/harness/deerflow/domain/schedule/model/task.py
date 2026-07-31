@@ -82,6 +82,15 @@ class ScheduledTask:
     last_thread_id: str | None = None
     last_error: str | None = None
     run_count: int = 0
+    version: int = 0
+    """Optimistic-concurrency token, owned by the storage write path.
+
+    Every committed write -- `save`'s compare-and-set, `record_launch`,
+    `record_completion` -- increments the stored value. The aggregate's own
+    transitions deliberately leave it alone: it identifies the snapshot this
+    aggregate was read from, which is exactly what `save` compares against
+    to refuse a write racing the run lifecycle (`ConcurrentUpdateError`).
+    """
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 

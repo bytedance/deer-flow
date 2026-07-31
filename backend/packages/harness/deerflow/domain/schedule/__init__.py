@@ -18,10 +18,12 @@ from deerflow.domain.schedule.commands import (
 )
 from deerflow.domain.schedule.exceptions import (
     ActiveRunConflictError,
+    ConcurrentUpdateError,
     CorruptStoredScheduleError,
     InvalidContextModeError,
     InvalidScheduleError,
     LaunchFailedError,
+    LaunchIndeterminateError,
     ScheduleError,
     TaskNotFoundError,
     TaskNotMutableError,
@@ -51,6 +53,7 @@ __all__ = [
     "TERMINAL_TASK_STATUSES",
     "UNSET",
     "ActiveRunConflictError",
+    "ConcurrentUpdateError",
     "ContextChange",
     "ContextMode",
     "CorruptStoredScheduleError",
@@ -61,6 +64,7 @@ __all__ = [
     "InvalidContextModeError",
     "InvalidScheduleError",
     "LaunchFailedError",
+    "LaunchIndeterminateError",
     "PauseTask",
     "ResumeTask",
     "RunStatus",

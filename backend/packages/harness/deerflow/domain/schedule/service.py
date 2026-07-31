@@ -30,6 +30,7 @@ from deerflow.domain.schedule.commands import (
 )
 from deerflow.domain.schedule.exceptions import (
     ActiveRunConflictError,
+    ConcurrentUpdateError,
     LaunchFailedError,
     LaunchIndeterminateError,
     TaskNotFoundError,
@@ -55,6 +56,11 @@ from deerflow.domain.schedule.ports import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How many times a read-modify-write is re-attempted when its version CAS
+# loses to a concurrent dispatch/completion write before the conflict is
+# surfaced to the caller.
+_SAVE_ATTEMPTS = 3
 
 # Shared so the has_active fast path and the active-slot race path produce
 # byte-identical outcomes for the same "task already has an active run"
@@ -167,33 +173,40 @@ class ScheduleService:
         transitions, so the re-arm rule and the running-task gate cannot be
         bypassed by patching fields directly.
         """
-        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
-        task.ensure_mutable()
 
-        if cmd.context is not UNSET:
-            task = task.with_context(cmd.context.context_mode, cmd.context.thread_id)
-            await self._require_thread(task)
-        if cmd.schedule is not UNSET:
-            task = task.with_schedule(cmd.schedule, now=now, policy=self._policy)
-        if cmd.title is not UNSET:
-            task = replace(task, title=cmd.title)
-        if cmd.prompt is not UNSET:
-            task = replace(task, prompt=cmd.prompt)
+        async def apply(task: ScheduledTask) -> ScheduledTask:
+            task.ensure_mutable()
+            if cmd.context is not UNSET:
+                task = task.with_context(cmd.context.context_mode, cmd.context.thread_id)
+                await self._require_thread(task)
+            if cmd.schedule is not UNSET:
+                task = task.with_schedule(cmd.schedule, now=now, policy=self._policy)
+            if cmd.title is not UNSET:
+                task = replace(task, title=cmd.title)
+            if cmd.prompt is not UNSET:
+                task = replace(task, prompt=cmd.prompt)
+            return task
 
-        return await self._save(task)
+        return await self._mutate_task(cmd.task_id, cmd.user_id, apply)
 
     async def pause_task(self, cmd: PauseTask) -> ScheduledTask:
         """Stop claiming this task until it is resumed.
 
         Refused while the task is being dispatched -- see `ensure_mutable`.
         """
-        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
-        return await self._save(task.paused())
+
+        async def apply(task: ScheduledTask) -> ScheduledTask:
+            return task.paused()
+
+        return await self._mutate_task(cmd.task_id, cmd.user_id, apply)
 
     async def resume_task(self, cmd: ResumeTask) -> ScheduledTask:
         """Re-admit this task to claiming. Same gate as `pause_task`."""
-        task = await self.get_task(cmd.task_id, user_id=cmd.user_id)
-        return await self._save(task.resumed())
+
+        async def apply(task: ScheduledTask) -> ScheduledTask:
+            return task.resumed()
+
+        return await self._mutate_task(cmd.task_id, cmd.user_id, apply)
 
     async def delete_task(self, cmd: DeleteTask) -> None:
         """Deleting is deliberately not gated on the task being idle: the
@@ -361,14 +374,36 @@ class ScheduleService:
         if not task.thread_id or not await self._threads.exists_for_user(task.thread_id, task.user_id):
             raise ThreadNotFoundError("Thread not found")
 
-    async def _save(self, task: ScheduledTask) -> ScheduledTask:
-        """Persist an already-validated aggregate.
+    async def _mutate_task(self, task_id: str, user_id: str, apply) -> ScheduledTask:
+        """Read-modify-write with optimistic retry.
 
-        Read-modify-write rather than a conditional UPDATE: pushing the
-        "not while running" rule into a storage predicate would put it beyond
-        the reach of a zero-IO test and give it a second home. The pre-existing
-        code had the same shape, and closing the window properly needs
-        optimistic locking, which needs a schema change.
+        `save` is a version compare-and-set, so a dispatch or completion
+        committing between this read and this write is detected rather than
+        overwritten -- a stale aggregate would roll back `next_run_at`,
+        `run_count`, and `last_run_id`, and the next poll would re-launch an
+        already-executed occurrence. On conflict the intent is re-applied to a
+        fresh read (re-validating every aggregate rule against current state);
+        a write that keeps losing surfaces ConcurrentUpdateError after
+        `_SAVE_ATTEMPTS` rounds instead of spinning.
+
+        The business rules stay in `apply` (aggregate transitions), not in a
+        storage predicate: the version comparison is the only thing the
+        repository decides.
+        """
+        for attempt in range(_SAVE_ATTEMPTS):
+            task = await self.get_task(task_id, user_id=user_id)
+            try:
+                return await self._save(await apply(task))
+            except ConcurrentUpdateError:
+                if attempt == _SAVE_ATTEMPTS - 1:
+                    raise
+        raise AssertionError("unreachable: the loop either returns or re-raises")
+
+    async def _save(self, task: ScheduledTask) -> ScheduledTask:
+        """Persist an already-validated aggregate through the version CAS.
+
+        Raises TaskNotFoundError when the row is absent or owned by someone
+        else; lets ConcurrentUpdateError propagate to the retry loop above.
         """
         saved = await self._tasks.save(task)
         if saved is None:

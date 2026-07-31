@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
-from deerflow.domain.schedule.exceptions import ActiveRunConflictError
+from deerflow.domain.schedule.exceptions import ActiveRunConflictError, ConcurrentUpdateError
 from deerflow.domain.schedule.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -87,8 +87,10 @@ class InMemoryScheduledTaskRepository:
         row = self._rows.get(task.task_id)
         if row is None or row.task.user_id != task.user_id:
             return None
-        row.task = task
-        return task
+        if row.task.version != task.version:
+            raise ConcurrentUpdateError(f"scheduled task {task.task_id!r} was modified concurrently (expected version {task.version}, stored {row.task.version})")
+        row.task = replace(task, version=task.version + 1)
+        return row.task
 
     async def delete(self, task_id: str, *, user_id: str) -> bool:
         row = self._rows.get(task_id)
@@ -118,7 +120,7 @@ class InMemoryScheduledTaskRepository:
             # Stands in for whatever identity a real adapter records.
             row.lease_owner = "fake-worker"
             row.lease_expires_at = now + timedelta(seconds=lease_seconds)
-            row.task = replace(row.task, status=TaskStatus.RUNNING)
+            row.task = replace(row.task, status=TaskStatus.RUNNING, version=row.task.version + 1)
             claimed.append(row.task)
         return claimed
 
@@ -150,7 +152,7 @@ class InMemoryScheduledTaskRepository:
         )
         if increment_run_count:
             task = replace(task, run_count=task.run_count + 1)
-        row.task = task
+        row.task = replace(task, version=task.version + 1)
         row.lease_owner = None
         row.lease_expires_at = None
 
@@ -166,7 +168,7 @@ class InMemoryScheduledTaskRepository:
         if row is None or row.task.user_id != user_id:
             return
         # Only the verdict; every scheduling field belongs to record_launch.
-        row.task = replace(row.task, last_error=error)
+        row.task = replace(row.task, last_error=error, version=row.task.version + 1)
         if status is not None:
             row.task = replace(row.task, status=status)
 
@@ -175,7 +177,7 @@ class InMemoryScheduledTaskRepository:
         for row in self._rows.values():
             stuck = row.task.status is TaskStatus.RUNNING and row.task.schedule.schedule_type is ScheduleType.ONCE and row.lease_expires_at is None
             if stuck:
-                row.task = replace(row.task, status=TaskStatus.CANCELLED, last_error=error)
+                row.task = replace(row.task, status=TaskStatus.CANCELLED, last_error=error, version=row.task.version + 1)
                 cancelled += 1
         return cancelled
 

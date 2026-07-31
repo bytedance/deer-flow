@@ -44,6 +44,16 @@ class CorruptStoredScheduleError(ScheduleError):
     """
 
 
+class ConcurrentUpdateError(ScheduleError):
+    """The aggregate changed between this caller's read and its write.
+
+    Raised by the task repository's `save` when the stored version no longer
+    matches the aggregate's -- a dispatch or completion committed in between.
+    The service retries the read-modify-write a bounded number of times and
+    then lets this surface; the router maps it to a retryable conflict.
+    """
+
+
 class ActiveRunConflictError(ScheduleError):
     """The task already holds its single active run slot.
 

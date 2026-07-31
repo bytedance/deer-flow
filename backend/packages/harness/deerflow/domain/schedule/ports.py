@@ -90,13 +90,25 @@ class ScheduledTaskRepository(Protocol):
         ...
 
     async def save(self, task: ScheduledTask) -> ScheduledTask | None:
-        """Persist a whole aggregate, keyed by its own id and owner.
+        """Persist a whole aggregate -- a compare-and-set on its version.
+
+        The write commits only when the stored version still equals
+        `task.version`; the stored value is then incremented and the stored
+        state returned. A mismatch raises ConcurrentUpdateError: the aggregate
+        was read before a dispatch/completion committed, and replacing the row
+        would roll back the fields those writes own (`next_run_at`,
+        `run_count`, `last_run_id`), re-arming an already-executed occurrence.
 
         Whole-aggregate replacement rather than a field patch: the aggregate is
         immutable, so a caller that changed anything is holding a complete new
-        value. Returns None when the row is absent or owned by someone else.
+        value -- the version check is what makes that shape safe. Returns None
+        when the row is absent or owned by someone else.
 
         Not to be used for the post-dispatch write -- see `record_launch`.
+
+        Raises:
+            ConcurrentUpdateError: the stored version moved past
+                `task.version` since the caller's read.
         """
         ...
 
@@ -151,7 +163,9 @@ class ScheduledTaskRepository(Protocol):
         aggregate would reintroduce the very race the flag exists to close.
 
         Every field is assigned unconditionally, so a caller preserving a value
-        must pass the current one back. The claim is always released.
+        must pass the current one back. The claim is always released. Like
+        every committed write, this increments the stored version so a stale
+        `save` racing it is refused.
         """
         ...
 
@@ -185,7 +199,9 @@ class ScheduledTaskRepository(Protocol):
 
         Scoped by `user_id` like every other read: a task belonging to someone
         else is left alone rather than reported. An unknown task is ignored --
-        one deleted mid-flight simply has nothing to update.
+        one deleted mid-flight simply has nothing to update. Like every
+        committed write, this increments the stored version so a stale `save`
+        racing it is refused.
         """
         ...
 

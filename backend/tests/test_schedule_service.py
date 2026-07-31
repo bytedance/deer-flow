@@ -35,6 +35,7 @@ from deerflow.domain.schedule.commands import (
     UpdateScheduledTask,
 )
 from deerflow.domain.schedule.exceptions import (
+    ConcurrentUpdateError,
     InvalidScheduleError,
     LaunchFailedError,
     LaunchIndeterminateError,
@@ -915,7 +916,10 @@ class TestTaskManagement:
 
         updated = await service.update_scheduled_task(UpdateScheduledTask(task_id=task.task_id, user_id="user-1"), now=NOW)
 
-        assert updated == task
+        # The write still commits (and bumps the version -- every committed
+        # write does), but no business field moves.
+        assert updated == replace(task, version=updated.version)
+        assert updated.version == task.version + 1
 
     async def test_update_can_change_the_prompt(self):
         service = make_service()
@@ -1045,3 +1049,79 @@ class TestTaskManagement:
         assert await service.list_tasks("someone-else") == []
         by_thread = await service.list_tasks_by_thread("user-1", "thread-1")
         assert [t.task_id for t in by_thread] == [bound.task_id]
+
+
+class _AlwaysStaleTaskRepo(_LaunchWritesMidReadTaskRepo):
+    """Every read races a `record_launch` commit, so no save can ever win."""
+
+    async def get(self, task_id: str, *, user_id: str):
+        self.arm()
+        return await super().get(task_id, user_id=user_id)
+
+
+class TestOptimisticLocking:
+    """A stale aggregate must not overwrite fields the run lifecycle owns.
+
+    `update/pause/resume` read the aggregate and later persist it whole; a
+    dispatch or completion can commit between those two operations. The save
+    is therefore a version compare-and-set: a stale write is refused, the
+    service re-reads and re-applies its intent, and only the requested change
+    lands -- never a rollback of `next_run_at` / `run_count` / `last_run_id`.
+    """
+
+    async def test_a_stale_update_does_not_roll_back_run_lifecycle_fields(self):
+        launch_next = NOW + timedelta(hours=1)
+        tasks = _LaunchWritesMidReadTaskRepo(launch_next_run_at=launch_next)
+        service = make_service(tasks=tasks)
+        task = await create_cron_task(service)
+        tasks.arm()
+
+        updated = await service.update_scheduled_task(
+            UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="Renamed"),
+            now=NOW,
+        )
+
+        assert updated.title == "Renamed"
+        # The launch bookkeeping that committed mid-update survives; on the
+        # whole-aggregate write shape these roll back and the next poll
+        # re-launches an already-executed occurrence.
+        assert updated.run_count == 1
+        assert updated.last_run_id == "run-1"
+        assert updated.next_run_at == launch_next
+
+    async def test_a_stale_pause_does_not_roll_back_run_lifecycle_fields(self):
+        launch_next = NOW + timedelta(hours=1)
+        tasks = _LaunchWritesMidReadTaskRepo(launch_next_run_at=launch_next)
+        service = make_service(tasks=tasks)
+        task = await create_cron_task(service)
+        tasks.arm()
+
+        updated = await service.pause_task(PauseTask(task_id=task.task_id, user_id="user-1"))
+
+        assert updated.status is TaskStatus.PAUSED
+        assert updated.run_count == 1
+        assert updated.next_run_at == launch_next
+
+    async def test_conflicts_exhaust_bounded_retries_and_surface(self):
+        """The retry loop is bounded: a write that keeps losing must surface
+        the conflict rather than spin or silently overwrite."""
+        tasks = _AlwaysStaleTaskRepo(launch_next_run_at=NOW + timedelta(hours=1))
+        service = make_service(tasks=tasks)
+        task = await create_cron_task(service)
+
+        with pytest.raises(ConcurrentUpdateError):
+            await service.update_scheduled_task(
+                UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="Renamed"),
+                now=NOW,
+            )
+
+    async def test_a_clean_save_bumps_the_version(self):
+        service = make_service()
+        task = await create_cron_task(service)
+
+        renamed = await service.update_scheduled_task(
+            UpdateScheduledTask(task_id=task.task_id, user_id="user-1", title="Renamed"),
+            now=NOW,
+        )
+
+        assert renamed.version == task.version + 1
