@@ -24,14 +24,12 @@ from schedule_fakes import (
 )
 
 from deerflow.domain.schedule.commands import (
-    UNSET,
     ContextChange,
     CreateScheduledTask,
     DeleteTask,
     PauseTask,
     ResumeTask,
     TriggerTask,
-    UnsetType,
     UpdateScheduledTask,
 )
 from deerflow.domain.schedule.exceptions import (
@@ -947,15 +945,16 @@ class TestTaskManagement:
         cmd = CreateScheduledTask(user_id="u", title="", prompt="", schedule=CRON, context_mode="not-a-mode", thread_id=None)
         assert cmd.context_mode == "not-a-mode"
 
-    async def test_unset_is_a_singleton_distinct_from_none(self):
-        # Three states, not two: an update field is UNSET (leave it alone),
-        # None can stay a meaningful value elsewhere, and UNSET is falsy so
-        # it cannot masquerade as a supplied value.
-        assert UnsetType() is UNSET
+    async def test_an_omitted_update_field_defaults_to_none(self):
+        # None means "not supplied" on every top-level update field. That is
+        # safe because none of them admits null as a business value -- the one
+        # nullable field, thread_id, travels inside ContextChange where None
+        # is unambiguous.
         cmd = UpdateScheduledTask(task_id="t", user_id="u")
-        assert cmd.title is UNSET
-        assert cmd.title is not None
-        assert not UNSET
+        assert cmd.title is None
+        assert cmd.prompt is None
+        assert cmd.schedule is None
+        assert cmd.context is None
 
     async def test_update_leaves_omitted_fields_alone(self):
         service = make_service()
@@ -967,7 +966,7 @@ class TestTaskManagement:
         assert updated.prompt == task.prompt
         assert updated.schedule == task.schedule
 
-    async def test_update_with_everything_unset_changes_nothing(self):
+    async def test_update_with_everything_omitted_changes_nothing(self):
         service = make_service()
         task = await create_cron_task(service)
 

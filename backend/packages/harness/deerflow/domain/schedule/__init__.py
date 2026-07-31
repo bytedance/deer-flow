@@ -6,14 +6,12 @@ are contracts consumed by adapters and tests, not everyday call-site symbols.
 """
 
 from deerflow.domain.schedule.commands import (
-    UNSET,
     ContextChange,
     CreateScheduledTask,
     DeleteTask,
     PauseTask,
     ResumeTask,
     TriggerTask,
-    UnsetType,
     UpdateScheduledTask,
 )
 from deerflow.domain.schedule.exceptions import (
@@ -51,7 +49,6 @@ __all__ = [
     "ACTIVE_RUN_STATUSES",
     "TERMINAL_RUN_STATUSES",
     "TERMINAL_TASK_STATUSES",
-    "UNSET",
     "ActiveRunConflictError",
     "ConcurrentUpdateError",
     "ContextChange",
@@ -82,6 +79,5 @@ __all__ = [
     "ThreadNotFoundError",
     "TriggerKind",
     "TriggerTask",
-    "UnsetType",
     "UpdateScheduledTask",
 ]

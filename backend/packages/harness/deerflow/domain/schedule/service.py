@@ -20,7 +20,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 
 from deerflow.domain.schedule.commands import (
-    UNSET,
     CreateScheduledTask,
     DeleteTask,
     PauseTask,
@@ -164,10 +163,11 @@ class ScheduleService:
         return await self._tasks.add(task)
 
     async def update_scheduled_task(self, cmd: UpdateScheduledTask, *, now: datetime) -> ScheduledTask:
-        """Partially update a task; ``UNSET`` means "not supplied".
+        """Partially update a task; ``None`` means "not supplied".
 
-        The one field for which ``None`` is a meaningful value, `thread_id`,
-        travels inside `ContextChange` where it is unambiguous.
+        Safe because every command field is non-nullable as a business value;
+        the one field for which ``None`` is meaningful, `thread_id`, travels
+        inside `ContextChange` where it is unambiguous.
 
         Context and schedule are applied through the aggregate's own
         transitions, so the re-arm rule and the running-task gate cannot be
@@ -176,14 +176,14 @@ class ScheduleService:
 
         async def apply(task: ScheduledTask) -> ScheduledTask:
             task.ensure_mutable()
-            if cmd.context is not UNSET:
+            if cmd.context is not None:
                 task = task.with_context(cmd.context.context_mode, cmd.context.thread_id)
                 await self._require_thread(task)
-            if cmd.schedule is not UNSET:
+            if cmd.schedule is not None:
                 task = task.with_schedule(cmd.schedule, now=now, policy=self._policy)
-            if cmd.title is not UNSET:
+            if cmd.title is not None:
                 task = replace(task, title=cmd.title)
-            if cmd.prompt is not UNSET:
+            if cmd.prompt is not None:
                 task = replace(task, prompt=cmd.prompt)
             return task
 

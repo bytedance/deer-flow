@@ -28,36 +28,10 @@ the client's intent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from deerflow.domain.schedule.model import ContextMode, ScheduleSpec
-
-
-@final
-class UnsetType:
-    """The type of ``UNSET`` -- "the client did not supply this field".
-
-    Partial updates need three states (absent, null, value). ``None`` cannot
-    carry two of them, so absence gets its own singleton; a field that is
-    ``UNSET`` is left untouched by the handler.
-    """
-
-    _instance: UnsetType | None = None
-
-    def __new__(cls) -> UnsetType:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __repr__(self) -> str:
-        return "UNSET"
-
-    def __bool__(self) -> bool:
-        return False
-
-
-UNSET: Final[UnsetType] = UnsetType()
 
 
 @dataclass(frozen=True)
@@ -88,14 +62,21 @@ class CreateScheduledTask:
 
 @dataclass(frozen=True)
 class UpdateScheduledTask:
-    """Partially update a task; ``UNSET`` means "not supplied"."""
+    """Partially update a task; ``None`` means "not supplied".
+
+    ``None`` can double as the absence marker ONLY because every field here
+    is non-nullable as a business value -- there is no "set the title to
+    null". Keep it that way: a future field whose ``None`` is meaningful
+    must travel inside a small change object instead, the way the nullable
+    ``thread_id`` already rides inside ``ContextChange``.
+    """
 
     task_id: str
     user_id: str
-    title: str | UnsetType = UNSET
-    prompt: str | UnsetType = UNSET
-    schedule: ScheduleSpec | UnsetType = UNSET
-    context: ContextChange | UnsetType = UNSET
+    title: str | None = None
+    prompt: str | None = None
+    schedule: ScheduleSpec | None = None
+    context: ContextChange | None = None
 
 
 @dataclass(frozen=True)
