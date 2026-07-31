@@ -279,6 +279,10 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+html.dark .shiki span {
+  color: var(--shiki-dark) !important;
+}
+
 .dark {
   --background: oklch(0.24 0.0036 106.64);
   --foreground: oklch(0.985 0 0);

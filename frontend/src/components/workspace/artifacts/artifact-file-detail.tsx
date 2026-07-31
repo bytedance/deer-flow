@@ -625,6 +625,7 @@ export function ArtifactFileDetail({
               }));
             }}
             onSave={() => void handleSave()}
+            language={language}
           />
         )}
         {!isCodeFile && canPreviewInBrowser && (
