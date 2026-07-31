@@ -18,6 +18,22 @@ export const zhCN: Translations = {
   },
 
   // Common
+  feedback: {
+    thumbsUp: "点赞",
+    thumbsDown: "点踩",
+    dialogTitle: "分享反馈",
+    detailsPlaceholder: "分享详细信息（可选）",
+    submit: "提交",
+    submitFailed: "反馈保存失败，请重试。",
+    tags: {
+      incorrect: "不正确或不完整",
+      notAsExpected: "与期望不符",
+      slow: "速度慢或存在问题",
+      styleTone: "风格或语气",
+      safetyLegal: "安全或法律疑虑",
+      other: "其他",
+    },
+  },
   common: {
     home: "首页",
     settings: "设置",

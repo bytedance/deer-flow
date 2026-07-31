@@ -25,6 +25,7 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import type { FeedbackData } from "@/core/api/feedback";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -86,7 +87,7 @@ import {
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
 import { MessageGroup } from "./message-group";
-import { MessageListItem } from "./message-list-item";
+import { FeedbackButtons, MessageListItem } from "./message-list-item";
 import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
@@ -828,10 +829,26 @@ export function MessageList({
       if (!clipboardData && !actionTarget) {
         return null;
       }
+      // Feedback echoes back on the run's last AI message (attached by the
+      // message-list endpoints); the turn's action bar owns the thumbs.
+      const feedbackTarget = actionTarget as
+        | { run_id?: string; feedback?: FeedbackData | null }
+        | undefined;
+      const feedbackRunId =
+        typeof feedbackTarget?.run_id === "string"
+          ? feedbackTarget.run_id
+          : undefined;
 
       return (
         <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
+          {!isStreaming && feedbackRunId && (
+            <FeedbackButtons
+              threadId={threadId}
+              runId={feedbackRunId}
+              initialFeedback={feedbackTarget?.feedback ?? null}
+            />
+          )}
           {enableBranchForTurn &&
             !isStreaming &&
             actionTarget?.id &&
@@ -919,6 +936,7 @@ export function MessageList({
       replayActionBusy,
       t.common.branch,
       t.common.regenerate,
+      threadId,
     ],
   );
 

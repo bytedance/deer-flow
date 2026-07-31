@@ -7,6 +7,22 @@ export interface Translations {
   };
 
   // Common
+  feedback: {
+    thumbsUp: string;
+    thumbsDown: string;
+    dialogTitle: string;
+    detailsPlaceholder: string;
+    submit: string;
+    submitFailed: string;
+    tags: {
+      incorrect: string;
+      notAsExpected: string;
+      slow: string;
+      styleTone: string;
+      safetyLegal: string;
+      other: string;
+    };
+  };
   common: {
     home: string;
     settings: string;

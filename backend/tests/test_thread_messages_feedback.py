@@ -15,6 +15,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import thread_runs
+from deerflow.domain.feedback import Feedback
 from deerflow.runtime.runs.manager import EditReplayVisibility
 
 
@@ -26,9 +27,9 @@ def _make_app(messages, feedback_grouped):
     event_store.list_messages = AsyncMock(return_value=messages)
     app.state.run_event_store = event_store
 
-    feedback_repo = MagicMock()
-    feedback_repo.list_by_thread_grouped = AsyncMock(return_value=feedback_grouped)
-    app.state.feedback_repo = feedback_repo
+    feedback_service = MagicMock()
+    feedback_service.latest_per_run_in_thread = AsyncMock(return_value=feedback_grouped)
+    app.state.feedback_service = feedback_service
 
     # list_thread_messages also calls run_manager.list_by_thread to inject
     # turn durations; stub it to return no runs so that path stays inert.
@@ -38,7 +39,7 @@ def _make_app(messages, feedback_grouped):
     run_manager.list_by_thread = AsyncMock(return_value=[])
     app.state.run_manager = run_manager
 
-    return app, feedback_repo
+    return app, feedback_service
 
 
 def _ai(run_id: str, seq: int, content: str) -> dict:
@@ -56,8 +57,8 @@ def test_feedback_attached_to_last_ai_message_per_run():
         _ai("r1", 3, "final answer"),  # last AI of r1 -> should get feedback
         _ai("r2", 4, "other run"),  # last AI of r2 -> no feedback row
     ]
-    grouped = {"r1": {"feedback_id": "fb-1", "rating": "up", "comment": "nice"}}
-    app, feedback_repo = _make_app(messages, grouped)
+    grouped = {"r1": Feedback(feedback_id="fb-1", run_id="r1", thread_id="t1", rating=1, comment="nice")}
+    app, feedback_service = _make_app(messages, grouped)
 
     resp = TestClient(app).get("/api/threads/t1/messages")
     assert resp.status_code == 200
@@ -65,21 +66,21 @@ def test_feedback_attached_to_last_ai_message_per_run():
 
     by_seq = {m["seq"]: m for m in data}
     # The bug: this used to be None for every message.
-    assert by_seq[3]["feedback"] == {"feedback_id": "fb-1", "rating": "up", "comment": "nice"}
+    assert by_seq[3]["feedback"] == {"feedback_id": "fb-1", "rating": 1, "comment": "nice", "tags": []}
     # Earlier AI message of the same run and the human message get no feedback.
     assert by_seq[2]["feedback"] is None
     assert by_seq[1]["feedback"] is None
     # r2's last AI message has no feedback row.
     assert by_seq[4]["feedback"] is None
-    feedback_repo.list_by_thread_grouped.assert_awaited_once()
+    feedback_service.latest_per_run_in_thread.assert_awaited_once()
 
 
 def test_no_feedback_query_when_thread_has_no_ai_message():
     messages = [_human("r1", 1)]
-    app, feedback_repo = _make_app(messages, {})
+    app, feedback_service = _make_app(messages, {})
 
     resp = TestClient(app).get("/api/threads/t1/messages")
     assert resp.status_code == 200
     assert resp.json()[0]["feedback"] is None
     # No AI message -> the grouped feedback query must not run.
-    feedback_repo.list_by_thread_grouped.assert_not_awaited()
+    feedback_service.latest_per_run_in_thread.assert_not_awaited()

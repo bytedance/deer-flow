@@ -1,258 +1,141 @@
-"""Tests for FeedbackRepository and follow-up association.
+"""Contract tests for the FeedbackRepository port.
 
-Uses temp SQLite DB for ORM tests.
+Every implementation (SQL adapter, in-memory fake) runs the same suite, so
+port semantics and implementations cannot drift apart. The in-memory fake
+lives in ``feedback_fakes`` because service-level tests reuse it as a fast
+zero-IO double.
 """
 
 import pytest
+from feedback_fakes import InMemoryFeedbackRepository
 
-from deerflow.persistence.feedback import FeedbackRepository
-
-
-async def _make_feedback_repo(tmp_path):
-    from deerflow.persistence.engine import get_session_factory, init_engine
-
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
-    return FeedbackRepository(get_session_factory())
+from deerflow.domain.feedback import Feedback
+from deerflow.domain.feedback.ports import FeedbackRepository
 
 
-async def _cleanup():
-    from deerflow.persistence.engine import close_engine
-
-    await close_engine()
-
-
-# -- FeedbackRepository --
-
-
-class TestFeedbackRepository:
-    @pytest.mark.anyio
-    async def test_create_positive(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        record = await repo.create(run_id="r1", thread_id="t1", rating=1)
-        assert record["feedback_id"]
-        assert record["rating"] == 1
-        assert record["run_id"] == "r1"
-        assert record["thread_id"] == "t1"
-        assert "created_at" in record
-        await _cleanup()
+class FeedbackRepositoryContract:
+    """Shared port-semantics suite; subclasses provide a ``repo`` fixture."""
 
     @pytest.mark.anyio
-    async def test_create_negative_with_comment(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        record = await repo.create(
-            run_id="r1",
-            thread_id="t1",
-            rating=-1,
-            comment="Response was inaccurate",
+    async def test_satisfies_port(self, repo):
+        assert isinstance(repo, FeedbackRepository)
+
+    @pytest.mark.anyio
+    async def test_save_creates(self, repo):
+        fb = await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        assert fb.feedback_id
+        assert fb.rating == 1
+        assert fb.created_at.tzinfo is not None
+
+    @pytest.mark.anyio
+    async def test_save_updates_keeping_identity(self, repo):
+        first = await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        second = await repo.save(
+            Feedback.create(
+                run_id="r1",
+                thread_id="t1",
+                rating=-1,
+                user_id="u1",
+                comment="changed my mind",
+                tags=["incorrect", "slow"],
+            )
         )
-        assert record["rating"] == -1
-        assert record["comment"] == "Response was inaccurate"
-        await _cleanup()
+        assert second.feedback_id == first.feedback_id
+        assert second.rating == -1
+        assert second.comment == "changed my mind"
+        assert second.tags == ("incorrect", "slow")
 
     @pytest.mark.anyio
-    async def test_create_with_message_id(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        record = await repo.create(run_id="r1", thread_id="t1", rating=1, message_id="msg-42")
-        assert record["message_id"] == "msg-42"
-        await _cleanup()
+    async def test_save_different_users_separate(self, repo):
+        a = await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        b = await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=-1, user_id="u2"))
+        assert a.feedback_id != b.feedback_id
 
     @pytest.mark.anyio
-    async def test_create_with_owner(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        record = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
-        assert record["user_id"] == "user-1"
-        await _cleanup()
+    async def test_latest_per_run_in_thread_scopes_thread_and_owner(self, repo):
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r2", thread_id="t1", rating=-1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r3", thread_id="t2", rating=1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=-1, user_id="u2"))
 
-    @pytest.mark.anyio
-    async def test_create_invalid_rating_zero(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        with pytest.raises(ValueError):
-            await repo.create(run_id="r1", thread_id="t1", rating=0)
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_create_invalid_rating_five(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        with pytest.raises(ValueError):
-            await repo.create(run_id="r1", thread_id="t1", rating=5)
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_get(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        created = await repo.create(run_id="r1", thread_id="t1", rating=1)
-        fetched = await repo.get(created["feedback_id"])
-        assert fetched is not None
-        assert fetched["feedback_id"] == created["feedback_id"]
-        assert fetched["rating"] == 1
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_get_nonexistent(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        assert await repo.get("nonexistent") is None
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_run(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
-        await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-2")
-        await repo.create(run_id="r2", thread_id="t1", rating=1, user_id="user-1")
-        results = await repo.list_by_run("t1", "r1", user_id=None)
-        assert len(results) == 2
-        assert all(r["run_id"] == "r1" for r in results)
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_thread(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.create(run_id="r1", thread_id="t1", rating=1)
-        await repo.create(run_id="r2", thread_id="t1", rating=-1)
-        await repo.create(run_id="r3", thread_id="t2", rating=1)
-        results = await repo.list_by_thread("t1")
-        assert len(results) == 2
-        assert all(r["thread_id"] == "t1" for r in results)
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_delete(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        created = await repo.create(run_id="r1", thread_id="t1", rating=1)
-        deleted = await repo.delete(created["feedback_id"])
-        assert deleted is True
-        assert await repo.get(created["feedback_id"]) is None
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_delete_nonexistent(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        deleted = await repo.delete("nonexistent")
-        assert deleted is False
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_aggregate_by_run(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
-        await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-2")
-        await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="user-3")
-        stats = await repo.aggregate_by_run("t1", "r1")
-        assert stats["total"] == 3
-        assert stats["positive"] == 2
-        assert stats["negative"] == 1
-        assert stats["run_id"] == "r1"
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_aggregate_empty(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        stats = await repo.aggregate_by_run("t1", "r1")
-        assert stats["total"] == 0
-        assert stats["positive"] == 0
-        assert stats["negative"] == 0
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_upsert_creates_new(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        record = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        assert record["rating"] == 1
-        assert record["feedback_id"]
-        assert record["user_id"] == "u1"
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_upsert_updates_existing(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="changed my mind")
-        assert second["feedback_id"] == first["feedback_id"]
-        assert second["rating"] == -1
-        assert second["comment"] == "changed my mind"
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_upsert_different_users_separate(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        r1 = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        r2 = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
-        assert r1["feedback_id"] != r2["feedback_id"]
-        assert r1["rating"] == 1
-        assert r2["rating"] == -1
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_upsert_invalid_rating(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        with pytest.raises(ValueError):
-            await repo.upsert(run_id="r1", thread_id="t1", rating=0, user_id="u1")
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_delete_by_run(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        deleted = await repo.delete_by_run(thread_id="t1", run_id="r1", user_id="u1")
-        assert deleted is True
-        results = await repo.list_by_run("t1", "r1", user_id="u1")
-        assert len(results) == 0
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_delete_by_run_nonexistent(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        deleted = await repo.delete_by_run(thread_id="t1", run_id="r1", user_id="u1")
-        assert deleted is False
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_thread_grouped(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        await repo.upsert(run_id="r2", thread_id="t1", rating=-1, user_id="u1")
-        await repo.upsert(run_id="r3", thread_id="t2", rating=1, user_id="u1")
-        grouped = await repo.list_by_thread_grouped("t1", user_id="u1")
-        assert "r1" in grouped
-        assert "r2" in grouped
-        assert "r3" not in grouped
-        assert grouped["r1"]["rating"] == 1
-        assert grouped["r2"]["rating"] == -1
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_thread_grouped_empty(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        grouped = await repo.list_by_thread_grouped("t1", user_id="u1")
-        assert grouped == {}
-        await _cleanup()
-
-    @pytest.mark.anyio
-    async def test_list_by_run_ids_is_thread_and_owner_scoped(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
-        await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
-        await repo.upsert(run_id="r2", thread_id="t1", rating=-1, user_id="u1")
-        await repo.upsert(run_id="r3", thread_id="t1", rating=1, user_id="u1")
-        await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
-        await repo.upsert(run_id="r2", thread_id="t2", rating=1, user_id="u1")
-
-        grouped = await repo.list_by_run_ids("t1", {"r1", "r2"}, user_id="u1")
+        grouped = await repo.latest_per_run_in_thread("t1", user_id="u1")
 
         assert set(grouped) == {"r1", "r2"}
-        assert grouped["r1"]["rating"] == 1
-        assert grouped["r2"]["rating"] == -1
-        await _cleanup()
+        assert grouped["r1"].rating == 1
+        assert grouped["r2"].rating == -1
 
     @pytest.mark.anyio
-    async def test_list_by_run_ids_empty_skips_query(self, tmp_path):
-        repo = await _make_feedback_repo(tmp_path)
+    async def test_latest_per_run_in_thread_empty(self, repo):
+        assert await repo.latest_per_run_in_thread("t1", user_id="u1") == {}
 
-        assert await repo.list_by_run_ids("t1", set(), user_id="u1") == {}
-        await _cleanup()
+    @pytest.mark.anyio
+    async def test_latest_for_runs_scopes_selection(self, repo):
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r2", thread_id="t1", rating=-1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r3", thread_id="t1", rating=1, user_id="u1"))
+
+        grouped = await repo.latest_for_runs("t1", {"r1", "r2"}, user_id="u1")
+
+        assert set(grouped) == {"r1", "r2"}
+
+    @pytest.mark.anyio
+    async def test_latest_for_runs_empty_set(self, repo):
+        assert await repo.latest_for_runs("t1", set(), user_id="u1") == {}
+
+    @pytest.mark.anyio
+    async def test_remove_for_run(self, repo):
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        assert await repo.remove_for_run("t1", "r1", user_id="u1") is True
+        assert await repo.latest_per_run_in_thread("t1", user_id="u1") == {}
+
+    @pytest.mark.anyio
+    async def test_remove_for_run_none_user_matches_only_null_owner(self, repo):
+        # Deletion is an equality match, not a filter: user_id=None targets
+        # only the NULL-owner entry (no-auth writes) and must never reach
+        # across into a named user's entry.
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=-1, user_id=None))
+
+        assert await repo.remove_for_run("t1", "r1", user_id=None) is True
+        assert await repo.remove_for_run("t1", "r1", user_id=None) is False
+
+        remaining = await repo.latest_per_run_in_thread("t1", user_id="u1")
+        assert remaining["r1"].rating == 1
+
+    @pytest.mark.anyio
+    async def test_remove_for_run_nonexistent(self, repo):
+        assert await repo.remove_for_run("t1", "r1", user_id="u1") is False
+
+    @pytest.mark.anyio
+    async def test_remove_for_run_other_user_denied(self, repo):
+        await repo.save(Feedback.create(run_id="r1", thread_id="t1", rating=1, user_id="u1"))
+        assert await repo.remove_for_run("t1", "r1", user_id="u2") is False
+        assert set(await repo.latest_per_run_in_thread("t1", user_id="u1")) == {"r1"}
 
 
-# -- Follow-up association --
+class TestSqlFeedbackRepository(FeedbackRepositoryContract):
+    @pytest.fixture
+    async def repo(self, tmp_path):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        import deerflow.persistence.feedback.model  # noqa: F401  (register FeedbackRow)
+        from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
+        from deerflow.persistence.base import Base
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.db'}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield SqlFeedbackRepository(async_sessionmaker(engine, expire_on_commit=False))
+        await engine.dispose()
+
+
+class TestInMemoryFeedbackRepository(FeedbackRepositoryContract):
+    @pytest.fixture
+    def repo(self):
+        return InMemoryFeedbackRepository()
+
+
+# -- Follow-up association (unrelated to the feedback repository) --
 
 
 class TestFollowUpAssociation:

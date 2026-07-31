@@ -1,19 +1,34 @@
-"""Feedback endpoints — create, list, stats, delete.
+"""Feedback endpoints — rate a run, retract a rating.
 
-Allows users to submit thumbs-up/down feedback on runs,
-optionally scoped to a specific message.
+Thumbs-up/down on a run, aligned with the mainstream chat UX: PUT is an
+idempotent upsert ("my current verdict is X"), DELETE retracts it
+(clicking the active button again). The current rating is echoed back to
+the UI inside the message-list payload, not through a separate read
+endpoint.
+
+Primary adapter only: resolves the current user, delegates to
+``FeedbackService`` (input port), and maps domain errors to HTTP codes.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_store
+from app.gateway.deps import get_current_user, get_feedback_service
+from deerflow.domain.feedback import (
+    DuplicateFeedbackError,
+    Feedback,
+    InvalidRatingError,
+    InvalidTagError,
+    RateRun,
+    RetractRunRating,
+    RunNotFoundError,
+)
+from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["feedback"])
@@ -24,15 +39,35 @@ router = APIRouter(prefix="/api/threads", tags=["feedback"])
 # ---------------------------------------------------------------------------
 
 
-class FeedbackCreateRequest(BaseModel):
+class RateRunRequest(BaseModel):
+    """Request model of the RateRun use case (name = command name + Request).
+
+    Carries only what the client may supply: identity (user_id) never
+    appears on a request model -- it is resolved server-side and injected
+    through ``to_command``.
+    """
+
     rating: int = Field(..., description="Feedback rating: +1 (positive) or -1 (negative)")
     comment: str | None = Field(default=None, description="Optional text feedback")
-    message_id: str | None = Field(default=None, description="Optional: scope feedback to a specific message")
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Optional thumbs-down reason slugs (e.g. 'incorrect', 'slow')",
+    )
 
+    def to_command(self, thread_id: str, run_id: str, user_id: str | None) -> RateRun:
+        """Body + path + resolved identity -> the use-case command.
 
-class FeedbackUpsertRequest(BaseModel):
-    rating: int = Field(..., description="Feedback rating: +1 (positive) or -1 (negative)")
-    comment: str | None = Field(default=None, description="Optional text feedback")
+        The wire shape owns the inbound translation into domain vocabulary
+        (wire types become domain types here, e.g. list -> tuple).
+        """
+        return RateRun(
+            thread_id=thread_id,
+            run_id=run_id,
+            rating=self.rating,
+            user_id=user_id,
+            comment=self.comment,
+            tags=tuple(self.tags),
+        )
 
 
 class FeedbackResponse(BaseModel):
@@ -40,17 +75,26 @@ class FeedbackResponse(BaseModel):
     run_id: str
     thread_id: str
     user_id: str | None = None
-    message_id: str | None = None
     rating: int
     comment: str | None = None
+    tags: list[str] = []
     created_at: str = ""
 
-
-class FeedbackStatsResponse(BaseModel):
-    run_id: str
-    total: int = 0
-    positive: int = 0
-    negative: int = 0
+    @classmethod
+    def from_domain(cls, feedback: Feedback) -> FeedbackResponse:
+        """Domain object -> wire shape (allowlist). ``created_at`` keeps the
+        legacy ``coerce_iso`` serialization so the API output is
+        byte-identical."""
+        return cls(
+            feedback_id=feedback.feedback_id,
+            run_id=feedback.run_id,
+            thread_id=feedback.thread_id,
+            user_id=feedback.user_id,
+            rating=feedback.rating,
+            comment=feedback.comment,
+            tags=list(feedback.tags),
+            created_at=coerce_iso(feedback.created_at),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -63,30 +107,25 @@ class FeedbackStatsResponse(BaseModel):
 async def upsert_feedback(
     thread_id: str,
     run_id: str,
-    body: FeedbackUpsertRequest,
+    body: RateRunRequest,
     request: Request,
-) -> dict[str, Any]:
-    """Create or update feedback for a run (idempotent)."""
-    if body.rating not in (1, -1):
-        raise HTTPException(status_code=400, detail="rating must be +1 or -1")
-
+) -> FeedbackResponse:
+    """Set the current user's rating for a run (idempotent upsert)."""
     user_id = await get_current_user(request)
-
-    run_store = get_run_store(request)
-    run = await run_store.get(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if run.get("thread_id") != thread_id:
+    service = get_feedback_service(request)
+    try:
+        feedback = await service.rate_run(body.to_command(thread_id, run_id, user_id))
+    except InvalidRatingError:
+        raise HTTPException(status_code=400, detail="rating must be +1 or -1")
+    except InvalidTagError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RunNotFoundError:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
-
-    feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.upsert(
-        run_id=run_id,
-        thread_id=thread_id,
-        rating=body.rating,
-        user_id=user_id,
-        comment=body.comment,
-    )
+    except DuplicateFeedbackError:
+        # Lost a concurrent-upsert race (legacy behavior was a 500); the
+        # client can simply retry.
+        raise HTTPException(status_code=409, detail="Concurrent feedback update, please retry")
+    return FeedbackResponse.from_domain(feedback)
 
 
 @router.delete("/{thread_id}/runs/{run_id}/feedback")
@@ -96,93 +135,10 @@ async def delete_run_feedback(
     run_id: str,
     request: Request,
 ) -> dict[str, bool]:
-    """Delete the current user's feedback for a run."""
+    """Retract the current user's rating for a run."""
     user_id = await get_current_user(request)
-    feedback_repo = get_feedback_repo(request)
-    deleted = await feedback_repo.delete_by_run(
-        thread_id=thread_id,
-        run_id=run_id,
-        user_id=user_id,
-    )
-    if not deleted:
+    service = get_feedback_service(request)
+    retracted = await service.retract_run_rating(RetractRunRating(thread_id=thread_id, run_id=run_id, user_id=user_id))
+    if not retracted:
         raise HTTPException(status_code=404, detail="No feedback found for this run")
-    return {"success": True}
-
-
-@router.post("/{thread_id}/runs/{run_id}/feedback", response_model=FeedbackResponse)
-@require_permission("threads", "write", owner_check=True, require_existing=True)
-async def create_feedback(
-    thread_id: str,
-    run_id: str,
-    body: FeedbackCreateRequest,
-    request: Request,
-) -> dict[str, Any]:
-    """Submit feedback (thumbs-up/down) for a run."""
-    if body.rating not in (1, -1):
-        raise HTTPException(status_code=400, detail="rating must be +1 or -1")
-
-    user_id = await get_current_user(request)
-
-    # Validate run exists and belongs to thread
-    run_store = get_run_store(request)
-    run = await run_store.get(run_id)
-    if run is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if run.get("thread_id") != thread_id:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
-
-    feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.create(
-        run_id=run_id,
-        thread_id=thread_id,
-        rating=body.rating,
-        user_id=user_id,
-        message_id=body.message_id,
-        comment=body.comment,
-    )
-
-
-@router.get("/{thread_id}/runs/{run_id}/feedback", response_model=list[FeedbackResponse])
-@require_permission("threads", "read", owner_check=True)
-async def list_feedback(
-    thread_id: str,
-    run_id: str,
-    request: Request,
-) -> list[dict[str, Any]]:
-    """List all feedback for a run."""
-    feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(thread_id, run_id)
-
-
-@router.get("/{thread_id}/runs/{run_id}/feedback/stats", response_model=FeedbackStatsResponse)
-@require_permission("threads", "read", owner_check=True)
-async def feedback_stats(
-    thread_id: str,
-    run_id: str,
-    request: Request,
-) -> dict[str, Any]:
-    """Get aggregated feedback stats (positive/negative counts) for a run."""
-    feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.aggregate_by_run(thread_id, run_id)
-
-
-@router.delete("/{thread_id}/runs/{run_id}/feedback/{feedback_id}")
-@require_permission("threads", "delete", owner_check=True, require_existing=True)
-async def delete_feedback(
-    thread_id: str,
-    run_id: str,
-    feedback_id: str,
-    request: Request,
-) -> dict[str, bool]:
-    """Delete a feedback record."""
-    feedback_repo = get_feedback_repo(request)
-    # Verify feedback belongs to the specified thread/run before deleting
-    existing = await feedback_repo.get(feedback_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found")
-    if existing.get("thread_id") != thread_id or existing.get("run_id") != run_id:
-        raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found in run {run_id}")
-    deleted = await feedback_repo.delete(feedback_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Feedback {feedback_id} not found")
     return {"success": True}

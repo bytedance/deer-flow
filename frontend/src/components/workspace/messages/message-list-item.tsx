@@ -66,10 +66,11 @@ import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { FeedbackDialog } from "./feedback-dialog";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
-function FeedbackButtons({
+export function FeedbackButtons({
   threadId,
   runId,
   initialFeedback,
@@ -78,22 +79,32 @@ function FeedbackButtons({
   runId: string;
   initialFeedback: FeedbackData | null;
 }) {
+  const { t } = useI18n();
   const [feedback, setFeedback] = useState<FeedbackData | null>(
     initialFeedback,
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
+  // Strict mutual exclusion: once a rating exists, only its own (highlighted)
+  // button stays visible; the user must retract it before rating the other
+  // way. No direct up<->down switching.
   const handleClick = useCallback(
     async (rating: number) => {
       if (isSubmitting) return;
       setIsSubmitting(true);
       try {
-        if (feedback?.rating === rating) {
+        if (feedback) {
+          // Only the active button is rendered, so this is always a retract.
           await deleteFeedback(threadId, runId);
           setFeedback(null);
         } else {
           const result = await upsertFeedback(threadId, runId, rating);
           setFeedback(result);
+          if (rating === -1) {
+            // Rating is already stored; the dialog only enriches it.
+            setDialogOpen(true);
+          }
         }
       } catch {
         // Revert on error — feedback state unchanged on catch
@@ -104,34 +115,59 @@ function FeedbackButtons({
     [threadId, runId, feedback, isSubmitting],
   );
 
+  const handleDialogSubmit = useCallback(
+    async (tags: string[], comment: string) => {
+      const result = await upsertFeedback(
+        threadId,
+        runId,
+        -1,
+        comment.length > 0 ? comment : undefined,
+        tags,
+      );
+      setFeedback(result);
+    },
+    [threadId, runId],
+  );
+
   return (
     <div className="flex gap-1">
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === 1 && "text-foreground",
-        )}
-        onClick={() => handleClick(1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsUpIcon
-          className={cn("size-4", feedback?.rating === 1 && "fill-current")}
-        />
-      </button>
-      <button
-        type="button"
-        className={cn(
-          "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-          feedback?.rating === -1 && "text-foreground",
-        )}
-        onClick={() => handleClick(-1)}
-        disabled={isSubmitting}
-      >
-        <ThumbsDownIcon
-          className={cn("size-4", feedback?.rating === -1 && "fill-current")}
-        />
-      </button>
+      {(!feedback || feedback.rating === 1) && (
+        <button
+          type="button"
+          aria-label={t.feedback.thumbsUp}
+          className={cn(
+            "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
+            feedback?.rating === 1 && "text-foreground",
+          )}
+          onClick={() => handleClick(1)}
+          disabled={isSubmitting}
+        >
+          <ThumbsUpIcon
+            className={cn("size-4", feedback?.rating === 1 && "fill-current")}
+          />
+        </button>
+      )}
+      {(!feedback || feedback.rating === -1) && (
+        <button
+          type="button"
+          aria-label={t.feedback.thumbsDown}
+          className={cn(
+            "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
+            feedback?.rating === -1 && "text-foreground",
+          )}
+          onClick={() => handleClick(-1)}
+          disabled={isSubmitting}
+        >
+          <ThumbsDownIcon
+            className={cn("size-4", feedback?.rating === -1 && "fill-current")}
+          />
+        </button>
+      )}
+      <FeedbackDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        onSubmit={handleDialogSubmit}
+      />
     </div>
   );
 }

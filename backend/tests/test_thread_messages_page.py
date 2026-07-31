@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.gateway.routers import thread_runs
+from deerflow.domain.feedback import Feedback
 from deerflow.runtime import RunRecord
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import build_branch_history_seed_events
@@ -34,10 +35,10 @@ def _make_app(
     run_manager.list_edit_replay_visibility.return_value = edit_visibility or EditReplayVisibility()
     run_manager.get_many_by_thread.return_value = records or {}
     app.state.run_manager = run_manager
-    feedback_repo = AsyncMock()
-    feedback_repo.list_by_run_ids.return_value = feedback or {}
-    feedback_repo.list_by_thread_grouped.return_value = feedback or {}
-    app.state.feedback_repo = feedback_repo
+    feedback_service = AsyncMock()
+    feedback_service.latest_for_runs.return_value = feedback or {}
+    feedback_service.latest_per_run_in_thread.return_value = feedback or {}
+    app.state.feedback_service = feedback_service
     return app
 
 
@@ -350,7 +351,7 @@ def test_thread_page_feedback_only_attaches_to_global_last_ai_row():
     original_get_last_visible_ai_seq_by_run = store.get_last_visible_ai_seq_by_run
     store.list_messages = AsyncMock(wraps=original_list_messages)
     store.get_last_visible_ai_seq_by_run = AsyncMock(wraps=original_get_last_visible_ai_seq_by_run)
-    feedback = {"run-1": {"feedback_id": "fb-1", "rating": 1, "comment": "good"}}
+    feedback = {"run-1": Feedback(feedback_id="fb-1", run_id="run-1", thread_id="thread-1", rating=1, comment="good")}
     app = _make_app(store, feedback=feedback)
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-1/messages/page?limit=3")
@@ -358,13 +359,13 @@ def test_thread_page_feedback_only_attaches_to_global_last_ai_row():
     data = response.json()["data"]
     assert data[0]["feedback"] is None
     assert data[1]["feedback"] is None
-    assert data[2]["feedback"] == {"feedback_id": "fb-1", "rating": 1, "comment": "good"}
+    assert data[2]["feedback"] == {"feedback_id": "fb-1", "rating": 1, "comment": "good", "tags": []}
     scan_user_id = store.list_messages.await_args.kwargs["user_id"]
     enrichment_user_id = store.get_last_visible_ai_seq_by_run.await_args.kwargs["user_id"]
     assert enrichment_user_id == scan_user_id
-    feedback_repo = app.state.feedback_repo
-    feedback_repo.list_by_run_ids.assert_awaited_once_with("thread-1", {"run-1"}, user_id=scan_user_id)
-    feedback_repo.list_by_thread_grouped.assert_not_awaited()
+    feedback_service = app.state.feedback_service
+    feedback_service.latest_for_runs.assert_awaited_once_with("thread-1", {"run-1"}, user_id=scan_user_id)
+    feedback_service.latest_per_run_in_thread.assert_not_awaited()
 
 
 def test_thread_page_helpers_forward_explicit_user_without_request_context():
@@ -377,7 +378,7 @@ def test_thread_page_helpers_forward_explicit_user_without_request_context():
     request = MagicMock()
     request.app.state.run_event_store = event_store
     request.app.state.run_manager = run_manager
-    request.app.state.feedback_repo = AsyncMock()
+    request.app.state.feedback_service = AsyncMock()
 
     async def exercise_helpers():
         await thread_runs._scan_thread_message_page(

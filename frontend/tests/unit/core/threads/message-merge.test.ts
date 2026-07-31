@@ -875,10 +875,11 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   ];
 
   // run_id is carried onto each content message (#3779) so historical subtask
-  // cards can fetch their persisted step history on expand.
+  // cards can fetch their persisted step history on expand. feedback is carried
+  // the same way so thumb state survives the RunMessage->Message flatten.
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]))).toEqual([
-    { ...newHuman, run_id: "run-new" },
-    { ...newAi, run_id: "run-new" },
+    { ...newHuman, run_id: "run-new", feedback: null },
+    { ...newAi, run_id: "run-new", feedback: null },
   ]);
 });
 

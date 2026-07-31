@@ -18,6 +18,22 @@ export const enUS: Translations = {
   },
 
   // Common
+  feedback: {
+    thumbsUp: "Good response",
+    thumbsDown: "Bad response",
+    dialogTitle: "Share feedback",
+    detailsPlaceholder: "Share more details (optional)",
+    submit: "Submit",
+    submitFailed: "Could not save your feedback. Please try again.",
+    tags: {
+      incorrect: "Incorrect or incomplete",
+      notAsExpected: "Not what I expected",
+      slow: "Slow or had issues",
+      styleTone: "Style or tone",
+      safetyLegal: "Safety or legal concern",
+      other: "Other",
+    },
+  },
   common: {
     home: "Home",
     settings: "Settings",

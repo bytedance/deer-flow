@@ -76,12 +76,17 @@ async def test_run_repository_emits_tz_aware_timestamps(tmp_path):
 
 @pytest.mark.anyio
 async def test_feedback_repository_emits_tz_aware_timestamps(tmp_path):
-    from deerflow.persistence.feedback import FeedbackRepository
+    from app.adapters.feedback.feedback_repository import SqlFeedbackRepository
+    from deerflow.domain.feedback import Feedback
 
-    repo = FeedbackRepository(await _init_sqlite(tmp_path))
+    repo = SqlFeedbackRepository(await _init_sqlite(tmp_path))
     try:
-        record = await repo.create(run_id="r-tz", thread_id="t-tz", rating=1, user_id="u1")
-        _assert_tz_aware(record["created_at"], context="feedback.create.created_at")
+        fb = await repo.save(Feedback.create(run_id="r-tz", thread_id="t-tz", rating=1, user_id="u1"))
+        # The port exchanges domain objects (datetime), not ISO strings;
+        # serialization to ISO happens in the router. Assert tz-awareness here.
+        assert fb.created_at.tzinfo is not None, "feedback.save.created_at lacks tzinfo"
+        read_back = (await repo.latest_per_run_in_thread("t-tz", user_id="u1"))["r-tz"]
+        assert read_back.created_at.tzinfo is not None, "feedback read-back lacks tzinfo"
     finally:
         await _cleanup()
 

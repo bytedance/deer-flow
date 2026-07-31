@@ -1,6 +1,11 @@
-"""Feedback persistence — ORM and SQL repository."""
+"""Feedback persistence — ORM row only.
+
+The legacy SQL repository was replaced by the hexagonal slice:
+port `deerflow.domain.feedback.ports.FeedbackRepository`, adapter
+`app.adapters.feedback.feedback_repository.SqlFeedbackRepository`. The ORM
+row stays here beside the harness-owned engine/models/migrations.
+"""
 
 from deerflow.persistence.feedback.model import FeedbackRow
-from deerflow.persistence.feedback.sql import FeedbackRepository
 
-__all__ = ["FeedbackRepository", "FeedbackRow"]
+__all__ = ["FeedbackRow"]
