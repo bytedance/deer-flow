@@ -84,6 +84,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactEditing: {
+    unsaved: string;
+    saving: string;
+    saved: string;
+    exit: string;
+    discard: string;
+    discardChanges: string;
+    conflict: string;
+    conflictShort: string;
+    runInProgress: string;
+    saveFailed: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;

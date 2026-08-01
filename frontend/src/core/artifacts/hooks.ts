@@ -49,6 +49,7 @@ export function useArtifactContent({
   return {
     content: isWriteFile ? content : data?.content,
     url: isWriteFile ? undefined : data?.url,
+    sha256: isWriteFile ? undefined : data?.sha256,
     isLoading,
     error,
   };

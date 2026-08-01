@@ -126,6 +126,52 @@ def _extract_text(content: Any) -> str:
 
 
 _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
+_FACT_CLASSIFICATION_FIELDS = ("scope", "durability", "authority")
+
+
+def _normalize_gate_label(value: Any) -> str | None:
+    """Normalize a model-produced scope-gate label without validating policy."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _fact_scope_gate_reason(fact: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a model-extracted fact."""
+    if any(_normalize_gate_label(fact.get(field)) is None for field in _FACT_CLASSIFICATION_FIELDS):
+        return "missing"
+    if _normalize_gate_label(fact.get("scope")) != "user":
+        return "scope"
+    if _normalize_gate_label(fact.get("durability")) != "durable":
+        return "durability"
+    if _normalize_gate_label(fact.get("authority")) != "descriptive":
+        return "authority"
+    return None
+
+
+def _summary_scope_gate_reason(section_data: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a summary update."""
+    scope = _normalize_gate_label(section_data.get("scope"))
+    authority = _normalize_gate_label(section_data.get("authority"))
+    if scope is None or authority is None:
+        return "missing"
+    if scope != "user":
+        return "scope"
+    if authority != "descriptive":
+        return "authority"
+    return None
+
+
+def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a contradiction removal."""
+    scope = _normalize_gate_label(removal.get("scope"))
+    reason = removal.get("reason")
+    if scope is None or not isinstance(reason, str) or not reason.strip():
+        return "missing"
+    if scope != "user":
+        return "scope"
+    return None
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -180,6 +226,14 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     if evd is not None:
         normalized_fact["expected_valid_days"] = evd
 
+    # Scope classification is extraction-only metadata. Preserve it through
+    # structural normalization so _apply_updates can fail closed per item, but
+    # never copy it into the persisted fact_entry.
+    for field in _FACT_CLASSIFICATION_FIELDS:
+        normalized_value = _normalize_gate_label(fact.get(field))
+        if normalized_value is not None:
+            normalized_fact[field] = normalized_value
+
     return normalized_fact
 
 
@@ -189,7 +243,35 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
-    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
+    normalized_facts_to_remove: list[dict[str, Any]] = []
+    if isinstance(facts_to_remove, list):
+        for entry in facts_to_remove:
+            # Preserve the legacy string form as an unclassified removal. The
+            # apply-layer gate will reject it as missing instead of continuing
+            # to allow an unscoped destructive mutation.
+            if isinstance(entry, str):
+                fact_id = entry.strip()
+                if fact_id:
+                    normalized_facts_to_remove.append({"id": fact_id})
+                continue
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            normalized_removal: dict[str, Any] = {"id": raw_id.strip()}
+            scope = _normalize_gate_label(entry.get("scope"))
+            if scope is not None:
+                normalized_removal["scope"] = scope
+            reason = entry.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                normalized_removal["reason"] = reason.strip()
+            if "replacementFactIndex" in entry:
+                # Preserve invalid values too: the apply layer must reject an
+                # invalid dependency rather than silently treating it as a pure
+                # removal and deleting the old fact.
+                normalized_removal["replacementFactIndex"] = entry.get("replacementFactIndex")
+            normalized_facts_to_remove.append(normalized_removal)
     normalized_new_facts = []
     dropped_new_fact = not isinstance(new_facts, list)
     if isinstance(new_facts, list):
@@ -290,6 +372,7 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
                         "content": content.strip(),
                         "category": _norm_cat,
                         "confidence": _norm_conf,
+                        **{field: normalized for field in _FACT_CLASSIFICATION_FIELDS if (normalized := _normalize_gate_label(consolidated.get(field))) is not None},
                     },
                 }
             )
@@ -1021,25 +1104,24 @@ class MemoryUpdater:
         if "correction" in signals:
             hints.append(
                 "IMPORTANT: Explicit correction signals were detected in this conversation. "
-                "Pay special attention to what the agent got wrong, what the user corrected, "
-                "and record the correct approach as a fact with category "
-                '"correction" and confidence >= 0.95 when appropriate.'
+                "Record a correction with confidence >= 0.95 only when it describes a durable, user-level "
+                "working preference that is safe to reuse across unrelated tasks. A correction to facts, files, "
+                "directions, or constraints in the current task is thread- or project-scoped and must not be stored."
             )
         if "reinforcement" in signals:
             hints.append(
                 "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
-                "The user explicitly confirmed the agent's approach was correct or helpful. "
-                "Record the confirmed approach, style, or preference as a fact with category "
-                '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
+                "Record the confirmed approach, style, or preference with high confidence only if it is a durable, "
+                "user-level pattern. Approval of the current result or current task is thread-scoped and must not be stored."
             )
         if "preference" in signals:
-            hints.append('IMPORTANT: A preference signal was detected. Record the user\'s stated preference or dislike as a fact with category "preference" and high confidence.')
+            hints.append("IMPORTANT: A preference signal was detected. Record it with high confidence only when it is a durable, user-level preference; a one-off choice for the current task is thread-scoped and must not be stored.")
         if "identity" in signals:
-            hints.append('IMPORTANT: An identity signal was detected. Record the user\'s stated role, profession, or background as a fact with category "identity" and high confidence.')
+            hints.append("IMPORTANT: An identity signal was detected. Record the user's stated role, profession, or background only when it is user-level and durable across tasks.")
         if "goal" in signals:
-            hints.append('IMPORTANT: A goal signal was detected. Record the user\'s stated objective or intent as a fact with category "goal" and high confidence.')
+            hints.append("IMPORTANT: A goal signal was detected. Record only a durable, user-level goal that remains useful across unrelated tasks; the objective of the current task, sprint, PR, or thread must not be stored.")
         if "decision" in signals:
-            hints.append('IMPORTANT: A decision signal was detected. Record the user\'s decision or chosen option as a fact with category "decision" and high confidence.')
+            hints.append("IMPORTANT: A decision signal was detected. Record only a durable, user-level decision or working pattern; a choice made for the current task, file, PR, or thread must not be stored.")
         return "\n".join(hints)
 
     def _prepare_update_prompt(
@@ -1534,22 +1616,34 @@ class MemoryUpdater:
             update_data: Updates from LLM.
             thread_id: Optional thread ID for tracking.
             metrics: Optional observability dict. When provided, populated with
-                ``facts_passed_confidence`` / ``rejected_low_confidence`` counted
-                at the real confidence-filter site below (the only acceptance
-                gate for new facts), so the metric cannot drift from the actual
-                filter the way a re-derived count in the caller could.
+                confidence and scope-gate counters counted at their real filter
+                sites, so observability cannot drift from actual acceptance.
 
         Returns:
             Updated memory data.
         """
         config = self._config
         now = utc_now_iso_z()
+        scope_gate_rejections: dict[str, dict[str, int]] = {
+            "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
+            "summaries": {"missing": 0, "scope": 0, "authority": 0},
+            "removals": {"missing": 0, "scope": 0, "replacement": 0},
+            "consolidations": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
+        }
+
+        def reject_by_scope_gate(kind: str, reason: str) -> None:
+            scope_gate_rejections[kind][reason] += 1
 
         # Update user sections
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind"]:
             section_data = user_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+                continue
+            rejection_reason = _summary_scope_gate_reason(section_data)
+            if rejection_reason is not None:
+                reject_by_scope_gate("summaries", rejection_reason)
+            else:
                 current_memory["user"][section] = {
                     "summary": section_data["summary"],
                     "updatedAt": now,
@@ -1559,16 +1653,16 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+                continue
+            rejection_reason = _summary_scope_gate_reason(section_data)
+            if rejection_reason is not None:
+                reject_by_scope_gate("summaries", rejection_reason)
+            else:
                 current_memory["history"][section] = {
                     "summary": section_data["summary"],
                     "updatedAt": now,
                 }
-
-        # Remove facts (contradiction-based)
-        facts_to_remove = set(update_data.get("factsToRemove", []))
-        if facts_to_remove:
-            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
         # ── Staleness review: removals + lifetime extensions ──
         # Both operations share one staleness-candidate guardrail pass and one
@@ -1672,62 +1766,102 @@ class MemoryUpdater:
         # Creation-time lifetime cap shared with the consolidation path below, so
         # both fact-creation sites apply the identical bound in one place.
         creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
-        # Counted at the confidence-gate site (the only real accept filter for new
-        # facts) so the ``facts_passed_confidence`` metric mirrors the actual
-        # filter and cannot drift from it. Facts below the threshold are the
-        # reject count; duplicate / empty / over-cap facts that pass the
-        # threshold are still counted here -- the metric is a confidence-gate
-        # signal (the host's rejection-rate warning monitors confidence
-        # filtering, not dedup / over-cap), not a persisted-fact count.
+        # Two independent accept filters govern new facts: the deterministic
+        # scope gate and this confidence threshold. Each is counted at its own
+        # filter site so neither metric can drift from the filter it reports:
+        # ``facts_passed_confidence`` counts threshold-passers even when the
+        # scope gate rejects them, and the scope-gate counters increment
+        # whether or not the confidence check passes. Duplicate / empty /
+        # over-cap facts that pass the threshold are still counted here -- the
+        # metric is a confidence-gate signal (the host's rejection-rate
+        # warning monitors confidence filtering, not dedup / over-cap), not a
+        # persisted-fact count.
         passed_threshold = 0
-        for fact in new_facts:
+        replacement_fact_keys: dict[int, str] = {}
+        for fact_index, fact in enumerate(new_facts):
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
                 passed_threshold += 1
-                raw_content = fact.get("content", "")
-                if not isinstance(raw_content, str):
-                    continue
-                normalized_content = raw_content.strip()
-                fact_key = _fact_content_key(normalized_content)
-                if fact_key is None:
-                    # Empty / whitespace-only content: skip it the same way the
-                    # non-string guard above does, instead of appending a blank
-                    # fact that violates the non-empty-content invariant.
-                    continue
-                if fact_key in existing_fact_keys:
-                    continue
+            rejection_reason = _fact_scope_gate_reason(fact)
+            if rejection_reason is not None:
+                reject_by_scope_gate("facts", rejection_reason)
+                continue
+            if confidence < config.fact_confidence_threshold:
+                continue
+            raw_content = fact.get("content", "")
+            if not isinstance(raw_content, str):
+                continue
+            normalized_content = raw_content.strip()
+            fact_key = _fact_content_key(normalized_content)
+            if fact_key is None:
+                # Empty / whitespace-only content: skip it the same way the
+                # non-string guard above does, instead of appending a blank
+                # fact that violates the non-empty-content invariant.
+                continue
+            # Remember every eligible replacement's content key even when it is
+            # already present. A paired removal is safe only if the post-trim
+            # memory contains this content under an ID other than its target.
+            replacement_fact_keys[fact_index] = fact_key
+            if fact_key in existing_fact_keys:
+                continue
 
-                fact_entry = {
-                    "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": normalized_content,
-                    "category": fact.get("category", "context"),
-                    "confidence": confidence,
-                    "createdAt": now,
-                    "source": thread_id or "unknown",
-                }
-                source_error = fact.get("sourceError")
-                if isinstance(source_error, str):
-                    normalized_source_error = source_error.strip()
-                    if normalized_source_error:
-                        fact_entry["sourceError"] = normalized_source_error
-                evd = _read_expected_valid_days(fact)
-                if evd is not None:
-                    # Apply the creation-time cap so the LLM cannot assign an
-                    # unbounded lifetime that defers staleness review indefinitely.
-                    # Extensions (staleFactsToExtend) bypass this cap via their own
-                    # staleness_max_extension_days ceiling because they represent a
-                    # deliberate review decision, not an unchecked initial assignment.
-                    fact_entry["expected_valid_days"] = min(evd, creation_cap)
-                current_memory["facts"].append(fact_entry)
-                if fact_key is not None:
-                    existing_fact_keys.add(fact_key)
-
-        if metrics is not None:
-            metrics["facts_passed_confidence"] = passed_threshold
-            metrics["rejected_low_confidence"] = len(new_facts) - passed_threshold
+            fact_entry = {
+                "id": f"fact_{uuid.uuid4().hex[:8]}",
+                "content": normalized_content,
+                "category": fact.get("category", "context"),
+                "confidence": confidence,
+                "createdAt": now,
+                "source": thread_id or "unknown",
+            }
+            source_error = fact.get("sourceError")
+            if isinstance(source_error, str):
+                normalized_source_error = source_error.strip()
+                if normalized_source_error:
+                    fact_entry["sourceError"] = normalized_source_error
+            evd = _read_expected_valid_days(fact)
+            if evd is not None:
+                # Apply the creation-time cap so the LLM cannot assign an
+                # unbounded lifetime that defers staleness review indefinitely.
+                # Extensions (staleFactsToExtend) bypass this cap via their own
+                # staleness_max_extension_days ceiling because they represent a
+                # deliberate review decision, not an unchecked initial assignment.
+                fact_entry["expected_valid_days"] = min(evd, creation_cap)
+            current_memory["facts"].append(fact_entry)
+            existing_fact_keys.add(fact_key)
 
         # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
         current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)
+
+        # Remove contradicted facts only after replacements have passed both
+        # gates and survived deduplication/trimming. Task-local contradictions
+        # cannot delete user memory, and a failed paired replacement cannot
+        # degrade into a delete-only update.
+        fact_ids_to_remove: set[str] = set()
+        for removal in update_data.get("factsToRemove", []):
+            if not isinstance(removal, dict):
+                reject_by_scope_gate("removals", "missing")
+                continue
+            rejection_reason = _removal_scope_gate_reason(removal)
+            if rejection_reason is not None:
+                reject_by_scope_gate("removals", rejection_reason)
+                continue
+            fact_id = removal.get("id")
+            if not isinstance(fact_id, str) or not fact_id:
+                reject_by_scope_gate("removals", "missing")
+                continue
+            if "replacementFactIndex" in removal:
+                replacement_index = removal.get("replacementFactIndex")
+                if not isinstance(replacement_index, int) or isinstance(replacement_index, bool) or replacement_index < 0:
+                    reject_by_scope_gate("removals", "replacement")
+                    continue
+                replacement_key = replacement_fact_keys.get(replacement_index)
+                if replacement_key is None or not any(fact.get("id") != fact_id and _fact_content_key(fact.get("content")) == replacement_key for fact in current_memory.get("facts", [])):
+                    reject_by_scope_gate("removals", "replacement")
+                    continue
+            fact_ids_to_remove.add(fact_id)
+
+        if fact_ids_to_remove:
+            current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in fact_ids_to_remove]
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
@@ -1788,6 +1922,10 @@ class MemoryUpdater:
 
                     content = consolidated.get("content", "")
                     if not isinstance(content, str) or not content.strip():
+                        continue
+                    rejection_reason = _fact_scope_gate_reason(consolidated)
+                    if rejection_reason is not None:
+                        reject_by_scope_gate("consolidations", rejection_reason)
                         continue
 
                     source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
@@ -1898,5 +2036,12 @@ class MemoryUpdater:
                 if ids_consumed:
                     current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
                     current_memory["facts"].extend(new_consolidated)
+
+        if metrics is not None:
+            metrics["facts_passed_confidence"] = passed_threshold
+            metrics["rejected_low_confidence"] = len(new_facts) - passed_threshold
+            metrics["facts_passed_scope_gate"] = len(new_facts) - sum(scope_gate_rejections["facts"].values())
+            metrics["rejected_by_scope_gate"] = sum(count for reasons in scope_gate_rejections.values() for count in reasons.values())
+            metrics["scope_gate_rejections"] = scope_gate_rejections
 
         return current_memory
