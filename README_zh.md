@@ -651,6 +651,8 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 
 跨 session 使用时，DeerFlow 会逐步积累关于你的持久 memory，包括你的个人偏好、知识背景，以及长期沉淀下来的工作习惯。你用得越多，它越了解你的写作风格、技术栈和重复出现的工作流。memory 保存在本地，控制权也始终在你手里。
 
+默认 DeerMem `middleware` 模式会先判断候选信息的作用域、持久性和授权属性，再由确定性写入门决定是否保存。只有稳定、描述性的用户级事实能进入长期 memory；当前对话或项目的约束、一次性操作授权仍留在对话状态中。用户全局 summary 必须同时具有用户级作用域和描述性授权属性，基于矛盾的删除也会经过作用域保护；如果删除依赖一条替代事实，只有替代事实真正通过校验并保留下来后才执行删除。这些分类字段只用于本次抽取，不写入 fact 文件，也不增加 LLM 调用次数。`memory.mode: tool` 的显式 CRUD 仍是独立的模型直写路径。如果通过 `memory.backend_config.prompts_dir` 覆盖了内置抽取模板，必须同步在自定义模板中加入新的分类字段（`memory_update` 的 fact/summary/removal 格式与 `consolidation` 的合并 fact 结构）：写入门是 fail closed 的，未迁移的旧模板会导致所有抽取驱动的 fact、summary 与删除写入停止，只能通过 `rejected_by_scope_gate` 指标和高拒绝率告警发现。
+
 ## 推荐模型
 
 DeerFlow 对模型没有强绑定，只要实现了 OpenAI 兼容 API 的 LLM，理论上都可以接入。不过在下面这些能力上表现更强的模型，通常会更适合 DeerFlow：
