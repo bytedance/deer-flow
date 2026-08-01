@@ -1484,6 +1484,7 @@ class DeerFlowClient:
             FileNotFoundError: If any file does not exist.
             ValueError: If any supplied path exists but is not a regular file.
         """
+        validate_thread_id(thread_id)
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -1587,6 +1588,7 @@ class DeerFlowClient:
             Dict with "files" and "count" keys, matching the Gateway API
             ``list_uploaded_files`` response.
         """
+        validate_thread_id(thread_id)
         uploads_dir = get_uploads_dir(thread_id)
         result = list_files_in_dir(uploads_dir)
         return enrich_file_listing(result, thread_id)
@@ -1606,6 +1608,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             PermissionError: If path traversal is detected.
         """
+        validate_thread_id(thread_id)
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         uploads_dir = get_uploads_dir(thread_id)
@@ -1629,6 +1632,7 @@ class DeerFlowClient:
             FileNotFoundError: If the artifact does not exist.
             ValueError: If the path is invalid.
         """
+        validate_thread_id(thread_id)
         try:
             actual = get_paths().resolve_virtual_path(thread_id, path, user_id=get_effective_user_id())
         except ValueError as exc:

@@ -1021,7 +1021,7 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
+async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
     from app.gateway.deps import get_thread_store
 
@@ -1074,7 +1074,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
 
 @router.get("/{thread_id}/goal", response_model=ThreadGoalResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_goal(thread_id: str, request: Request) -> ThreadGoalResponse:
+async def get_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Return the active Claude-style goal for a thread, if any."""
     checkpointer = get_checkpointer(request)
     try:
@@ -1191,7 +1191,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
+async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadStateResponse:
     """Get the latest materialized graph state for a thread."""
     # Resolve through the thread's assistant so custom middleware channels
     # appear in the response instead of being dropped by the default schema.
@@ -1333,7 +1333,7 @@ def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_history(
-    thread_id: str,
+    thread_id: ThreadId,
     body: ThreadHistoryRequest,
     request: Request,
     background_tasks: BackgroundTasks,
