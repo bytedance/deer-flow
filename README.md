@@ -1150,6 +1150,16 @@ DeerFlow has key high-privilege capabilities including **system command executio
 - **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
 - **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
 
+### Gateway Admin Is Equivalent to Code Execution
+
+An admin can register stdio MCP servers, which run commands inside the Gateway
+container. The API restricts them to an allowlist (`npx`, `uvx` by default,
+extended via `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST`) and rejects arguments and
+environment variables that would evaluate arbitrary code. That is defense in
+depth, not a boundary: these launchers exist to fetch and run remote packages,
+so **treat Gateway admin as equivalent to code execution on the host** and grant
+it accordingly.
+
 ### Deployment Defaults
 
 The Docker stack publishes its entry port on `127.0.0.1` only, matching the
