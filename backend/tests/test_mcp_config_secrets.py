@@ -956,7 +956,10 @@ def test_validate_mcp_update_ignores_remote_transports(monkeypatch):
         ["--call", "printf pwned"],
         ["--call=printf pwned"],
         ["-c=printf pwned"],
-        ["-y", "some-package", "--eval", "require('child_process').exec('id')"],
+        # In the launcher's own option region. The same flag *after* the package
+        # name belongs to the server's CLI and is allowed -- see
+        # `test_validate_mcp_update_allows_server_own_flags_after_package_name`.
+        ["--yes", "--eval", "require('child_process').exec('id')"],
         ["-e", "process.exit(0)"],
         ["--print", "1"],
         ["--node-arg", "-e", "1"],
@@ -1279,6 +1282,188 @@ def test_validate_mcp_update_does_not_decompose_package_launcher_args(monkeypatc
     )
 
     _validate_mcp_update_request(request)
+
+
+# ---------------------------------------------------------------------------
+# The argument screen applies to the launcher's own option region only.
+#
+# `npx`/`uvx` stop parsing their own flags at the package name; every later
+# token belongs to the third-party server's CLI, where `-c` is routinely
+# "config" and `-e` is "env". Screening those rejected ordinary servers while
+# buying no coverage. The boundary has to account for options that consume a
+# value, or an exec flag hiding behind one slips past the screen entirely.
+#
+# Verified against npm 10.9.4 / uv 0.11.1:
+#   npx . -c X            -> server argv ["-c", "X"]        (package ends it)
+#   npx -- . -c X         -> server argv ["-c", "X"]        (first token after
+#                                                            `--` is the package)
+#   npx --parseable . -c X-> server argv ["-c", "X"]        (boolean, then package)
+#   npx -p . -c 'echo Z'  -> npm RUNS `echo Z`              (`-p` is exec's
+#                                                            `--package`, so `.`
+#                                                            is its value and the
+#                                                            option region goes on)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("npx", ["-y", "@scope/server", "-c", "config.json"]),
+        ("npx", ["-y", "@scope/server", "-e", "production"]),
+        ("npx", ["-y", "@scope/server", "--", "-c", "config.json"]),
+        ("npx", ["--", "@scope/server", "--eval", "expr"]),
+        ("npx", ["@scope/server", "--call", "not-a-launcher-flag"]),
+        ("npx", ["--yes", "some-package", "--eval", "expr"]),
+        ("npx", ["--parseable", "@scope/server", "-c", "config.json"]),
+        ("uvx", ["mcp-server-x", "-e", "prod"]),
+        ("uvx", ["--from", "pkg", "tool", "--print", "table"]),
+    ],
+)
+def test_validate_mcp_update_allows_server_own_flags_after_package_name(monkeypatch, command, args):
+    """Trailing arguments belong to the spawned server, not to the launcher."""
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "third-party-cli": McpServerConfigResponse(
+                type="stdio",
+                command=command,
+                args=args,
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+def test_validate_mcp_update_allows_uvx_constraints_short_flag(monkeypatch):
+    """`-c` is uv's `--constraints <file>`, an ordinary launcher option.
+
+    uv has no flag that evaluates a string, so a short spelling collision with
+    another tool's exec flag must not cost uvx its own documented option.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "constrained": McpServerConfigResponse(
+                type="stdio",
+                command="uvx",
+                args=["-c", "constraints.txt", "mcp-server-fetch"],
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_flag"),
+    [
+        (["-p", "@scope/pkg", "-c", "echo pwned"], "-c"),
+        (["--package", "@scope/pkg", "--call", "echo pwned"], "--call"),
+        (["--registry", "https://registry.example", "-c", "echo pwned"], "-c"),
+        (["-w", "workspace-a", "--call", "echo pwned"], "--call"),
+        (["--loglevel", "silly", "-c", "echo pwned"], "-c"),
+    ],
+)
+def test_validate_mcp_update_rejects_exec_flag_behind_value_taking_option(monkeypatch, args, expected_flag):
+    """An option that consumes a value does not end the launcher's option region.
+
+    `npx -p <pkg> -c '<command>'` runs the command: `-p` is `--package`, so its
+    value is not the package positional and npm keeps parsing its own flags.
+    Ending the screen at the first non-flag token would walk straight past it.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "behind-a-value": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=args,
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert f"'{expected_flag}'" in exc_info.value.detail
+
+
+def test_validate_mcp_update_rejects_unknown_launcher_flag_before_exec_flag(monkeypatch):
+    """An unrecognized npx option is assumed to consume a value.
+
+    npm errors on an option it does not define, so this direction cannot break
+    a working invocation, while the opposite default would let an npm config
+    this file has not enumerated carry an exec flag past the boundary.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "unknown-option": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=["--not-an-npm-option", "value", "--call", "echo pwned"],
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "'--call'" in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        # `-C` is npm's `--prefix <dir>`, not `--call`; folding case onto `-c`
+        # rejected an ordinary option.
+        ["-C", "/srv/prefix", "@scope/server"],
+        # `-P` is `--save-prod` (boolean), so the next token is the package and
+        # the server's own `-c` stays out of the launcher's option region.
+        ["-P", "@scope/server", "-c", "config.json"],
+    ],
+)
+def test_validate_mcp_update_reads_short_launcher_options_case_sensitively(monkeypatch, args):
+    """A short option's case selects a different option, so matching keeps it.
+
+    Long spellings stay case-insensitive -- see
+    `test_validate_mcp_update_rejects_arbitrary_exec_args_case_insensitively`.
+    """
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "case-sensitive": McpServerConfigResponse(
+                type="stdio",
+                command="npx",
+                args=args,
+            )
+        }
+    )
+
+    _validate_mcp_update_request(request)
+
+
+def test_validate_mcp_update_keeps_uvx_long_exec_spellings_as_a_tripwire(monkeypatch):
+    """uvx has no exec flag today; the long spellings stay as a cheap tripwire."""
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+    request = McpConfigUpdateRequest(
+        mcp_servers={
+            "uvx-tripwire": McpServerConfigResponse(
+                type="stdio",
+                command="uvx",
+                args=["--eval", "print(1)", "some-tool"],
+            )
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_mcp_update_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert "'--eval'" in exc_info.value.detail
 
 
 def test_validate_mcp_update_ignores_args_and_env_for_remote_transports(monkeypatch):

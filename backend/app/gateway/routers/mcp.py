@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -57,15 +57,241 @@ _ARBITRARY_EXEC_ARGS = frozenset(
     }
 )
 
-# Launchers where `-p` is an ordinary selector rather than an exec flag:
-# `--package` for npx, `--python` for uv. They are also the only allowlisted
-# commands by default, so scoping the two rules below to everything *else*
-# leaves the default allowlist's behavior untouched.
-_PACKAGE_SELECTOR_LAUNCHERS = frozenset({"npx", "uvx"})
+
+# Package launchers parse their own options only until the package name; every
+# later token is handed to the spawned server's own CLI, where `-c` is commonly
+# "config" and `-e` "env". Screening those rejected ordinary third-party servers
+# without covering anything, so the screen is scoped to the option region.
+#
+# Finding that region needs each launcher's option *arity*, because a value is
+# not a positional: `npx -p <pkg> -c '<command>'` runs the command -- `-p` is
+# exec's `--package`, so `<pkg>` is its value and npm keeps parsing its own
+# flags. Ending the region at the first non-flag token would walk past it.
+# (Verified against npm 10.9.4 / uv 0.11.1.)
+#
+# The two launchers get opposite defaults for an option neither table lists,
+# and the reason is the exec set above, not symmetry:
+#
+#   `npx` really does own exec flags here (`-c`/`--call`), so an unlisted option
+#   must not be able to hide one. Unknown therefore consumes a value, keeping
+#   the region open. npm *errors* on an option it does not define, so this
+#   cannot reject an invocation that would otherwise work; enumerating npm's
+#   booleans (rather than its much larger value-taking set) is what makes the
+#   common `npx -y <pkg> ...` shape land on the package name.
+#
+#   `uvx` owns no exec flag at all -- uv has no "evaluate this string" option --
+#   so its screen is a tripwire, not a control, and an imprecise region cannot
+#   walk past anything real. Unknown therefore consumes nothing, which keeps
+#   uv's large and growing boolean surface from over-blocking.
+#
+# A launcher outside this table is not a package runner and keeps the
+# conservative whole-args screen below.
+class _LauncherGrammar(NamedTuple):
+    """How one package launcher separates its own options from the server's."""
+
+    exec_args: frozenset[str]
+    known_args: frozenset[str]
+    unknown_consumes_value: bool
+
+    def consumes_value(self, flag: str) -> bool:
+        if self.unknown_consumes_value:
+            return flag not in self.known_args
+        return flag in self.known_args
+
+
+# npm's boolean configs, i.e. the options that do *not* consume the next token.
+# Generated from `@npmcli/config`'s definitions (npm 10.9.4): every config whose
+# type is Boolean, plus every nopt shorthand expanding to one of them or to a
+# complete assignment such as `-d` -> `--loglevel info`. Regenerate against a
+# newer npm rather than editing by hand. A boolean missing here over-blocks one
+# invocation and names the flag in the rejection, which is the failure direction
+# this file prefers.
+_NPM_BOOLEAN_ARGS = frozenset(
+    {
+        "--all",
+        "--allow-same-version",
+        "--audit",
+        "--bin-links",
+        "--commit-hooks",
+        "--description",
+        "--dev",
+        "--diff-ignore-all-space",
+        "--diff-name-only",
+        "--diff-no-prefix",
+        "--diff-text",
+        "--dry-run",
+        "--engine-strict",
+        "--expect-results",
+        "--force",
+        "--foreground-scripts",
+        "--format-package-lock",
+        "--fund",
+        "--git-tag-version",
+        "--global",
+        "--global-style",
+        "--if-present",
+        "--ignore-scripts",
+        "--include-staged",
+        "--include-workspace-root",
+        "--install-links",
+        "--json",
+        "--legacy-bundling",
+        "--legacy-peer-deps",
+        "--link",
+        "--long",
+        "--offline",
+        "--omit-lockfile-registry-resolved",
+        "--optional",
+        "--package-lock",
+        "--package-lock-only",
+        "--parseable",
+        "--prefer-dedupe",
+        "--prefer-offline",
+        "--prefer-online",
+        "--production",
+        "--progress",
+        "--provenance",
+        "--read-only",
+        "--rebuild-bundle",
+        "--save",
+        "--save-bundle",
+        "--save-dev",
+        "--save-exact",
+        "--save-optional",
+        "--save-peer",
+        "--save-prod",
+        "--shrinkwrap",
+        "--sign-git-commit",
+        "--sign-git-tag",
+        "--strict-peer-deps",
+        "--strict-ssl",
+        "--timing",
+        "--unicode",
+        "--update-notifier",
+        "--usage",
+        "--version",
+        "--versions",
+        "--workspaces",
+        "--workspaces-update",
+        "--yes",
+        "-?",
+        "-B",
+        "-D",
+        "-E",
+        "-H",
+        "-O",
+        "-P",
+        "-S",
+        "-a",
+        "-d",
+        "-dd",
+        "-ddd",
+        "-desc",
+        "-f",
+        "-g",
+        "-h",
+        "-help",
+        "-iwr",
+        "-l",
+        "-local",
+        "-n",
+        "-no",
+        "-porcelain",
+        "-q",
+        "-quiet",
+        "-readonly",
+        "-s",
+        "-silent",
+        "-v",
+        "-verbose",
+        "-ws",
+        "-y",
+    }
+)
+
+# `npm exec` overrides the global `-p` shorthand: it is `--package <spec>` there,
+# not the boolean `--parseable`. Confirmed by running it -- `npx -p . -c '<cmd>'`
+# executes the command, i.e. `.` was consumed as a value and never ended the
+# option region. Treating it as boolean is exactly the bypass this table exists
+# to prevent, so the override is applied explicitly rather than left implicit.
+_NPX_BOOLEAN_ARGS = _NPM_BOOLEAN_ARGS - {"-p"}
+
+# uv's value-taking options (`uvx --help`, uv 0.11.1). Everything absent is
+# treated as boolean; see the unknown-option note above for why that default is
+# safe here and inverted for npx.
+_UVX_VALUE_ARGS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--build-constraints",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--config-setting",
+        "--config-settings-package",
+        "--constraints",
+        "--default-index",
+        "--directory",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--from",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-sources-package",
+        "--overrides",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--torch-backend",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-C",
+        "-P",
+        "-b",
+        "-c",
+        "-f",
+        "-i",
+        "-p",
+        "-w",
+    }
+)
+
+_PACKAGE_LAUNCHERS: dict[str, _LauncherGrammar] = {
+    "npx": _LauncherGrammar(
+        exec_args=_ARBITRARY_EXEC_ARGS,
+        known_args=_NPX_BOOLEAN_ARGS,
+        unknown_consumes_value=True,
+    ),
+    # uv spells `-c` `--constraints` and `-p` `--python`, so the short forms are
+    # dropped from its exec set; the long spellings stay as a tripwire in case a
+    # future uv grows one. Derived so a new entry above cannot forget this.
+    "uvx": _LauncherGrammar(
+        exec_args=frozenset(flag for flag in _ARBITRARY_EXEC_ARGS if flag.startswith("--")),
+        known_args=_UVX_VALUE_ARGS,
+        unknown_consumes_value=False,
+    ),
+}
 
 # `-p` is `--print` (evaluate and print) on node, so exempting it everywhere
 # left the short and long spellings of one flag disagreeing as soon as an
-# operator extended the allowlist.
+# operator extended the allowlist. It stays scoped to commands outside
+# `_PACKAGE_LAUNCHERS`, where it is an ordinary selector (`--package` for npx,
+# `--python` for uv), so the default allowlist is unaffected.
 _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS = frozenset({"-p"})
 
 # Short options combine into one token (`node -pe`, `perl -we`, `python -Ic`),
@@ -278,36 +504,74 @@ def _stdio_command_name(command: str | None, *, server_name: str) -> str:
     return stripped
 
 
+def _launcher_option_region(args: list[str], *, grammar: _LauncherGrammar) -> list[str]:
+    """Return the leading args a package launcher parses as its own options.
+
+    The region ends at a bare ``--`` or at the package name -- the first token
+    that is neither a flag nor the value of one. A ``--flag=value`` token
+    carries its own value and never consumes the next one.
+
+    Arity is looked up case-sensitively, because a launcher's short options are:
+    npm reads ``-c`` as ``--call`` but ``-C`` as ``--prefix``, which takes a
+    value.
+    """
+    region: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if not isinstance(arg, str):
+            break
+        token = arg.strip()
+        if token == "--" or token == "-" or not token.startswith("-"):
+            break
+        region.append(token)
+        index += 1
+        if "=" not in token and grammar.consumes_value(token):
+            index += 1
+    return region
+
+
 def _arbitrary_exec_arg(args: list[str], *, command: str) -> str | None:
     """Return the offending flag when an argument makes the launcher eval a string.
 
-    Handles both ``--call value`` and ``--call=value`` spellings. Every
-    argument is inspected, including those after a bare ``--``: the launchers
-    in scope treat the token after ``--`` as a package name rather than a
-    flag, so nothing legitimate is lost and an unknown launcher cannot smuggle
-    an exec flag past the check by prefixing it.
+    Handles both ``--call value`` and ``--call=value`` spellings.
 
-    Outside :data:`_PACKAGE_SELECTOR_LAUNCHERS` two extra rules apply, because
-    those commands are interpreters rather than package runners: ``-p`` is an
+    For a package launcher (:data:`_PACKAGE_LAUNCHERS`) only the launcher's own
+    option region is screened, because everything from the package name onward
+    is the spawned server's argv -- ``npx -y <pkg> -c config.json`` hands
+    ``-c config.json`` to the server, where it is "config", not eval. A bare
+    ``--`` ends the region too: only the *first* token after it is the package
+    name, and the rest are that package's arguments.
+
+    Every other command is screened whole, and two extra rules apply because
+    such a command is an interpreter rather than a package runner: ``-p`` is an
     exec flag (node's ``--print``) instead of a package/python selector, and
     combined short-option clusters are decomposed so ``-pe`` cannot smuggle
-    past a check that only splits on ``=``. Both stay scoped: npx/uvx do not
-    cluster short options, and their trailing arguments belong to a
-    third-party server's own CLI where ``-name``-style flags are ordinary.
+    past a check that only splits on ``=``.
 
     Only the normalized flag is returned, never the caller's value, so the
     rejection message does not echo a payload string back into the response.
     """
-    is_package_launcher = command.lower() in _PACKAGE_SELECTOR_LAUNCHERS
-    denied = _ARBITRARY_EXEC_ARGS if is_package_launcher else _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS
+    grammar = _PACKAGE_LAUNCHERS.get(command.lower())
+    if grammar is not None:
+        for token in _launcher_option_region(args, grammar=grammar):
+            flag = token.split("=", 1)[0]
+            # Long options are matched case-insensitively as before; a short one
+            # is not, because its case selects a different option -- npm's `-C`
+            # is `--prefix`, and folding it onto `-c` rejected an ordinary flag.
+            flag = flag.lower() if flag.startswith("--") else flag
+            if flag in grammar.exec_args:
+                return flag
+        return None
 
+    denied = _ARBITRARY_EXEC_ARGS | _EXEC_ARGS_OUTSIDE_PACKAGE_LAUNCHERS
     for arg in args:
         if not isinstance(arg, str):
             continue
         flag = arg.split("=", 1)[0].strip().lower()
         if flag in denied:
             return flag
-        if is_package_launcher or not flag.startswith("-") or flag.startswith("--"):
+        if not flag.startswith("-") or flag.startswith("--"):
             continue
         for letter in flag[1:]:
             if letter in _CLUSTERED_EXEC_LETTERS:
