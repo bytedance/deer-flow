@@ -167,8 +167,11 @@ def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[
     as they are read and their bodies consumed verbatim at the newline that
     starts them, so a body line beginning with ``$(curl url)`` is not promoted to
     command position. ``<<<`` is a here-string, not a heredoc, and does not open
-    one. This is a heuristic, not shell parsing — the goal is only to avoid
-    manufacturing command positions that the shell would never create.
+    one; neither does a ``<<`` inside ``$(( ... ))`` or ``(( ... ))``, where it is
+    a bit shift whose right operand would otherwise read as a delimiter that never
+    appears — swallowing the rest of the command. This is a heuristic, not shell
+    parsing — the goal is only to avoid manufacturing command positions that the
+    shell would never create, and to avoid destroying real ones.
 
     Pipes do not split by default, because a pipeline is one logical command.
     Pass ``split_pipes=True`` to also split on ``|``, which is what
@@ -182,6 +185,7 @@ def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[
     pending_heredocs: list[str] = []
     in_single_quote = False
     in_double_quote = False
+    arithmetic_depth = 0
     escaping = False
     index = 0
 
@@ -213,9 +217,26 @@ def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[
             continue
 
         if not in_single_quote and not in_double_quote:
+            # ``<<`` inside arithmetic is a bit shift, not a redirection, and a
+            # phantom header whose delimiter never appears would swallow the rest
+            # of the command. Both ``$(( ... ))`` and the bare arithmetic command
+            # ``(( ... ))`` are tracked. An unclosed ``((`` leaves the depth
+            # positive, which only disables heredoc detection — newlines keep
+            # splitting, so the failure direction stays towards seeing more
+            # command positions rather than fewer.
+            if char == "(" and command.startswith("((", index):
+                arithmetic_depth += 1
+                current.append("((")
+                index += 2
+                continue
+            if arithmetic_depth and char == ")" and command.startswith("))", index):
+                arithmetic_depth -= 1
+                current.append("))")
+                index += 2
+                continue
             # A header can only start at ``<``; checking that first keeps the
             # regex off every other character of a long command.
-            if char == "<":
+            if char == "<" and not arithmetic_depth:
                 heredoc = _HEREDOC_HEADER.match(command, index)
                 if heredoc:
                     pending_heredocs.append(next(group for group in heredoc.groups() if group is not None))

