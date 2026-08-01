@@ -264,6 +264,14 @@ The checkpoint storage settings `database.checkpoint_channel_mode` and
 both are frozen when the process first builds an agent (including through
 `DeerFlowClient`) and require a process restart to change safely.
 
+The optional `database.checkpoint_cache` section (delta channel mode only)
+caches materialized checkpoint histories: `type` is `memory` (default) or
+`redis`, and `max_entries: 0` disables the cache. The `redis` backend is
+Gateway/async-only; the sync TUI/embedded path supports `memory` only. The
+cache is performance-only — results are identical with it disabled — so it is
+never frozen and workers sharing one checkpoint database may safely run
+different cache settings.
+
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
 

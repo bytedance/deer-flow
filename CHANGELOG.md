@@ -112,6 +112,8 @@ This section accumulates work toward the **2.1.0** milestone
 - **runtime:** Dual-mode checkpoint storage with LangGraph `DeltaChannel` cuts
   thread storage from O(N²) to near-linear for long research/coding runs.
   ([#4292])
+- **runtime:** Delta-mode checkpoint history cache (memory/redis) with O(1)
+  incremental composition, configured via `database.checkpoint_cache`.
 - **agent:** Config-declared lead-agent middlewares let deployments add custom
   `AgentMiddleware` classes without patching the runtime chain. ([#3964])
 - **agents:** Per-agent model and generation settings (`temperature`,
