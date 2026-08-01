@@ -655,7 +655,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                     return await client.get_tools(server_name=server_name)
                 return await load_mcp_tools(
                     None,
-                    connection=client.connections[server_name],
+                    connection=servers_config[server_name],
                     callbacks=client.callbacks,
                     server_name=server_name,
                     tool_interceptors=client.tool_interceptors,
