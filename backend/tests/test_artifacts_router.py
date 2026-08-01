@@ -35,19 +35,22 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
 
     original_read_text = Path.read_text
 
-    def read_text_with_gbk_default(self, *args, **kwargs):
-        kwargs.setdefault("encoding", "gbk")
+    def reject_artifact_read_text(self, *args, **kwargs):
+        if self == artifact_path:
+            pytest.fail("text files must stream")
         return original_read_text(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", read_text_with_gbk_default)
+    monkeypatch.setattr(Path, "read_text", reject_artifact_read_text)
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
 
-    request = _make_request()
-    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/note.txt", request))
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt")
 
-    assert bytes(response.body).decode("utf-8") == text
-    assert response.media_type == "text/plain"
-    assert response.headers["etag"] == f'"{hashlib.sha256(text.encode("utf-8")).hexdigest()}"'
+    assert response.text == text
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["accept-ranges"] == "bytes"
 
 
 @asynccontextmanager
@@ -329,6 +332,60 @@ def test_update_artifact_reports_active_run_conflict(tmp_path, monkeypatch) -> N
     assert artifact_path.read_text(encoding="utf-8") == "before"
 
 
+def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
+    payload = ("0123456789abcdef" * 131_072).encode()
+    artifact_path = tmp_path / "large.txt"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        preview = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/large.txt",
+            headers={"Range": "bytes=0-1048575"},
+        )
+        invalid = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/large.txt",
+            headers={"Range": f"bytes={len(payload)}-"},
+        )
+
+    assert preview.status_code == 206
+    assert preview.content == payload[:1_048_576]
+    assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
+    assert preview.headers["content-disposition"].startswith("inline;")
+    assert invalid.status_code == 416
+    assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
+
+
+def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
+    payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        preview = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": "bytes=0-1048575"},
+        )
+        invalid = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": f"bytes={len(payload)}-"},
+        )
+
+    assert preview.status_code == 206
+    assert preview.content == payload[:1_048_576]
+    assert preview.headers["accept-ranges"] == "bytes"
+    assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
+    assert invalid.status_code == 416
+    assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename
@@ -370,7 +427,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
 
     assert response.status_code == 200
     assert response.text == "hello"
-    assert "content-disposition" not in response.headers
+    assert response.headers["content-disposition"].startswith("inline;")
 
 
 def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypatch) -> None:

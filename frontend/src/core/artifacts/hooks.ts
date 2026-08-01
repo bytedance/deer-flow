@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
 
@@ -18,6 +18,8 @@ export function useArtifactContent({
     return filepath.startsWith("write-file:");
   }, [filepath]);
   const { thread, isMock } = useThread();
+  const [fullFilepath, setFullFilepath] = useState<string | null>(null);
+  const fullContentRequested = fullFilepath === filepath;
   const content = useMemo(() => {
     if (isWriteFile) {
       return loadArtifactContentFromToolCall({ url: filepath, thread });
@@ -26,9 +28,14 @@ export function useArtifactContent({
   }, [filepath, isWriteFile, thread]);
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["artifact", filepath, threadId, isMock],
+    queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
     queryFn: () => {
-      return loadArtifactContent({ filepath, threadId, isMock });
+      return loadArtifactContent({
+        filepath,
+        threadId,
+        isMock,
+        full: fullContentRequested,
+      });
     },
     enabled,
     staleTime: 0,
@@ -46,10 +53,19 @@ export function useArtifactContent({
     }
   }, [enabled, isWriteFile, refetch, thread.isLoading]);
 
+  const loadFullContent = useCallback(() => {
+    setFullFilepath(filepath);
+  }, [filepath]);
+
   return {
     content: isWriteFile ? content : data?.content,
     url: isWriteFile ? undefined : data?.url,
     sha256: isWriteFile ? undefined : data?.sha256,
+    truncated: isWriteFile ? false : (data?.truncated ?? false),
+    previewBytes: isWriteFile ? undefined : data?.previewBytes,
+    totalBytes: isWriteFile ? undefined : data?.totalBytes,
+    fullContentRequested,
+    loadFullContent,
     isLoading,
     error,
   };

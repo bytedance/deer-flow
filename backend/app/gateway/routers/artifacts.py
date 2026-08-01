@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -159,6 +159,51 @@ def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | Non
     return headers
 
 
+def _slice_byte_range(content: bytes, range_header: str | None) -> tuple[bytes, int, dict[str, str]]:
+    """Apply one RFC 9110 byte range to an in-memory archive member."""
+    size = len(content)
+    headers = {"Accept-Ranges": "bytes"}
+    if range_header is None:
+        return content, 200, headers
+
+    def unsatisfied() -> HTTPException:
+        return HTTPException(
+            status_code=416,
+            detail="Requested range is not satisfiable",
+            headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{size}"},
+        )
+
+    if not range_header.startswith("bytes=") or "," in range_header:
+        raise unsatisfied()
+    range_spec = range_header.removeprefix("bytes=")
+    if "-" not in range_spec:
+        raise unsatisfied()
+    start_text, end_text = range_spec.split("-", 1)
+    try:
+        if start_text:
+            start = int(start_text)
+            end = size - 1 if not end_text else min(int(end_text), size - 1)
+        else:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                raise unsatisfied()
+            start = max(size - suffix_length, 0)
+            end = size - 1
+    except ValueError as exc:
+        raise unsatisfied() from exc
+
+    if size == 0 or start < 0 or start >= size or end < start:
+        raise unsatisfied()
+    ranged_content = content[start : end + 1]
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Content-Length": str(len(ranged_content)),
+        }
+    )
+    return ranged_content, 206, headers
+
+
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
     """Check if file is text by examining content for null bytes."""
     try:
@@ -239,18 +284,14 @@ def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, in
     return content, mime_type
 
 
-def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tuple[str, str | None, bytes | str | None]:
+def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tuple[str, str | None]:
     """Worker-thread body for the regular branch of ``get_artifact``.
 
-    Stat probes, MIME sniffing (``mimetypes`` lazily stats the system MIME
-    database on first use), and text reads are blocking filesystem IO. Returns
-    a ``(kind, mime_type, payload)`` plan the handler turns into a response on
-    the loop: ``("file", mime, None)`` (attachment / forced-download active
-    content, streamed by ``FileResponse``), ``("inline_file", mime, None)``
-    (inline binary preview — also streamed by ``FileResponse`` so the client
-    can issue byte-``Range`` requests, e.g. to seek within audio/video
-    artifacts instead of always replaying from byte 0), or ``("text", mime,
-    str)``. Behavior/error codes match the previous inline logic.
+    Stat probes and MIME sniffing (``mimetypes`` lazily stats the system MIME
+    database on first use) are blocking filesystem IO. Returns a
+    ``(kind, mime_type)`` plan the handler turns into a streamed
+    ``FileResponse``. Inline text and binary previews both use FileResponse so
+    clients can request a bounded byte range instead of buffering a whole file.
     """
     if not actual_path.exists():
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
@@ -259,15 +300,12 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
     mime_type, _ = mimetypes.guess_type(actual_path)
     # Active content / explicit download is streamed by FileResponse — no read here.
     if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
-        return ("file", mime_type, None)
+        return ("file", mime_type)
     if mime_type and mime_type.startswith("text/"):
-        return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
+        return ("inline_file", mime_type)
     if is_text_file_by_content(actual_path):
-        return ("text", mime_type, actual_path.read_text(encoding="utf-8"))
-    # Binary inline preview (images, audio, video, PDFs, ...): stream via
-    # FileResponse instead of buffering the whole file in memory, so it also
-    # gets FileResponse's built-in byte-Range handling (see get_artifact).
-    return ("inline_file", mime_type, None)
+        return ("inline_file", mime_type or "text/plain")
+    return ("inline_file", mime_type)
 
 
 @router.get(
@@ -338,23 +376,37 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=_build_attachment_headers(download_name, cache_headers))
 
+        # Archive members are already bounded during extraction. Preserve byte
+        # semantics here so the frontend can request only its preview budget,
+        # including a final partial UTF-8 sequence.
+        request_headers = request.headers if request is not None else {}
+        range_header = None if request_headers.get("if-range") else request_headers.get("range")
+        ranged_content, status_code, range_headers = _slice_byte_range(content, range_header)
+        inline_headers = {**cache_headers, **range_headers}
+
         if mime_type and mime_type.startswith("text/"):
-            return PlainTextResponse(content=content.decode("utf-8"), media_type=mime_type, headers=cache_headers)
+            return Response(content=ranged_content, status_code=status_code, media_type=mime_type, headers=inline_headers)
 
         # Default to plain text for unknown types that look like text
         try:
-            return PlainTextResponse(content=content.decode("utf-8"), media_type="text/plain", headers=cache_headers)
+            content.decode("utf-8")
+            return Response(content=ranged_content, status_code=status_code, media_type="text/plain", headers=inline_headers)
         except UnicodeDecodeError:
-            return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
+            return Response(
+                content=ranged_content,
+                status_code=status_code,
+                media_type=mime_type or "application/octet-stream",
+                headers=inline_headers,
+            )
 
     actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, path, user_id=owner_user_id)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
-    # Offload path stat + MIME sniff + file reads (all blocking filesystem IO).
-    # Active content and explicit downloads are streamed by FileResponse, so the
-    # worker only reports the kind; inline text/binary payloads are read in-thread.
-    kind, mime_type, payload = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
+    # Offload path stat + MIME sniff (blocking filesystem IO). Every regular
+    # artifact response is streamed by FileResponse; the worker only reports
+    # disposition and media type.
+    kind, mime_type = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
 
     if kind == "file":
         # Always force download for active content types to prevent script
@@ -362,22 +414,13 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
 
     if kind == "inline_file":
-        # FileResponse (unlike a fully-buffered Response) honors byte-Range
-        # requests. Browsers issue these when seeking an <audio>/<video>
-        # element backed by a remote URL; serving the same bytes through a
-        # plain Response ignores Range headers and always replays from byte
-        # 0, which is why dragging an audio/video artifact's progress bar
-        # reset playback to the start instead of jumping to the new position.
+        # FileResponse honors byte-Range requests for large text previews and
+        # media seeking without buffering the full artifact in the Gateway.
         return FileResponse(
             path=actual_path,
             media_type=mime_type,
             headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)},
         )
-
-    if kind == "text":
-        assert isinstance(payload, str)
-        content_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        return PlainTextResponse(content=payload, media_type=mime_type, headers={"ETag": f'"{content_sha256}"'})
 
     raise AssertionError(f"Unhandled artifact response kind: {kind!r}")
 

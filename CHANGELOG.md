@@ -222,6 +222,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Changed
 
+- **frontend performance:** Keep the public root and localized docs static;
+  lazy-load closed workspace panels and editor/highlighter dependencies;
+  incrementally derive streamed message state; bound streaming Markdown work;
+  virtualize long message and chat lists; pause offscreen decorative effects;
+  and enforce representative route JS/CSS budgets.
+- **browser:** Negotiate binary Browser Live JPEG frames, retain the legacy
+  JSON/base64 protocol for older clients, coalesce presentation to the latest
+  frame per refresh, and revoke replaced object URLs.
+- **artifacts:** Stream regular text artifacts with HTTP byte-range support and
+  limit the initial Web UI preview to 1 MiB until the user explicitly loads the
+  complete file.
 - **sandbox:** The Helm chart now defaults per-sandbox Services to `ClusterIP`
   instead of `NodePort`, so the code-execution sandbox is reachable only inside
   the cluster via Service DNS (`http://sandbox-<id>-svc.<ns>.svc.cluster.local`)

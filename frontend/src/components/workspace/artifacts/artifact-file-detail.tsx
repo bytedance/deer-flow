@@ -193,7 +193,18 @@ export function ArtifactFileDetail({
     isSupportPreview,
     toolResult,
   });
-  const { content, url, sha256 } = useArtifactContent({
+  const {
+    content,
+    url,
+    sha256,
+    truncated,
+    previewBytes,
+    totalBytes,
+    fullContentRequested,
+    loadFullContent,
+    isLoading,
+    error,
+  } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
@@ -243,6 +254,9 @@ export function ArtifactFileDetail({
     artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
+  const isLoadingFullContent = fullContentRequested && isLoading;
+  const effectiveViewMode =
+    truncated && language === "html" ? "code" : viewMode;
   useEffect(() => {
     setViewMode(artifactViewState.initialViewMode);
   }, [artifactViewState.initialViewMode]);
@@ -299,7 +313,7 @@ export function ArtifactFileDetail({
         },
       }));
       queryClient.setQueryData(
-        ["artifact", filepathFromProps, threadId, isMock],
+        ["artifact", filepathFromProps, threadId, isMock, fullContentRequested],
         (
           current:
             | { content?: string; url?: string; sha256?: string }
@@ -339,6 +353,7 @@ export function ArtifactFileDetail({
     canEdit,
     filepath,
     filepathFromProps,
+    fullContentRequested,
     isDirty,
     isMock,
     isSaving,
@@ -410,7 +425,7 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center gap-2">
-          {artifactViewState.canPreview && (
+          {artifactViewState.canPreview && !truncated && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -540,7 +555,7 @@ export function ArtifactFileDetail({
               <ArtifactAction
                 icon={CopyIcon}
                 label={t.clipboard.copyToClipboard}
-                disabled={!content}
+                disabled={!content || truncated}
                 onClick={() => {
                   void (async () => {
                     const didCopy = await writeTextToClipboard(
@@ -597,53 +612,143 @@ export function ArtifactFileDetail({
           </ArtifactActions>
         </div>
       </ArtifactHeader>
-      <ArtifactContent className="p-0">
-        {artifactViewState.canPreview &&
-          viewMode === "preview" &&
-          (language === "markdown" || language === "html") && (
-            <ArtifactFilePreview
-              content={editorContent}
-              language={language ?? "text"}
-              scrollKey={filepathFromProps}
-              url={url}
+      <ArtifactContent className="flex flex-col p-0">
+        {truncated && (
+          <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
+            <span className="text-muted-foreground">
+              {t.artifactPreview.limited(
+                formatArtifactBytes(previewBytes) ?? "1 MiB",
+                formatArtifactBytes(totalBytes),
+              )}
+            </span>
+            <Button size="sm" variant="outline" onClick={loadFullContent}>
+              {t.artifactPreview.loadFullFile}
+            </Button>
+          </div>
+        )}
+        {isLoadingFullContent && (
+          <div className="border-border text-muted-foreground flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm">
+            <LoaderIcon className="size-4 animate-spin" />
+            {t.artifactPreview.loadingFullFile}
+          </div>
+        )}
+        <div className="min-h-0 flex-1">
+          {error && (
+            <ArtifactPreviewError
+              filepath={filepath}
+              threadId={threadId}
+              isMock={isMock}
+              message={t.artifactPreview.previewFailed}
+              downloadLabel={t.common.download}
             />
           )}
-        {isCodeFile && viewMode === "code" && (
-          <CodeEditor
-            className="size-full resize-none rounded-none border-none"
-            value={editorContent ?? ""}
-            readonly={!isEditing}
-            disabled={thread.isLoading || isSaving}
-            autoFocus={isEditing}
-            onChange={(nextContent) => {
-              setDrafts((current) => ({
-                ...current,
-                [filepath]: {
-                  ...(current[filepath] ?? activeDraft),
-                  draftContent: nextContent,
-                },
-              }));
-            }}
-            onSave={() => void handleSave()}
-          />
-        )}
-        {!isCodeFile && canPreviewInBrowser && (
-          <iframe
-            className="size-full"
-            sandbox=""
-            src={urlOfArtifact({ filepath, threadId, isMock })}
-          />
-        )}
-        {!isCodeFile && !canPreviewInBrowser && (
-          <ArtifactDownloadFallback
-            filepath={filepath}
-            threadId={threadId}
-            isMock={isMock}
-          />
-        )}
+          {artifactViewState.canPreview &&
+            !error &&
+            effectiveViewMode === "preview" &&
+            !isLoading &&
+            (!truncated || language === "markdown") &&
+            (language === "markdown" || language === "html") && (
+              <ArtifactFilePreview
+                content={editorContent}
+                language={language}
+                scrollKey={filepathFromProps}
+                url={url}
+              />
+            )}
+          {isCodeFile &&
+            !error &&
+            effectiveViewMode === "code" &&
+            !truncated &&
+            !isLoading && (
+              <CodeEditor
+                className="size-full resize-none rounded-none border-none"
+                value={editorContent ?? ""}
+                readonly={!isEditing}
+                disabled={thread.isLoading || isSaving}
+                autoFocus={isEditing}
+                onChange={(nextContent) => {
+                  setDrafts((current) => ({
+                    ...current,
+                    [filepath]: {
+                      ...(current[filepath] ?? activeDraft),
+                      draftContent: nextContent,
+                    },
+                  }));
+                }}
+                onSave={() => void handleSave()}
+                language={language}
+              />
+            )}
+          {isCodeFile &&
+            !error &&
+            truncated &&
+            effectiveViewMode === "code" && (
+              <pre className="size-full overflow-auto p-4 font-mono text-sm whitespace-pre-wrap">
+                {visibleContent}
+              </pre>
+            )}
+          {!isCodeFile && canPreviewInBrowser && (
+            <iframe
+              className="size-full"
+              sandbox=""
+              src={urlOfArtifact({ filepath, threadId, isMock })}
+            />
+          )}
+          {!isCodeFile && !canPreviewInBrowser && (
+            <ArtifactDownloadFallback
+              filepath={filepath}
+              threadId={threadId}
+              isMock={isMock}
+            />
+          )}
+        </div>
       </ArtifactContent>
     </Artifact>
   );
+}
+
+function ArtifactPreviewError({
+  filepath,
+  threadId,
+  isMock,
+  message,
+  downloadLabel,
+}: {
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+  message: string;
+  downloadLabel: string;
+}) {
+  return (
+    <div className="flex size-full items-center justify-center p-6">
+      <div className="flex max-w-sm flex-col items-center gap-4 text-center">
+        <p className="text-muted-foreground text-sm">{message}</p>
+        <Button asChild>
+          <a
+            href={urlOfArtifact({
+              filepath,
+              threadId,
+              download: true,
+              isMock,
+            })}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <DownloadIcon className="size-4" />
+            {downloadLabel}
+          </a>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function formatArtifactBytes(bytes: number | undefined) {
+  if (bytes === undefined) return undefined;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function ArtifactDownloadFallback({

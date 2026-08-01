@@ -1,3 +1,5 @@
+import "katex/dist/katex.min.css";
+
 import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 

@@ -76,6 +76,10 @@ function MessageGroupComponent({
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const stepIndexByStep = useMemo(
+    () => new Map(steps.map((step, index) => [step, index] as const)),
+    [steps],
+  );
   const debugStepByMessageId = useMemo(
     () =>
       new Map(
@@ -104,20 +108,20 @@ function MessageGroupComponent({
   }, [steps]);
   const aboveLastToolCallSteps = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(0, index);
     }
     return [];
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
   const afterLastToolCallAssistantTextSteps = useMemo(() => {
     if (!lastToolCallStep) {
       return [];
     }
-    const index = steps.indexOf(lastToolCallStep);
+    const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
     return steps
       .slice(index + 1)
       .filter((step) => step.type === "assistantText");
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
   const collapsibleAboveLastToolCallSteps = useMemo(
     () =>
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
@@ -125,13 +129,13 @@ function MessageGroupComponent({
   );
   const lastReasoningStep = useMemo(() => {
     if (lastToolCallStep) {
-      const index = steps.indexOf(lastToolCallStep);
+      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
       return steps.slice(index + 1).find((step) => step.type === "reasoning");
     } else {
       const filteredSteps = steps.filter((step) => step.type === "reasoning");
       return filteredSteps[filteredSteps.length - 1];
     }
-  }, [lastToolCallStep, steps]);
+  }, [lastToolCallStep, stepIndexByStep, steps]);
   // Assistant text emitted after the trailing reasoning is the answer that
   // reasoning produced, so it renders below the reasoning disclosure. The
   // settled assistant bubble always paints reasoning above content, and the
@@ -142,11 +146,11 @@ function MessageGroupComponent({
     if (!lastReasoningStep) {
       return [];
     }
-    const index = steps.indexOf(lastReasoningStep);
+    const index = stepIndexByStep.get(lastReasoningStep) ?? -1;
     return steps
       .slice(index + 1)
       .filter((step) => step.type === "assistantText");
-  }, [lastReasoningStep, steps]);
+  }, [lastReasoningStep, stepIndexByStep, steps]);
   const belowLastReasoningSteps = useMemo(
     () => new Set<CoTStep>(belowLastReasoningAssistantTextSteps),
     [belowLastReasoningAssistantTextSteps],
@@ -276,7 +280,7 @@ function MessageGroupComponent({
   );
 
   const renderStep = (step: CoTStep) => {
-    const stepIndex = steps.indexOf(step);
+    const stepIndex = stepIndexByStep.get(step) ?? -1;
     if (step.type === "assistantText") {
       return [
         renderDebugSummary(step.messageId, stepIndex),
@@ -364,7 +368,7 @@ function MessageGroupComponent({
             <>
               {renderDebugSummary(
                 lastToolCallStep.messageId,
-                steps.indexOf(lastToolCallStep),
+                stepIndexByStep.get(lastToolCallStep) ?? -1,
               )}
               <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
                 {renderToolCall(lastToolCallStep, { isLast: true })}
@@ -380,7 +384,7 @@ function MessageGroupComponent({
         <>
           {renderDebugSummary(
             lastReasoningStep.messageId,
-            steps.indexOf(lastReasoningStep),
+            stepIndexByStep.get(lastReasoningStep) ?? -1,
           )}
           <Button
             key={lastReasoningStep.id}

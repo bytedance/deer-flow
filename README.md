@@ -945,6 +945,12 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
 
+Text artifacts are streamed with HTTP byte-range support. The Web UI initially
+loads at most 1 MiB, shows the preview size when a file is larger, and waits for
+an explicit **Load full file** action before fetching the remainder or mounting
+the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
+downloads at the Gateway boundary.
+
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log.
 
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
@@ -978,6 +984,11 @@ uv run playwright install chromium
 ```
 
 Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_get_text`, `browser_back`, `browser_screenshot`, `browser_close`). `make dev` / Docker startup detects an enabled `browser_navigate` tool and preserves the `browser` extra on dependency syncs. The Gateway fails startup if browser control is configured but Playwright is missing, and `/api/features` hides the Browser UI unless the backend can actually serve it. Keep `headless: true` and `allow_private_addresses: false` for anything but local, trusted debugging. Attaching to an existing Chrome with `cdp_url` cannot enforce DeerFlow's subresource/redirect SSRF guard and therefore fails closed unless `allow_unguarded_cdp: true` explicitly acknowledges that risk; use it only with a trusted local browser. Browser sessions are process-local; keep `GATEWAY_WORKERS=1` while this tool group is enabled because ordinary uvicorn worker dispatch does not provide thread affinity.
+
+The workspace Browser Live client negotiates binary JPEG WebSocket frames,
+keeps only the newest pending frame per display refresh, and revokes replaced
+object URLs. Gateway control messages remain JSON, and clients that do not
+request the binary capability retain the legacy JSON/base64 frame protocol.
 
 ### Context Engineering
 
@@ -1199,6 +1210,12 @@ and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
 The JSON includes compact review records with `priority`, `location`,
 `blocking_call`, `event_loop_exposure`, `reason`, and `code`.
 Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+Frontend route asset budgets can be checked with `cd frontend && pnpm
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
 
 ## License
 

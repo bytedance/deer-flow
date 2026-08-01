@@ -71,6 +71,11 @@ The frontend is a stateful chat application. Users create **threads** (conversat
    `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
    Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
    The detail view exposes explicit editing only for an already-opened formal UTF-8 text artifact under `/mnt/user-data/outputs`. Drafts stay in provider memory until Save so switching right-side panels cannot discard them, render in Markdown/HTML preview, and are protected from remote refreshes by the loaded SHA-256 revision. Saving is disabled during an active run; a changed revision preserves the draft and surfaces a conflict instead of overwriting agent output.
+   Regular artifact text loads request at most the first 1 MiB through an HTTP
+   byte range. A truncated preview must stay lightweight and expose an explicit
+   full-file action; do not mount CodeMirror for that artifact until the user
+   requests and receives the complete content. The Gateway retains range
+   ownership and returns 206/416 through `FileResponse`.
 3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. The resolver suppresses checkpoint/transient prefixes whose canonical position is still behind an unloaded cursor page instead of collapsing that unknown gap before a recent anchor, then adds optimistic messages without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys the submitted user message from `X` to `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the submitted frame and checkpoint replacement remain one visible turn. A locally submitted turn also records its pre-submit identity baseline: if `messages-tuple` publishes new AI/tool steps before `values` publishes that turn's human message, render ordering moves only those non-baseline visible steps behind the new human while leaving history, hidden controls, and reconnected runs untouched. Keep that local order anchor through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
 4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 5. TanStack Query manages server state; localStorage stores user settings. The
@@ -106,6 +111,13 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 ### Key Patterns
 
 - **Server Components by default**, `"use client"` only for interactive components
+- **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
+  chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
+  locale provider; docs derive locale from their route, and blog owns its preference
+  cookie. Public server routes load one dictionary at a time through
+  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
+  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
+  Keep public `/` static and keep rich-content CSS on the routes that render it.
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
@@ -125,6 +137,12 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
 - `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
+- `src/components/workspace/browser-view/use-browser-stream.ts` requests binary JPEG
+  frames with `frame_format=binary`; status, URL, tabs, and navigation rejection
+  messages remain JSON. `LatestBrowserFrameBuffer` keeps only the newest pending
+  frame, publishes through `useSyncExternalStore` at most once per animation
+  frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
+  frame path for older clients.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
@@ -165,3 +183,12 @@ When adding features:
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
+
+Route asset budgets are enforced with `pnpm perf:check`. The command measures
+`/login` from a normal production build, then builds in static-demo mode for the
+fixture-backed workspace routes. It starts the production server on temporary local
+ports, measures the unique JavaScript and CSS files referenced by representative
+routes, writes the detailed result to `.next/performance-results.json`, and compares
+totals with `performance-budgets.json`. Fix route ownership or split points when a
+budget fails; do not raise a ceiling without documenting and reviewing the measured
+regression.

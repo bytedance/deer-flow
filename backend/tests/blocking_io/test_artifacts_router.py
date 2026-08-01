@@ -1,7 +1,7 @@
 """Regression anchor: serving artifacts must not block the event loop.
 
-``get_artifact`` probes the artifact path (``exists`` / ``is_file``), reads
-text content (``read_text``), sniffs text-ness (``is_text_file_by_content``),
+``get_artifact`` probes the artifact path (``exists`` / ``is_file``), sniffs
+text-ness (``is_text_file_by_content``),
 and extracts ``.skill`` archive members — all blocking filesystem IO. The
 handler offloads each branch's IO via ``asyncio.to_thread``; if any regresses
 back onto the event loop, the strict Blockbuster gate raises ``BlockingError``
@@ -65,8 +65,10 @@ async def test_get_artifact_text_does_not_block_event_loop(tmp_path: Path, monke
 
     resp = await _get_artifact("t1", vpath, request=None, download=False)
 
+    assert isinstance(resp, FileResponse)
     assert resp.status_code == 200
-    assert resp.body == b"hello world"
+    assert Path(resp.path) == target
+    assert resp.headers.get("content-disposition", "").startswith("inline;")
 
 
 async def test_get_artifact_binary_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
