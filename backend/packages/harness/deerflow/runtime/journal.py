@@ -87,24 +87,16 @@ def _coerce_seed_message(message: Any) -> Any:
     return message
 
 
-def build_branch_history_seed_events(
+def _build_history_seed_events(
     messages: Sequence[Any],
     *,
     thread_id: str,
     run_id_prefix: str,
-    parent_thread_id: str,
+    seed_metadata: Mapping[str, Any],
 ) -> list[dict]:
-    """Serialize a branch checkpoint's messages into run-event message rows.
+    """Serialize checkpoint messages into run-event rows.
 
-    Thread branching copies checkpoint state, but the thread feed
-    (``list_messages`` / ``GET /threads/{id}/messages/page``) reads the
-    run-event store — which a fresh branch has no rows in, so the inherited
-    history vanishes from the UI as soon as the branch's first run refreshes
-    the feed (#4380). Seeding the branch's run_events from the same
-    checkpoint snapshot the branch was created from keeps the feed
-    consistent with what the branch actually contains.
-
-    Rows are grouped into one synthetic run per inherited turn
+    Rows are grouped into one synthetic run per checkpoint turn
     (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
     message — the same boundary a real run has, since a run begins with a
     human input (including the allowlisted hidden ``ask_clarification``
@@ -117,9 +109,9 @@ def build_branch_history_seed_events(
     id per turn confines the drop to the turn actually regenerated.
 
     Mirrors RunJournal's message-event contract so seeded rows are
-    indistinguishable from journaled ones except by the ``branch_seed``
-    marker: same event types, ``category="message"``, ``content=
-    message.model_dump()``, the human-input persistence rule
+    indistinguishable from journaled ones except by the supplied seed metadata:
+    same event types, ``category="message"``, ``content=message.model_dump()``,
+    the human-input persistence rule
     (``_should_persist_human_input_message``), the original-user-text
     restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
     RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
@@ -136,7 +128,6 @@ def build_branch_history_seed_events(
     """
     events: list[dict] = []
     created_at = datetime.now(UTC).isoformat()
-    seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
     # Messages ahead of the first human turn (none in practice) stay in turn 0.
     turn_index = 0
     for raw_message in messages:
@@ -173,6 +164,45 @@ def build_branch_history_seed_events(
             }
         )
     return events
+
+
+def build_branch_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+    parent_thread_id: str,
+) -> list[dict]:
+    """Serialize inherited branch history into the branch's empty event feed."""
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={
+            "branch_seed": True,
+            "branch_parent_thread_id": parent_thread_id,
+        },
+    )
+
+
+def build_checkpoint_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+) -> list[dict]:
+    """Serialize legacy checkpoint history for a thread's empty event feed.
+
+    Reuse the branch seed's message normalization and per-turn synthetic run
+    grouping, but stamp migration-specific metadata so these rows are not
+    misidentified as history inherited from another thread.
+    """
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={"checkpoint_history_seed": True},
+    )
 
 
 class RunJournal(BaseCallbackHandler):

@@ -694,6 +694,8 @@ def _host_default_extraction_callback(payload: Any) -> None:
     extracted = payload.get("facts_extracted")
     passed_confidence = payload.get("facts_passed_confidence")
     rejected = payload.get("rejected_low_confidence", 0)
+    rejected_by_scope = payload.get("rejected_by_scope_gate", 0)
+    scope_breakdown = payload.get("scope_gate_rejections")
     thread_id = payload.get("thread_id")
     model_name = payload.get("model_name")
     if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
@@ -721,6 +723,22 @@ def _host_default_extraction_callback(payload: Any) -> None:
             payload.get("success"),
             payload.get("token_usage"),
         )
+    if isinstance(scope_breakdown, dict):
+        logger.info(
+            "Memory scope-gate metrics: thread=%s model=%s rejected=%s breakdown=%s",
+            thread_id,
+            model_name,
+            rejected_by_scope,
+            scope_breakdown,
+        )
+        fact_breakdown = scope_breakdown.get("facts")
+        fact_scope_rejected = sum(value for value in fact_breakdown.values() if isinstance(value, int)) if isinstance(fact_breakdown, dict) else 0
+        if isinstance(extracted, int) and extracted > 0 and fact_scope_rejected / extracted > 0.6:
+            logger.warning(
+                "Memory fact scope-gate rejection rate %.0f%% exceeds 60%% - review extraction model classification / prompt (thread=%s)",
+                fact_scope_rejected / extracted * 100,
+                thread_id,
+            )
 
 
 def _collect_host_hooks() -> dict[str, Any]:

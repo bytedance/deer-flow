@@ -57,7 +57,6 @@ services:
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
       # Per-user data base directory for user-scoped skill mounts
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
@@ -93,8 +92,11 @@ services:
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
+    # Loopback-only by default; see the note in docker-compose.yaml. Override
+    # with BIND_HOST when you deliberately need the dev stack reachable from
+    # another machine.
     ports:
-      - "2026:2026"
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
     command:
@@ -201,7 +203,6 @@ services:
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
       # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY

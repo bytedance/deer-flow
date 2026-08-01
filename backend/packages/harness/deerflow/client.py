@@ -1281,13 +1281,19 @@ class DeerFlowClient:
             if config_path is None:
                 raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
-            extensions_config = get_extensions_config()
-            extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
+            from deerflow.skills.projection import skill_projection_mutation
 
-            config_data = extensions_config.to_file_dict()
+            removal_names = (name,) if not enabled else ()
+            with skill_projection_mutation(storage, "public", remove_names=removal_names):
+                # The projection lock is cross-process, but the singleton cache
+                # is not. Reload from disk under the lock before this RMW.
+                extensions_config = ExtensionsConfig.from_file(config_path)
+                extensions_config.skills[name] = SkillStateConfig(enabled=enabled)
 
-            self._atomic_write_json(config_path, config_data)
-            reload_extensions_config()
+                config_data = extensions_config.to_file_dict()
+
+                self._atomic_write_json(config_path, config_data)
+                reload_extensions_config()
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage

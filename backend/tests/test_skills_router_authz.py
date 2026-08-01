@@ -125,6 +125,17 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     from deerflow.skills.types import Skill
 
     config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {},
+                "middlewares": ["pkg:Middleware"],
+                "mcpInterceptors": ["pkg.interceptor:build"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def _load_skills(*, enabled_only: bool):
         return [
@@ -141,21 +152,12 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         ]
 
     app = _make_app(system_role="admin")
+    # Not a real LocalSkillStorage instance, so _write_extensions_skill_state's
+    # projection-mutation branch is skipped (nullcontext) and it reads the
+    # config_path fresh via ExtensionsConfig.from_file.
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    from deerflow.config.extensions_config import ExtensionsConfig
-
-    monkeypatch.setattr(
-        skills_router,
-        "get_extensions_config",
-        lambda: ExtensionsConfig(
-            mcp_servers={},
-            skills={},
-            middlewares=["pkg:Middleware"],
-            mcpInterceptors=["pkg.interceptor:build"],
-        ),
-    )
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _config_path=None: config_path))
 
     async def _refresh(_user_id: str):
         return None
