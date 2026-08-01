@@ -1,4 +1,5 @@
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.tools import StructuredTool
@@ -6,7 +7,8 @@ from pydantic import BaseModel, Field
 
 from app.gateway.routers.mcp import McpServerConfigResponse
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-from deerflow.mcp.tools import get_mcp_tools
+from deerflow.mcp.tools import _make_session_pool_tool, get_mcp_tools
+from deerflow.tools.mcp_metadata import get_mcp_routing
 
 
 class _Args(BaseModel):
@@ -42,11 +44,17 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
     extensions_config = ExtensionsConfig.model_validate(
         {
             "mcpServers": {
-                "semantic-scholar": {
+                "semantic_scholar": {
                     "type": "stdio",
                     "command": "uvx",
                     "args": ["s2-mcp-server"],
                     "tool_name_prefix": False,
+                    "routing": {"mode": "prefer", "priority": 10},
+                    "tools": {
+                        "semantic_scholar_search_papers": {
+                            "routing": {"priority": 99},
+                        }
+                    },
                 },
                 "github": {
                     "type": "http",
@@ -56,7 +64,7 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
         }
     )
     servers_config = {
-        "semantic-scholar": {
+        "semantic_scholar": {
             "transport": "stdio",
             "command": "uvx",
             "args": ["s2-mcp-server"],
@@ -67,7 +75,7 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
         },
     }
     raw_tools = {
-        "semantic-scholar": _tool("semantic_scholar_search_papers"),
+        "semantic_scholar": _tool("semantic_scholar_search_papers"),
         "github": _tool("search_repositories"),
     }
 
@@ -120,5 +128,38 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
         "semantic_scholar_search_papers",
         "github_search_repositories",
     }
+    semantic_scholar_tool = next(tool for tool in tools if tool.name == "semantic_scholar_search_papers")
+    routing = get_mcp_routing(semantic_scholar_tool)
+    assert routing is not None
+    assert routing["priority"] == 99
     wrap_tool.assert_called_once()
-    assert wrap_tool.call_args.args[1] == "semantic-scholar"
+    assert wrap_tool.call_args.args[1] == "semantic_scholar"
+    assert wrap_tool.call_args.kwargs["tool_name_prefix"] is False
+
+
+@pytest.mark.asyncio
+async def test_unprefixed_stdio_tool_keeps_server_like_original_name(tmp_path: Path) -> None:
+    """Pooling must not strip a prefix that belongs to the MCP tool itself."""
+    original_tool = _tool("github_search")
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_pool = MagicMock()
+    mock_pool.get_session = AsyncMock(return_value=mock_session)
+
+    with (
+        patch("deerflow.mcp.tools.get_session_pool", return_value=mock_pool),
+        patch("deerflow.mcp.tools.get_paths", return_value=MagicMock()),
+        patch(
+            "deerflow.mcp.tools._prepare_stdio_workspace",
+            return_value=(tmp_path, tmp_path / "tmp", {}),
+        ),
+    ):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "github",
+            {"transport": "stdio", "command": "mcp-server", "args": []},
+            tool_name_prefix=False,
+        )
+        await wrapped.coroutine(query="repositories")
+
+    mock_session.call_tool.assert_awaited_once_with("github_search", {"query": "repositories"})
