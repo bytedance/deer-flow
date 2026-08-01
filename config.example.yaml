@@ -2325,12 +2325,15 @@ run_ownership:
 #         admin:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
+#           models: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
+#           models: {allow: "*"}
 #         guest:
 #           tools: {allow: ["web_search", "read_file"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
+#           models: {allow: ["gpt-4o-mini"]}
 authorization:
   enabled: false
 

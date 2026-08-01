@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
+from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.authorization_config import AuthorizationConfig
 
@@ -261,6 +261,61 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
 
     results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
     return [p for p in results if p is not None]
+
+
+class _AuthorizationUnavailable(Exception):
+    """Raised internally when the provider cannot be resolved for a route check.
+
+    Carries the ``fail_closed`` flag so the caller can decide between deny-all
+    and legacy allow-all without re-reading config.
+    """
+
+    def __init__(self, *, fail_closed: bool) -> None:
+        self.fail_closed = fail_closed
+
+
+def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for model-route authorization.
+
+    When authorization is disabled, returns ``(None, None)`` so callers can
+    short-circuit to legacy behavior (all models visible). When enabled,
+    resolves the cached provider and builds a Principal identical to
+    ``resolve_route_permissions`` (including the ``INTERNAL_SYSTEM_ROLE``
+    → ``None`` pop so internal callers fall under ``default_role``).
+
+    Raises ``_AuthorizationUnavailable`` (carrying the ``fail_closed`` flag)
+    when the provider cannot be resolved; callers translate that into the
+    appropriate deny response (empty list / 403).
+    """
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return None, None
+
+    try:
+        provider = _get_cached_route_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for model routes", exc_info=True)
+        raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
+
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    user_role = getattr(user, "system_role", None)
+    if user_role == INTERNAL_SYSTEM_ROLE:
+        user_role = None
+
+    principal = build_principal_from_context(
+        {
+            "user_id": str(user.id),
+            "user_role": user_role,
+            "oauth_provider": getattr(user, "oauth_provider", None),
+            "oauth_id": getattr(user, "oauth_id", None),
+            "is_internal": is_internal,
+        },
+        default_role=config.default_role,
+    )
+    return provider, principal
 
 
 async def _authenticate(request: Request) -> AuthContext:
