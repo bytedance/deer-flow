@@ -569,6 +569,30 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # configure_logging() at lifespan startup) out of sync with the middleware.
     app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
 
+    # Python extensions load once while the Gateway app is constructed. Agent
+    # middleware builders consume the same immutable set through the process
+    # singleton; app.state exposes it to the Gateway runtime.
+    from deerflow.extensions import (
+        EMPTY_EXTENSIONS,
+        ExtensionLoadError,
+        initialize_runtime_diagnostics,
+        load_extensions,
+        set_loaded_extensions,
+    )
+
+    try:
+        loaded_extensions, extension_diagnostics = load_extensions(get_app_config().plugins)
+    except ExtensionLoadError:
+        # `required: true` makes the extension part of the startup contract.
+        # Booting without it would silently change configured behaviour.
+        raise
+    except Exception:
+        logger.exception("Extension loading failed; continuing with no extensions")
+        loaded_extensions, extension_diagnostics = EMPTY_EXTENSIONS, []
+    set_loaded_extensions(loaded_extensions)
+    app.state.extensions = loaded_extensions
+    app.state.extension_diagnostics = initialize_runtime_diagnostics(extension_diagnostics)
+
     # Include routers
     # Models API is mounted at /api/models
     app.include_router(models.router)

@@ -13,6 +13,7 @@ resolution-markers = [
 [manifest]
 members = [
     "deer-flow",
+    "deerflow-extension-api",
     "deerflow-harness",
 ]
 overrides = [{ name = "websockets", specifier = "==16.0" }]
@@ -873,6 +874,11 @@ dev = [
 ]
 
 [[package]]
+name = "deerflow-extension-api"
+version = "0.1.0"
+source = { editable = "packages/extension-api" }
+
+[[package]]
 name = "deerflow-harness"
 version = "2.1.0"
 source = { editable = "packages/harness" }
@@ -884,6 +890,7 @@ dependencies = [
     { name = "croniter" },
     { name = "cryptography" },
     { name = "ddgs" },
+    { name = "deerflow-extension-api" },
     { name = "dotenv" },
     { name = "duckdb" },
     { name = "e2b-code-interpreter" },
@@ -960,6 +967,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "ddgs", specifier = ">=9.10.0" },
+    { name = "deerflow-extension-api", editable = "packages/extension-api" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "duckdb", specifier = ">=1.4.4" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.0" },
