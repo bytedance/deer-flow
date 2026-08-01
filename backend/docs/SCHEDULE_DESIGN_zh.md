@@ -76,7 +76,7 @@
 domain/schedule/                 对应规范 §2 的 domain 七件套
 ├── __init__.py       上下文公开 API：聚合 + 命令 + 错误 + 服务（端口刻意不导出）
 ├── exceptions.py     10 个领域错误，一个基类 ScheduleError        → 七件套 exceptions/
-├── commands.py       6 个写用例 command + UNSET + ContextChange   → 七件套 commands/
+├── commands.py       6 个写用例 command + ContextChange            → 七件套 commands/
 ├── ports.py          4 个 Protocol + LaunchedRun / RunOutcome     → 七件套 ports/
 ├── service.py        ScheduleService（写方法即 handler）          → 七件套 command_handlers/
 └── model/            两个聚合 + 值对象；是包而非单文件            → 七件套 model/
@@ -271,7 +271,7 @@ GET    /api/threads/{tid}/scheduled-tasks 某 thread 绑定的任务
 
 相比只有单聚合、单驱动源的上下文，schedule 多出三个设计点：
 
-**① `UNSET` sentinel 表达三态**（规范 §3.1 明文）。`UpdateScheduledTask` 的四个可选字段默认 `UNSET`（"未提供"），与 `None` 严格区分。wire 保持历史契约（显式 `null` = 未提供），`to_command` 是 `None`→`UNSET` 翻译的唯一发生处——三态在 command 层无歧义，两态在 wire 层不破坏兼容。
+**① 部分更新用 `None` 表达"未提供"，而不是自造哨兵。** `UpdateScheduledTask` 的可选字段默认 `None`，wire 侧的历史契约（显式 `null` = 未提供）因此一路直达 command，`to_command` 不需要翻译层。这**只在每个字段的 `None` 都不是合法业务值时成立**——这里没有"把标题设成 null"这回事。将来若某字段的 `None` 本身有含义，它必须像 `thread_id` 一样装进小对象里传（见 ②），而不是把哨兵加回来。
 
 **② `ContextChange` 是字段联动的对象化先例。** `context_mode` 与 `thread_id` 总是一起变（`with_context` 同时接收两者，切到 fresh 模式就意味着清空绑定）。打包之后，"解绑 thread"与"没传 thread"再无歧义——`thread_id` 的 `None` 有含义，但它只在 `ContextChange` 内部出现。
 
@@ -296,16 +296,25 @@ GET    /api/threads/{tid}/scheduled-tasks 某 thread 绑定的任务
 
 **① 越权一律表现为"不存在"**（规范 §4）：别人的任务读取返回 `None` / `False` / 从列表消失，不抛权限错误。
 
-**② `RunLauncher` 只允许两种异常逃逸。**
+**② `RunLauncher` 只允许三种异常逃逸。**
 
 ```
-执行 thread 已经忙  ->  ThreadBusyError
-其他任何失败        ->  LaunchFailedError
+执行 thread 已经忙          ->  ThreadBusyError
+确定没启动任何 run          ->  LaunchFailedError
+可能启动了、但认不出身份     ->  LaunchIndeterminateError
 ```
 
-这条约定是**整个重构的支点**。旧编排层靠 `isinstance(exc, HTTPException) and exc.status_code == 409` 嗅探"线程忙"，业务逻辑因此依赖了 Web 框架。翻译交给适配器后，领域只认自己的两个错误。必须区分，因为结果不同：自动调度遇到线程忙是一次跳过的机会，真正的失败要记为失败。
+这条约定是**整个重构的支点**。旧编排层靠 `isinstance(exc, HTTPException) and exc.status_code == 409` 嗅探"线程忙"，业务逻辑因此依赖了 Web 框架。翻译交给适配器后，领域只认自己的三个错误。
 
-**③ `RunOutcome` 挡住运行时类型。** 旧完成回调直接吃 `deerflow.runtime.RunRecord`——纯度测试会拦下它。现在由入站适配器先过滤再翻译（§7.2），service 因此不需要守卫子句。
+三者必须区分，因为结果不同：自动调度遇到线程忙是一次跳过的机会；`LaunchFailedError` 会**释放任务唯一的活跃槽位**，所以适配器只有在能确证"没有任何 run 被启动"时才允许抛它；其余一切疑问——5xx、连接在请求发出后断开、返回体解不出 run id——都归 `LaunchIndeterminateError`，槽位保持占用、`run_id` 记为未知，留给对账去查清。这条界线就是 #4452 重复执行的防线：把"可能已经启动"当成失败上报，下一次派发就会再跑一遍。适配器按 HTTP 语义划界——4xx 是请求在做事之前被拒，5xx 是执行途中出错。
+
+**③ `version` 是存储写路径持有的乐观令牌。** 每一次已提交的写入（`save` 的 CAS、`record_launch`、`record_completion`、`claim_due`、`cancel_stuck_once_tasks`）都递增它；聚合自己的状态转换刻意不碰它——它标识的是"这个聚合是从哪一份快照读出来的"。
+
+需要它，是因为 HTTP 的写用例天然是"读—改—写整个聚合"，而派发与完成路径同时在写同一行。API 读出任务、用户改了标题、这期间轮询器把它启动了：把改过的旧快照整体写回去，就会把 `next_run_at`、`run_count`、`last_run_id` 一起还原，一个已经执行过的时刻被重新武装。`save` 因此是对 `version` 的 compare-and-set，冲突抛 `ConcurrentUpdateError`；service 在新读到的状态上重放意图、重跑一遍聚合规则，`_SAVE_ATTEMPTS` 轮后仍失败才让它冒到 router（→ 409，可重试）。
+
+SQL 侧刻意写成**带条件的 UPDATE**而不是"先读再比再写"：后者读与比是两条语句，两个写者可以同时看到相同版本、双双提交。让数据库来做比较，才是这道保护真正成立的地方。它需要一列 `scheduled_tasks.version`——本切片唯一的 schema 变更（migration `0011`）。
+
+**④ `RunOutcome` 挡住运行时类型。** 旧完成回调直接吃 `deerflow.runtime.RunRecord`——纯度测试会拦下它。现在由入站适配器先过滤再翻译（§7.2），service 因此不需要守卫子句。
 
 ### 5.2 两个刻意的缺席
 
@@ -507,7 +516,7 @@ sequenceDiagram
 
 1. `model/task.py` 的 `ScheduledTask` 加字段（带默认值）；若有约束，写进 `__post_init__`
 2. `test_schedule_domain.py` 先写红的测试（TDD 是本仓库硬要求）
-3. 用户要能设置它才改 command：`commands.py` 的 `CreateScheduledTask` 加字段、`UpdateScheduledTask` 加 `UNSET` 默认字段；`service.py` 的 handler 跟着传
+3. 用户要能设置它才改 command：`commands.py` 的 `CreateScheduledTask` 加字段、`UpdateScheduledTask` 加 `None` 默认字段（若该字段的 `None` 有业务含义，改为装进小对象）；`service.py` 的 handler 跟着传
 4. ORM 层——`persistence/scheduled_tasks/model.py` 加列 + alembic revision（`make migrate-rev`，用 `_helpers.py` 幂等 helper）
 5. `scheduled_task_repository.py` 的 `_to_domain` / `_apply` 各加一行
 6. api model：请求模型加字段、`to_command` 跟着传；响应模型**默认不加**，除非前端真的需要
@@ -578,7 +587,7 @@ sequenceDiagram
 |---|---|
 | 上下文公开 API | `packages/harness/deerflow/domain/schedule/__init__.py` |
 | 领域错误（一族一基类） | `packages/harness/deerflow/domain/schedule/exceptions.py` |
-| 命令 + `UNSET` + `ContextChange` | `packages/harness/deerflow/domain/schedule/commands.py` |
+| 命令 + `ContextChange` | `packages/harness/deerflow/domain/schedule/commands.py` |
 | 端口契约（语义写在 docstring 里） | `packages/harness/deerflow/domain/schedule/ports.py` |
 | 用例编排（写方法即 command handler） | `packages/harness/deerflow/domain/schedule/service.py` |
 | 值对象 | `packages/harness/deerflow/domain/schedule/model/spec.py` |
