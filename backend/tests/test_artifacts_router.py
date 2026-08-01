@@ -119,9 +119,30 @@ def test_update_artifact_replaces_utf8_text_atomically(tmp_path, monkeypatch) ->
     assert response.path == "/mnt/user-data/outputs/note.txt"
     assert response.sha256 == _artifact_sha256("after")
     assert response.size == len(b"after")
-    replacement_mode = stat.S_IMODE(artifact_path.stat().st_mode)
-    assert replacement_mode == 0o660
-    assert not replacement_mode & stat.S_IWOTH
+    if hasattr(artifacts_router.os, "fchmod"):
+        replacement_mode = stat.S_IMODE(artifact_path.stat().st_mode)
+        assert replacement_mode == 0o660
+        assert not replacement_mode & stat.S_IWOTH
+
+
+def test_update_artifact_replaces_when_fchmod_is_unavailable(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    monkeypatch.delattr(artifacts_router.os, "fchmod", raising=False)
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/note.txt",
+            artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+            _make_request(),
+        )
+    )
+
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+    assert response.sha256 == _artifact_sha256("after")
 
 
 def test_update_artifact_rejects_stale_revision_without_changing_file(tmp_path, monkeypatch) -> None:

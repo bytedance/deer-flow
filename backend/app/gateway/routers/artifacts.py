@@ -123,7 +123,11 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
                 os.fchown(temp_fd, file_stat.st_uid, file_stat.st_gid)
             except OSError:
                 logger.debug("Could not preserve artifact ownership: %s", actual_path, exc_info=True)
-        os.fchmod(temp_fd, stat.S_IMODE(file_stat.st_mode) | 0o660)
+        # Windows has no fchmod and uses ACLs rather than POSIX mode bits.
+        # Keep the mkstemp permissions there; retain the existing POSIX
+        # behavior on platforms that expose descriptor-based chmod.
+        if hasattr(os, "fchmod"):
+            os.fchmod(temp_fd, stat.S_IMODE(file_stat.st_mode) | 0o660)
         with os.fdopen(temp_fd, "wb") as handle:
             temp_fd = -1
             handle.write(content)
