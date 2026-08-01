@@ -3,6 +3,7 @@
 import {
   BellIcon,
   CableIcon,
+  CpuIcon,
   InfoIcon,
   BrainIcon,
   PaletteIcon,
@@ -26,6 +27,7 @@ import { AppearanceSettingsPage } from "@/components/workspace/settings/appearan
 import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
 import { IntegrationsSettingsPage } from "@/components/workspace/settings/integrations-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
+import { ModelSettingsPage } from "@/components/workspace/settings/model-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
@@ -38,6 +40,7 @@ export type SettingsSection =
   | "channels"
   | "integrations"
   | "memory"
+  | "models"
   | "tools"
   | "skills"
   | "notification"
@@ -89,6 +92,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: PlugZapIcon,
       },
       {
+        id: "models",
+        label: t.settings.sections.models,
+        icon: CpuIcon,
+      },
+      {
         id: "memory",
         label: t.settings.sections.memory,
         icon: BrainIcon,
@@ -102,6 +110,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.appearance,
       t.settings.sections.channels,
       t.settings.sections.integrations,
+      t.settings.sections.models,
       t.settings.sections.memory,
       t.settings.sections.tools,
       t.settings.sections.skills,
@@ -154,6 +163,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
+              {activeSection === "models" && <ModelSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (
                 <SkillSettingsPage
