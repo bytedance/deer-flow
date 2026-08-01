@@ -257,6 +257,25 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
+  substitution that only captures output. The rule now judges *position* instead
+  of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a
+  `for` word list all run normally, while a substitution in command position
+  (`$(curl url)`, after a `|`/`&&`/`;`, behind leading assignments or an
+  `env`/`nohup`/`time` style wrapper, or as an `eval`/`source` argument) still
+  blocks because it executes fetched content. An interpreter's code-string flag
+  (`bash -c`, `python -c`, `perl -e`, `node -p`, `php -r`, and the `<<<`
+  here-string) is treated as an execution context wherever it appears, so
+  `bash -c "$(curl url)"` blocks; `source <(curl url)` and the backtick spelling
+  of `eval`/`source` now block too, neither of which was detected before. An
+  unquoted newline separates statements like `;`, so `echo hi` followed by a
+  new line starting `$(curl url)` blocks as well, while heredoc bodies are
+  consumed as data — writing a file whose content happens to start a line with
+  `$(curl url)` is not a command.
+  Variable expansions whose name merely starts with a risky executable
+  (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
+  (`shellcheck`, `shasum`) are no longer false positives.
+  ([#4611])
 - **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
   an unrelated disallowed stdio command no longer blocks every switch; allow
   disabling a disallowed target while still rejecting its re-enable, preserve
@@ -1372,3 +1391,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4469]: https://github.com/bytedance/deer-flow/pull/4469
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
+[#4611]: https://github.com/bytedance/deer-flow/issues/4611

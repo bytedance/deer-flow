@@ -22,6 +22,7 @@ import {
   removeSetItems,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
+  restoreLocalTurnMessageOrder,
   type ThreadMessagesPageResponse,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -1500,6 +1501,126 @@ test("rendered message ledger survives rolling live windows before repeated comp
   expect(moved.map((message) => message.id)).toEqual(
     processingMessages.slice(0, 18).map((message) => message.id),
   );
+});
+
+test("rendered message ledger replaces a submitted user message with its injected server copy", () => {
+  const submittedHuman = {
+    id: "request-1",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedSystemReminder = {
+    id: "request-1",
+    type: "system",
+    content: "<system-reminder>today</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedMemory = {
+    id: "request-1__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedHuman = {
+    id: "request-1__user",
+    type: "human",
+    content: "Build a presentation",
+    name: "user-input",
+  } as Message;
+  const assistantStep = {
+    id: "assistant-step-1",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+
+  const firstLedger = mergeRenderedMessageLedger([], [submittedHuman]);
+  const nextFrame = mergeMessages(
+    [submittedHuman],
+    [injectedSystemReminder, injectedMemory, injectedHuman, assistantStep],
+    [],
+  ).filter((message) => message.additional_kwargs?.hide_from_ui !== true);
+  const nextLedger = mergeRenderedMessageLedger(firstLedger, nextFrame);
+
+  expect(nextLedger).toEqual([injectedHuman, assistantStep]);
+  expect(nextLedger.filter((message) => message.type === "human")).toHaveLength(
+    1,
+  );
+});
+
+test("local turn order keeps early streamed steps behind the user message", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Previous request",
+  } as Message;
+  const previousAssistant = {
+    id: "previous-assistant",
+    type: "ai",
+    content: "Previous answer",
+  } as Message;
+  const earlyAssistantStep = {
+    id: "early-assistant-step",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-current",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedHuman = {
+    id: "current-request__user",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedMemory = {
+    id: "current-request__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const laterAssistantStep = {
+    id: "later-assistant-step",
+    type: "ai",
+    content: "Writing the presentation plan",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-assistant",
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, previousAssistant, earlyAssistantStep, optimisticHuman],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    optimisticHuman,
+    earlyAssistantStep,
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAssistant,
+        earlyAssistantStep,
+        injectedMemory,
+        injectedHuman,
+        laterAssistantStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    injectedMemory,
+    injectedHuman,
+    earlyAssistantStep,
+    laterAssistantStep,
+  ]);
 });
 
 test("rendered message ledger does not retain explicitly superseded messages", () => {

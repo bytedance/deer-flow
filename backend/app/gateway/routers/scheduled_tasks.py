@@ -23,6 +23,7 @@ from deerflow.scheduler.schedules import (
     normalize_cron_expression,
     validate_timezone,
 )
+from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
@@ -36,7 +37,7 @@ def _ensure_task_mutable(task: dict[str, Any]) -> None:
 
 
 class ScheduledTaskCreateRequest(BaseModel):
-    thread_id: str | None = None
+    thread_id: ThreadId | None = None
     context_mode: str = "fresh_thread_per_run"
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
@@ -47,7 +48,7 @@ class ScheduledTaskCreateRequest(BaseModel):
 
 class ScheduledTaskUpdateRequest(BaseModel):
     context_mode: str | None = None
-    thread_id: str | None = None
+    thread_id: ThreadId | None = None
     title: str | None = Field(default=None, min_length=1)
     prompt: str | None = Field(default=None, min_length=1)
     schedule_spec: dict[str, Any] | None = None
@@ -302,7 +303,7 @@ async def list_scheduled_task_runs(
 
 @router.get("/threads/{thread_id}/scheduled-tasks")
 @require_permission("threads", "read", owner_check=True)
-async def list_thread_scheduled_tasks(thread_id: str, request: Request):
+async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
     if user is None:

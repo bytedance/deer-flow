@@ -240,7 +240,7 @@ def test_trace_id_threads_through_to_callbacks(deermem_data_dir):
 
 
 def test_default_passive_update_persists_fact_in_reserved_default_bucket(deermem_data_dir):
-    dm = _deermem_with_fake_llm(payload='{"user":{},"history":{},"newFacts":[{"content":"Default agent fact","category":"context","confidence":0.9}],"factsToRemove":[]}')
+    dm = _deermem_with_fake_llm(payload='{"user":{},"history":{},"newFacts":[{"content":"Default agent fact","category":"context","confidence":0.9,"scope":"user","durability":"durable","authority":"descriptive"}],"factsToRemove":[]}')
 
     dm.add(
         thread_id="default-thread",

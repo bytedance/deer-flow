@@ -101,6 +101,20 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  artifactEditing: {
+    unsaved: "Unsaved",
+    saving: "Saving...",
+    saved: "Artifact saved",
+    exit: "Exit editing",
+    discard: "Discard changes",
+    discardChanges: "Discard the unsaved changes to this artifact?",
+    conflict:
+      "This artifact changed after you started editing. Discard your draft and reload before saving.",
+    conflictShort: "Changed remotely",
+    runInProgress: "Wait for the current agent run to finish before saving.",
+    saveFailed: "Failed to save artifact",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) =>
@@ -697,6 +711,13 @@ export const enUS: Translations = {
     completeTodo: (content: string) => `Complete To-do: ${content}`,
     updateTodo: (content: string) => `Update To-do: ${content}`,
     removeTodo: (content: string) => `Remove To-do: ${content}`,
+  },
+
+  contextUsage: {
+    label: "Context",
+    title: "Context window",
+    badgeAriaLabel: (percentage: string) =>
+      `Context window ${percentage}% full`,
   },
 
   // Shortcuts

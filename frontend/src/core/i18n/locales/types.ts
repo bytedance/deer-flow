@@ -84,6 +84,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactEditing: {
+    unsaved: string;
+    saving: string;
+    saved: string;
+    exit: string;
+    discard: string;
+    discardChanges: string;
+    conflict: string;
+    conflictShort: string;
+    runInProgress: string;
+    saveFailed: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;
@@ -580,6 +593,12 @@ export interface Translations {
     completeTodo: (content: string) => string;
     updateTodo: (content: string) => string;
     removeTodo: (content: string) => string;
+  };
+
+  contextUsage: {
+    label: string;
+    title: string;
+    badgeAriaLabel: (percentage: string) => string;
   };
 
   // Shortcuts
