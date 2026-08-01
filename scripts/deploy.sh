@@ -73,6 +73,37 @@ load_uv_extras_from_dotenv() {
 
 load_uv_extras_from_dotenv
 
+# Read one key from $ENV_FILE the way compose --env-file interpolates it, so the
+# final summary reports the values the stack actually came up with. The shell
+# does not source $ENV_FILE, so reading these from the environment alone would
+# report "loopback only" for a stack that .env exposed to the network.
+read_dotenv_value() {
+    local key="$1"
+    local line=""
+    local value=""
+
+    # An exported shell variable wins, matching compose precedence.
+    if [ -n "${!key+x}" ]; then
+        printf '%s' "${!key}"
+        return 0
+    fi
+
+    [ -f "$ENV_FILE" ] || return 0
+
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$ENV_FILE" | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+        \"*\") value="${value#\"}"; value="${value%\"}" ;;
+        \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    printf '%s' "$value"
+}
+
 # ── Colors ────────────────────────────────────────────────────────────────────
 
 GREEN='\033[0;32m'
@@ -373,10 +404,25 @@ echo "=========================================="
 echo "  DeerFlow is running!"
 echo "=========================================="
 echo ""
-echo "  🌐 Application: http://localhost:${PORT:-2026}"
-echo "  📡 API Gateway: http://localhost:${PORT:-2026}/api/*"
+RESOLVED_PORT="$(read_dotenv_value PORT)"
+RESOLVED_PORT="${RESOLVED_PORT:-2026}"
+RESOLVED_BIND_HOST="$(read_dotenv_value BIND_HOST)"
+RESOLVED_BIND_HOST="${RESOLVED_BIND_HOST:-127.0.0.1}"
+
+echo "  🌐 Application: http://localhost:${RESOLVED_PORT}"
+echo "  📡 API Gateway: http://localhost:${RESOLVED_PORT}/api/*"
 echo "  🤖 Runtime:     Gateway embedded"
 echo "  API:            /api/langgraph/* → Gateway"
+echo ""
+if [ "$RESOLVED_BIND_HOST" = "127.0.0.1" ] || [ "$RESOLVED_BIND_HOST" = "::1" ] || [ "$RESOLVED_BIND_HOST" = "localhost" ]; then
+    echo "  🔒 Bound to ${RESOLVED_BIND_HOST} — reachable from this machine only."
+    echo "     To expose it, set BIND_HOST in .env, put TLS/auth in front, and"
+    echo "     create the admin account before the host becomes reachable."
+else
+    echo "  ⚠️  Bound to ${RESOLVED_BIND_HOST} — reachable from the network."
+    echo "     Open http://localhost:${RESOLVED_PORT} and complete first-run"
+    echo "     setup now, before anyone else reaches this host."
+fi
 echo ""
 echo "  Manage:"
 echo "    make down        — stop and remove containers"

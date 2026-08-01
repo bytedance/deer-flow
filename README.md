@@ -1136,6 +1136,17 @@ DeerFlow has key high-privilege capabilities including **system command executio
 - **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
 - **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
 
+### Deployment Defaults
+
+The Docker stack publishes its entry port on `127.0.0.1` only, matching the
+local-trusted-environment model described above. To reach it from another
+machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only after
+putting the security measures below in place.
+
+**Complete first-run setup before the host becomes reachable.** A fresh
+instance has no accounts yet, so create the admin account through `/setup`
+immediately after starting any deployment that is not loopback-only.
+
 ### Security Recommendations
 
 **Note: We strongly recommend deploying DeerFlow in a local trusted network environment.** If you need cross-device or cross-network deployment, you must implement strict security measures, such as:
