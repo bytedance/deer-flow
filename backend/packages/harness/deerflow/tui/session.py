@@ -82,7 +82,7 @@ def open_session(persistence: bool = True) -> Session:
     from deerflow.runtime.checkpointer.provider import get_checkpointer
 
     checkpointer = get_checkpointer()
-    client = DeerFlowClient(checkpointer=checkpointer)
+    client = DeerFlowClient(checkpointer=checkpointer, subagent_enabled=True)
     if not persistence:
         return Session(client=client)
 

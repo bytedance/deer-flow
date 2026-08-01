@@ -1027,7 +1027,7 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 
 ## Terminal Workbench (TUI)
 
-`deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.
+`deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, sandbox, and subagent delegation settings as the rest of DeerFlow.
 
 ![DeerFlow TUI](docs/tui/tui-preview.svg)
 

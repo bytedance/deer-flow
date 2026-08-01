@@ -387,7 +387,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def get_user_integrations_root(self) -> Path:
         """Host path to this user's managed integration skills root directory."""
-        return self._user_integrations_root
+        return self._integrations_root
 
     # ------------------------------------------------------------------
     # Path validation — accept per-user custom root as well as global root
@@ -401,7 +401,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         would reject them.  This override allows both roots.
         """
         resolved_file = skill_file.resolve()
-        for allowed_root in (self._host_root.resolve(), self._user_custom_root.resolve(), self._user_integrations_root.resolve()):
+        for allowed_root in (self._host_root.resolve(), self._user_custom_root.resolve(), self._integrations_root.resolve()):
             try:
                 resolved_file.relative_to(allowed_root)
                 return resolved_file

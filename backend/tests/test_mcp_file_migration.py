@@ -203,6 +203,18 @@ class TestRewriteLocalPathsInText:
 
         assert result == text
 
+    def test_https_url_is_not_treated_as_local_path(self):
+        text = "Issue URL: https://github.com/octocat/Hello-World/pull/1"
+
+        with patch.object(
+            mcp_tools,
+            "_local_uri_to_virtual_path",
+            side_effect=AssertionError("remote URL must not enter local path conversion"),
+        ):
+            result = mcp_tools._rewrite_local_paths_in_text(text, thread_id="t1", user_id="u1")
+
+        assert result == text
+
     def test_playwright_markdown_path_is_rewritten_twice_without_copy(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
         _workspace_file(paths, ".playwright-mcp/page.png", content=b"png")

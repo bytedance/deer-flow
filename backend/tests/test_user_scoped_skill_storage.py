@@ -282,6 +282,16 @@ class TestHistoryIsolation:
 class TestPathSafety:
     """UserScopedSkillStorage inherits path-traversal guards from LocalSkillStorage."""
 
+    def test_accepts_public_skill_file(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        skill_file = skills_root / "public" / "github-issue-coding" / "SKILL.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text(_skill_content("github-issue-coding"), encoding="utf-8")
+
+        assert user_storage.validate_skill_file_path(skill_file) == skill_file.resolve()
+
+    def test_integration_root_accessor_returns_configured_root(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        assert user_storage.get_user_integrations_root() == base_dir / "integrations" / "skills"
+
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):
             user_storage.get_custom_skill_dir("../../escaped")

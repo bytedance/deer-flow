@@ -276,6 +276,9 @@ def _rewrite_local_paths_in_text(
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(0)
+        prefix = text[: match.start()].lower()
+        if prefix.endswith(("http:", "https:")):
+            return token
         # A path can end a sentence ("saved as temp/a.png."); strip trailing
         # punctuation and restore it after the (possibly rewritten) path.
         stripped = token.rstrip(_TEXT_PATH_TRAILING_CHARS)
