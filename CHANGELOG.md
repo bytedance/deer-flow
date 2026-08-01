@@ -268,6 +268,7 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
   of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a
