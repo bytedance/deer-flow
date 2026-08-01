@@ -501,6 +501,19 @@ Localhost persistence deliberately reads the direct request `Host` and ignores `
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |
 
+Thread identifiers use the shared `deerflow.utils.thread_id` contract
+`^[A-Za-z0-9_-]{1,64}$`. Caller-provided opaque IDs remain supported; UUIDs
+are generated only for `None`, while explicit empty strings fail validation.
+Gateway creation and state-producing request boundaries, embedded-client
+entry points, filesystem/upload/event-store consumers, scheduled launches,
+and the standalone Provisioner enforce the same contract before persistence
+or workspace initialization. Route-addressable legacy IDs remain accepted by
+pure reads and cleanup/control endpoints. Deleting a noncanonical legacy ID
+best-effort removes its metadata and checkpoints but deliberately skips local
+filesystem cleanup, so the raw value is never interpolated into a host path;
+new runs, workspace/sandbox operations, and other state-producing mutations
+remain blocked.
+
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via

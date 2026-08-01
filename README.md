@@ -1048,6 +1048,18 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
+Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
+IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
+(`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is
+omitted or `None`; an explicitly supplied empty string is invalid.
+Existing route-addressable threads created under older, looser rules remain
+readable and deletable, but cannot start new runs or create new filesystem or
+sandbox state. Legacy deletion skips local path cleanup when the ID is not
+safe under the canonical contract. For canonical legacy threads whose
+conversation exists only in LangGraph checkpoints, DeerFlow seeds an empty
+run-event feed from the checkpoint before the first new run so
+`/messages/page` keeps both the old and new turns.
+
 ```python
 from deerflow.client import DeerFlowClient
 

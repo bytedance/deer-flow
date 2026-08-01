@@ -279,6 +279,112 @@ async def test_manual_overlap_conflict_returns_conflict():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
+    """Rows persisted before the thread-id contract was centralized may store
+    IDs that fail the canonical pattern (dots, >64 chars). Dispatch must record
+    the failure through normal bookkeeping instead of raising — an uncaught
+    ValueError surfaces as HTTP 500 on manual trigger and, in the poller,
+    aborts the rest of the claimed batch every cycle."""
+
+    async def fake_launch(**_kwargs):
+        raise AssertionError("launch_run must not be called for an invalid thread_id")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-legacy",
+                "user_id": "user-1",
+                "thread_id": "thread.with.dot",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(
+        task_repo.rows[0],
+        now=datetime.now(UTC),
+        trigger="scheduled",
+    )
+
+    assert result["outcome"] == "failed"
+    assert result["task_run_id"] is None
+    assert result["run_id"] is None
+    assert "Invalid thread_id" in result["error"]
+    assert run_repo.created is None
+    assert task_repo.updated[1]["last_error"] == result["error"]
+    assert task_repo.updated[1]["last_thread_id"] == "thread.with.dot"
+    assert task_repo.updated[1]["increment_run_count"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_once_continues_batch_after_invalid_thread_id():
+    """A poison legacy row must not prevent later claimed tasks from dispatching."""
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-ok", "thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-legacy",
+                "user_id": "user-1",
+                "thread_id": "thread.with.dot",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+            },
+            {
+                "id": "task-valid",
+                "user_id": "user-1",
+                "thread_id": "thread-ok",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+            },
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert len(launched) == 1
+    assert launched[0]["thread_id"] == "thread-ok"
+
+
+@pytest.mark.asyncio
 async def test_handle_run_completion_persists_success():
     task_repo = DummyTaskRepo(
         [
