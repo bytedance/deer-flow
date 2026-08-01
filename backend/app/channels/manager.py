@@ -930,7 +930,7 @@ class ChannelManager:
         self._require_bound_identity = require_bound_identity
         # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
         # threaded in from app.py's lifespan via start_channel_service() ->
-        # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
+        # ChannelService.__init__ (mirrors how the schedule composition root gets a
         # launch_run closure over `app` in the same lifespan function). None
         # when not wired (e.g. a ChannelManager constructed directly in
         # tests) — follow-up buffering still works, but no watcher is
