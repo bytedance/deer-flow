@@ -115,6 +115,38 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+# A heredoc header and its delimiter: ``<<EOF``, ``<< EOF``, ``<<-EOF``,
+# ``<<\EOF``, ``<<'EOF'``, ``<<"EOF"``. Both guards are needed to keep ``<<<``
+# (a here-string, which has no body) from opening one: the lookahead rejects it
+# at its first ``<``, and the lookbehind stops its trailing ``<<`` from matching
+# one character later, where ``<<< "text"`` would otherwise read as a heredoc
+# with delimiter ``text``.
+_HEREDOC_HEADER = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:\\?([A-Za-z_][\w.-]*)|'([^'\n]*)'|\"([^\"\n]*)\")")
+
+
+def _consume_heredoc_bodies(command: str, pos: int, delimiters: list[str]) -> int:
+    """Return the index just past the bodies of the *delimiters* opened so far.
+
+    Bodies are consumed in the order their headers appeared, each running until a
+    line whose stripped content equals its delimiter (``<<-`` strips leading tabs,
+    which ``strip()`` covers). An unterminated body consumes the rest of the
+    string: everything after the header genuinely is body, and there is no later
+    statement to find.
+    """
+    for delimiter in delimiters:
+        while pos < len(command):
+            newline = command.find("\n", pos)
+            if newline == -1:
+                return len(command)
+            line = command[pos:newline]
+            pos = newline + 1
+            if line.strip() == delimiter:
+                break
+        else:
+            return len(command)
+    return pos
+
+
 def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[str]:
     """Split a compound command into sub-commands (quote-aware).
 
@@ -125,15 +157,29 @@ def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[
     dangling escape, return the whole command unchanged (fail-closed —
     safer to classify the unsplit string than silently drop parts).
 
-    By default only sequencing operators (``&&``, ``||``, ``;``) split, because a
-    pipeline is one logical command. Pass ``split_pipes=True`` to also split on
-    ``|``, which is what command-position detection needs — the word after a pipe
-    starts a new command. Rules that span a pipe (``| sh``, ``base64 -d | ...``)
-    are matched by the whole-command scan in :func:`_classify_command`, so they
-    are unaffected by the extra split.
+    Sequencing operators (``&&``, ``||``, ``;``) split, and so does an unquoted
+    newline — it separates statements exactly like ``;``, so leaving it joined let
+    ``echo hi\\n$(curl url)`` evade the anchored command-position rules that
+    ``echo hi; $(curl url)`` triggers, despite identical shell semantics.
+
+    A heredoc body is data, not statements: its newlines and operators are file
+    content. Headers (``<<EOF``, ``<<-EOF``, ``<<'EOF'``) are therefore recorded
+    as they are read and their bodies consumed verbatim at the newline that
+    starts them, so a body line beginning with ``$(curl url)`` is not promoted to
+    command position. ``<<<`` is a here-string, not a heredoc, and does not open
+    one. This is a heuristic, not shell parsing — the goal is only to avoid
+    manufacturing command positions that the shell would never create.
+
+    Pipes do not split by default, because a pipeline is one logical command.
+    Pass ``split_pipes=True`` to also split on ``|``, which is what
+    command-position detection needs — the word after a pipe starts a new
+    command. Rules that span a pipe (``| sh``, ``base64 -d | ...``) are matched by
+    the whole-command scan in :func:`_classify_command`, so they are unaffected by
+    the extra split.
     """
     parts: list[str] = []
     current: list[str] = []
+    pending_heredocs: list[str] = []
     in_single_quote = False
     in_double_quote = False
     escaping = False
@@ -167,6 +213,30 @@ def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[
             continue
 
         if not in_single_quote and not in_double_quote:
+            # A header can only start at ``<``; checking that first keeps the
+            # regex off every other character of a long command.
+            if char == "<":
+                heredoc = _HEREDOC_HEADER.match(command, index)
+                if heredoc:
+                    pending_heredocs.append(next(group for group in heredoc.groups() if group is not None))
+                    current.append(heredoc.group(0))
+                    index = heredoc.end()
+                    continue
+            if char == "\n":
+                # The newline that follows a heredoc header is the statement
+                # separator, and its body belongs to the statement being closed.
+                if pending_heredocs:
+                    body_end = _consume_heredoc_bodies(command, index + 1, pending_heredocs)
+                    pending_heredocs = []
+                    current.append(command[index:body_end])
+                    index = body_end
+                else:
+                    index += 1
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                continue
             if command.startswith("&&", index) or command.startswith("||", index):
                 part = "".join(current).strip()
                 if part:

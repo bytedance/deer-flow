@@ -267,7 +267,11 @@ This section accumulates work toward the **2.1.0** milestone
   (`bash -c`, `python -c`, `perl -e`, `node -p`, `php -r`, and the `<<<`
   here-string) is treated as an execution context wherever it appears, so
   `bash -c "$(curl url)"` blocks; `source <(curl url)` and the backtick spelling
-  of `eval`/`source` now block too, neither of which was detected before.
+  of `eval`/`source` now block too, neither of which was detected before. An
+  unquoted newline separates statements like `;`, so `echo hi` followed by a
+  new line starting `$(curl url)` blocks as well, while heredoc bodies are
+  consumed as data — writing a file whose content happens to start a line with
+  `$(curl url)` is not a command.
   Variable expansions whose name merely starts with a risky executable
   (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
   (`shellcheck`, `shasum`) are no longer false positives.
