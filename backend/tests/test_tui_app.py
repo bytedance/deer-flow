@@ -8,6 +8,7 @@ import asyncio
 import threading
 
 import pytest
+from textual import events
 
 from deerflow.client import StreamEvent
 from deerflow.tui.app import DeerFlowTUI
@@ -69,6 +70,50 @@ async def test_app_runs_a_turn_and_renders_streamed_assistant():
     assistant = [r for r in app.state.rows if r.kind == "assistant"][-1]
     assert assistant.text == "Hello world"
     assert app.state.usage == {"total_tokens": 3}
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_reaches_agent_without_dropping_lines():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = 'Traceback:\n  File "worker.py", line 7\nRuntimeError: boom'
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+
+
+@pytest.mark.asyncio
+async def test_multiline_arrows_move_lines_before_input_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        app.post_message(events.Paste("first line\nsecond line"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+
+        assert composer.cursor_location == (1, 11)
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 0
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        composer.cursor_position = 0
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "previous prompt"
 
 
 @pytest.mark.asyncio
