@@ -582,6 +582,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     """
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
     except ImportError:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
@@ -648,7 +649,18 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         async def load_server_tools(server_name: str) -> list[BaseTool]:
             try:
-                return await client.get_tools(server_name=server_name)
+                server_cfg = extensions_config.mcp_servers.get(server_name)
+                tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
+                if tool_name_prefix:
+                    return await client.get_tools(server_name=server_name)
+                return await load_mcp_tools(
+                    None,
+                    connection=client.connections[server_name],
+                    callbacks=client.callbacks,
+                    server_name=server_name,
+                    tool_interceptors=client.tool_interceptors,
+                    tool_name_prefix=False,
+                )
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
@@ -672,8 +684,7 @@ async def get_mcp_tools() -> list[BaseTool]:
         # scanning servers_config for a name prefix is ambiguous when one server name is a
         # prefix of another (e.g. "web" vs "web_scraper" → "web_scraper_search".startswith(
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
-        # source grouping makes routing exact; the prefix guard preserves the previous
-        # behavior of leaving unprefixed tools unwrapped.
+        # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
@@ -692,7 +703,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)
-                if tool.name.startswith(f"{source_name}_") and transport == "stdio":
+                if transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
                     wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors, tool_call_timeout=_timeout))
                 else:

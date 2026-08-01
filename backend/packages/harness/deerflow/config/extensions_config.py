@@ -98,6 +98,10 @@ class McpServerConfig(BaseModel):
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
+    tool_name_prefix: bool = Field(
+        default=True,
+        description="Whether to prefix discovered tool names with the MCP server name to avoid cross-server collisions",
+    )
     tool_call_timeout: float | None = Field(
         default=None,
         description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",

@@ -15,6 +15,7 @@
       "env": {
         "GITHUB_TOKEN": "$GITHUB_TOKEN"
       },
+      "tool_name_prefix": true,
       "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
     },
