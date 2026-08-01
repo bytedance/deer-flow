@@ -150,7 +150,9 @@ async def get_model(
 
     Raises:
         HTTPException: 404 if model not found; 403 if the caller's role may not
-        ``use`` the model (only when ``authorization.enabled`` is true).
+        ``use`` the model (only when ``authorization.enabled`` is true). A
+        provider resolution error yields 403 (fail-closed) or allows the request
+        (fail-open), mirroring ``list_models``'s provider-error semantics.
 
     Example Response:
         ```json

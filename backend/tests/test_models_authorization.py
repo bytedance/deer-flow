@@ -329,6 +329,46 @@ def test_get_model_provider_error_fail_closed_vs_open(monkeypatch, fail_closed, 
     assert response.status_code == expected_status
 
 
+@pytest.mark.parametrize(
+    ("fail_closed", "expected_status"),
+    [(True, 403), (False, 200)],
+)
+def test_get_model_provider_unavailable_fail_closed_vs_open(monkeypatch, fail_closed, expected_status):
+    """Provider *resolution* failure → 403 (fail-closed) or 200 (fail-open).
+
+    Distinct from ``test_get_model_provider_error_fail_closed_vs_open``: that
+    test exercises a provider that resolves but errors inside ``authorize``.
+    This one exercises ``_AuthorizationUnavailable`` (the provider cannot be
+    resolved at all, e.g. misconfigured class path) and pins the fail-open
+    path so the docstring's "provider resolution error yields 403 (fail-closed)
+    or allows the request (fail-open)" claim is backed by a test.
+    """
+    config = AuthorizationConfig(
+        enabled=True,
+        fail_closed=fail_closed,
+        default_role="user",
+    )
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+
+    # Force provider resolution to raise → _AuthorizationUnavailable.
+    def _boom(_config):
+        raise RuntimeError("provider class path invalid")
+
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", _boom)
+
+    app_config = _make_app_config(["gpt-4"])
+    app_config.authorization.fail_closed = fail_closed
+    monkeypatch.setattr(
+        "app.gateway.routers.models.get_optional_user_from_request",
+        AsyncMock(return_value=_user()),
+    )
+
+    with TestClient(_make_models_app(app_config)) as client:
+        response = client.get("/api/models/gpt-4")
+
+    assert response.status_code == expected_status
+
+
 # ── Runtime model resolution tests (_authorize_model_name) ─────────────
 
 
