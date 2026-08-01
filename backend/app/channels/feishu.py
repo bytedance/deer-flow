@@ -325,14 +325,22 @@ class FeishuChannel(Channel):
             logger.exception("[Feishu] failed to upload/send file: %s", attachment.filename)
             return False
 
-    async def _upload_image(self, path) -> str:
-        """Upload an image to Feishu and return the image_key."""
+    def _upload_image_sync(self, path):
         with open(str(path), "rb") as f:
             request = self._CreateImageRequest.builder().request_body(self._CreateImageRequestBody.builder().image_type("message").image(f).build()).build()
-            response = await asyncio.to_thread(self._api_client.im.v1.image.create, request)
+            return self._api_client.im.v1.image.create(request)
+
+    async def _upload_image(self, path) -> str:
+        """Upload an image to Feishu and return the image_key."""
+        response = await asyncio.to_thread(self._upload_image_sync, path)
         if not response.success():
             raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
         return response.data.image_key
+
+    def _upload_file_sync(self, path, filename: str, file_type: str):
+        with open(str(path), "rb") as f:
+            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
+            return self._api_client.im.v1.file.create(request)
 
     async def _upload_file(self, path, filename: str) -> str:
         """Upload a file to Feishu and return the file_key."""
@@ -348,9 +356,7 @@ class FeishuChannel(Channel):
         else:
             file_type = "stream"
 
-        with open(str(path), "rb") as f:
-            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
-            response = await asyncio.to_thread(self._api_client.im.v1.file.create, request)
+        response = await asyncio.to_thread(self._upload_file_sync, path, filename, file_type)
         if not response.success():
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
