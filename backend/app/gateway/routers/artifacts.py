@@ -1,17 +1,28 @@
 import asyncio
+import hashlib
 import logging
 import mimetypes
+import os
+import stat
+import tempfile
 import zipfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.config.paths import make_safe_user_id
+from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +36,110 @@ ACTIVE_CONTENT_MIME_TYPES = {
 
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
+MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
+_EDITABLE_OUTPUTS_PREFIX = "mnt/user-data/outputs/"
+_ARTIFACT_EDIT_TEMP_PREFIX = ".artifact-edit-"
+
+
+class ArtifactUpdateRequest(BaseModel):
+    content: str
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ArtifactUpdateResponse(BaseModel):
+    path: str
+    sha256: str
+    size: int
+
+
+@asynccontextmanager
+async def reserve_artifact_write(request: Request, thread_id: str, *, user_id: str) -> AsyncIterator[None]:
+    """Serialize an artifact edit against runs and other thread mutations."""
+    run_manager = get_run_manager(request)
+    async with run_manager.reserve_thread_operation(
+        thread_id,
+        kind=ThreadOperationKind.artifact_write,
+        user_id=user_id,
+    ):
+        yield
+
+
+def _normalize_editable_artifact_path(path: str) -> str:
+    stripped = path.lstrip("/")
+    if not stripped.startswith(_EDITABLE_OUTPUTS_PREFIX):
+        raise HTTPException(status_code=400, detail="Only files in /mnt/user-data/outputs can be edited")
+    if ".skill/" in stripped or stripped.endswith(".skill"):
+        raise HTTPException(status_code=415, detail="Skill archives cannot be edited in the artifacts panel")
+    return f"/{stripped}"
+
+
+def _load_editable_artifact(actual_path: Path, path: str, expected_sha256: str) -> tuple[bytes, os.stat_result]:
+    try:
+        file_stat = os.lstat(actual_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}") from None
+    if stat.S_ISLNK(file_stat.st_mode):
+        raise HTTPException(status_code=415, detail="Symlinked artifacts cannot be edited")
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
+    if file_stat.st_size > MAX_EDITABLE_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="Artifact is too large to edit")
+
+    current = actual_path.read_bytes()
+    if len(current) > MAX_EDITABLE_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="Artifact is too large to edit")
+    if b"\x00" in current:
+        raise HTTPException(status_code=415, detail="Binary artifacts cannot be edited")
+    try:
+        current.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=415, detail="Only UTF-8 text artifacts can be edited") from None
+
+    current_sha256 = hashlib.sha256(current).hexdigest()
+    if current_sha256 != expected_sha256:
+        raise HTTPException(status_code=412, detail="Artifact changed since it was opened")
+    return current, file_stat
+
+
+def _encode_artifact_update(content: str) -> bytes:
+    encoded = content.encode("utf-8")
+    if len(encoded) > MAX_EDITABLE_ARTIFACT_BYTES:
+        raise HTTPException(status_code=413, detail="Artifact is too large to edit")
+    if b"\x00" in encoded:
+        raise HTTPException(status_code=415, detail="Binary content cannot be saved as an artifact")
+    return encoded
+
+
+def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: os.stat_result) -> None:
+    temp_fd, temp_path_str = tempfile.mkstemp(prefix=_ARTIFACT_EDIT_TEMP_PREFIX, dir=actual_path.parent)
+    temp_path = Path(temp_path_str)
+    try:
+        # Preserve ownership where possible and keep replacement permissions
+        # scoped to the owner/group. The shared outputs directory allows a
+        # mounted sandbox to reach the file without making it world-writable.
+        if hasattr(os, "fchown"):
+            try:
+                os.fchown(temp_fd, file_stat.st_uid, file_stat.st_gid)
+            except OSError:
+                logger.debug("Could not preserve artifact ownership: %s", actual_path, exc_info=True)
+        os.fchmod(temp_fd, stat.S_IMODE(file_stat.st_mode) | 0o660)
+        with os.fdopen(temp_fd, "wb") as handle:
+            temp_fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, actual_path)
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _sync_artifact_to_sandbox(sandbox, virtual_path: str, content: bytes) -> None:
+    sandbox.update_file(virtual_path, content)
 
 
 def _build_content_disposition(disposition_type: str, filename: str) -> str:
@@ -255,6 +370,85 @@ async def get_artifact(thread_id: str, path: str, request: Request, download: bo
         )
 
     if kind == "text":
-        return PlainTextResponse(content=payload, media_type=mime_type)
+        assert isinstance(payload, str)
+        content_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return PlainTextResponse(content=payload, media_type=mime_type, headers={"ETag": f'"{content_sha256}"'})
 
     raise AssertionError(f"Unhandled artifact response kind: {kind!r}")
+
+
+@router.put(
+    "/threads/{thread_id}/artifacts/{path:path}",
+    response_model=ArtifactUpdateResponse,
+    summary="Update Artifact File",
+    description="Replace an existing UTF-8 text artifact after verifying that its content has not changed.",
+)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def update_artifact(
+    thread_id: str,
+    path: str,
+    body: ArtifactUpdateRequest,
+    request: Request,
+) -> ArtifactUpdateResponse:
+    """Update an existing text artifact while the thread has no active run."""
+    virtual_path = _normalize_editable_artifact_path(path)
+    raw_owner_user_id = get_trusted_internal_owner_user_id(request)
+    effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
+
+    sandbox_provider = None
+    sandbox_id: str | None = None
+    sandbox = None
+    try:
+        async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
+            actual_path = await asyncio.to_thread(
+                resolve_thread_virtual_path,
+                thread_id,
+                virtual_path,
+                user_id=effective_user_id,
+            )
+            current, file_stat = await asyncio.to_thread(
+                _load_editable_artifact,
+                actual_path,
+                virtual_path,
+                body.expected_sha256,
+            )
+            updated = _encode_artifact_update(body.content)
+
+            sandbox_provider = get_sandbox_provider()
+            if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
+                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
+                sandbox = sandbox_provider.get(sandbox_id)
+                if sandbox is None:
+                    raise RuntimeError("Failed to acquire sandbox for artifact update")
+
+            try:
+                if sandbox is not None:
+                    await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, updated)
+                await asyncio.to_thread(_replace_artifact_atomically, actual_path, updated, file_stat)
+            except Exception:
+                if sandbox is not None:
+                    try:
+                        await asyncio.to_thread(_sync_artifact_to_sandbox, sandbox, virtual_path, current)
+                    except Exception:
+                        logger.exception("Failed to roll back remote artifact after artifact update failure: %s", virtual_path)
+                raise
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Save after the run finishes.") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to update artifact %s for thread %s", path, thread_id)
+        raise HTTPException(status_code=500, detail="Failed to update artifact") from None
+    finally:
+        if sandbox_id is not None and sandbox_provider is not None:
+            try:
+                await asyncio.to_thread(sandbox_provider.release, sandbox_id)
+            except Exception:
+                logger.warning("Failed to release sandbox after artifact update: %s", sandbox_id, exc_info=True)
+
+    content_sha256 = hashlib.sha256(updated).hexdigest()
+    return ArtifactUpdateResponse(
+        path=virtual_path,
+        sha256=content_sha256,
+        size=len(updated),
+    )
