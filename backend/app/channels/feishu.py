@@ -424,10 +424,8 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] empty resource content: resource_key=%s, type=%s", file_key, type)
             return f"Failed to obtain the [{type}]"
 
-        paths = get_paths()
         effective_user_id = user_id or get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-        uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
+        paths = await asyncio.to_thread(get_paths)
 
         ext = "png" if type == "image" else "bin"
         raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
@@ -439,30 +437,33 @@ class FeishuChannel(Channel):
             filename = f"{name_part}.{ext}"
         else:
             filename = re.sub(r"[./\\]", "_", raw_filename)
-        resolved_target = uploads_dir / filename
 
-        def down_load():
-            # use thread_lock to avoid filename conflicts when writing
+        def _persist():
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
+            resolved_target = uploads_dir / filename
+            # Use thread_lock to avoid filename conflicts when writing.
             with self._thread_lock:
                 resolved_target.write_bytes(content)
+            return resolved_target
 
         try:
-            await asyncio.to_thread(down_load)
+            resolved_target = await asyncio.to_thread(_persist)
         except Exception:
-            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", resolved_target, type)
+            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", filename, type)
             return f"Failed to obtain the [{type}]"
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
 
         try:
-            sandbox_provider = get_sandbox_provider()
-            sandbox_id = sandbox_provider.acquire(thread_id, user_id=effective_user_id)
-            if sandbox_id != "local":
+            sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+            if not getattr(sandbox_provider, "uses_thread_data_mounts", False):
+                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
                 sandbox = sandbox_provider.get(sandbox_id)
                 if sandbox is None:
                     logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
                     return f"Failed to obtain the [{type}]"
-                sandbox.update_file(virtual_path, content)
+                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"

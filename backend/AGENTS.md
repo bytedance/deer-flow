@@ -264,6 +264,9 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
   offloading upload directory creation, staged writes, chmod/cleanup,
   directory scans/deletes, and remote sandbox sync off the event loop);
+  `test_feishu_receive_file.py` (locks Feishu attachment path preparation and
+  persistence plus remote sandbox acquisition/sync off the event loop, and
+  skips redundant sandbox sync when thread data is already mounted);
   `test_openviking_memory_backend.py` (locks the OpenViking backend's async
   add/context/search entrypoints offloading synchronous HTTP and watermark
   filesystem IO); and
