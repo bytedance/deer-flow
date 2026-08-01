@@ -330,6 +330,8 @@ def test_update_artifact_reports_active_run_conflict(tmp_path, monkeypatch) -> N
 
     assert exc_info.value.status_code == 409
     assert artifact_path.read_text(encoding="utf-8") == "before"
+
+
 def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
     payload = ("0123456789abcdef" * 131_072).encode()
     artifact_path = tmp_path / "large.txt"
