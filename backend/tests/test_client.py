@@ -1088,6 +1088,8 @@ class TestExtractText:
 
 class TestEnsureAgent:
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
+        from deerflow.authz.provider import AuthzDecision, AuthzReason
+
         class Provider:
             name = "test"
 
@@ -1095,10 +1097,13 @@ class TestEnsureAgent:
                 return [name for name in candidates if name == "safe_tool"]
 
             def authorize(self, request):
-                raise AssertionError("not called while assembling")
+                # Phase 3: model:use is now checked during assembly; allow it so
+                # the model name passes through. Tool-level authorize is still
+                # not invoked here (filter_resources drives tool assembly).
+                return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
 
             async def aauthorize(self, request):
-                raise AssertionError("not called while assembling")
+                return self.authorize(request)
 
         provider = Provider()
         mock_app_config.authorization = AuthorizationConfig(
@@ -1121,6 +1126,7 @@ class TestEnsureAgent:
             patch("deerflow.client.build_skill_search_setup", return_value=SimpleNamespace(describe_skill_tool=describe_tool, skill_names=frozenset({"example"}))),
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})

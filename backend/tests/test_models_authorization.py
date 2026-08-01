@@ -540,3 +540,145 @@ def test_authorize_model_name_custom_provider_no_usable_fallback_fail_open(monke
 
     result = _authorize_model_name("gpt-4", context=_rbac_context(), app_config=app_config)
     assert result == "gpt-4"
+
+
+# ── DeerFlowClient._ensure_agent path ─────────────────────────────────
+# Regression for willem-bd's Round 4 coverage observation: the embedded/library
+# lead-agent construction path (``DeerFlowClient._ensure_agent``) must enforce
+# ``model:use`` too, not just the Gateway runtime path (``_make_lead_agent``).
+# Otherwise a consumer that enables ``authorization`` with role-scoped model
+# policies gets tools filtered yet can still run a model the role is denied
+# ``use`` for, diverging from the contract this PR establishes.
+
+
+def test_client_ensure_agent_enforces_model_use_when_authorized(monkeypatch):
+    """``_ensure_agent`` routes the resolved model through ``_authorize_model_name``.
+
+    Real-path test: we let the genuine ``_authorize_model_name`` run against a
+    real RBAC provider (only ``resolve_authorization_provider`` is patched, as
+    in the runtime tests above) so the full ``client → authz gate → RBAC →
+    fallback → create_chat_model`` chain is exercised — not just "the gate was
+    called". The provider allows only ``claude-3`` for ``use``, so the denied
+    ``gpt-4`` must be swapped for ``claude-3`` before reaching the model factory.
+    """
+    from langchain_core.runnables import RunnableConfig
+
+    app_config = _make_app_config(["gpt-4", "claude-3"])
+    app_config.authorization = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
+
+    provider = RbacAuthorizationProvider(roles={"user": {"models": {"allow": ["claude-3"]}}})
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    captured_name = _stub_client_assembly(monkeypatch)
+
+    client = _bare_client(app_config)
+    config: RunnableConfig = {"configurable": {"model_name": "gpt-4", "user_id": "user-123", "user_role": "user"}}
+    client._ensure_agent(config)
+
+    # Denied ``gpt-4`` was swapped for the authorized fallback ``claude-3``.
+    assert captured_name["name"] == "claude-3"
+
+
+def test_client_ensure_agent_resolves_none_default_before_authorization(monkeypatch):
+    """A ``None`` model name is resolved to the default before the authz gate.
+
+    Guards the ``create_chat_model(name=None)`` semantic: when the caller omits
+    ``model_name`` the implicit default (first configured model) must still pass
+    ``model:use`` — otherwise the embedded path could run an unauthorized default.
+    """
+    from langchain_core.runnables import RunnableConfig
+
+    app_config = _make_app_config(["gpt-4", "claude-3"])
+    app_config.authorization = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
+
+    # Deny the default ``gpt-4``; the gate must fallback to ``claude-3``.
+    provider = RbacAuthorizationProvider(roles={"user": {"models": {"allow": ["claude-3"]}}})
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.agent.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    captured_name = _stub_client_assembly(monkeypatch)
+
+    client = _bare_client(app_config)
+    # No model_name supplied → defaults to ``gpt-4`` (first configured) → denied → fallback.
+    config: RunnableConfig = {"configurable": {"user_id": "user-123", "user_role": "user"}}
+    client._ensure_agent(config)
+
+    assert captured_name["name"] == "claude-3"
+
+
+def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
+    """When ``authorization.enabled`` is false, ``_ensure_agent`` leaves the model unchanged."""
+    from langchain_core.runnables import RunnableConfig
+
+    app_config = _make_app_config(["gpt-4"])
+    # AuthorizationConfig() defaults to enabled=False.
+
+    captured_name = _stub_client_assembly(monkeypatch)
+    client = _bare_client(app_config)
+    config: RunnableConfig = {"configurable": {"model_name": "gpt-4"}}
+    client._ensure_agent(config)
+
+    # Disabled → gate is a no-op: original name passed straight through.
+    assert captured_name["name"] == "gpt-4"
+
+
+def _stub_client_assembly(monkeypatch) -> dict[str, str]:
+    """Stub the heavy dependencies ``_ensure_agent`` pulls in after the authz gate.
+
+    Returns a dict the caller can inspect to see what ``create_chat_model`` got.
+    Everything here is downstream of the contract under test, so we replace it
+    with no-ops to keep the test focused on the ``_authorize_model_name`` call.
+    """
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        "deerflow.client.create_chat_model",
+        lambda **kwargs: captured.__setitem__("name", kwargs.get("name")) or object(),
+    )
+    monkeypatch.setattr("deerflow.client.create_agent", lambda **kwargs: object())
+    monkeypatch.setattr("deerflow.client.build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        "deerflow.client.build_skill_search_setup",
+        lambda skills, *, enabled, container_base_path: SimpleNamespace(describe_skill_tool=None, skill_names=frozenset()),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "deerflow.client.assemble_deferred_tools",
+        lambda tools, *, enabled: ([], SimpleNamespace(deferred_names=frozenset())),  # noqa: ARG005
+    )
+    monkeypatch.setattr("deerflow.client.build_mcp_routing_middleware", lambda *args, **kwargs: None)  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.get_mcp_routing_hints_prompt_section", lambda *args, **kwargs: "")  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.apply_prompt_template", lambda **kwargs: "")  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.get_thread_state_schema", lambda *args, **kwargs: object())  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.normalize_middleware_state_schemas", lambda schemas, mode, freq: [])  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.get_effective_user_id", lambda: "user-123")
+    # ``apply_tool_authorization`` (called with the empty tool list above) still
+    # resolves a provider via ``tool_filter.resolve_authorization_provider``; route
+    # it at an allow-all RBAC provider so the empty list stays empty.
+    monkeypatch.setattr(
+        "deerflow.authz.tool_filter.resolve_authorization_provider",
+        lambda config: RbacAuthorizationProvider(roles={"user": {"tools": {"allow": "*"}}}),
+    )
+    return captured
+
+
+def _bare_client(app_config):
+    """Construct a ``DeerFlowClient`` without running ``__init__``."""
+    from deerflow.client import DeerFlowClient
+
+    client = DeerFlowClient.__new__(DeerFlowClient)
+    client._app_config = app_config
+    client._agent_name = "default"
+    client._available_skills = None
+    client._checkpoint_channel_mode = "full"
+    client._checkpoint_snapshot_frequency = None
+    client._middlewares = []
+    client._agent = None
+    client._agent_config_key = None
+    # Non-None so ``_ensure_agent`` skips the real (postgres/sqlite) checkpointer
+    # resolution — the value is never used because ``create_agent`` is stubbed.
+    client._checkpointer = object()
+    return client
