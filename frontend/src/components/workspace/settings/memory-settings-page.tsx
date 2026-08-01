@@ -290,7 +290,11 @@ const MAIN_MEMORY_SCOPE = "__main__";
 export function MemorySettingsPage() {
   const { t } = useI18n();
   const { enabled: agentsApiEnabled } = useAgentsApiEnabled();
-  const { agents, isLoading: agentsLoading } = useAgents({
+  const {
+    agents,
+    isLoading: agentsLoading,
+    error: agentsError,
+  } = useAgents({
     enabled: agentsApiEnabled,
   });
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
@@ -321,20 +325,29 @@ export function MemorySettingsPage() {
   const factConfidenceInputId = useId();
   const factConfidenceHintId = useId();
 
-  // If the selected agent is deleted elsewhere while this page is open, fall
-  // back to the default bucket instead of querying a bucket that no longer
-  // has an agent behind it. Gated on a completed agents fetch so the initial
-  // empty list cannot drop the selection prematurely.
+  // Bucket-selection guard:
+  // - When the agents API is unavailable the selector is hidden, so never
+  //   keep operating on a scope the user can no longer see or change.
+  // - If the selected agent is deleted elsewhere while this page is open,
+  //   fall back to the default bucket -- but ONLY on a settled, successful
+  //   agents fetch: a transient listAgents failure also yields an empty
+  //   list, and treating that as "agent gone" would silently drop the
+  //   selection (the facts only appear to vanish) with no way back while
+  //   the failure persists.
   useEffect(() => {
+    if (!agentsApiEnabled) {
+      setSelectedAgent(null);
+      return;
+    }
     if (
-      agentsApiEnabled &&
       !agentsLoading &&
+      !agentsError &&
       selectedAgent !== null &&
       !agents.some((agent) => agent.name === selectedAgent)
     ) {
       setSelectedAgent(null);
     }
-  }, [agentsApiEnabled, agentsLoading, agents, selectedAgent]);
+  }, [agentsApiEnabled, agentsLoading, agentsError, agents, selectedAgent]);
 
   const isAgentScoped = selectedAgent !== null;
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
@@ -383,6 +396,15 @@ export function MemorySettingsPage() {
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
+  // An agent-scoped import still replaces the user-global summaries (only
+  // facts are bucketed), so the confirmation must say so explicitly instead
+  // of the generic "overwrite your current memory" copy.
+  const importConfirmTitle = isAgentScoped
+    ? t.settings.memory.importAgentConfirmTitle
+    : t.settings.memory.importConfirmTitle;
+  const importConfirmDescription = isAgentScoped
+    ? t.settings.memory.importAgentConfirmDescription
+    : t.settings.memory.importConfirmDescription;
   const agentScopeLabel = t.settings.memory.agentScopeLabel;
   const agentScopeDefault = t.settings.memory.agentScopeDefault;
   const clearLabel = isAgentScoped
@@ -1026,10 +1048,8 @@ export function MemorySettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t.settings.memory.importConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {t.settings.memory.importConfirmDescription}
-            </DialogDescription>
+            <DialogTitle>{importConfirmTitle}</DialogTitle>
+            <DialogDescription>{importConfirmDescription}</DialogDescription>
           </DialogHeader>
           {pendingImport ? (
             <div className="bg-muted rounded-md border p-3 text-sm">

@@ -712,6 +712,9 @@ export const zhCN: Translations = {
       importFileLabel: "已选择文件",
       importInvalidFile: "读取记忆文件失败，请选择有效的 JSON 导出文件。",
       importSuccess: "记忆已导入",
+      importAgentConfirmTitle: "要导入到该智能体的记忆吗？",
+      importAgentConfirmDescription:
+        "备份中的事实会覆盖该智能体的事实。其中的摘要是用户全局的，会替换主记忆和所有其他智能体共享的摘要。",
       manualFactSource: "手动添加",
       addFact: "添加事实",
       addFactTitle: "添加记忆事实",

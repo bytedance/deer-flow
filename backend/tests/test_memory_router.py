@@ -631,6 +631,77 @@ def test_clear_memory_with_agent_name_keeps_summaries_and_other_buckets(tmp_path
         assert default_view.json()["user"]["workContext"]["summary"] == "Shared user summary"
 
 
+def test_export_memory_route_forwards_agent_name_to_manager() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory.return_value = _sample_memory()
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/export", params={"agent_name": "coding-agent"})
+    assert response.status_code == 200
+    assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "coding-agent"
+
+
+def test_import_with_agent_name_scopes_facts_and_overwrites_shared_summaries(tmp_path) -> None:
+    """An agent-scoped import: facts land in the selected bucket, summaries
+    overwrite the user-global ones (they are shared, not bucketed), and other
+    buckets keep their own facts."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    memory_path = tmp_path / "users" / "alice" / "memory.json"
+    memory_path.parent.mkdir(parents=True)
+    seeded = _sample_memory()
+    seeded["user"]["workContext"] = {"summary": "Original shared summary", "updatedAt": "2026-03-26T12:00:00Z"}
+    memory_path.write_text(json.dumps(seeded), encoding="utf-8")
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        assert client.post("/api/memory/facts", json={"content": "Default bucket fact", "category": "context", "confidence": 0.8}).status_code == 200
+
+        backup = _sample_memory()
+        backup["user"]["workContext"] = {"summary": "Imported shared summary", "updatedAt": "2026-07-31T00:00:00Z"}
+        backup["facts"] = [
+            {
+                "id": "fact_imported_agent",
+                "content": "Imported agent fact",
+                "category": "context",
+                "confidence": 0.9,
+                "createdAt": "2026-07-31T00:00:00Z",
+                "source": "import",
+            }
+        ]
+
+        imported = client.post("/api/memory/import", params={"agent_name": "coding-agent"}, json=backup)
+        assert imported.status_code == 200
+
+        # Facts land in the selected bucket...
+        agent_view = client.get("/api/memory", params={"agent_name": "coding-agent"})
+        assert [fact["id"] for fact in agent_view.json()["facts"]] == ["fact_imported_agent"]
+        # ...and the summaries are overwritten (they are user-global).
+        assert agent_view.json()["user"]["workContext"]["summary"] == "Imported shared summary"
+
+        # Exporting the agent view carries the same bucket-scoped facts.
+        agent_export = client.get("/api/memory/export", params={"agent_name": "coding-agent"})
+        assert [fact["id"] for fact in agent_export.json()["facts"]] == ["fact_imported_agent"]
+
+        # Other buckets keep their own facts but see the overwritten shared
+        # summaries.
+        default_view = client.get("/api/memory")
+        assert [fact["content"] for fact in default_view.json()["facts"]] == ["Default bucket fact"]
+        assert default_view.json()["user"]["workContext"]["summary"] == "Imported shared summary"
+
+        default_export = client.get("/api/memory/export")
+        assert [fact["content"] for fact in default_export.json()["facts"]] == ["Default bucket fact"]
+
+    facts_root = tmp_path / "users" / "alice" / "agents" / "coding-agent" / "facts"
+    assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_imported_agent"]
+
+
 # ── unsupported-backend 501s ────────────────────────────────────────────────
 # A minimal backend (only add + get_context) inherits the tier-2/tier-3 default
 # raise for get_memory / clear_memory / import_memory / reload_memory. Before

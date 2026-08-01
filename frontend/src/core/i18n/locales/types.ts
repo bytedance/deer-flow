@@ -621,6 +621,8 @@ export interface Translations {
       importFileLabel: string;
       importInvalidFile: string;
       importSuccess: string;
+      importAgentConfirmTitle: string;
+      importAgentConfirmDescription: string;
       manualFactSource: string;
       addFact: string;
       addFactTitle: string;
