@@ -299,6 +299,7 @@ class DeerMem(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Load memory and format it for injection (plain text, no wrap).
 
@@ -312,6 +313,7 @@ class DeerMem(MemoryManager):
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
         call site (``_get_memory_context``); this returns only the body.
         """
+        del query
         injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
         return format_memory_for_injection(

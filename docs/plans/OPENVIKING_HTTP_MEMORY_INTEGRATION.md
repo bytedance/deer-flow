@@ -1,5 +1,9 @@
 # OpenViking HTTP Memory Backend 接入实现方案
 
+> 本方案已由 [`docs/OPENVIKING.md`](../OPENVIKING.md) 中的官方适配器方案取代。
+> 本文描述的是原有自建 HTTP Client 和 trusted identity 实现，目前只作为
+> 旧配置的临时兼容路径保留。
+
 > 状态：设计稿
 > 范围：通过 HTTP 将 OpenViking 接入为 DeerFlow 的可选 `MemoryManager` 后端
 > 默认行为：DeerMem 继续作为默认后端，OpenViking 需要显式启用

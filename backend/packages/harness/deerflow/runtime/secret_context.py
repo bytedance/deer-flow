@@ -119,6 +119,12 @@ _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 # digest, never a secret value; listed below to keep the redaction guard complete.
 _SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
 
+# Query-aware memory recalled for the current run. The value can contain a
+# user's private long-term memory, so it must never be serialized with runnable
+# config or trace context. DynamicContextMiddleware owns the value and replaces
+# it when the latest real user message changes.
+DYNAMIC_MEMORY_CONTEXT_KEY = "__dynamic_memory_context"
+
 # Run-context keys whose values are request-scoped secrets and must be stripped
 # before a context mapping is serialized anywhere observable (traces, logs).
 REDACTED_CONTEXT_KEYS = frozenset(
@@ -129,6 +135,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
         SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        DYNAMIC_MEMORY_CONTEXT_KEY,
     }
 )
 

@@ -36,8 +36,8 @@ _SESSION_NAMESPACE = "deerflow-openviking-v1"
 _SAFE_SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
-class OpenVikingMemoryManager(MemoryManager):
-    """Remote OpenViking memory backend for passive middleware mode."""
+class LegacyOpenVikingMemoryManager(MemoryManager):
+    """Deprecated custom HTTP backend retained for existing trusted configs."""
 
     supports_search: ClassVar[bool] = True
 
@@ -62,7 +62,7 @@ class OpenVikingMemoryManager(MemoryManager):
         *,
         mode: Literal["middleware", "tool"] = "middleware",
         **host_hooks: Any,
-    ) -> OpenVikingMemoryManager:
+    ) -> LegacyOpenVikingMemoryManager:
         if mode != "middleware":
             raise ValueError("The OpenViking HTTP backend currently supports memory.mode='middleware' only")
         instance = cls(backend_config=backend_config, mode=mode)
@@ -115,7 +115,9 @@ class OpenVikingMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
+        del query
         if not self._begin_operation():
             return ""
         try:
@@ -143,12 +145,14 @@ class OpenVikingMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return await asyncio.to_thread(
             self.get_context,
             user_id,
             agent_name=agent_name,
             thread_id=thread_id,
+            query=query,
         )
 
     def search(
@@ -543,3 +547,8 @@ def _format_context(hits: list[OpenVikingSearchHit], *, max_chars: int) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+# Import compatibility for code that referenced the pre-official module path.
+# Backend discovery uses ``openviking.manager.OpenVikingMemoryManager`` instead.
+OpenVikingMemoryManager = LegacyOpenVikingMemoryManager

@@ -423,6 +423,39 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     }
 
 
+@pytest.mark.asyncio
+async def test_aget_memory_context_preserves_legacy_backend_signature(monkeypatch):
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True),
+    )
+    captured: dict[str, object] = {}
+
+    async def legacy_aget_context(user_id, *, agent_name=None, thread_id=None):
+        captured.update(
+            user_id=user_id,
+            agent_name=agent_name,
+            thread_id=thread_id,
+        )
+        return "remember this"
+
+    manager = SimpleNamespace(aget_context=legacy_aget_context)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    context = await prompt_module._aget_memory_context(
+        "agent-a",
+        app_config=explicit_config,
+        user_id="runtime-user",
+        thread_id="thread-1",
+    )
+
+    assert context == "<memory>\nremember this\n</memory>\n"
+    assert captured == {
+        "user_id": "runtime-user",
+        "agent_name": "agent-a",
+        "thread_id": "thread-1",
+    }
+
+
 def test_refresh_skills_system_prompt_cache_async_reloads_immediately(monkeypatch, tmp_path):
     def make_skill(name: str) -> Skill:
         skill_dir = tmp_path / name

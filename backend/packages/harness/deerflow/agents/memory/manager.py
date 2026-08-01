@@ -147,6 +147,11 @@ class MemoryManager(BaseModel):
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
+    # Controls how DynamicContextMiddleware obtains automatic memory context.
+    # ``session`` preserves the existing frozen-snapshot behavior. Backends
+    # that perform query-aware retrieval opt into ``turn`` so context is
+    # refreshed from the latest user request and added only to that model call.
+    context_refresh_policy: ClassVar[Literal["session", "turn"]] = "session"
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -192,12 +197,12 @@ class MemoryManager(BaseModel):
         user_id: str | None = None,
         trace_id: str | None = None,
     ) -> None:
-        """Queue a conversation for memory update (debounced, asynchronous).
+        """Submit a conversation snapshot to the backend's capture policy.
 
         Args:
             thread_id: Conversation thread id.
-            messages: Raw conversation messages; the implementation filters
-                to user inputs + final assistant responses itself.
+            messages: Raw conversation messages. The backend owns selection,
+                conversion, extraction, and persistence semantics.
             agent_name: Per-agent bucket; ``None`` = global memory.
             user_id: Per-user bucket.
             trace_id: Request trace id captured for memory-LLM tracing.
@@ -210,6 +215,7 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
 
@@ -217,6 +223,9 @@ class MemoryManager(BaseModel):
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+        ``query`` is populated only for backends that opt into
+        ``context_refresh_policy = "turn"``. Existing session-snapshot
+        backends never receive it, preserving third-party compatibility.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -236,7 +245,7 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> None:
-        """Queue a conversation for *immediate* memory update (emergency flush).
+        """Submit a conversation for *immediate* capture before compaction.
 
         Used right before summarization removes messages from state, so the
         content is captured instead of lost. Default: delegate to :meth:`add`
@@ -449,8 +458,19 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        if query is None:
+            # Do not pass the new keyword to existing third-party backends that
+            # retain the original signature. Only explicitly turn-aware
+            # implementations are required to accept it.
+            return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        return self.get_context(
+            user_id,
+            agent_name=agent_name,
+            thread_id=thread_id,
+            query=query,
+        )
 
     async def asearch(
         self,

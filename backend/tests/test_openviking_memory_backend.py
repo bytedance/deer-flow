@@ -11,6 +11,7 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
 from deerflow.agents.memory.backends.openviking.client import OpenVikingAuthenticationError, OpenVikingHttpClient, OpenVikingUnavailableError
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
 from deerflow.agents.memory.backends.openviking.models import (
@@ -19,7 +20,9 @@ from deerflow.agents.memory.backends.openviking.models import (
     OpenVikingMessage,
     OpenVikingSearchHit,
 )
-from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
+from deerflow.agents.memory.backends.openviking.openviking_manager import (
+    LegacyOpenVikingMemoryManager,
+)
 from deerflow.agents.memory.manager import _scan_backends, reset_memory_manager
 
 
@@ -261,8 +264,9 @@ class _FakeClient:
         self.closed = True
 
 
-def _manager(tmp_path: Path, **overrides: Any) -> tuple[OpenVikingMemoryManager, _FakeClient]:
+def _manager(tmp_path: Path, **overrides: Any) -> tuple[LegacyOpenVikingMemoryManager, _FakeClient]:
     manager = OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
+    assert isinstance(manager, LegacyOpenVikingMemoryManager)
     fake = _FakeClient()
     manager._client = fake  # type: ignore[assignment]
     return manager, fake
@@ -447,20 +451,20 @@ async def test_manager_async_methods_offload_sync_operations(tmp_path: Path, mon
     event_loop_thread = threading.get_ident()
     worker_threads: list[int] = []
 
-    def fake_add(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> None:
+    def fake_add(self: LegacyOpenVikingMemoryManager, *args: Any, **kwargs: Any) -> None:
         worker_threads.append(threading.get_ident())
 
-    def fake_get_context(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> str:
+    def fake_get_context(self: LegacyOpenVikingMemoryManager, *args: Any, **kwargs: Any) -> str:
         worker_threads.append(threading.get_ident())
         return "context"
 
-    def fake_search(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    def fake_search(self: LegacyOpenVikingMemoryManager, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         worker_threads.append(threading.get_ident())
         return [{"id": "memory-1"}]
 
-    monkeypatch.setattr(OpenVikingMemoryManager, "add", fake_add)
-    monkeypatch.setattr(OpenVikingMemoryManager, "get_context", fake_get_context)
-    monkeypatch.setattr(OpenVikingMemoryManager, "search", fake_search)
+    monkeypatch.setattr(LegacyOpenVikingMemoryManager, "add", fake_add)
+    monkeypatch.setattr(LegacyOpenVikingMemoryManager, "get_context", fake_get_context)
+    monkeypatch.setattr(LegacyOpenVikingMemoryManager, "search", fake_search)
 
     await manager.aadd("thread-1", [], user_id="alice")
     assert await manager.aget_context("alice") == "context"

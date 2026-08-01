@@ -33,15 +33,19 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.messages import get_original_user_content_text, is_real_user_message
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -61,6 +65,8 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
+_TURN_MEMORY_MESSAGE_NAME = "dynamic_memory_context"
+_TURN_MEMORY_MARKER_KEY = "dynamic_memory_context"
 # Suffix the ID-swap gives the real user message; the reminder SystemMessage
 # takes the original id so ``add_messages`` can replace it in place.
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
@@ -144,14 +150,20 @@ def _is_user_injection_target(message: object) -> bool:
 
 
 class DynamicContextMiddleware(AgentMiddleware):
-    """Inject memory and current date as a SystemMessage <system-reminder>.
+    """Inject the current date and backend-selected memory context.
 
     First turn
     ----------
-    Prepends a full system-reminder (memory + date) to the first HumanMessage and
-    persists it (same message ID).  The first message is then frozen for the whole
-    session — its content never changes again, so the prefix cache can hit on every
-    subsequent turn.
+    Prepends the date and, for ``context_refresh_policy="session"`` backends, a
+    memory snapshot to the first HumanMessage and persists that state. The first
+    message is then frozen for the session so the prefix cache can hit.
+
+    Query-aware memory
+    ------------------
+    A ``context_refresh_policy="turn"`` backend retrieves from the latest real
+    user request in the model-call hook. Its hidden HumanMessage is added only to
+    that request, cached in redacted run context for tool-loop calls, and never
+    persisted into graph state.
 
     Midnight crossing
     -----------------
@@ -176,14 +188,22 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        if self._app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            memory_config = get_memory_config()
+        else:
+            memory_config = self._app_config.memory
+        from deerflow.agents.memory import get_memory_manager
+
+        uses_session_snapshot = memory_config.enabled and memory_config.injection_enabled and get_memory_manager().context_refresh_policy == "session"
         memory_context = (
             _get_memory_context(
                 self._agent_name,
                 app_config=self._app_config,
                 user_id=resolve_runtime_user_id(runtime),
             )
-            if injection_enabled
+            if uses_session_snapshot
             else ""
         )
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
@@ -235,7 +255,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         stable_id = original.id or str(uuid.uuid4())
         messages: list[SystemMessage | HumanMessage] = []
 
-        reminder_kwargs = {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True}
+        reminder_kwargs: dict[str, Any] = {
+            "hide_from_ui": True,
+            _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+        }
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
         messages.append(
@@ -339,6 +362,207 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
         self._record_effective_memory(state, result, runtime)
         return result
+
+    @staticmethod
+    def _latest_user_message(messages: list[Any]) -> HumanMessage | None:
+        return next(
+            (message for message in reversed(messages) if is_real_user_message(message)),
+            None,
+        )
+
+    @staticmethod
+    def _run_context(request: ModelRequest) -> dict[str, Any] | None:
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        return context if isinstance(context, dict) else None
+
+    @staticmethod
+    def _thread_id(request: ModelRequest) -> str | None:
+        context = DynamicContextMiddleware._run_context(request)
+        if context is not None and context.get("thread_id"):
+            return str(context["thread_id"])
+        state = getattr(request, "state", None)
+        if isinstance(state, dict) and state.get("thread_id"):
+            return str(state["thread_id"])
+        return None
+
+    @staticmethod
+    def _turn_cache_key(message: HumanMessage, query: str) -> str:
+        query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        if message.id:
+            return f"{message.id}:{query_digest}"
+        return f"sha256:{query_digest}"
+
+    def _turn_context_plan(
+        self,
+        request: ModelRequest,
+    ) -> tuple[HumanMessage, str, str, dict[str, Any] | None] | None:
+        if self._app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            config = get_memory_config()
+        else:
+            config = self._app_config.memory
+        if not config.enabled or not config.injection_enabled:
+            return None
+
+        target = self._latest_user_message(list(request.messages))
+        if target is None:
+            return None
+        query = get_original_user_content_text(target.content, target.additional_kwargs).strip()
+        if not query:
+            return None
+        return target, query, self._turn_cache_key(target, query), self._run_context(request)
+
+    @staticmethod
+    def _cached_turn_context(
+        run_context: dict[str, Any] | None,
+        cache_key: str,
+    ) -> tuple[bool, str]:
+        if run_context is None:
+            return False, ""
+        cached = run_context.get(DYNAMIC_MEMORY_CONTEXT_KEY)
+        if not isinstance(cached, dict) or cached.get("key") != cache_key:
+            return False, ""
+        content = cached.get("content")
+        return True, content if isinstance(content, str) else ""
+
+    @staticmethod
+    def _store_turn_context(
+        run_context: dict[str, Any] | None,
+        cache_key: str,
+        content: str,
+    ) -> None:
+        if run_context is not None:
+            run_context[DYNAMIC_MEMORY_CONTEXT_KEY] = {
+                "key": cache_key,
+                "content": content,
+                "recorded": False,
+            }
+
+    def _record_turn_context(
+        self,
+        run_context: dict[str, Any] | None,
+        content: str,
+    ) -> None:
+        if not content or run_context is None:
+            return
+        cached = run_context.get(DYNAMIC_MEMORY_CONTEXT_KEY)
+        if isinstance(cached, dict) and cached.get("recorded"):
+            return
+        journal = run_context.get("__run_journal")
+        if journal is None:
+            return
+        try:
+            journal.record_memory_context(
+                content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            )
+            if isinstance(cached, dict):
+                cached["recorded"] = True
+        except Exception:
+            logger.debug("Failed to record query-aware memory context", exc_info=True)
+
+    @staticmethod
+    def _request_with_turn_context(
+        request: ModelRequest,
+        target: HumanMessage,
+        content: str,
+    ) -> ModelRequest:
+        if not content:
+            return request
+        reminder = HumanMessage(
+            content=content,
+            name=_TURN_MEMORY_MESSAGE_NAME,
+            additional_kwargs={
+                "hide_from_ui": True,
+                _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                _TURN_MEMORY_MARKER_KEY: True,
+            },
+        )
+        messages = list(request.messages)
+        target_index = next(
+            (index for index in range(len(messages) - 1, -1, -1) if messages[index] is target),
+            len(messages),
+        )
+        messages.insert(target_index, reminder)
+        return request.override(messages=messages)
+
+    def _load_turn_context(self, request: ModelRequest, query: str) -> str:
+        from deerflow.agents.lead_agent.prompt import _get_memory_context
+
+        return _get_memory_context(
+            self._agent_name,
+            app_config=self._app_config,
+            user_id=resolve_runtime_user_id(getattr(request, "runtime", None)),
+            query=query,
+            thread_id=self._thread_id(request),
+        ).strip()
+
+    async def _aload_turn_context(self, request: ModelRequest, query: str) -> str:
+        from deerflow.agents.lead_agent.prompt import _aget_memory_context
+
+        return (
+            await _aget_memory_context(
+                self._agent_name,
+                app_config=self._app_config,
+                user_id=resolve_runtime_user_id(getattr(request, "runtime", None)),
+                query=query,
+                thread_id=self._thread_id(request),
+            )
+        ).strip()
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        from deerflow.agents.memory import get_memory_manager
+
+        plan = self._turn_context_plan(request)
+        if plan is None:
+            return handler(request)
+        if get_memory_manager().context_refresh_policy != "turn":
+            return handler(request)
+        target, query, cache_key, run_context = plan
+        cached, content = self._cached_turn_context(run_context, cache_key)
+        if not cached:
+            content = self._load_turn_context(request, query)
+            self._store_turn_context(run_context, cache_key, content)
+        self._record_turn_context(run_context, content)
+        return handler(self._request_with_turn_context(request, target, content))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        from deerflow.agents.memory import get_memory_manager
+
+        plan = self._turn_context_plan(request)
+        if plan is None:
+            return await handler(request)
+        manager = await asyncio.to_thread(get_memory_manager)
+        if manager.context_refresh_policy != "turn":
+            return await handler(request)
+        target, query, cache_key, run_context = plan
+        cached, content = self._cached_turn_context(run_context, cache_key)
+        if not cached:
+            try:
+                content = await asyncio.wait_for(
+                    self._aload_turn_context(request, query),
+                    timeout=_INJECT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "DynamicContextMiddleware: query-aware memory retrieval timed out (%.1fs); continuing without memory for this turn",
+                    _INJECT_TIMEOUT_SECONDS,
+                )
+                content = ""
+            self._store_turn_context(run_context, cache_key, content)
+        self._record_turn_context(run_context, content)
+        return await handler(self._request_with_turn_context(request, target, content))
 
     @staticmethod
     def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:

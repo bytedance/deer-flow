@@ -6,8 +6,11 @@ the first HumanMessage exactly once per session (frozen-snapshot pattern).
 
 import hashlib
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
+import pytest
+from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.dynamic_context_middleware import (
@@ -15,8 +18,27 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     DynamicContextMiddleware,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.secret_context import (
+    DYNAMIC_MEMORY_CONTEXT_KEY,
+    redact_secret_context_keys,
+)
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
+
+
+class _TurnAwareMemoryManager:
+    context_refresh_policy = "turn"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def get_context(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "Relevant memory"
+
+    async def aget_context(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "Relevant memory"
 
 
 def _make_middleware(**kwargs) -> DynamicContextMiddleware:
@@ -243,6 +265,154 @@ def test_context_event_failure_does_not_block_memory_injection():
 
     assert result is not None
     assert result["messages"][1].content == "<memory>\nUseful context\n</memory>"
+
+
+def test_turn_aware_backend_skips_frozen_memory_and_injects_request_locally(
+    monkeypatch,
+):
+    import deerflow.agents.memory as memory_package
+
+    manager = _TurnAwareMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+    middleware = _make_middleware(agent_name="research")
+    state = {"messages": [HumanMessage(content="First question", id="msg-1")]}
+    runtime = _fake_runtime(user_id="alice")
+    runtime.context["thread_id"] = "thread-1"
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        update = middleware.before_agent(state, runtime)
+
+    assert update is not None
+    assert len(update["messages"]) == 2
+    assert manager.calls == []
+
+    effective_messages = [*update["messages"]]
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=effective_messages,
+        state={"thread_id": "thread-1"},
+        runtime=runtime,
+    )
+    handled: list[ModelRequest] = []
+
+    def handler(value: ModelRequest):
+        handled.append(value)
+        return mock.MagicMock()
+
+    middleware.wrap_model_call(request, handler)
+    middleware.wrap_model_call(request, handler)
+
+    assert len(manager.calls) == 1
+    assert manager.calls[0] == {
+        "user_id": "alice",
+        "agent_name": "research",
+        "thread_id": "thread-1",
+        "query": "First question",
+    }
+    injected = handled[0].messages
+    assert [message.name for message in injected if isinstance(message, HumanMessage)] == [
+        "dynamic_memory_context",
+        None,
+    ]
+    memory_message = next(message for message in injected if isinstance(message, HumanMessage) and message.name == "dynamic_memory_context")
+    assert memory_message.content == "<memory>\nRelevant memory\n</memory>"
+    assert request.messages == effective_messages
+    assert DYNAMIC_MEMORY_CONTEXT_KEY in runtime.context
+    assert DYNAMIC_MEMORY_CONTEXT_KEY not in redact_secret_context_keys(runtime.context)
+
+
+@pytest.mark.asyncio
+async def test_turn_aware_async_recall_is_cached_across_model_calls(monkeypatch):
+    import deerflow.agents.memory as memory_package
+
+    manager = _TurnAwareMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+    middleware = _make_middleware(agent_name="research")
+    runtime = _fake_runtime(user_id="alice")
+    runtime.context["thread_id"] = "thread-1"
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="Latest question", id="msg-2")],
+        state={"thread_id": "thread-1"},
+        runtime=runtime,
+    )
+    handled: list[ModelRequest] = []
+
+    async def handler(value: ModelRequest):
+        handled.append(value)
+        return mock.MagicMock()
+
+    await middleware.awrap_model_call(request, handler)
+    await middleware.awrap_model_call(request, handler)
+
+    assert len(manager.calls) == 1
+    assert manager.calls[0]["query"] == "Latest question"
+    assert handled[0].messages[0].name == "dynamic_memory_context"
+
+
+def test_turn_aware_cache_key_includes_query_even_when_message_id_is_reused(
+    monkeypatch,
+):
+    import deerflow.agents.memory as memory_package
+
+    manager = _TurnAwareMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+    middleware = _make_middleware()
+    runtime = _fake_runtime(user_id="alice")
+
+    def invoke(query: str) -> None:
+        request = ModelRequest(
+            model=mock.MagicMock(),
+            messages=[HumanMessage(content=query, id="reused-id")],
+            state={},
+            runtime=runtime,
+        )
+        middleware.wrap_model_call(request, lambda _request: mock.MagicMock())
+
+    invoke("first query")
+    invoke("different query")
+
+    assert [call["query"] for call in manager.calls] == [
+        "first query",
+        "different query",
+    ]
+
+
+def test_disabled_memory_does_not_resolve_turn_aware_manager(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    from deerflow.config.memory_config import MemoryConfig
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=AssertionError("manager must not be resolved")),
+    )
+    app_config = SimpleNamespace(memory=MemoryConfig(enabled=False, injection_enabled=True))
+    middleware = _make_middleware(app_config=app_config)
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handled: list[ModelRequest] = []
+
+    middleware.wrap_model_call(
+        request,
+        lambda value: handled.append(value) or mock.MagicMock(),
+    )
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        update = middleware.before_agent(
+            {"messages": [HumanMessage(content="query", id="msg-1")]},
+            _fake_runtime(user_id="alice"),
+        )
+
+    assert handled == [request]
+    assert update is not None
+    assert len(update["messages"]) == 2
 
 
 # ---------------------------------------------------------------------------

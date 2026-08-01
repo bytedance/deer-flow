@@ -707,6 +707,8 @@ def _get_memory_context(
     *,
     app_config: AppConfig | None = None,
     user_id: str | None = None,
+    query: str | None = None,
+    thread_id: str | None = None,
 ) -> str:
     """Get memory context for injection into system prompt.
 
@@ -716,6 +718,9 @@ def _get_memory_context(
             are read from this value instead of the global config singleton.
         user_id: Explicit user bucket. When omitted, resolves the current
             Gateway or standalone LangGraph Server identity.
+        query: Latest user request for a query-aware memory backend. Session
+            snapshot backends leave this unset.
+        thread_id: Current conversation thread, when available.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -735,10 +740,21 @@ def _get_memory_context(
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_content = get_memory_manager().get_context(
-            user_id=user_id or resolve_runtime_user_id(None),
-            agent_name=agent_name,
-        )
+        manager = get_memory_manager()
+        resolved_user_id = user_id or resolve_runtime_user_id(None)
+        if query is None:
+            memory_content = manager.get_context(
+                user_id=resolved_user_id,
+                agent_name=agent_name,
+                thread_id=thread_id,
+            )
+        else:
+            memory_content = manager.get_context(
+                user_id=resolved_user_id,
+                agent_name=agent_name,
+                thread_id=thread_id,
+                query=query,
+            )
 
         if not memory_content.strip():
             return ""
@@ -747,6 +763,60 @@ def _get_memory_context(
 {memory_content}
 </memory>
 """
+    except Exception as exc:
+        logger.exception("Failed to load memory context")
+        from deerflow.agents.memory import MemoryManagerError
+
+        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+            raise
+        return ""
+
+
+async def _aget_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+    query: str | None = None,
+    thread_id: str | None = None,
+) -> str:
+    """Async counterpart of :func:`_get_memory_context` for model hooks."""
+    config = None
+    try:
+        from deerflow.agents.memory import get_memory_manager
+        from deerflow.runtime.user_context import resolve_runtime_user_id
+
+        if app_config is None:
+            from deerflow.config.memory_config import get_memory_config
+
+            config = get_memory_config()
+        else:
+            config = app_config.memory
+
+        if not config.enabled or not config.injection_enabled:
+            return ""
+
+        manager = await asyncio.to_thread(get_memory_manager)
+        resolved_user_id = user_id or resolve_runtime_user_id(None)
+        if query is None:
+            # Preserve compatibility with third-party managers that override
+            # ``aget_context`` with the pre-query signature.
+            memory_content = await manager.aget_context(
+                user_id=resolved_user_id,
+                agent_name=agent_name,
+                thread_id=thread_id,
+            )
+        else:
+            memory_content = await manager.aget_context(
+                user_id=resolved_user_id,
+                agent_name=agent_name,
+                thread_id=thread_id,
+                query=query,
+            )
+        if not memory_content.strip():
+            return ""
+        return f"<memory>\n{memory_content}\n</memory>\n"
     except Exception as exc:
         logger.exception("Failed to load memory context")
         from deerflow.agents.memory import MemoryManagerError
