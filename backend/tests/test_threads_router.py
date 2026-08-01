@@ -852,7 +852,7 @@ def test_get_thread_returns_iso_for_legacy_unix_record() -> None:
     """
     app, store, checkpointer = _build_thread_app()
 
-    legacy_thread_id = "legacy.thread"
+    legacy_thread_id = "legacy-thread"
     legacy_ts = "1777252410.411327"
 
     async def _seed() -> None:
