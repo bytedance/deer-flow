@@ -645,6 +645,8 @@ async def get_current_user_from_request(request: Request):
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
     }:
+        if getattr(state_user, "is_frozen", False):
+            raise HTTPException(status_code=403, detail="Account is frozen")
         return state_user
 
     from app.gateway.auth import decode_token
@@ -678,6 +680,9 @@ async def get_current_user_from_request(request: Request):
             status_code=401,
             detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
         )
+
+    if user.is_frozen:
+        raise HTTPException(status_code=403, detail="Account is frozen")
 
     return user
 

@@ -6,9 +6,11 @@ import {
   GlobeIcon,
   InfoIcon,
   MailIcon,
+  ShieldCheckIcon,
   Settings2Icon,
   SettingsIcon,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
@@ -25,6 +27,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { GithubIcon } from "./github-icon";
@@ -52,6 +55,8 @@ function NavMenuButtonContent({
 
 export function WorkspaceNavMenu() {
   const { openSettings } = useSettingsDialog();
+  const { user } = useAuth();
+  const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
@@ -88,6 +93,14 @@ export function WorkspaceNavMenu() {
                     <Settings2Icon />
                     {t.common.settings}
                   </DropdownMenuItem>
+                  {user?.system_role === "admin" && (
+                    <DropdownMenuItem
+                      onClick={() => router.push("/workspace/admin")}
+                    >
+                      <ShieldCheckIcon />
+                      运营后台
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator />
                   <a
                     href="https://deerflow.tech/"

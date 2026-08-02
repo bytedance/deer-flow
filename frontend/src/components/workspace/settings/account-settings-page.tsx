@@ -10,6 +10,8 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { WalletCard } from "../billing/wallet-card";
+
 import { SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
@@ -96,6 +98,13 @@ export function AccountSettingsPage() {
             )}
           </div>
         </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="积分与账单"
+        description="使用平台提供的模型服务时按实际 Token 结算。"
+      >
+        <WalletCard />
       </SettingsSection>
 
       {!isSsoUser ? (

@@ -1113,12 +1113,30 @@ async def run_agent(
                 logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
         if not record.ownership_lost and journal is not None and persist_completion:
+            completion = journal.get_completion_data()
             try:
                 # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
                 await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+
+            # Billing settlement must not be skipped just because the optional
+            # convenience projection above failed. It is itself idempotent, so
+            # terminal retries cannot debit the wallet twice.
+            if os.environ.get("DEERFLOW_BILLING_ENABLED", "false").lower() in {"1", "true", "yes"} and record.user_id:
+                try:
+                    from deerflow.persistence.billing.service import WalletService
+                    from deerflow.persistence.engine import get_session_factory
+
+                    session_factory = get_session_factory()
+                    if session_factory is not None:
+                        await WalletService(session_factory).settle_run_usage(
+                            record.user_id,
+                            run_id,
+                            completion.get("token_usage_by_model") or {},
+                        )
+                except Exception:
+                    logger.warning("Failed to settle billing for completed run %s", run_id, exc_info=True)
 
         if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
             try:

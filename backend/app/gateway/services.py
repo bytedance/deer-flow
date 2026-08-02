@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -35,6 +37,8 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+from deerflow.persistence.billing.service import InsufficientCredits, WalletService
+from deerflow.persistence.engine import get_session_factory
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -74,6 +78,26 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+def _billing_enabled() -> bool:
+    return os.environ.get("DEERFLOW_BILLING_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+
+def resolve_billing_owner_user_id(request: Request) -> str | None:
+    """Resolve the tenant whose wallet must fund a run.
+
+    Internal channel requests may explicitly attribute work to a connected
+    user. Browser/API requests instead use the authenticated request user.
+    """
+    internal_owner = get_trusted_internal_owner_user_id(request)
+    if internal_owner:
+        return internal_owner
+    user = getattr(getattr(request, "state", None), "user", None)
+    if user is None or getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return None
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id is not None else None
 
 
 @asynccontextmanager
@@ -1099,7 +1123,7 @@ async def start_run(
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-    owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = resolve_billing_owner_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
     # @require_permission(owner_check=True) decorator -- which resolves ownership
     # from the path param -- cannot protect them. Enforce thread ownership here,
@@ -1125,6 +1149,25 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
+        billing_run_id: str | None = None
+        billing_wallet_service: WalletService | None = None
+        if _billing_enabled() and owner_user_id:
+            if not model_name:
+                raise HTTPException(status_code=503, detail="Billing requires an explicit model selection")
+            session_factory = get_session_factory()
+            if session_factory is None:
+                raise HTTPException(status_code=503, detail="Billing requires SQL persistence")
+            billing_wallet_service = WalletService(session_factory)
+            billing_run_id = str(uuid.uuid4())
+            try:
+                await billing_wallet_service.reserve_for_model(owner_user_id, billing_run_id, model_name)
+            except InsufficientCredits as exc:
+                raise HTTPException(
+                    status_code=402,
+                    detail={"code": "INSUFFICIENT_CREDITS", "available_credits": exc.available_credits, "required_credits": exc.required_credits},
+                ) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
@@ -1228,6 +1271,7 @@ async def start_run(
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,
+                    run_id=billing_run_id,
                     on_disconnect=disconnect,
                     metadata=body.metadata or {},
                     # Persist a secret-redacted copy of the config: the run record is
@@ -1254,11 +1298,21 @@ async def start_run(
                         record.run_id,
                         error=f"Failed to attach run worker: {exc}",
                     )
+                    if billing_run_id and owner_user_id and billing_wallet_service:
+                        await billing_wallet_service.release_run_reservation(owner_user_id, billing_run_id)
                     raise
         except ConflictError as exc:
+            if billing_run_id and owner_user_id and billing_wallet_service:
+                await billing_wallet_service.release_run_reservation(owner_user_id, billing_run_id)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except UnsupportedStrategyError as exc:
+            if billing_run_id and owner_user_id and billing_wallet_service:
+                await billing_wallet_service.release_run_reservation(owner_user_id, billing_run_id)
             raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except Exception:
+            if billing_run_id and owner_user_id and billing_wallet_service:
+                await billing_wallet_service.release_run_reservation(owner_user_id, billing_run_id)
+            raise
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name

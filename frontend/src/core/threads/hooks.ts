@@ -35,6 +35,7 @@ import {
   patchThreadMetadata,
   type ThreadMetadataPatch,
 } from "./api";
+import { getStreamErrorMessage } from "./stream-error-message";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -1339,29 +1340,6 @@ export async function stopThreadAndInvalidateCaches(
   }
 }
 
-function getStreamErrorMessage(error: unknown): string {
-  if (typeof error === "string" && error.trim()) {
-    return error;
-  }
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-  if (typeof error === "object" && error !== null) {
-    const message = Reflect.get(error, "message");
-    if (typeof message === "string" && message.trim()) {
-      return message;
-    }
-    const nestedError = Reflect.get(error, "error");
-    if (nestedError instanceof Error && nestedError.message.trim()) {
-      return nestedError.message;
-    }
-    if (typeof nestedError === "string" && nestedError.trim()) {
-      return nestedError;
-    }
-  }
-  return "Request failed.";
-}
-
 async function readResponseErrorMessage(
   response: Response,
   fallback = "Request failed.",
@@ -2125,7 +2103,11 @@ export function useThreadStream({
         setLiveMessagesThreadId(null);
         setIsUploading(false);
         localTurnOrderBaselineIdentitiesRef.current = null;
-        throw error;
+        // Text-only submits are intentionally fire-and-forget in the chat
+        // pages. Do not rethrow a known request failure here, otherwise the
+        // browser reports it as an unhandled promise and Next shows its error
+        // overlay instead of the in-app notification.
+        toast.error(getStreamErrorMessage(error));
       } finally {
         sendInFlightRef.current = false;
       }

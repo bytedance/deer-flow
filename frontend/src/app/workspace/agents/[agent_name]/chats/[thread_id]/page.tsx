@@ -10,7 +10,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
-import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
+import { CreditBalanceIndicator } from "@/components/workspace/credit-balance-indicator";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
@@ -28,7 +28,6 @@ import {
 } from "@/components/workspace/sidecar";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
-import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
@@ -43,15 +42,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
-import {
-  useThreadMetadata,
-  useThreadStream,
-  useThreadTokenUsage,
-} from "@/core/threads/hooks";
-import {
-  selectContextUsage,
-  threadTokenUsageToTokenUsage,
-} from "@/core/threads/token-usage";
+import { useThreadMetadata, useThreadStream } from "@/core/threads/hooks";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -75,16 +66,10 @@ export default function AgentChatPage() {
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { tokenUsageEnabled } = useModels();
-  const threadTokenUsage = useThreadTokenUsage(
-    isNewThread || isMock ? undefined : threadId,
-    { enabled: !isMock },
-  );
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
   });
-  const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
-  const contextUsage = selectContextUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
 
@@ -94,7 +79,6 @@ export default function AgentChatPage() {
 
   const {
     thread,
-    pendingUsageMessages,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,
@@ -281,22 +265,7 @@ export default function AgentChatPage() {
                     <span className="hidden sm:inline">{t.agents.newChat}</span>
                   </Button>
                 </Tooltip>
-                {tokenUsageEnabled ? (
-                  <TokenUsageIndicator
-                    threadId={isNewThread ? undefined : threadId}
-                    backendUsage={backendTokenUsage}
-                    contextUsage={contextUsage}
-                    enabled={tokenUsageEnabled}
-                    messages={thread.messages}
-                    pendingMessages={pendingUsageMessages}
-                    preferences={localSettings.tokenUsage}
-                    onPreferencesChange={(preferences) =>
-                      setLocalSettings("tokenUsage", preferences)
-                    }
-                  />
-                ) : (
-                  <ContextUsageBadge contextUsage={contextUsage} />
-                )}
+                <CreditBalanceIndicator />
                 <SidecarTrigger />
                 <ExportTrigger threadId={threadId} />
                 <ArtifactTrigger />

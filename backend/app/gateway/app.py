@@ -13,10 +13,12 @@ from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
+    admin_billing,
     agents,
     artifacts,
     assistants_compat,
     auth,
+    billing,
     browser,
     channel_connections,
     channels,
@@ -578,6 +580,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
+
+    # Wallet balance and simulated recharge API.
+    app.include_router(billing.router)
+    app.include_router(admin_billing.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)

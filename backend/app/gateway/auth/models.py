@@ -29,6 +29,7 @@ class User(BaseModel):
 
     # Auth lifecycle
     needs_setup: bool = Field(default=False, description="True when a reset account must complete setup")
+    is_frozen: bool = Field(default=False, description="True when an administrator blocks the account")
     token_version: int = Field(default=0, description="Incremented on password change to invalidate old JWTs")
 
 
@@ -39,4 +40,5 @@ class UserResponse(BaseModel):
     email: str
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
+    is_frozen: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
