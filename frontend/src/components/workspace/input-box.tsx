@@ -1296,21 +1296,30 @@ export function InputBox({
     () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
-  const skillSuggestions = useMemo(
-    () =>
-      slashSkillQuery === null
-        ? []
-        : getMatchingSkillSuggestions(
-            skills,
-            slashSkillQuery,
-            builtinSlashCommands,
-          ),
-    [builtinSlashCommands, skills, slashSkillQuery],
-  );
+  const skillSuggestions = useMemo(() => {
+    if (slashSkillQuery === null) {
+      return [];
+    }
+    const matches = getMatchingSkillSuggestions(
+      skills,
+      slashSkillQuery,
+      builtinSlashCommands,
+    );
+    // Builtin commands own the whole composer line, so they cannot be combined
+    // with a skill activation: `/goal` behind a selected skill would submit as
+    // chat text instead of running the command. Drop them from the result
+    // rather than withholding them from the helper, which needs the list to
+    // reserve their names — a skill named after a builtin is unusable for the
+    // mirrored reason, its submitted text runs the command, not the skill.
+    return selectedSlashSkill
+      ? matches.filter(({ kind }) => kind === "skill")
+      : matches;
+  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
+  // A selected skill does not close the catalog: `/` reopens it so a skill can
+  // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =
     !disabled &&
     textareaFocused &&
-    !selectedSlashSkill &&
     slashSkillQuery !== null &&
     skillSuggestions.length > 0 &&
     dismissedSkillSuggestionValue !== textInput.value;
@@ -1896,6 +1905,16 @@ export function InputBox({
 
   const handleInlineSkillKeyDown = useCallback(
     (event: KeyboardEvent<HTMLSpanElement>) => {
+      // The catalog can be reopened from here, so its navigation keys must win
+      // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
+      // the IME candidate rather than the list.
+      if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        handleSkillSuggestionKeyDown(event);
+        if (event.defaultPrevented) {
+          return;
+        }
+      }
+
       handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
@@ -1920,7 +1939,11 @@ export function InputBox({
 
       event.currentTarget.closest("form")?.requestSubmit();
     },
-    [handleSelectedSlashSkillKeyDown, updateInlineSkillTextInput],
+    [
+      handleSelectedSlashSkillKeyDown,
+      handleSkillSuggestionKeyDown,
+      updateInlineSkillTextInput,
+    ],
   );
 
   const clearSelectedSlashSkill = useCallback(() => {
