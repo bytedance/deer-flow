@@ -202,7 +202,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     summary="List Custom Agents",
     description="List all custom agents available in the agents directory, including their soul content.",
 )
-async def list_agents(request: Request) -> AgentsListResponse:
+async def list_agents(request: Request = None) -> AgentsListResponse:
     """List all custom agents.
 
     Returns:
@@ -217,7 +217,7 @@ async def list_agents(request: Request) -> AgentsListResponse:
         # _agent_config_to_response are filesystem IO (file backend) or DB round
         # trips (db backend) and must stay off the event loop.
         agents = list_custom_agents(user_id=user_id)
-        app_profile = getattr(request.state, "app_profile", None)
+        app_profile = getattr(request.state, "app_profile", None) if request is not None else None
         if isinstance(app_profile, dict):
             allowed_agents = set(app_profile.get("agents", []))
             agents = [agent for agent in agents if agent.name in allowed_agents]
