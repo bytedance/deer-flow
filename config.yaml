@@ -40,8 +40,28 @@ token_usage:
 # Configure available LLM models for the agent to use
 
 models:
-  # DeepSeek V4 Pro — primary model for AlphaFRS Railway deployment.
-  # 1M context, 384K max output, supports thinking mode and tool calls.
+  # ── HOW THE ACTIVE MODEL IS CHOSEN ────────────────────────────────────────
+  # DeerFlow resolves the default model as app_config.models[0] (see
+  # agents/lead_agent/agent.py, subagents/config.py, tools/tools.py). ORDER IS
+  # THE SWITCH — to change model, move an entry to the top. Nothing else reads
+  # a model name, and DEERFLOW_MODEL only feeds the entrypoint's config
+  # generator, which never runs because this file is committed.
+  #
+  # Three entries are maintained. All are one move away from being live; two
+  # additionally need an API key on the Railway *deerflow* service, which today
+  # holds only DEEPSEEK_API_KEY.
+  #
+  #   deepseek-v4-pro   ACTIVE. Cheapest by 5-8x. Thinking was switched ON in
+  #                     alphaFRS (backend/deerflow.py) after it ignored the
+  #                     prompt's structural constraints with thinking off.
+  #   gpt-5.6-terra     Reasoning model. Needs OPENAI_API_KEY on deerflow.
+  #   claude-sonnet-5   Reasoning model. Needs ANTHROPIC_API_KEY on deerflow.
+  #
+  # The open question is whether the structural failures came from too little
+  # reasoning or from the model family. deepseek+thinking answers that first
+  # and costs nothing new; promote one of the others only if it does not.
+
+  # ── ACTIVE ────────────────────────────────────────────────────────────────
   - name: deepseek-v4-pro
     display_name: DeepSeek V4 Pro
     use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
@@ -64,6 +84,62 @@ models:
       extra_body:
         thinking:
           type: disabled
+
+  # ── STAGED: GPT-5.6 Terra via OpenRouter ──────────────────────────────────
+  # Mid tier of OpenAI's 5.6 family. 1M context, 128K max output, knowledge
+  # cutoff 2026-02-16. Reasoning model, which is the reason it is here.
+  #
+  # ROUTED VIA OPENROUTER, not OpenAI directly. Two reasons: the direct OpenAI
+  # account is unfunded, and OpenRouter is cheaper for this model — $1/$6 per
+  # 1M vs OpenAI's $2/$12 (a 50% discount was applied at the time of writing;
+  # re-check before relying on it).
+  #
+  # Note the model id carries the `openai/` provider prefix. That is
+  # OpenRouter's namespace, NOT part of the model name — calling OpenAI
+  # directly it is plain `gpt-5.6-terra`.
+  #
+  # BLOCKED: needs OPENROUTER_API_KEY on the deerflow service. Railway
+  # variables are per-service, so a key set on `api` is not visible here.
+  #
+  # NO when_thinking_enabled / when_thinking_disabled BLOCK, deliberately.
+  # Reasoning is native to this model, not a toggle. models/factory.py only
+  # applies those blocks when one is present, so their absence is correct and
+  # inert. Do NOT copy the DeepSeek or Gemini `extra_body.thinking.type` shape
+  # onto it — those are gateway-specific conventions and mean nothing here.
+  #
+  # NO temperature, top_p or top_k. GPT-5 reasoning models reject them. The
+  # `# Example: OpenAI model` block further down this file sets
+  # temperature: 0.7 — do not copy that entry verbatim.
+  #
+  # COST: reasoning tokens bill as OUTPUT. At $1/$6 the thinking-off baseline
+  # (239,855 in / 8,399 out) is ~$0.29/report; expect ~$0.38-0.44 once
+  # reasoning is counted. Cheapest of the three staged options.
+  # - name: gpt-5.6-terra
+  #   display_name: GPT-5.6 Terra (OpenRouter)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: openai/gpt-5.6-terra   # OpenRouter namespace; plain id if calling OpenAI directly
+  #   api_key: $OPENROUTER_API_KEY
+  #   base_url: https://openrouter.ai/api/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 32768
+  #   supports_thinking: true
+  #   supports_vision: true
+
+  # ── STAGED: Claude Sonnet 5 ───────────────────────────────────────────────
+  # BLOCKED: needs ANTHROPIC_API_KEY on the deerflow service, and an Anthropic
+  # account with credits — more setup than the OpenAI option, which already has
+  # an account behind it.
+  # - name: claude-sonnet-5
+  #   display_name: Claude Sonnet 5
+  #   use: langchain_anthropic:ChatAnthropic
+  #   model: claude-sonnet-5
+  #   api_key: $ANTHROPIC_API_KEY
+  #   default_request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 32768
+  #   supports_thinking: true
+  #   supports_vision: true
 
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
