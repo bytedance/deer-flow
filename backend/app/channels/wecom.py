@@ -21,6 +21,18 @@ from app.channels.message_bus import (
 logger = logging.getLogger(__name__)
 
 
+def _file_md5(path: str) -> str:
+    md5_hasher = hashlib.md5()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            md5_hasher.update(chunk)
+    return md5_hasher.hexdigest()
+
+
+def _open_binary(path: str):
+    return open(path, "rb")
+
+
 class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
@@ -428,11 +440,7 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] invalid total_chunks=%d for %s", total_chunks, filename)
             return None
 
-        md5_hasher = hashlib.md5()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                md5_hasher.update(chunk)
-        md5 = md5_hasher.hexdigest()
+        md5 = await asyncio.to_thread(_file_md5, path)
 
         init_req_id = generate_req_id("aibot_upload_media_init")
         init_body = {
@@ -448,9 +456,10 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] upload init returned no upload_id: %s", init_ack)
             return None
 
-        with open(path, "rb") as f:
+        file_obj = await asyncio.to_thread(_open_binary, path)
+        try:
             for idx in range(total_chunks):
-                data = f.read(chunk_size)
+                data = await asyncio.to_thread(file_obj.read, chunk_size)
                 if not data:
                     break
                 chunk_req_id = generate_req_id("aibot_upload_media_chunk")
@@ -460,6 +469,8 @@ class WeComChannel(Channel):
                     "base64_data": base64.b64encode(data).decode("utf-8"),
                 }
                 await self._send_ws_upload_command(chunk_req_id, chunk_body, "aibot_upload_media_chunk")
+        finally:
+            await asyncio.to_thread(file_obj.close)
 
         finish_req_id = generate_req_id("aibot_upload_media_finish")
         finish_ack = await self._send_ws_upload_command(finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish")

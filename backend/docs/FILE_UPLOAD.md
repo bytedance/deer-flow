@@ -9,7 +9,7 @@ DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，�
 - ✅ 支持多文件同时上传
 - ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
-- ✅ Agent 自动感知已上传的文件
+- ✅ Agent 自动感知当前消息中附带的文件
 - ✅ 支持文件列表查询和删除
 
 ## API 端点
@@ -116,23 +116,29 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ## Agent 集成
 
-### 自动文件列举
+### 当前消息中的文件上下文
 
-Agent 在每次请求时会自动收到已上传文件的列表，格式如下：
+发送消息时，前端会把该消息附带的上传文件元数据放入
+`HumanMessage.additional_kwargs.files`。`UploadsMiddleware` 只把当前消息中的文件
+注入 Agent 上下文，格式如下：
 
 ```xml
-<uploaded_files>
-The following files have been uploaded and are available for use:
+<current_uploads>
+The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
 
-- document.md (45.3 KB)
-  Path: /mnt/user-data/uploads/document.md
-
-You can read these files using the `read_file` tool with the paths shown above.
-</uploaded_files>
+To work with these files:
+- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- Use `grep` to search for keywords when you are not sure which section to look at.
+- Use `glob` to find files by name pattern.
+</current_uploads>
 ```
+
+以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
+`list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用
+`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
@@ -240,8 +246,9 @@ backend/.deer-flow/threads/
    - 使用 markitdown 转换文档
 
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
-   - 在每次 Agent 请求前注入文件列表
-   - 自动生成格式化的文件列表消息
+   - 读取当前消息的 `additional_kwargs.files`
+   - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
+   - 历史上传由 `list_uploaded_files` 按需查询，不会每轮自动注入
 
 3. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API
