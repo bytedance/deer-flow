@@ -580,8 +580,22 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         set_loaded_extensions,
     )
 
+    # Resolving the configured plugin list is deliberately outside the
+    # fail-open guard below: a config.yaml that exists but cannot be parsed or
+    # validated is a configuration failure, not an extension failure. Reporting
+    # it as the latter would silently drop a `required: true` extension instead
+    # of failing the boot. Only an absent config.yaml is tolerated, mirroring
+    # _resolve_trace_enabled_for_app_construction() — create_app() runs at
+    # import time, and lifespan still performs strict config loading before
+    # serving.
     try:
-        loaded_extensions, extension_diagnostics = load_extensions(get_app_config().plugins)
+        configured_plugins = get_app_config().plugins
+    except FileNotFoundError:
+        logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
+        configured_plugins = []
+
+    try:
+        loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)
     except ExtensionLoadError:
         # `required: true` makes the extension part of the startup contract.
         # Booting without it would silently change configured behaviour.
