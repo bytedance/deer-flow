@@ -397,6 +397,7 @@ class TestChannelBase:
         assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
 
     def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.buzz import BuzzChannel
         from app.channels.dingtalk import DingTalkChannel
         from app.channels.discord import DiscordChannel
         from app.channels.feishu import FeishuChannel
@@ -409,6 +410,7 @@ class TestChannelBase:
 
         bus = MessageBus()
         defaults = {
+            "buzz": BuzzChannel(bus=bus, config={"relay_url": "wss://buzz.example.com"}).supports_streaming,
             "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,

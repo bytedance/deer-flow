@@ -18,6 +18,7 @@ from urllib.parse import quote
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
@@ -125,6 +126,7 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
+    "buzz": {"supports_streaming": True},
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
