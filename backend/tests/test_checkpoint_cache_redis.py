@@ -83,11 +83,11 @@ class _FailingRedis(_FakeRedis):
         raise RedisError("connection refused")
 
 
-def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, **kwargs: Any):
+def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, ttl_seconds: int = 60, **kwargs: Any):
     import deerflow.runtime.checkpoint_cache.redis as redis_mod
 
     monkeypatch.setattr(redis_mod, "_create_client", lambda *a, **k: fake)
-    return redis_mod.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=60, **kwargs)
+    return redis_mod.RedisCheckpointHistoryCache("redis://unused", serde=JsonPlusSerializer(), ttl_seconds=ttl_seconds, **kwargs)
 
 
 def _entry(i: int) -> dict:
@@ -151,6 +151,15 @@ async def test_redis_outage_skips_write(monkeypatch: pytest.MonkeyPatch, caplog:
 
 
 @pytest.mark.anyio
+async def test_zero_ttl_disables_expiry_explicitly(monkeypatch: pytest.MonkeyPatch):
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake, ttl_seconds=0)
+    await cache.aset_many({"k1": _entry(1)})
+    assert cache._ttl is None
+    assert fake.ttls["k1"] is None  # SET without EX: redis maxmemory policy only
+
+
+@pytest.mark.anyio
 async def test_adelete_thread_purges_matching_keys_only(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeRedis()
     cache = _make_cache(monkeypatch, fake)
@@ -207,6 +216,26 @@ def test_db_hash_distinguishes_backends_and_targets():
     assert checkpoint_cache_db_hash(sqlite_cfg) != checkpoint_cache_db_hash(pg_cfg)
     assert checkpoint_cache_db_hash(pg_cfg) != checkpoint_cache_db_hash(pg_cfg2)
     assert len(checkpoint_cache_db_hash(pg_cfg)) == 12
+
+
+def test_db_hash_stable_across_credential_rotation():
+    """Same database, rotated user/password -> same cache namespace."""
+    from deerflow.config.database_config import DatabaseConfig
+
+    before = DatabaseConfig.model_validate({"backend": "postgres", "postgres_url": "postgresql://alice:secret1@pg.internal:5432/deerflow"})
+    rotated = DatabaseConfig.model_validate({"backend": "postgres", "postgres_url": "postgresql://bob:secret2@pg.internal:5432/deerflow"})
+    driver_suffix = DatabaseConfig.model_validate({"backend": "postgres", "postgres_url": "postgresql+asyncpg://alice:secret1@pg.internal:5432/deerflow"})
+    other_db = DatabaseConfig.model_validate({"backend": "postgres", "postgres_url": "postgresql://alice:secret1@pg.internal:5432/other"})
+    assert checkpoint_cache_db_hash(before) == checkpoint_cache_db_hash(rotated)
+    assert checkpoint_cache_db_hash(before) == checkpoint_cache_db_hash(driver_suffix)
+    assert checkpoint_cache_db_hash(before) != checkpoint_cache_db_hash(other_db)
+
+
+def test_db_hash_unparseable_url_falls_back_to_raw():
+    from deerflow.config.database_config import DatabaseConfig
+
+    cfg = DatabaseConfig.model_validate({"backend": "postgres", "postgres_url": "not-a-url"})
+    assert len(checkpoint_cache_db_hash(cfg)) == 12  # stable, never raises
 
 
 def test_key_prefix_override_wins():

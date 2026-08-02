@@ -157,6 +157,7 @@ _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
 _checkpointer_lock = threading.Lock()
 _checkpointer_cache = None  # MemoryCheckpointHistoryCache singleton shared by wrapped sync savers
+_checkpointer_cache_prefix: str | None = None  # key prefix the singleton was built for
 
 
 def _wrap_sync_if_delta(saver: Checkpointer, app_config: AppConfig) -> Checkpointer:
@@ -166,7 +167,7 @@ def _wrap_sync_if_delta(saver: Checkpointer, app_config: AppConfig) -> Checkpoin
     fallback when nothing is frozen yet. Only the memory cache backend is
     supported on the sync path (TUI/embedded) — it is process-local anyway.
     """
-    global _checkpointer_cache
+    global _checkpointer_cache, _checkpointer_cache_prefix
     # The ``_checkpointer_cache`` singleton is reassigned here without holding
     # ``_checkpointer_lock`` on the ``checkpointer_context()`` path (and under
     # the lock on the ``get_checkpointer()`` path). The race is intentional
@@ -183,9 +184,13 @@ def _wrap_sync_if_delta(saver: Checkpointer, app_config: AppConfig) -> Checkpoin
     from deerflow.runtime.checkpoint_cache.provider import checkpoint_cache_key_prefix
     from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
-    if _checkpointer_cache is None or _checkpointer_cache._max_entries != cache_config.max_entries:
+    key_prefix = checkpoint_cache_key_prefix(app_config)
+    # Recreate on capacity OR namespace change: entries under a stale prefix
+    # would be unreachable and no longer covered by thread purges.
+    if _checkpointer_cache is None or _checkpointer_cache._max_entries != cache_config.max_entries or _checkpointer_cache_prefix != key_prefix:
         _checkpointer_cache = MemoryCheckpointHistoryCache(max_entries=cache_config.max_entries)
-    return CachedHistorySaver(saver, _checkpointer_cache, key_prefix=checkpoint_cache_key_prefix(app_config))
+        _checkpointer_cache_prefix = key_prefix
+    return CachedHistorySaver(saver, _checkpointer_cache, key_prefix=key_prefix)
 
 
 def get_checkpointer() -> Checkpointer:
@@ -241,7 +246,7 @@ def reset_checkpointer() -> None:
     Closes any open backend connections and clears the cached instance.
     Useful in tests or after a configuration change.
     """
-    global _checkpointer, _checkpointer_ctx, _checkpointer_cache
+    global _checkpointer, _checkpointer_ctx, _checkpointer_cache, _checkpointer_cache_prefix
     with _checkpointer_lock:
         if _checkpointer_ctx is not None:
             try:
@@ -251,6 +256,7 @@ def reset_checkpointer() -> None:
             _checkpointer_ctx = None
         _checkpointer = None
         _checkpointer_cache = None
+        _checkpointer_cache_prefix = None
 
 
 # ---------------------------------------------------------------------------

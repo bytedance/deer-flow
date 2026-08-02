@@ -1985,7 +1985,8 @@ database:
   #   max_entries: 128        # 0 disables the cache
   #   redis_url: null         # or DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL / REDIS_URL
   #   ttl_seconds: 86400      # redis leak safety net; bounds residual copies if a
-  #                           # thread-delete purge fails (purge itself is immediate)
+  #                           # thread-delete purge fails (purge itself is immediate).
+  #                           # 0 explicitly disables expiry (redis maxmemory only)
   #   key_prefix: ""          # default: hash of the database identity
 
 # ============================================================================

@@ -129,7 +129,8 @@ class CheckpointCacheConfig(BaseModel):
         description=(
             "Redis entry TTL; a leak safety net, not a correctness mechanism (entries are immutable). "
             "Thread deletion purges that thread's entries immediately; if the purge fails (redis outage), "
-            "residual copies of the thread's history persist until this TTL expires."
+            "residual copies of the thread's history persist until this TTL expires. "
+            "0 explicitly disables expiry — orphaned keys then rely on the redis maxmemory policy alone."
         ),
     )
     key_prefix: str = Field(

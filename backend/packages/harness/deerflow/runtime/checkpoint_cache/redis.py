@@ -54,7 +54,9 @@ class RedisCheckpointHistoryCache:
     ) -> None:
         self._client = _create_client(redis_url, max_connections=max_connections)
         self._serde = serde
-        self._ttl = ttl_seconds or None
+        # ttl_seconds=0 is an explicit opt-out of expiry (no SETEX) — not the
+        # default, and leaked/orphaned keys then rely on redis maxmemory only.
+        self._ttl = ttl_seconds if ttl_seconds > 0 else None
         self._hits = 0
         self._misses = 0
 

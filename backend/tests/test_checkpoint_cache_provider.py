@@ -73,3 +73,24 @@ def test_sync_full_mode_unwrapped():
     reset_checkpointer()
     with checkpointer_context() as saver:
         assert not isinstance(saver, CachedHistorySaver)
+
+
+def test_sync_cache_recreated_when_key_prefix_changes():
+    """The singleton must not outlive its namespace: a prefix change without
+    a process restart leaves old-prefix entries unreachable and unpurgeable."""
+    reset_checkpointer()
+    set_app_config(_app_config("delta", {"key_prefix": "ns-a"}))
+    freeze_checkpoint_channel_mode("delta")
+    with checkpointer_context() as saver:
+        saver._cache.set_many({"ns-a:t1:x": {"writes": []}})
+        first_cache = saver._cache
+    # Same prefix: singleton is reused (warm across wrappers).
+    with checkpointer_context() as saver:
+        assert saver._cache is first_cache
+        assert saver._cache.stats().entries == 1
+    # Prefix change: fresh cache, stale namespace gone with the old instance.
+    set_app_config(_app_config("delta", {"key_prefix": "ns-b"}))
+    with checkpointer_context() as saver:
+        assert saver._cache is not first_cache
+        assert saver._cache.stats().entries == 0
+    reset_checkpointer()
