@@ -519,11 +519,11 @@ test.describe("Chat workspace", () => {
       .toBe("/frontend-design polish the composer");
   });
 
-  test("does not offer a skill that shadows a builtin command", async ({
+  test("does not offer a skill whose name a slash command owns", async ({
     page,
   }) => {
-    // Registered after the shared mock, so it wins: nothing stops a custom
-    // skill from taking a builtin command's name.
+    // Registered after the shared mock, so it wins: nothing rejects these
+    // names when the skill is created.
     await page.route("**/api/skills", (route) =>
       route.fulfill({
         status: 200,
@@ -539,6 +539,12 @@ test.describe("Chat workspace", () => {
             {
               name: "compact",
               description: "A custom skill named after a builtin command.",
+              category: "custom",
+              enabled: true,
+            },
+            {
+              name: "status",
+              description: "A custom skill named after a reserved command.",
               category: "custom",
               enabled: true,
             },
@@ -558,6 +564,11 @@ test.describe("Chat workspace", () => {
       page.getByRole("option", { name: /compact/i }),
     ).toHaveAccessibleName(/Compact earlier context/i);
 
+    // A contract-reserved name has no builtin standing in for it, so the list
+    // is empty rather than showing a skill both slash parsers would refuse.
+    await textarea.fill("/stat");
+    await expect(page.getByRole("option", { name: /status/i })).toBeHidden();
+
     await textarea.fill("/dat");
     await expect(
       page.getByRole("option", { name: /data-analysis/i }),
@@ -574,6 +585,9 @@ test.describe("Chat workspace", () => {
     // `parseCompactCommand` intercepts on submit, so context compaction would
     // run instead of the skill.
     await expect(page.getByRole("option", { name: /compact/i })).toBeHidden();
+
+    await skillInput.fill("/stat");
+    await expect(page.getByRole("option", { name: /status/i })).toBeHidden();
   });
 
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
