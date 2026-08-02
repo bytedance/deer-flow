@@ -662,6 +662,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    app_allowed_skills = cfg.get("app_allowed_skills")
+    if isinstance(app_allowed_skills, list):
+        allowed_skills = {skill for skill in app_allowed_skills if isinstance(skill, str)}
+        available_skills = allowed_skills if available_skills is None else available_skills.intersection(allowed_skills)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -834,8 +838,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
+    configured_groups = agent_config.tool_groups if agent_config else None
+    app_allowed_tool_groups = cfg.get("app_allowed_tool_groups")
+    if isinstance(app_allowed_tool_groups, list):
+        allowed_groups = {group for group in app_allowed_tool_groups if isinstance(group, str)}
+        configured_groups = [group for group in (configured_groups or allowed_groups) if group in allowed_groups]
+    raw_tools = get_available_tools(model_name=model_name, groups=configured_groups, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     configured_tools = raw_tools + extra_tools
+    app_allowed_tools = cfg.get("app_allowed_tools")
+    if isinstance(app_allowed_tools, list):
+        allowed_tools = {tool for tool in app_allowed_tools if isinstance(tool, str)}
+        configured_tools = [tool for tool in configured_tools if tool.name in allowed_tools]
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     authorization_candidates = [*configured_tools]

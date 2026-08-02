@@ -15,6 +15,7 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.agents.model import AgentRow
+from deerflow.persistence.app_keys.model import AppCapabilityRow, AppCredentialRow, AppKeyAuditRow, AppProfileRow
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -32,6 +33,10 @@ from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
 __all__ = [
     "AgentRow",
+    "AppCapabilityRow",
+    "AppCredentialRow",
+    "AppKeyAuditRow",
+    "AppProfileRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",

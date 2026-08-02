@@ -10,6 +10,8 @@ Fine-grained permission checks remain in authz.py decorators.
 """
 
 from collections.abc import Callable
+from hashlib import sha256
+from types import SimpleNamespace
 
 from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -18,6 +20,7 @@ from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.auth_disabled import (
+    AUTH_SOURCE_APP_KEY,
     AUTH_SOURCE_AUTH_DISABLED,
     AUTH_SOURCE_INTERNAL,
     AUTH_SOURCE_SESSION,
@@ -27,6 +30,18 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+_APP_KEY_HEADER_NAME = "X-DeerFlow-App-Key"
+_APP_USER_ID_HEADER_NAME = "X-DeerFlow-User-Id"
+_APP_KEY_REQUESTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/models"),
+        ("GET", "/api/skills"),
+        ("GET", "/api/agents"),
+        ("POST", "/api/runs/stream"),
+        ("POST", "/api/runs/wait"),
+    }
+)
 
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
@@ -62,6 +77,44 @@ def _is_public(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _PUBLIC_PATH_PREFIXES)
 
 
+def _derive_app_user_id(app_id: str, external_user_id: str) -> str:
+    """Return a path-safe, app-scoped internal identity for an external user."""
+    identity_source = f"{app_id}:{external_user_id}".encode()
+    return f"app-user-{sha256(identity_source).hexdigest()[:32]}"
+
+
+async def _resolve_app_key_user(request: Request):
+    """Resolve a credential with a direct database query and no local cache."""
+    app_key = request.headers.get(_APP_KEY_HEADER_NAME)
+    if not app_key:
+        return None
+    from deerflow.persistence.app_keys import AppKeyRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    session_factory = get_session_factory()
+    if session_factory is None:
+        return None
+    profile = await AppKeyRepository(session_factory).find_active_profile_by_api_key(app_key)
+    if profile is None:
+        return None
+    request.state.app_profile = profile
+    external_user_id = request.headers.get(_APP_USER_ID_HEADER_NAME, "").strip()
+    if len(external_user_id) > 256:
+        return None
+    # An external ID is untrusted transport input, never an internal principal.
+    # Scope its deterministic digest by the authenticated application, so two
+    # applications' similarly named users never share threads or user data.
+    derived_user_id = _derive_app_user_id(profile["id"], external_user_id)
+    request.state.app_external_user_id = external_user_id or None
+    return SimpleNamespace(
+        id=derived_user_id,
+        email=None,
+        system_role="app",
+        oauth_provider=None,
+        oauth_id=None,
+    )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Strict auth gate: reject requests without a valid session.
 
@@ -89,6 +142,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(request.url.path):
             return await call_next(request)
 
+        app_key_user = await _resolve_app_key_user(request)
+        if request.headers.get(_APP_KEY_HEADER_NAME) and app_key_user is None:
+            return JSONResponse(status_code=401, content={"detail": "Invalid App Key"})
+        if app_key_user is not None and (request.method, request.url.path.rstrip("/")) not in _APP_KEY_REQUESTS:
+            return JSONResponse(status_code=403, content={"detail": "App Key is not allowed on this endpoint"})
+
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             # Extract the channel owner user ID from the trusted header.
@@ -107,7 +166,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         access_token = request.cookies.get("access_token")
 
         # Non-public path: require session cookie
-        if internal_user is not None:
+        if app_key_user is not None:
+            user = app_key_user
+            auth_source = AUTH_SOURCE_APP_KEY
+        elif internal_user is not None:
             user = internal_user
             auth_source = AUTH_SOURCE_INTERNAL
         elif access_token:
@@ -151,10 +213,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
         request.state.auth_source = auth_source
-        permissions = await resolve_route_permissions(
-            user,
-            is_internal=auth_source == AUTH_SOURCE_INTERNAL,
-        )
+        permissions = ["runs:create"] if auth_source == AUTH_SOURCE_APP_KEY else await resolve_route_permissions(user, is_internal=auth_source == AUTH_SOURCE_INTERNAL)
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:

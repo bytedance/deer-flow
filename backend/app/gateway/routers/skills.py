@@ -153,10 +153,14 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     summary="List All Skills",
     description="Retrieve a list of all available skills from both public and custom directories.",
 )
-async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResponse:
+async def list_skills(request: Request, config: AppConfig = Depends(get_config)) -> SkillsListResponse:
     try:
         # Use user-scoped storage: loads public (global) + custom (user-level + fallback)
         skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        app_profile = getattr(request.state, "app_profile", None)
+        if isinstance(app_profile, dict):
+            allowed_skills = set(app_profile.get("skills", []))
+            skills = [skill for skill in skills if skill.name in allowed_skills]
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in skills])
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)

@@ -1047,6 +1047,15 @@ async def ensure_checkpoint_history_seeded(
 # ---------------------------------------------------------------------------
 
 
+def validate_app_key_profile(profile: dict[str, Any], *, assistant_id: str | None, model_name: str | None) -> None:
+    """Enforce the direct App-Key profile allowlists at the run boundary."""
+    selected_agent = (assistant_id or "lead-agent").strip().lower().replace("_", "-")
+    if selected_agent not in set(profile.get("agents", [])):
+        raise HTTPException(status_code=403, detail="App Key is not allowed to use this agent")
+    if not model_name or model_name not in set(profile.get("models", [])):
+        raise HTTPException(status_code=403, detail="App Key must use an explicitly allowed model")
+
+
 async def start_run(
     body: RunCreateRequest,
     thread_id: str,
@@ -1098,6 +1107,10 @@ async def start_run(
                 status_code=400,
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
+
+    app_profile = getattr(getattr(request, "state", None), "app_profile", None)
+    if isinstance(app_profile, dict):
+        validate_app_key_profile(app_profile, assistant_id=body.assistant_id, model_name=model_name)
 
     owner_user_id = get_trusted_internal_owner_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
@@ -1151,6 +1164,17 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+        if isinstance(app_profile, dict):
+            runtime_context = config.setdefault("context", {})
+            runtime_context["app_id"] = app_profile["id"]
+            runtime_context["app_allowed_skills"] = list(app_profile.get("skills", []))
+            runtime_context["app_allowed_tool_groups"] = list(app_profile.get("tool_groups", []))
+            runtime_context["app_allowed_tools"] = list(app_profile.get("tools", []))
+            metadata = config.setdefault("metadata", {})
+            metadata["app_id"] = app_profile["id"]
+            external_user_id = getattr(request.state, "app_external_user_id", None)
+            if external_user_id:
+                metadata["app_external_user_id"] = external_user_id
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(

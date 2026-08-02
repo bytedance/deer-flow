@@ -14,6 +14,7 @@ from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, ge
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     agents,
+    app_keys,
     artifacts,
     assistants_compat,
     auth,
@@ -608,6 +609,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+    app.include_router(app_keys.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
