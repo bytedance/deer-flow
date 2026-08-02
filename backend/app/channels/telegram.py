@@ -42,6 +42,12 @@ MAX_TRACKED_STREAM_MESSAGES = 256
 _monotonic = time.monotonic
 
 
+def _load_telegram_input_file(path, filename: str):
+    from telegram import InputFile
+
+    return InputFile(path.read_bytes(), filename=filename)
+
+
 class TelegramChannel(Channel):
     """Telegram bot channel using long-polling.
 
@@ -385,21 +391,17 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(msg.chat_id)
 
         try:
+            input_file = await asyncio.to_thread(_load_telegram_input_file, attachment.actual_path, attachment.filename)
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
-                with open(attachment.actual_path, "rb") as f:
-                    kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_photo(**kwargs)
+                kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_photo(**kwargs)
             else:
-                from telegram import InputFile
-
-                with open(attachment.actual_path, "rb") as f:
-                    input_file = InputFile(f, filename=attachment.filename)
-                    kwargs = {"chat_id": chat_id, "document": input_file}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_document(**kwargs)
+                kwargs = {"chat_id": chat_id, "document": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
