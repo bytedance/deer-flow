@@ -18,8 +18,13 @@ export function useArtifactContent({
     return filepath.startsWith("write-file:");
   }, [filepath]);
   const { thread, isMock } = useThread();
-  const [fullFilepath, setFullFilepath] = useState<string | null>(null);
-  const fullContentRequested = fullFilepath === filepath;
+  const [fullContentSelection, setFullContentSelection] = useState<{
+    filepath: string;
+    threadId: string;
+  } | null>(null);
+  const fullContentRequested =
+    fullContentSelection?.filepath === filepath &&
+    fullContentSelection.threadId === threadId;
   const content = useMemo(() => {
     if (isWriteFile) {
       return loadArtifactContentFromToolCall({ url: filepath, thread });
@@ -54,8 +59,8 @@ export function useArtifactContent({
   }, [enabled, isWriteFile, refetch, thread.isLoading]);
 
   const loadFullContent = useCallback(() => {
-    setFullFilepath(filepath);
-  }, [filepath]);
+    setFullContentSelection({ filepath, threadId });
+  }, [filepath, threadId]);
 
   return {
     content: isWriteFile ? content : data?.content,
