@@ -113,6 +113,16 @@ export const zhCN: Translations = {
     saveFailed: "保存文件失败",
   },
 
+  artifactPreview: {
+    limited: (previewSize, totalSize) =>
+      totalSize
+        ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
+        : `当前显示前 ${previewSize}。`,
+    loadFullFile: "加载完整文件",
+    loadingFullFile: "正在加载完整文件...",
+    previewFailed: "无法预览此文件，但仍可下载原始文件。",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) => `使用了 ${count} 个来源`,

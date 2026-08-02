@@ -35,6 +35,8 @@ Nginx is the single public entry: it serves the frontend and proxies `/api/langg
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
 other `/api/*` go straight to the Gateway REST routers. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
+It compresses HTML and configured textual assets, while deliberately leaving SSE,
+fonts, images, audio, and video uncompressed at the proxy layer.
 
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**, matching the README's documented deployment model. A bare

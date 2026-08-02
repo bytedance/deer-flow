@@ -7,6 +7,31 @@ import pytest
 from app.gateway.routers import scheduled_tasks
 
 
+@pytest.mark.parametrize(
+    "model",
+    [
+        scheduled_tasks.ScheduledTaskCreateRequest,
+        scheduled_tasks.ScheduledTaskUpdateRequest,
+    ],
+)
+@pytest.mark.parametrize("thread_id", ["", "thread.with.dot", "../escape", "x" * 65])
+def test_scheduled_task_models_reject_invalid_thread_ids(model, thread_id):
+    from pydantic import ValidationError
+
+    kwargs = {"thread_id": thread_id}
+    if model is scheduled_tasks.ScheduledTaskCreateRequest:
+        kwargs.update(
+            title="Task",
+            prompt="Prompt",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 * * * *"},
+            timezone="UTC",
+        )
+
+    with pytest.raises(ValidationError):
+        model(**kwargs)
+
+
 class _Repo:
     def __init__(self) -> None:
         self.created = []

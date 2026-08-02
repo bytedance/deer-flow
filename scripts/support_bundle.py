@@ -63,7 +63,11 @@ SECRET_FLAG_RE = re.compile(r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|passwor
 HEADER_KEY_RE = re.compile(r"(?i)header")
 POSIX_HOME_RE = re.compile(r"(?<![\w.-])(/Users|/home)/([^/\s:]+)")
 WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
-SAFE_THREAD_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+# Must stay byte-identical to deerflow.utils.thread_id.THREAD_ID_PATTERN
+# (canonical thread ID contract); pinned by a parity test in backend/tests.
+# Kept as a local copy because this script must run even in environments
+# where the backend venv is broken.
+SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
 ATTENTION_SIGNAL_NAMES = {
     "doctor_failed",

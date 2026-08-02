@@ -409,6 +409,7 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
+MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Settings > Tools updates one MCP server at a time: an invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
@@ -951,7 +952,13 @@ Image bytes loaded for a vision-model call are transient: DeerFlow removes the h
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes. Large, binary, or sensitive-looking files are shown as metadata only.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel while the thread is idle; saves use content revisions to prevent overwriting agent changes.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
+
+Text artifacts are streamed with HTTP byte-range support. The Web UI initially
+loads at most 1 MiB, shows the preview size when a file is larger, and waits for
+an explicit **Load full file** action before fetching the remainder or mounting
+the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
+downloads at the Gateway boundary.
 
 With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log.
 
@@ -986,6 +993,11 @@ uv run playwright install chromium
 ```
 
 Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_get_text`, `browser_back`, `browser_screenshot`, `browser_close`). `make dev` / Docker startup detects an enabled `browser_navigate` tool and preserves the `browser` extra on dependency syncs. The Gateway fails startup if browser control is configured but Playwright is missing, and `/api/features` hides the Browser UI unless the backend can actually serve it. Keep `headless: true` and `allow_private_addresses: false` for anything but local, trusted debugging. Attaching to an existing Chrome with `cdp_url` cannot enforce DeerFlow's subresource/redirect SSRF guard and therefore fails closed unless `allow_unguarded_cdp: true` explicitly acknowledges that risk; use it only with a trusted local browser. Browser sessions are process-local; keep `GATEWAY_WORKERS=1` while this tool group is enabled because ordinary uvicorn worker dispatch does not provide thread affinity.
+
+The workspace Browser Live client negotiates binary JPEG WebSocket frames,
+keeps only the newest pending frame per display refresh, and revokes replaced
+object URLs. Gateway control messages remain JSON, and clients that do not
+request the binary capability retain the legacy JSON/base64 frame protocol.
 
 ### Context Engineering
 
@@ -1055,6 +1067,18 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 ## Embedded Python Client
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+
+Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
+IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
+(`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is
+omitted or `None`; an explicitly supplied empty string is invalid.
+Existing route-addressable threads created under older, looser rules remain
+readable and deletable, but cannot start new runs or create new filesystem or
+sandbox state. Legacy deletion skips local path cleanup when the ID is not
+safe under the canonical contract. For canonical legacy threads whose
+conversation exists only in LangGraph checkpoints, DeerFlow seeds an empty
+run-event feed from the checkpoint before the first new run so
+`/messages/page` keeps both the old and new turns.
 
 ```python
 from deerflow.client import DeerFlowClient
@@ -1146,6 +1170,16 @@ DeerFlow has key high-privilege capabilities including **system command executio
 - **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
 - **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
 
+### Gateway Admin Is Equivalent to Code Execution
+
+An admin can register stdio MCP servers, which run commands inside the Gateway
+container. The API restricts them to an allowlist (`npx`, `uvx` by default,
+extended via `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST`) and rejects arguments and
+environment variables that would evaluate arbitrary code. That is defense in
+depth, not a boundary: these launchers exist to fetch and run remote packages,
+so **treat Gateway admin as equivalent to code execution on the host** and grant
+it accordingly.
+
 ### Deployment Defaults
 
 The Docker stack publishes its entry port on `127.0.0.1` only, matching the
@@ -1185,6 +1219,12 @@ and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
 The JSON includes compact review records with `priority`, `location`,
 `blocking_call`, `event_loop_exposure`, `reason`, and `code`.
 Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+Frontend route asset budgets can be checked with `cd frontend && pnpm
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
 
 ## License
 

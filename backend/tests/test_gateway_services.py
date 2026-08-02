@@ -2748,3 +2748,17 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         RunStatus.error,
         error="Thread requires delta mode; materialize and convert its checkpoints before using full mode.",
     )
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies():
+    from fastapi import HTTPException
+
+    from app.gateway.run_models import RunCreateRequest
+    from app.gateway.services import start_run
+
+    with pytest.raises(HTTPException) as exc_info:
+        await start_run(RunCreateRequest(), "thread.with.dot", SimpleNamespace())
+
+    assert exc_info.value.status_code == 422
+    assert "Invalid thread_id" in exc_info.value.detail

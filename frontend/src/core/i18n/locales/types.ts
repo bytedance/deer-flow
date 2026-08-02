@@ -97,6 +97,13 @@ export interface Translations {
     saveFailed: string;
   };
 
+  artifactPreview: {
+    limited: (previewSize: string, totalSize?: string) => string;
+    loadFullFile: string;
+    loadingFullFile: string;
+    previewFailed: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;

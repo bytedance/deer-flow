@@ -31,6 +31,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class SkillUpdateRequest(BaseModel):
 class SkillInstallRequest(BaseModel):
     """Request model for installing a skill from a .skill file."""
 
-    thread_id: str = Field(..., description="The thread ID where the .skill file is located")
+    thread_id: ThreadId = Field(..., description="The thread ID where the .skill file is located")
     path: str = Field(..., description="Virtual path to the .skill file (e.g., mnt/user-data/outputs/my-skill.skill)")
 
 

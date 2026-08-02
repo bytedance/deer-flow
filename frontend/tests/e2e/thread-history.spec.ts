@@ -94,6 +94,54 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("keeps a thousand-turn history DOM bounded while preserving navigation", async ({
+    page,
+  }) => {
+    const messages = Array.from({ length: 1_000 }, (_, turn) => [
+      {
+        type: "human",
+        id: `long-human-${turn}`,
+        content: `Long history question ${turn}`,
+      },
+      {
+        type: "ai",
+        id: `long-ai-${turn}`,
+        content: `Long history answer ${turn}`,
+      },
+    ]).flat();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Virtualized long history",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages,
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Long history answer 999")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const conversation = page.getByRole("log");
+    const scroller = conversation.locator(":scope > div").first();
+    await expect
+      .poll(() => conversation.locator("[data-index]").count())
+      .toBeLessThan(60);
+
+    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText("Long history question 0")).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await conversation.locator("[data-index]").count()).toBeLessThan(60);
+  });
+
   test("keeps rendered messages ordered when the latest history page advances", async ({
     page,
   }) => {
@@ -226,8 +274,19 @@ test.describe("Thread history", () => {
     await expect
       .poll(() => cursorPageRequestCount, { timeout: 15_000 })
       .toBeGreaterThan(0);
+    const conversation = page.getByRole("log");
+    const scroller = conversation.locator(":scope > div").first();
+    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
     await expect(page.getByText(originalPrompt)).toBeVisible({
       timeout: 15_000,
+    });
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
     });
     await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
 
@@ -239,15 +298,32 @@ test.describe("Thread history", () => {
     await expect
       .poll(() => latestPageRequestCount, { timeout: 15_000 })
       .toBeGreaterThan(latestPageRequestsBeforeSubmit);
-    await expect(page.getByText(originalPrompt)).toBeVisible();
     await expect(page.getByText(followUpPrompt)).toBeVisible();
-    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
 
-    const originalBox = await page.getByText(originalPrompt).boundingBox();
-    const followUpBox = await page.getByText(followUpPrompt).boundingBox();
-    expect(originalBox).not.toBeNull();
-    expect(followUpBox).not.toBeNull();
-    expect(originalBox!.y).toBeLessThan(followUpBox!.y);
+    let preservedDurationFound = false;
+    for (let step = 0; step <= 12; step += 1) {
+      await scroller.evaluate((element, ratio) => {
+        element.scrollTop =
+          (element.scrollHeight - element.clientHeight) * ratio;
+        element.dispatchEvent(new Event("scroll"));
+      }, step / 12);
+      if (await page.getByText("Completed in 11m 44s").isVisible()) {
+        preservedDurationFound = true;
+        break;
+      }
+    }
+    expect(preservedDurationFound).toBe(true);
+
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText(originalPrompt)).toBeVisible();
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText(followUpPrompt)).toBeVisible();
   });
 
   test("shows a completed run duration once after multi-step history", async ({
