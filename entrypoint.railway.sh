@@ -51,6 +51,47 @@ export DEER_FLOW_CONFIG_PATH="/app/config.yaml"
 export DEER_FLOW_CHANNELS_LANGGRAPH_URL="http://localhost:${GATEWAY_PORT}/api"
 export DEER_FLOW_CHANNELS_GATEWAY_URL="http://localhost:${GATEWAY_PORT}"
 
+# ── Create the schema once, before any worker starts ─────────────────────────
+# Every worker runs create_all() and the checkpointer/store setup() at startup.
+# Against a fresh database they race, and the loser dies on
+#   UniqueViolationError: duplicate key ... "pg_type_typname_nsp_index"
+#   ERROR: Application startup failed. Exiting.
+# because CREATE TABLE is not atomic against a concurrent identical CREATE.
+# uvicorn respawns the dead worker and the retry succeeds, so it converges — but
+# it is a crash on every deploy against a new database, and converging by
+# restart is not something to leave in the boot path.
+#
+# Doing it here, in one process before uvicorn forks, means the workers always
+# find the schema already present. Idempotent, so it costs a no-op round trip
+# on every subsequent boot.
+echo "[entrypoint] Ensuring database schema …"
+.venv/bin/python - <<'PY'
+import asyncio
+
+from deerflow.config.app_config import get_app_config
+from deerflow.persistence.engine import close_engine, init_engine_from_config
+from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+from deerflow.runtime.store.async_provider import make_store
+
+
+async def main() -> None:
+    config = get_app_config()
+    # create_all() for the application tables (runs, threads_meta, feedback,
+    # run_events).
+    await init_engine_from_config(config.database)
+    # Entering each context manager runs its own setup() — the LangGraph
+    # checkpoint tables and the store tables respectively.
+    async with make_checkpointer(config):
+        pass
+    async with make_store(config):
+        pass
+    await close_engine()
+
+
+asyncio.run(main())
+print("[entrypoint] Schema ready.")
+PY
+
 # ── Start gateway ─────────────────────────────────────────────────────────────
 # exec: the gateway becomes PID 1 so Railway's stop/restart signals reach uvicorn
 # directly instead of a shell that would have to forward them.

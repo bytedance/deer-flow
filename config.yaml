@@ -946,6 +946,25 @@ skill_evolution:
 #   type: postgres
 #   connection_string: postgresql://user:password@localhost:5432/deerflow
 
+# AlphaFRS: this section is NOT redundant with `database` below, despite what
+# the "DEPRECATED" heading implies. It is set deliberately, and removing it
+# silently downgrades the store to in-process memory.
+#
+# make_checkpointer() falls back to `database` when this is absent
+# (runtime/checkpointer/async_provider.py), but make_store() does not — it reads
+# ONLY this section and otherwise yields an InMemoryStore, warning "Thread list
+# will be lost on server restart" (runtime/store/async_provider.py). With this
+# omitted and 2 uvicorn workers, thread metadata written by one worker is
+# invisible to the other and gone at restart, which is precisely the durability
+# problem this deployment exists to fix. Verified in the Railway logs of the
+# first postgres deploy: checkpointer came up on postgres, the store did not.
+#
+# Set both, to the same database. Then checkpointer, store, application data
+# and run events all share it.
+checkpointer:
+  type: postgres
+  connection_string: $DATABASE_URL
+
 # ============================================================================
 # Database
 # ============================================================================
