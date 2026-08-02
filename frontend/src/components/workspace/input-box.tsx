@@ -1296,20 +1296,25 @@ export function InputBox({
     () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
-  const skillSuggestions = useMemo(
-    () =>
-      slashSkillQuery === null
-        ? []
-        : getMatchingSkillSuggestions(
-            skills,
-            slashSkillQuery,
-            // Builtin commands own the whole composer line, so they cannot be
-            // combined with a skill activation: `/goal` behind a selected skill
-            // would submit as chat text instead of running the command.
-            selectedSlashSkill ? [] : builtinSlashCommands,
-          ),
-    [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery],
-  );
+  const skillSuggestions = useMemo(() => {
+    if (slashSkillQuery === null) {
+      return [];
+    }
+    const matches = getMatchingSkillSuggestions(
+      skills,
+      slashSkillQuery,
+      builtinSlashCommands,
+    );
+    // Builtin commands own the whole composer line, so they cannot be combined
+    // with a skill activation: `/goal` behind a selected skill would submit as
+    // chat text instead of running the command. Drop them from the result
+    // rather than withholding them from the helper, which needs the list to
+    // reserve their names — a skill named after a builtin is unusable for the
+    // mirrored reason, its submitted text runs the command, not the skill.
+    return selectedSlashSkill
+      ? matches.filter(({ kind }) => kind === "skill")
+      : matches;
+  }, [builtinSlashCommands, selectedSlashSkill, skills, slashSkillQuery]);
   // A selected skill does not close the catalog: `/` reopens it so a skill can
   // be found by browsing and swapped without first clearing the chip.
   const showSkillSuggestions =

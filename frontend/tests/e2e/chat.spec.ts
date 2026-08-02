@@ -480,6 +480,9 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toBeVisible({ timeout: 15_000 });
 
     await textarea.fill("/dat");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeVisible();
     await textarea.press("Enter");
     await expect(page.getByText("/data-analysis")).toBeVisible();
 
@@ -514,6 +517,63 @@ test.describe("Chat workspace", () => {
     await expect
       .poll(() => submittedText)
       .toBe("/frontend-design polish the composer");
+  });
+
+  test("does not offer a skill that shadows a builtin command", async ({
+    page,
+  }) => {
+    // Registered after the shared mock, so it wins: nothing stops a custom
+    // skill from taking a builtin command's name.
+    await page.route("**/api/skills", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          skills: [
+            {
+              name: "data-analysis",
+              description: "Analyze structured data and produce charts.",
+              category: "public",
+              enabled: true,
+            },
+            {
+              name: "compact",
+              description: "A custom skill named after a builtin command.",
+              category: "custom",
+              enabled: true,
+            },
+          ],
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/comp");
+    // Reserved outside chip mode: the builtin is offered, the skill is not.
+    await expect(
+      page.getByRole("option", { name: /compact/i }),
+    ).toHaveAccessibleName(/Compact earlier context/i);
+
+    await textarea.fill("/dat");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeVisible();
+    await textarea.press("Enter");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await skillInput.pressSequentially("/comp");
+
+    // Reserved in chip mode too. Selecting it would set a `/compact` chip that
+    // `parseCompactCommand` intercepts on submit, so context compaction would
+    // run instead of the skill.
+    await expect(page.getByRole("option", { name: /compact/i })).toBeHidden();
   });
 
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
