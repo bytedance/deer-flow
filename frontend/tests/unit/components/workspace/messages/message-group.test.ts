@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { MessageGroup } from "@/components/workspace/messages/message-group";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 
 const artifactsMockState = rs.hoisted(() => ({
   autoOpen: false,
@@ -535,6 +536,7 @@ function renderGroup(
         value: {
           locale: "en-US",
           setLocale: () => undefined,
+          t: enUS,
         },
       },
       createElement(MessageGroup, { ...props, messages }),

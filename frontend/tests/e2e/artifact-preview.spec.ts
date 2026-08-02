@@ -7,13 +7,16 @@ const MARKDOWN_ARTIFACT_PATH = "/artifact-fixtures/report.md";
 const JSON_ARTIFACT_PATH = "/artifact-fixtures/report.json";
 const PRESENTED_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
 const PDF_ARTIFACT_PATH = "/artifact-fixtures/report.pdf";
+const LARGE_JSON_ARTIFACT_PATH = "/mnt/user-data/outputs/large-report.json";
 const IN_PROGRESS_THREAD_ID = "00000000-0000-0000-0000-000000003119";
 const COMPLETE_THREAD_ID = "00000000-0000-0000-0000-000000003120";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003121";
 const MARKDOWN_ANCHOR_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const JSON_THREAD_ID = "00000000-0000-0000-0000-000000003122";
 const PRESENTED_THREAD_ID = "00000000-0000-0000-0000-000000003123";
+const PERSISTED_PANEL_THREAD_ID = "00000000-0000-0000-0000-000000003125";
 const PDF_THREAD_ID = "00000000-0000-0000-0000-000000003124";
+const LARGE_JSON_THREAD_ID = "00000000-0000-0000-0000-000000003126";
 
 function writeFileMessages({
   path = ARTIFACT_PATH,
@@ -61,7 +64,7 @@ function writeFileMessages({
   return messages;
 }
 
-function presentFilesMessages() {
+function presentFilesMessages(path = PRESENTED_ARTIFACT_PATH) {
   return [
     {
       type: "human",
@@ -77,7 +80,7 @@ function presentFilesMessages() {
           id: "present-file-artifact",
           name: "present_files",
           args: {
-            filepaths: [PRESENTED_ARTIFACT_PATH],
+            filepaths: [path],
           },
         },
       ],
@@ -267,6 +270,60 @@ test.describe("Artifact preview stability", () => {
     ).toBeVisible();
   });
 
+  test("loads a large code artifact only after explicit confirmation", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: LARGE_JSON_THREAD_ID,
+          title: "Large artifact preview",
+          messages: presentFilesMessages(LARGE_JSON_ARTIFACT_PATH),
+          artifacts: [LARGE_JSON_ARTIFACT_PATH],
+        },
+      ],
+    });
+    const ranges: Array<string | undefined> = [];
+    await page.route(
+      `**/api/threads/${LARGE_JSON_THREAD_ID}/artifacts/mnt/user-data/outputs/large-report.json`,
+      (route) => {
+        const range = route.request().headers().range;
+        ranges.push(range);
+        if (range) {
+          const body = '{"preview":"PARTIAL_FILE_MARKER"}';
+          return route.fulfill({
+            status: 206,
+            contentType: "application/json",
+            headers: {
+              "Content-Range": `bytes 0-${Buffer.byteLength(body) - 1}/2000000`,
+            },
+            body,
+          });
+        }
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: '{"complete":"FULL_FILE_MARKER"}',
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${LARGE_JSON_THREAD_ID}`);
+    await expect(page.getByText("large-report.json").first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("large-report.json").first().click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText(/PARTIAL_FILE_MARKER/)).toBeVisible();
+    await expect(artifactsPanel.locator(".cm-editor")).toHaveCount(0);
+    await artifactsPanel
+      .getByRole("button", { name: "Load full file" })
+      .click();
+    await expect(artifactsPanel.getByText(/FULL_FILE_MARKER/)).toBeVisible();
+    expect(ranges).toEqual(["bytes=0-1048575", undefined]);
+  });
+
   test("keeps an opened presented artifact in the header dropdown", async ({
     page,
   }) => {
@@ -324,6 +381,46 @@ test.describe("Artifact preview stability", () => {
     await expect(presentedOption).toBeVisible();
     await presentedOption.click();
     await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+  });
+
+  test("restores the artifact panel and selected file after a page refresh", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: PERSISTED_PANEL_THREAD_ID,
+          title: "Persisted artifact panel",
+          messages: presentFilesMessages(),
+          artifacts: [MARKDOWN_ARTIFACT_PATH],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${PERSISTED_PANEL_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.md`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Presented Report\n\nGenerated content",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${PERSISTED_PANEL_THREAD_ID}`);
+    await expect(page.getByText("presented-report.md")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("presented-report.md").first().click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+
+    await page.reload();
+
+    await expect(page.getByTestId("artifact-trigger")).toBeVisible();
+    await expect(
+      page.locator("#artifacts").getByText("Presented Report"),
+    ).toBeVisible();
   });
 
   test("renders sandboxed iframe for a browser-previewable non-code file (urlOfArtifact path)", async ({

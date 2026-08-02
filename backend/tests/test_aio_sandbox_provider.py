@@ -219,8 +219,9 @@ def test_get_user_skill_mounts_mounts_only_global_integrations(tmp_path, monkeyp
 
     assert set(alice) == {"/mnt/skills/integrations"}
     assert set(bob) == {"/mnt/skills/integrations"}
-    assert alice["/mnt/skills/integrations"] == bob["/mnt/skills/integrations"]
-    assert alice["/mnt/skills/integrations"] == str(tmp_path / "home" / "integrations" / "skills")
+    assert alice["/mnt/skills/integrations"] != bob["/mnt/skills/integrations"]
+    assert alice["/mnt/skills/integrations"] == str(tmp_path / "home" / "users" / "alice" / "skills_view" / "integrations")
+    assert bob["/mnt/skills/integrations"] == str(tmp_path / "home" / "users" / "bob" / "skills_view" / "integrations")
 
 
 def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_path, monkeypatch, provisioner_module):
@@ -243,7 +244,7 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     monkeypatch.setattr(aio_mod, "get_app_config", lambda: config)
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=home))
     monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(aio_mod, "user_should_see_legacy_skills", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(remote_backend, "user_should_see_legacy_skills", lambda *_args, **_kwargs: False)
 
     provider = _make_provider(tmp_path)
     mounts = provider._get_extra_mounts("thread-1", user_id="alice")
@@ -526,7 +527,10 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     sandbox_id = await provider._acquire_internal_async("thread-cached-async", user_id="default")
 
     assert sandbox_id == "sandbox-cached-async"
-    assert to_thread_calls == [(provider._reuse_in_process_sandbox, ("thread-cached-async",))]
+    assert to_thread_calls == [
+        (provider._ensure_skills_projection, ("default",)),
+        (provider._reuse_in_process_sandbox, ("thread-cached-async",)),
+    ]
 
 
 def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
@@ -548,7 +552,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         return _Response()
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
-    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: True)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _user_id: True)
 
     try:
         backend.create("thread-42", "sandbox-42")
@@ -585,7 +589,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     monkeypatch.setattr(remote_mod.requests, "post", _post)
     monkeypatch.setattr(remote_mod, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda user_id: False)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _user_id: False)
 
     backend.create("thread-42", "sandbox-42", user_id="ou-user")
 

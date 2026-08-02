@@ -219,6 +219,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
+            # Runtime/UI metadata used to size the context indicator. Provider
+            # clients do not accept this as a model-constructor argument.
+            "context_window",
             # Presentation-only metadata (consumed by the console's cost
             # display) — must never reach the provider client, which would
             # forward unknown kwargs into the completion request payload.

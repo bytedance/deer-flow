@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 
 const streamMockState = rs.hoisted(() => ({
@@ -51,6 +52,7 @@ test("batches stream subscription updates in a macrotask", async () => {
           value: {
             locale: "en-US",
             setLocale: () => undefined,
+            t: enUS,
           },
         },
         createElement(StreamProbe),

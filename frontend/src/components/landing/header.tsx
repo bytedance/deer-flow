@@ -3,7 +3,7 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { NumberTicker } from "@/components/ui/number-ticker";
-import type { Locale } from "@/core/i18n/locale";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
 import { getI18n } from "@/core/i18n/server";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -18,7 +18,7 @@ export type HeaderProps = {
 
 export async function Header({ className, homeURL, locale }: HeaderProps) {
   const isExternalHome = !homeURL;
-  const { locale: resolvedLocale, t } = await getI18n(locale);
+  const { locale: resolvedLocale, t } = await getI18n(locale ?? DEFAULT_LOCALE);
   const lang = resolvedLocale.substring(0, 2);
   return (
     <header

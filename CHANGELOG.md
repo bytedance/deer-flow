@@ -12,6 +12,18 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
+  projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
+  used; Docker/AIO and hostPath deployments derive projection paths from
+  `DEER_FLOW_HOST_BASE_DIR`. E2B operator mounts targeting `/mnt/skills` or any
+  child path are skipped with a warning so they cannot shadow the managed
+  projection; move extra E2B content to a different container path. User
+  projections re-read global enable state from disk so toggles propagate across
+  Gateway workers on the next sandbox acquire. Existing E2B sandboxes retain
+  their creation-time snapshot until they are recreated. PVC-backed provisioner
+  deployments still mount the operator-supplied PVC snapshot directly, so
+  disabled-skill filesystem isolation does not apply in PVC mode until dynamic
+  PVC materialization is implemented. ([#4178])
 - **sandbox:** E2B now enforces `sandbox.replicas` as a process-local capacity
   limit. The default `wait` policy waits for `acquire_timeout`, then fails the
   agent turn. DeerFlow does not retry the turn automatically. Use `burst` with
@@ -210,6 +222,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Changed
 
+- **frontend performance:** Keep the public root and localized docs static;
+  lazy-load closed workspace panels and editor/highlighter dependencies;
+  incrementally derive streamed message state; bound streaming Markdown work;
+  virtualize long message and chat lists; pause offscreen decorative effects;
+  and enforce representative route JS/CSS budgets.
+- **browser:** Negotiate binary Browser Live JPEG frames, retain the legacy
+  JSON/base64 protocol for older clients, coalesce presentation to the latest
+  frame per refresh, and revoke replaced object URLs.
+- **artifacts:** Stream regular text artifacts with HTTP byte-range support and
+  limit the initial Web UI preview to 1 MiB until the user explicitly loads the
+  complete file.
 - **sandbox:** The Helm chart now defaults per-sandbox Services to `ClusterIP`
   instead of `NodePort`, so the code-execution sandbox is reachable only inside
   the cluster via Service DNS (`http://sandbox-<id>-svc.<ns>.svc.cluster.local`)
@@ -245,6 +268,34 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
+- **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
+  substitution that only captures output. The rule now judges *position* instead
+  of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a
+  `for` word list all run normally, while a substitution in command position
+  (`$(curl url)`, after a `|`/`&&`/`;`, behind leading assignments or an
+  `env`/`nohup`/`time` style wrapper, or as an `eval`/`source` argument) still
+  blocks because it executes fetched content. An interpreter's code-string flag
+  (`bash -c`, `python -c`, `perl -e`, `node -p`, `php -r`, and the `<<<`
+  here-string) is treated as an execution context wherever it appears, so
+  `bash -c "$(curl url)"` blocks; `source <(curl url)` and the backtick spelling
+  of `eval`/`source` now block too, neither of which was detected before. An
+  unquoted newline separates statements like `;`, so `echo hi` followed by a
+  new line starting `$(curl url)` blocks as well, while heredoc bodies are
+  consumed as data — writing a file whose content happens to start a line with
+  `$(curl url)` is not a command.
+  Variable expansions whose name merely starts with a risky executable
+  (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
+  (`shellcheck`, `shasum`) are no longer false positives.
+  ([#4611])
+- **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
+  an unrelated disallowed stdio command no longer blocks every switch; allow
+  disabling a disallowed target while still rejecting its re-enable, preserve
+  the raw extensions config, honor the MCP-spec `transport` alias when enabling
+  SSE/HTTP servers, surface backend validation details in the UI, and atomically
+  replace the shared config for MCP, skill, and embedded-client updates so
+  interrupted writes cannot leave it truncated.
+  ([#4574])
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project
   `running`; clients may observe the prior thread status during worker startup.
@@ -1256,6 +1307,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4170]: https://github.com/bytedance/deer-flow/pull/4170
 [#4171]: https://github.com/bytedance/deer-flow/pull/4171
 [#4174]: https://github.com/bytedance/deer-flow/pull/4174
+[#4178]: https://github.com/bytedance/deer-flow/pull/4178
 [#4181]: https://github.com/bytedance/deer-flow/pull/4181
 [#4187]: https://github.com/bytedance/deer-flow/pull/4187
 [#4188]: https://github.com/bytedance/deer-flow/pull/4188
@@ -1351,3 +1403,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4469]: https://github.com/bytedance/deer-flow/pull/4469
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
+[#4611]: https://github.com/bytedance/deer-flow/issues/4611

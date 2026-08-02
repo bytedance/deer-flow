@@ -177,7 +177,9 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
         channel._api_client.im.v1.message_resource.get.return_value = response
 
         provider = MagicMock()
-        provider.acquire.return_value = "aio-1"
+        provider.uses_thread_data_mounts = False
+        provider.acquire.side_effect = AssertionError("receive_file must use acquire_async")
+        provider.acquire_async = AsyncMock(return_value="aio-1")
         sandbox = MagicMock()
         provider.get.return_value = sandbox
 
@@ -189,7 +191,7 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
 
         assert virtual_path == "/mnt/user-data/uploads/report.md"
         assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
-        provider.acquire.assert_called_once_with("thread-1", user_id="ou-user")
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
         sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
 
     _run(go())
