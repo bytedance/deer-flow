@@ -460,6 +460,62 @@ test.describe("Chat workspace", () => {
       .toBe("/data-analysis summarize this dataset");
   });
 
+  test("reopens the skill list with a slash after a skill is selected", async ({
+    page,
+  }) => {
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      submittedText = textFromMessageContent(
+        body.input?.messages?.at(-1)?.content,
+      );
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/dat");
+    await textarea.press("Enter");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await expect(skillInput).toBeVisible();
+
+    await skillInput.pressSequentially("/");
+
+    const dataAnalysis = page.getByRole("option", { name: /data-analysis/i });
+    const frontendDesign = page.getByRole("option", {
+      name: /frontend-design/i,
+    });
+    await expect(dataAnalysis).toBeVisible();
+    await expect(frontendDesign).toBeVisible();
+    // Builtin commands own the whole composer line, so they stay out of the
+    // list while a skill is selected even though an empty query matches them.
+    await expect(page.getByRole("option", { name: /goal/i })).toBeHidden();
+
+    await skillInput.pressSequentially("fro");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "true");
+
+    await skillInput.press("Enter");
+
+    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(page.getByText("/data-analysis")).toBeHidden();
+
+    await skillInput.pressSequentially("polish the composer");
+    await skillInput.press("Enter");
+
+    await expect
+      .poll(() => submittedText)
+      .toBe("/frontend-design polish the composer");
+  });
+
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
     let streamCalls = 0;
     await page.goto("/workspace/chats/new");
