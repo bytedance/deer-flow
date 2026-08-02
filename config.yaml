@@ -49,7 +49,11 @@ models:
     api_key: $DEEPSEEK_API_KEY
     timeout: 600.0
     max_retries: 2
-    max_tokens: 8192
+    # 32768, not 8192. At 8192 a standard competitor_intel report hit the cap
+    # and shipped truncated mid-word (report 07a475ab ended on "Clean"). The
+    # model supports 384K output, so 8192 was an arbitrary floor, not a model
+    # limit. This is a ceiling, not a target — reports run ~8-9K output tokens.
+    max_tokens: 32768
     supports_thinking: true
     supports_vision: false
     when_thinking_enabled:
