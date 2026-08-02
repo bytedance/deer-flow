@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Any
 
-from deerflow.runtime.checkpoint_cache.base import CheckpointCacheStats
+from deerflow.runtime.checkpoint_cache.base import CheckpointCacheStats, thread_key_stem
 
 
 def _copy_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +57,15 @@ class MemoryCheckpointHistoryCache:
 
     async def aset_many(self, entries: dict[str, dict[str, Any]]) -> None:
         self.set_many(entries)
+
+    def delete_thread(self, key_prefix: str, thread_id: str) -> None:
+        """Purge every entry of one thread (lifecycle, not invalidation)."""
+        stem = thread_key_stem(key_prefix, thread_id)
+        for key in [k for k in self._data if k.startswith(stem)]:
+            del self._data[key]
+
+    async def adelete_thread(self, key_prefix: str, thread_id: str) -> None:
+        self.delete_thread(key_prefix, thread_id)
 
     def stats(self) -> CheckpointCacheStats:
         return CheckpointCacheStats(

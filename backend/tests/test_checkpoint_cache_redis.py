@@ -14,11 +14,12 @@ from deerflow.runtime.checkpoint_cache.provider import (
 
 
 class _FakeRedis:
-    """Minimal async redis stand-in: mget / set / pipeline."""
+    """Minimal async redis stand-in: mget / set / pipeline / scan / unlink."""
 
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {}
         self.ttls: dict[str, int | None] = {}
+        self.unlinked: list[tuple[str, ...]] = []
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
         return [self.store.get(k) for k in keys]
@@ -26,6 +27,23 @@ class _FakeRedis:
     def set(self, key: str, value: bytes, ex: int | None = None) -> None:
         self.store[key] = value
         self.ttls[key] = ex
+
+    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
+        import fnmatch
+
+        keys = sorted(self.store)
+        batch = keys[cursor : cursor + count]
+        if match is not None:
+            batch = [k for k in batch if fnmatch.fnmatchcase(k, match)]
+        next_cursor = cursor + count
+        return (0 if next_cursor >= len(keys) else next_cursor), batch
+
+    async def unlink(self, *keys: str) -> int:
+        self.unlinked.append(tuple(keys))
+        removed = 0
+        for key in keys:
+            removed += self.store.pop(key, None) is not None
+        return removed
 
     def pipeline(self, transaction: bool = False) -> "_FakePipeline":
         return _FakePipeline(self)
@@ -50,6 +68,11 @@ class _FailingRedis(_FakeRedis):
     """Simulates a redis outage: every operation raises RedisError."""
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
+        from redis.exceptions import RedisError
+
+        raise RedisError("connection refused")
+
+    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
         from redis.exceptions import RedisError
 
         raise RedisError("connection refused")
@@ -125,6 +148,35 @@ async def test_redis_outage_skips_write(monkeypatch: pytest.MonkeyPatch, caplog:
         await cache.aset_many({"k1": _entry(1)})  # must not raise
     assert fake.store == {}
     assert "write failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_purges_matching_keys_only(monkeypatch: pytest.MonkeyPatch):
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake)
+    prefix = "ckpt-hist:v1:db0"
+    await cache.aset_many(
+        {
+            f"{prefix}:t1:aaa": _entry(1),
+            f"{prefix}:t1:bbb": _entry(2),
+            f"{prefix}:t10:ccc": _entry(3),  # 't1' stem must not over-match 't10'
+            f"{prefix}:t2:ddd": _entry(4),
+        }
+    )
+
+    await cache.adelete_thread(prefix, "t1")
+
+    assert sorted(fake.store) == [f"{prefix}:t10:ccc", f"{prefix}:t2:ddd"]
+    assert fake.unlinked  # UNLINK, not DEL: non-blocking on big histories
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_outage_degrades_without_raising(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    fake = _FailingRedis()
+    cache = _make_cache(monkeypatch, fake)
+    with caplog.at_level("WARNING"):
+        await cache.adelete_thread("p", "t1")  # must not raise
+    assert "thread purge failed" in caplog.text
 
 
 @pytest.mark.anyio

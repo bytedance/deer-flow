@@ -1,6 +1,10 @@
 """Shared Redis backend. Entries are immutable, so a multi-worker shared
 cache needs no invalidation; the TTL is a leak safety net only.
 
+Thread-scoped purge (``adelete_thread``) exists for data lifecycle: when a
+thread's checkpoints are deleted, its cached history payloads are removed
+immediately instead of lingering until TTL expiry.
+
 The redis import is lazy (module is importable without the optional
 ``redis`` extra), mirroring runtime/stream_bridge/redis.py.
 """
@@ -10,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from deerflow.runtime.checkpoint_cache.base import CheckpointCacheStats
+from deerflow.runtime.checkpoint_cache.base import CheckpointCacheStats, thread_key_stem
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,22 @@ class RedisCheckpointHistoryCache:
         except _redis_error() as exc:
             # Writes are optional; the next read simply recomputes the history.
             logger.warning("checkpoint history cache write failed; skipping: %s", exc)
+
+    async def adelete_thread(self, key_prefix: str, thread_id: str) -> None:
+        """SCAN+UNLINK every entry of one thread. Failure degrades to
+        TTL-bounded residual retention; the source-of-truth delete already
+        happened, so this never raises."""
+        stem = thread_key_stem(key_prefix, thread_id)
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = await self._client.scan(cursor=cursor, match=stem + "*", count=500)
+                if keys:
+                    await self._client.unlink(*keys)
+                if cursor == 0:
+                    break
+        except _redis_error() as exc:
+            logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
         return CheckpointCacheStats(hits=self._hits, misses=self._misses)

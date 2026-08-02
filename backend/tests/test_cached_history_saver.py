@@ -88,6 +88,112 @@ def _wrap(saver: _DictSaver, cache) -> CachedHistorySaver:
     return CachedHistorySaver(saver, cache, key_prefix=PREFIX)
 
 
+class _DeletableSaver(_DictSaver):
+    """Functional delete/prune so purge behavior is observable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted_threads: list[str] = []
+        self.deleted_run_ids: list[list[str]] = []
+        self.pruned_threads: list[list[str]] = []
+
+    def delete_for_runs(self, run_ids):
+        self.deleted_run_ids.append(list(run_ids))
+
+    async def adelete_for_runs(self, run_ids):
+        self.deleted_run_ids.append(list(run_ids))
+
+    def _drop(self, thread_id: str) -> None:
+        self.deleted_threads.append(thread_id)
+        self.checkpoints = {cid: stored for cid, stored in self.checkpoints.items() if stored[0].config["configurable"]["thread_id"] != thread_id}
+
+    def delete_thread(self, thread_id):
+        self._drop(thread_id)
+
+    async def adelete_thread(self, thread_id):
+        self._drop(thread_id)
+
+    def prune(self, thread_ids, *, strategy="keep_latest"):
+        self.pruned_threads.append(list(thread_ids))
+
+    async def aprune(self, thread_ids, *, strategy="keep_latest"):
+        self.pruned_threads.append(list(thread_ids))
+
+
+def _thread_entries(cache: MemoryCheckpointHistoryCache, thread_id: str) -> int:
+    stem = f"{PREFIX}:{thread_id}:"
+    return sum(1 for key in cache._data if key.startswith(stem))
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_purges_only_that_threads_cache_entries():
+    inner = _DeletableSaver()
+    _chain(inner, "t1")
+    # _DictSaver keys tuples by checkpoint_id alone: t2 needs distinct cids.
+    inner.put_tuple(_tup("t2", "u0", None, channel_values={"messages": ["seed2"]}, writes=[]))
+    inner.put_tuple(_tup("t2", "u1", "u0", channel_values={}, writes=[("task1", "messages", "x1")]))
+    cache = MemoryCheckpointHistoryCache(max_entries=32)
+    saver = _wrap(inner, cache)
+    await saver.aget_delta_channel_history(config=_cfg("t1", "c2"), channels=["messages"])
+    await saver.aget_delta_channel_history(config=_cfg("t2", "u1"), channels=["messages"])
+    assert _thread_entries(cache, "t1") > 0
+    assert _thread_entries(cache, "t2") > 0
+
+    await saver.adelete_thread("t1")
+
+    assert inner.deleted_threads == ["t1"]
+    assert inner.get_tuple(_cfg("t1", "c2")) is None  # source of truth gone
+    assert _thread_entries(cache, "t1") == 0  # residual history payloads purged
+    assert _thread_entries(cache, "t2") > 0  # other threads untouched
+
+
+def test_sync_delete_thread_purges_cache_entries():
+    inner = _DeletableSaver()
+    _chain(inner, "t1")
+    cache = MemoryCheckpointHistoryCache(max_entries=32)
+    saver = _wrap(inner, cache)
+    saver.get_delta_channel_history(config=_cfg("t1", "c2"), channels=["messages"])
+    assert _thread_entries(cache, "t1") > 0
+
+    saver.delete_thread("t1")
+
+    assert inner.deleted_threads == ["t1"]
+    assert _thread_entries(cache, "t1") == 0
+
+
+@pytest.mark.anyio
+async def test_prune_purges_rewritten_threads_cache_entries():
+    inner = _DeletableSaver()
+    _chain(inner, "t1")
+    cache = MemoryCheckpointHistoryCache(max_entries=32)
+    saver = _wrap(inner, cache)
+    await saver.aget_delta_channel_history(config=_cfg("t1", "c2"), channels=["messages"])
+    assert _thread_entries(cache, "t1") > 0
+
+    await saver.aprune(["t1"], strategy="keep_latest")
+
+    assert inner.pruned_threads == [["t1"]]
+    # The chain was rewritten: pre-prune histories must not linger.
+    assert _thread_entries(cache, "t1") == 0
+
+
+@pytest.mark.anyio
+async def test_delete_for_runs_delegates_without_cache_purge():
+    """Run-scoped deletes cannot be mapped to threads cheaply; documented
+    behavior is delegation with LRU/TTL-bounded residual retention."""
+    inner = _DeletableSaver()
+    _chain(inner, "t1")
+    cache = MemoryCheckpointHistoryCache(max_entries=32)
+    saver = _wrap(inner, cache)
+    await saver.aget_delta_channel_history(config=_cfg("t1", "c2"), channels=["messages"])
+    entries_before = cache.stats().entries
+
+    await saver.adelete_for_runs(["run-1"])  # base-class no-op on _DictSaver lineage
+
+    assert inner.deleted_run_ids == [["run-1"]]
+    assert cache.stats().entries == entries_before
+
+
 class _RecordingSaver(_DictSaver):
     """Captures the config passed into each fallback walk."""
 

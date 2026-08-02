@@ -6,6 +6,7 @@ from deerflow.runtime.checkpoint_cache.base import (
     CACHE_FORMAT_VERSION,
     CheckpointCacheStats,
     make_history_key,
+    thread_key_stem,
 )
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
 
@@ -80,6 +81,40 @@ def test_zero_max_entries_disables():
     cache.set_many({"a": _entry("x")})
     assert cache.get_many(["a"]) == {}
     assert cache.stats().entries == 0
+
+
+def test_delete_thread_purges_only_that_thread():
+    cache = MemoryCheckpointHistoryCache(max_entries=16)
+    prefix = "ckpt-hist:v1:db0"
+    t1_keys = [make_history_key(prefix, "t1", "", f"c{i}", "messages") for i in range(3)]
+    t2_key = make_history_key(prefix, "t2", "", "c0", "messages")
+    # A thread_id that is a prefix of another must not over-match: the stem
+    # ends with ':' so "t1" never matches "t10"'s keys.
+    t10_key = make_history_key(prefix, "t10", "", "c0", "messages")
+    cache.set_many({k: _entry(k) for k in [*t1_keys, t2_key, t10_key]})
+
+    cache.delete_thread(prefix, "t1")
+
+    assert cache.stats().entries == 2
+    assert all(cache.get_many([k]) == {} for k in t1_keys)
+    assert cache.get_many([t2_key]) != {}
+    assert cache.get_many([t10_key]) != {}
+
+
+@pytest.mark.anyio
+async def test_adelete_thread_matches_sync():
+    cache = MemoryCheckpointHistoryCache(max_entries=4)
+    prefix = "ckpt-hist:v1:db0"
+    key = make_history_key(prefix, "t1", "", "c0", "messages")
+    await cache.aset_many({key: _entry("x")})
+    await cache.adelete_thread(prefix, "t1")
+    assert cache.get_many([key]) == {}
+
+
+def test_thread_key_stem_matches_make_history_key_layout():
+    key = make_history_key("p", "t1", "ns", "c1", "messages")
+    assert key.startswith(thread_key_stem("p", "t1"))
+    assert not key.startswith(thread_key_stem("p", "t"))
 
 
 @pytest.mark.anyio

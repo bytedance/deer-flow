@@ -126,7 +126,11 @@ class CheckpointCacheConfig(BaseModel):
     ttl_seconds: int = Field(
         default=86400,
         ge=0,
-        description="Redis entry TTL; a leak safety net, not a correctness mechanism (entries are immutable).",
+        description=(
+            "Redis entry TTL; a leak safety net, not a correctness mechanism (entries are immutable). "
+            "Thread deletion purges that thread's entries immediately; if the purge fails (redis outage), "
+            "residual copies of the thread's history persist until this TTL expires."
+        ),
     )
     key_prefix: str = Field(
         default="",

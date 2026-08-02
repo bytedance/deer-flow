@@ -9,6 +9,11 @@ invalidation, and shared backends are coherent across processes.
 
 The wrapper never caches the "latest checkpoint" resolution; only histories
 keyed by resolved immutable checkpoint_ids.
+
+Data lifecycle: thread deletion and prune purge the thread's cached entries
+(source-of-truth removal must not leave residual history payloads in the
+cache); run-scoped deletes cannot be mapped to threads cheaply and rely on
+LRU/TTL bounds.
 """
 
 from __future__ import annotations
@@ -261,15 +266,29 @@ class CachedHistorySaver(BaseCheckpointSaver):
 
     def delete_thread(self, thread_id: str) -> None:
         self._inner.delete_thread(thread_id)
+        self._purge_thread_sync(thread_id)
 
     def delete_for_runs(self, run_ids: Sequence[str]) -> None:
+        # Run-scoped deletes cannot be mapped back to threads without an extra
+        # query, so cached entries are left in place: they stay *correct* (the
+        # sealed-chain argument is unaffected by other chains) and residual
+        # retention is bounded by LRU/TTL. No in-tree callers today.
         self._inner.delete_for_runs(run_ids)
+
+    def _purge_thread_sync(self, thread_id: str) -> None:
+        delete = getattr(self._cache, "delete_thread", None)
+        if delete is not None:
+            delete(self._key_prefix, thread_id)
 
     def copy_thread(self, source_thread_id: str, target_thread_id: str) -> None:
         self._inner.copy_thread(source_thread_id, target_thread_id)
 
     def prune(self, thread_ids: Sequence[str], *, strategy: str = "keep_latest") -> None:
         self._inner.prune(thread_ids, strategy=strategy)
+        # Pruning rewrites these threads' chains: purge so no cached history
+        # references a deleted ancestor (retention) or its pre-prune chain.
+        for thread_id in thread_ids:
+            self._purge_thread_sync(thread_id)
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         return await self._inner.aget_tuple(config)
@@ -285,15 +304,25 @@ class CachedHistorySaver(BaseCheckpointSaver):
 
     async def adelete_thread(self, thread_id: str) -> None:
         await self._inner.adelete_thread(thread_id)
+        await self._apurge_thread(thread_id)
 
     async def adelete_for_runs(self, run_ids: Sequence[str]) -> None:
+        # See delete_for_runs: unscoped residual retention bounded by LRU/TTL.
         await self._inner.adelete_for_runs(run_ids)
+
+    async def _apurge_thread(self, thread_id: str) -> None:
+        delete = getattr(self._cache, "adelete_thread", None)
+        if delete is not None:
+            await delete(self._key_prefix, thread_id)
 
     async def acopy_thread(self, source_thread_id: str, target_thread_id: str) -> None:
         await self._inner.acopy_thread(source_thread_id, target_thread_id)
 
     async def aprune(self, thread_ids: Sequence[str], *, strategy: str = "keep_latest") -> None:
         await self._inner.aprune(thread_ids, strategy=strategy)
+        # See prune: rewritten chains must not keep pre-prune cached histories.
+        for thread_id in thread_ids:
+            await self._apurge_thread(thread_id)
 
     def get_next_version(self, current: Any, channel: Any) -> Any:
         return self._inner.get_next_version(current, channel)
