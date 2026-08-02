@@ -1023,12 +1023,28 @@ database:
 #   backend: memory
 #   max_trace_content: 10240    # Truncation threshold for trace content (db backend, bytes)
 #   track_token_usage: true     # Accumulate token counts to RunRow
-# AlphaFRS (Railway): db, not memory. With `memory` a run's history lives in
-# one worker's process, so a status lookup landing on the other worker 404s —
-# the problem patch 0005 worked around at the API level. The db backend shares
-# it through the `database` section above.
+# AlphaFRS (Railway): memory. DO NOT set this to `db` — it is broken on
+# Postgres and it silently breaks report delivery.
+#
+# events/store/db.py:122 issues
+#   SELECT max(run_events.seq) FROM run_events WHERE thread_id = $1 FOR UPDATE
+# and Postgres rejects it: "FOR UPDATE is not allowed with aggregate functions".
+# SQLite tolerates it, and upstream's default is `memory`, so the path has
+# evidently never run against Postgres.
+#
+# The failure mode is nasty rather than loud. The run completes and RunManager
+# logs "-> success", then journal.flush() raises inside worker.py:453 before
+# the completion is written to the run row. The run stays status=running for
+# ever, the AlphaFRS poller never sees it finish, and the job hangs to its
+# timeout — a delivered report is lost after the model work is already paid
+# for. Cost one production report on 2026-08-02 (run fe5b25c9).
+#
+# `memory` keeps the message/trace history in-process, which is what production
+# ran before and what AlphaFRS needs: it reads run STATUS (RunRepository) and
+# thread STATE (checkpointer), both of which are on Postgres via the `database`
+# and `checkpointer` sections and so are shared across workers regardless.
 run_events:
-  backend: db
+  backend: memory
   max_trace_content: 10240
   track_token_usage: true
 
