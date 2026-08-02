@@ -1,6 +1,9 @@
 # DeerFlow — Railway production Dockerfile
-# Runs gateway (port 8001) + langgraph (port 2024) behind a supervisor entrypoint.
-# Railway routes external traffic to $PORT (gateway).
+# Runs the gateway (port 8001) as the container's only process. The gateway
+# serves the LangGraph-compatible API itself; there is no separate LangGraph
+# server. See entrypoint.railway.sh for why.
+#
+# Requires DATABASE_URL at runtime (config.yaml sets database.backend=postgres).
 #
 # Build: docker build -f Dockerfile.railway -t deerflow-railway .
 # Run:   docker run -p 2026:8001 --env-file .env deerflow-railway
@@ -41,8 +44,12 @@ WORKDIR /app
 COPY backend ./backend
 RUN mkdir -p /app/skills/custom /app/skills/public
 
-# Install Python deps
-RUN cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync
+# Install Python deps.
+# --extra postgres pulls deerflow-harness[postgres] (asyncpg,
+# langgraph-checkpoint-postgres, psycopg[binary], psycopg-pool). Required
+# because config.yaml sets database.backend=postgres; without it the gateway
+# raises ImportError from the checkpointer factory at startup.
+RUN cd backend && UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --extra postgres
 
 # Copy entrypoint + production config
 # config.yaml is committed past .gitignore (-f) and is the live Railway config.
@@ -50,7 +57,7 @@ COPY entrypoint.railway.sh /app/entrypoint.sh
 COPY config.yaml /app/config.yaml
 RUN chmod +x /app/entrypoint.sh
 
-# Railway injects $PORT — gateway listens on it, langgraph on 2024 internally
+# Railway injects $PORT — the gateway is the only process and listens on it
 ENV PORT=8001
 EXPOSE 8001
 

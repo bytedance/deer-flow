@@ -979,9 +979,17 @@ skill_evolution:
 # database:
 #   backend: postgres
 #   postgres_url: $DATABASE_URL
+# AlphaFRS (Railway): postgres, not sqlite. The container filesystem is
+# discarded on every deploy and restart, so a sqlite file loses runs in flight
+# — the AlphaFRS poller then sees the thread disappear instead of completing.
+# It is also what makes >1 uvicorn worker safe: workers share run state through
+# Postgres rather than each holding their own. DATABASE_URL is supplied
+# per-environment by the Railway Postgres service, so staging and production
+# share this one baked config.
 database:
-  backend: sqlite
-  sqlite_dir: .deer-flow/data
+  backend: postgres
+  postgres_url: $DATABASE_URL
+  pool_size: 5
 
 # ============================================================================
 # Run Events Configuration
@@ -996,8 +1004,12 @@ database:
 #   backend: memory
 #   max_trace_content: 10240    # Truncation threshold for trace content (db backend, bytes)
 #   track_token_usage: true     # Accumulate token counts to RunRow
+# AlphaFRS (Railway): db, not memory. With `memory` a run's history lives in
+# one worker's process, so a status lookup landing on the other worker 404s —
+# the problem patch 0005 worked around at the API level. The db backend shares
+# it through the `database` section above.
 run_events:
-  backend: memory
+  backend: db
   max_trace_content: 10240
   track_token_usage: true
 
