@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 31
+config_version: 32
 
 # ============================================================================
 # Logging
@@ -1978,6 +1978,16 @@ database:
   checkpoint_graph_cache:
     # Gateway thread-state accessor graphs (per assistant/mode/cadence).
     accessor_graph_max: 64
+  # Delta-mode checkpoint history cache (only used when checkpoint_channel_mode: delta).
+  # Pure performance policy: safe to differ across workers, never frozen.
+  # checkpoint_cache:
+  #   type: memory            # memory | redis (redis is Gateway/async only)
+  #   max_entries: 128        # 0 disables the cache
+  #   redis_url: null         # or DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL / REDIS_URL
+  #   ttl_seconds: 86400      # redis leak safety net; bounds residual copies if a
+  #                           # thread-delete purge fails (purge itself is immediate).
+  #                           # 0 explicitly disables expiry (redis maxmemory only)
+  #   key_prefix: ""          # default: hash of the database identity
 
 # ============================================================================
 # Run Events Configuration
