@@ -96,12 +96,22 @@ PY
 # exec: the gateway becomes PID 1 so Railway's stop/restart signals reach uvicorn
 # directly instead of a shell that would have to forward them.
 #
-# --workers 2 is safe only because run state is shared through Postgres. Do not
-# raise workers (or railway.toml's numReplicas) while database.backend is
-# sqlite or memory — each worker would keep its own runs and status lookups
-# would 404 depending on which one answered.
+# ONE WORKER. Do not add --workers, and do not raise railway.toml's numReplicas.
+#
+# Postgres does NOT make multiple workers safe. Run tracking is deliberately
+# in-process: GET /api/threads/{tid}/runs/{rid} reads RunManager
+# (thread_runs.py get_run) and 404s when the record is absent — the RunStore is
+# consulted only to enrich token counts, never to answer "does this run exist".
+# A run is also an asyncio task living in the worker that created it. So with
+# two workers a run started on one is invisible on the other, and the AlphaFRS
+# poller — load-balanced across both — gets 200/404/200/404 for the life of the
+# run and cannot tell a live run from a dead one.
+#
+# This was briefly deployed on 2026-08-02 on the incorrect theory that a shared
+# Postgres covered run state. It does not. The database, checkpointer and store
+# sections are still worth having: they keep threads and checkpoints across
+# restarts, which is the actual durability win.
 echo "[entrypoint] Starting gateway on port ${GATEWAY_PORT} …"
 exec .venv/bin/python -m uvicorn app.gateway.app:app \
   --host 0.0.0.0 \
-  --port "${GATEWAY_PORT}" \
-  --workers 2
+  --port "${GATEWAY_PORT}"
