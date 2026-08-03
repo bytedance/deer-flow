@@ -276,6 +276,16 @@ def _build_runtime_middlewares(
 
         tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
 
+    # ToolReceiptMiddleware sits between ToolProgress (outer) and
+    # ToolErrorHandling (inner): the stamped deerflow_tool_meta status must
+    # already exist when the receipt is built.
+    verification_config = app_config.verification
+    _ToolReceiptMiddleware = None
+    if verification_config.receipts_enabled:
+        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware as _ToolReceiptMiddleware
+
+        tail.append(_ToolReceiptMiddleware())
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
@@ -289,6 +299,14 @@ def _build_runtime_middlewares(
         _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
         if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
             raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
+
+    # Same contract for the receipt layer: receipts read the deerflow_tool_meta
+    # status stamped by ToolErrorHandlingMiddleware, so they must wrap it.
+    if _ToolReceiptMiddleware is not None:
+        _receipt_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolReceiptMiddleware)), None)
+        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
+        if _receipt_idx is not None and _error_idx is not None and _receipt_idx > _error_idx:
+            raise RuntimeError(f"ToolReceiptMiddleware must be outer (index {_receipt_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
 
     return middlewares
 

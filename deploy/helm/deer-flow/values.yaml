@@ -240,7 +240,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 32
+  config_version: 33
   log_level: info
 
   models: []
@@ -286,6 +286,11 @@ config: |
 
   memory:
     storage_path: memory.json
+
+  verification:
+    receipts_enabled: true
+    judge_enabled: false
+    judge_model_name: null
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash

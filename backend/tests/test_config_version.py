@@ -171,6 +171,9 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["database"]["checkpoint_channel_mode"] == "full"
     assert upgraded["database"]["backend"] == "sqlite"
     assert upgraded["database"]["sqlite_dir"] == "custom-data"
+    assert upgraded["verification"]["receipts_enabled"] is True
+    assert upgraded["verification"]["judge_enabled"] is False
+    assert upgraded["verification"]["judge_model_name"] is None
 
 
 def _load_repo_example() -> dict:
