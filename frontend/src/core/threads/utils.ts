@@ -62,8 +62,12 @@ export function textOfMessage(message: Message) {
   return null;
 }
 
-export function titleOfThread(thread: AgentThread) {
-  return thread.values?.title ?? "Untitled";
+export function titleOfThread(
+  thread: { values?: { title?: unknown } | null },
+  fallback = "Untitled",
+): string {
+  const title = thread.values?.title;
+  return typeof title === "string" ? title : fallback;
 }
 
 export function isThreadPinned(thread: Pick<AgentThread, "metadata">) {

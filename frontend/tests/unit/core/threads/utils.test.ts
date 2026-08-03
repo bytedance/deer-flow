@@ -9,6 +9,7 @@ import {
   sortPinnedThreads,
   textOfMessage,
   THREAD_PINNED_METADATA_KEY,
+  titleOfThread,
 } from "@/core/threads/utils";
 
 function makeThread(
@@ -182,4 +183,23 @@ test("textOfMessage returns null when array content has no text", () => {
   } as unknown as Message;
 
   expect(textOfMessage(message)).toBeNull();
+});
+
+test("titleOfThread returns string titles", () => {
+  expect(titleOfThread(makeThread("Conversation title"))).toBe(
+    "Conversation title",
+  );
+});
+
+test("titleOfThread falls back for missing or malformed titles", () => {
+  for (const title of [undefined, null, 42, { unexpected: true }, ["title"]]) {
+    const thread = {
+      values: title === undefined ? {} : { title },
+    };
+    expect(titleOfThread(thread)).toBe("Untitled");
+  }
+});
+
+test("titleOfThread supports a caller-provided fallback", () => {
+  expect(titleOfThread({ values: { title: false } }, "")).toBe("");
 });
