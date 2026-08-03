@@ -101,6 +101,11 @@ def _create_body(**overrides):
     return router_module.CreateScheduledTaskRequest(**{**defaults, **overrides})
 
 
+def _future_iso(*, days: int) -> str:
+    """An offset-aware instant safely in the future, as the wire spells it."""
+    return (datetime.now(UTC) + timedelta(days=days)).isoformat()
+
+
 def _update_body(**fields):
     return router_module.UpdateScheduledTaskRequest(**fields)
 
@@ -349,7 +354,11 @@ class TestUpdate:
         created = await _create(
             service,
             schedule_type="once",
-            schedule_spec={"run_at": "2026-08-01T09:00:00+00:00"},
+            # Relative to now, not a literal: these routes run against the real
+            # clock (no `now=` injection), and `once` schedules must be in the
+            # future -- a hardcoded instant turns the test into a time bomb
+            # that passes until the date quietly goes by.
+            schedule_spec={"run_at": _future_iso(days=30)},
             timezone="UTC",
         )
         updated = await _call(
