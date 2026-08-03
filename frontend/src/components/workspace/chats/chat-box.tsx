@@ -1,4 +1,5 @@
 import { FilesIcon, XIcon } from "lucide-react";
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -25,14 +26,47 @@ import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
-import {
-  ArtifactFileDetail,
-  ArtifactFileList,
-  useArtifacts,
-} from "../artifacts";
-import { BrowserViewPanel, useMaybeBrowserView } from "../browser-view";
+import { useArtifacts } from "../artifacts/context";
+import { useMaybeBrowserView } from "../browser-view/context";
 import { useThread } from "../messages/context";
-import { SidecarPanel, useMaybeSidecar } from "../sidecar";
+import { useMaybeSidecar } from "../sidecar/context";
+
+function RightPanelLoading() {
+  return (
+    <div className="grid size-full place-items-center">
+      <p role="status" className="text-muted-foreground text-sm">
+        Loading panel…
+      </p>
+    </div>
+  );
+}
+
+const ArtifactFileDetail = dynamic(
+  () =>
+    import("../artifacts/artifact-file-detail").then(
+      (module) => module.ArtifactFileDetail,
+    ),
+  { loading: RightPanelLoading },
+);
+const ArtifactFileList = dynamic(
+  () =>
+    import("../artifacts/artifact-file-list").then(
+      (module) => module.ArtifactFileList,
+    ),
+  { loading: RightPanelLoading },
+);
+const BrowserViewPanel = dynamic(
+  () =>
+    import("../browser-view/browser-view-panel").then(
+      (module) => module.BrowserViewPanel,
+    ),
+  { loading: RightPanelLoading },
+);
+const SidecarPanel = dynamic(
+  () =>
+    import("../sidecar/sidecar-panel").then((module) => module.SidecarPanel),
+  { loading: RightPanelLoading },
+);
 
 const RIGHT_PANEL_ANIMATION_MS = 280;
 const RIGHT_PANEL_DEFAULT_SIZE = "40%";

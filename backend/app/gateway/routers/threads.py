@@ -68,6 +68,7 @@ from deerflow.runtime.runs.worker import valid_duration_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
 logger = logging.getLogger(__name__)
@@ -372,7 +373,7 @@ class ThreadResponse(_MetadataRedactingResponse):
 class ThreadCreateRequest(BaseModel):
     """Request body for creating a thread."""
 
-    thread_id: str | None = Field(default=None, description="Optional thread ID (auto-generated if omitted)")
+    thread_id: ThreadId | None = Field(default=None, description="Optional thread ID (auto-generated if omitted)")
     assistant_id: str | None = Field(default=None, description="Associate thread with an assistant")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Initial metadata")
 
@@ -627,8 +628,18 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     """
     from app.gateway.deps import get_thread_store
 
-    # Clean local filesystem
-    response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+    # Legacy IDs may predate the canonical filesystem-safe contract. They can
+    # still be removed from metadata/checkpoint stores, but must never be
+    # interpolated into a host path during cleanup.
+    try:
+        validate_thread_id(thread_id)
+    except ValueError:
+        response = ThreadDeleteResponse(
+            success=True,
+            message="Skipped local data cleanup for legacy thread ID",
+        )
+    else:
+        response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -707,7 +718,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    thread_id = body.thread_id or str(uuid.uuid4())
+    thread_id = resolve_thread_id(body.thread_id)
     now = now_iso()
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
@@ -774,7 +785,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def branch_thread(thread_id: str, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
+async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
     """Create a new main-thread branch from a completed assistant turn."""
     from app.gateway.deps import get_thread_store
 
@@ -977,7 +988,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
+async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
     from app.gateway.deps import get_thread_store
 
@@ -1010,7 +1021,7 @@ async def patch_thread(thread_id: str, body: ThreadPatchRequest, request: Reques
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
+async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
     from app.gateway.deps import get_thread_store
 
@@ -1063,7 +1074,7 @@ async def get_thread(thread_id: str, request: Request) -> ThreadResponse:
 
 @router.get("/{thread_id}/goal", response_model=ThreadGoalResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_goal(thread_id: str, request: Request) -> ThreadGoalResponse:
+async def get_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Return the active Claude-style goal for a thread, if any."""
     checkpointer = get_checkpointer(request)
     try:
@@ -1076,7 +1087,7 @@ async def get_thread_goal(thread_id: str, request: Request) -> ThreadGoalRespons
 
 @router.put("/{thread_id}/goal", response_model=ThreadGoalResponse)
 @require_permission("threads", "write", owner_check=True)
-async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Request) -> ThreadGoalResponse:
+async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request: Request) -> ThreadGoalResponse:
     """Set or replace the active goal for a thread.
 
     ``/chats/new`` pages already hold a generated UUID before the first run, so
@@ -1102,7 +1113,7 @@ async def set_thread_goal(thread_id: str, body: ThreadGoalRequest, request: Requ
 
 @router.delete("/{thread_id}/goal", response_model=ThreadGoalResponse)
 @require_permission("threads", "write", owner_check=True)
-async def clear_thread_goal(thread_id: str, request: Request) -> ThreadGoalResponse:
+async def clear_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
     try:
@@ -1133,7 +1144,7 @@ def _thread_compact_response(result: ThreadCompactionResult) -> ThreadCompactRes
 
 @router.post("/{thread_id}/compact", response_model=ThreadCompactResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
+async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, request: Request) -> ThreadCompactResponse:
     """Manually summarize old thread context while preserving the visible history."""
     # Compaction writes only base-schema channels (messages + summary_text);
     # every other channel — including middleware-contributed ones — is carried
@@ -1180,7 +1191,7 @@ async def compact_thread(thread_id: str, body: ThreadCompactRequest, request: Re
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_state(thread_id: str, request: Request) -> ThreadStateResponse:
+async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadStateResponse:
     """Get the latest materialized graph state for a thread."""
     # Resolve through the thread's assistant so custom middleware channels
     # appear in the response instead of being dropped by the default schema.
@@ -1222,7 +1233,7 @@ async def get_thread_state(thread_id: str, request: Request) -> ThreadStateRespo
 
 @router.post("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def update_thread_state(thread_id: str, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
+async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
     """Replace selected thread-state fields through the materialized graph."""
     from app.gateway.deps import get_thread_store
 
@@ -1322,7 +1333,7 @@ def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_history(
-    thread_id: str,
+    thread_id: ThreadId,
     body: ThreadHistoryRequest,
     request: Request,
     background_tasks: BackgroundTasks,

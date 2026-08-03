@@ -301,7 +301,7 @@ async def test_wheel_input_falls_back_to_native_wheel_when_js_scroll_fails():
 
 
 @pytest.mark.asyncio
-async def test_live_frame_returns_base64_jpeg_screenshot():
+async def test_live_frame_returns_jpeg_bytes_without_base64_expansion():
     session = BrowserSession(
         MagicMock(),
         headless=True,
@@ -314,7 +314,7 @@ async def test_live_frame_returns_base64_jpeg_screenshot():
 
     frame = await session._live_frame()
 
-    assert frame == "/9hq cGVnLWJ5dGVz".replace(" ", "")
+    assert frame == b"\xff\xd8jpeg-bytes"
     page.screenshot.assert_awaited_once_with(type="jpeg", quality=_LIVE_FRAME_JPEG_QUALITY)
 
 
@@ -390,7 +390,7 @@ async def test_continuous_inputs_refresh_before_input_stops(monkeypatch):
     page.keyboard.press = AsyncMock()
     session._ensure_page = AsyncMock(return_value=page)
     session._on_frame = MagicMock()
-    session._live_frame = AsyncMock(return_value="frame")
+    session._live_frame = AsyncMock(return_value=b"frame")
     session._schedule_settle_live_frames = MagicMock()
 
     stop = asyncio.Event()
@@ -633,7 +633,7 @@ async def test_live_frame_screenshots_current_active_page_after_switch():
     frame = await session._live_frame()
 
     new_page.screenshot.assert_awaited_once_with(type="jpeg", quality=_LIVE_FRAME_JPEG_QUALITY)
-    assert frame  # base64 payload of the new page
+    assert frame  # JPEG bytes from the new page
 
 
 @pytest.mark.asyncio
@@ -646,10 +646,10 @@ async def test_stop_screencast_ignores_stale_connection_callback():
         viewport={"width": 1000, "height": 500},
     )
 
-    def old_frame(_data: str) -> None:
+    def old_frame(_data: bytes) -> None:
         pass
 
-    def new_frame(_data: str) -> None:
+    def new_frame(_data: bytes) -> None:
         pass
 
     session._on_frame = new_frame
@@ -675,10 +675,10 @@ async def test_start_screencast_rejects_second_live_viewer():
     page = MagicMock()
     session._ensure_page = AsyncMock(return_value=page)
 
-    def old_frame(_data: str) -> None:
+    def old_frame(_data: bytes) -> None:
         pass
 
-    def new_frame(_data: str) -> None:
+    def new_frame(_data: bytes) -> None:
         pass
 
     session._on_frame = old_frame

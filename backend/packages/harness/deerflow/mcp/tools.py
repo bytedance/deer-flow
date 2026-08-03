@@ -431,6 +431,7 @@ def _make_session_pool_tool(
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
     tool_call_timeout: float | None = None,
+    tool_name_prefix: bool = True,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -442,10 +443,11 @@ def _make_session_pool_tool(
     The configured ``tool_interceptors`` (OAuth, custom) are preserved and
     applied on every call before invoking the pooled session.
     """
-    # Strip the server-name prefix to recover the original MCP tool name.
+    # Strip only prefixes added by the adapter. An unprefixed server may expose
+    # a tool whose own name happens to start with ``<server_name>_``.
     original_name = tool.name
     prefix = f"{server_name}_"
-    if original_name.startswith(prefix):
+    if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
     pool = get_session_pool()
@@ -582,6 +584,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     """
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
     except ImportError:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
@@ -648,7 +651,18 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         async def load_server_tools(server_name: str) -> list[BaseTool]:
             try:
-                return await client.get_tools(server_name=server_name)
+                server_cfg = extensions_config.mcp_servers.get(server_name)
+                tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
+                if tool_name_prefix:
+                    return await client.get_tools(server_name=server_name)
+                return await load_mcp_tools(
+                    None,
+                    connection=servers_config[server_name],
+                    callbacks=client.callbacks,
+                    server_name=server_name,
+                    tool_interceptors=client.tool_interceptors,
+                    tool_name_prefix=False,
+                )
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
@@ -672,11 +686,11 @@ async def get_mcp_tools() -> list[BaseTool]:
         # scanning servers_config for a name prefix is ambiguous when one server name is a
         # prefix of another (e.g. "web" vs "web_scraper" → "web_scraper_search".startswith(
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
-        # source grouping makes routing exact; the prefix guard preserves the previous
-        # behavior of leaving unprefixed tools unwrapped.
+        # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
+            tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
             for tool in server_tools:
                 if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
                     logger.warning(
@@ -688,13 +702,22 @@ async def get_mcp_tools() -> list[BaseTool]:
                     continue
                 tag_mcp_tool(tool)
                 prefix = f"{source_name}_"
-                original_name = tool.name[len(prefix) :] if tool.name.startswith(prefix) else tool.name
+                original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)
-                if tool.name.startswith(f"{source_name}_") and transport == "stdio":
+                if transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
-                    wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors, tool_call_timeout=_timeout))
+                    wrapped_tools.append(
+                        _make_session_pool_tool(
+                            tool,
+                            source_name,
+                            servers_config[source_name],
+                            tool_interceptors,
+                            tool_call_timeout=_timeout,
+                            tool_name_prefix=tool_name_prefix,
+                        )
+                    )
                 else:
                     if transport != "stdio" and server_cfg and server_cfg.tool_call_timeout is not None:
                         logger.warning(

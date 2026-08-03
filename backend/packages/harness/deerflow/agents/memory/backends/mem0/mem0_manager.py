@@ -196,19 +196,41 @@ class Mem0Manager(MemoryManager):
                 max_items=top_k,
             ),
         )
+        budget = self._config.max_injection_chars
         seen: set[str] = set()
         lines: list[str] = []
+        used = 0
+        shortest_line: int | None = None
         for record in records:
             rid = record.get("id")
             if rid in seen:
                 continue
             seen.add(rid)
             text = str(record.get("memory") or "").strip()
-            if text:
-                lines.append(f"- {text}")
+            if not text:
+                continue
+            line = f"- {text}"
+            line_len = len(line)
+            shortest_line = line_len if shortest_line is None else min(shortest_line, line_len)
+            # Truncate on entry boundaries: keep only memories that fit whole
+            # within the remaining budget (+1 for the joining newline), so the
+            # injection never ends mid-entry with a dangling partial line. An
+            # oversized entry is skipped -- a shorter later one may still fit.
+            added = line_len if not lines else line_len + 1
+            if used + added > budget:
+                continue
+            lines.append(line)
+            used += added
         context = "\n".join(lines)
-        if len(context) > self._config.max_injection_chars:
-            context = context[: self._config.max_injection_chars]
+        if not context and shortest_line is not None:
+            # Every recalled memory was longer than the configured budget.
+            # Keep the entry-boundary guarantee and surface the config problem
+            # with a warning rather than injecting a partial fact.
+            logger.warning(
+                "max_injection_chars=%d is smaller than the shortest recalled memory (%d chars); returning empty context",
+                budget,
+                shortest_line,
+            )
         return context
 
     async def aget_context(

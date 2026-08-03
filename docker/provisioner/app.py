@@ -100,7 +100,7 @@ if not (1 <= SANDBOX_CONTAINER_PORT <= 65535):
     raise RuntimeError(f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT}; expected a value in [1, 65535]")
 if SANDBOX_SERVICE_TYPE not in {"NodePort", "ClusterIP"}:
     raise RuntimeError(f"Invalid SANDBOX_SERVICE_TYPE={SANDBOX_SERVICE_TYPE!r}; expected 'NodePort' or 'ClusterIP'")
-SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
+SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
 MAX_EXTRA_MOUNTS = 9

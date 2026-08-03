@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
+from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +106,41 @@ class ScheduledTaskService:
         trigger: str,
     ) -> dict[str, Any]:
         execution_thread_id = task.get("thread_id")
-        if task.get("context_mode") == "fresh_thread_per_run" or not execution_thread_id:
+        if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
             execution_thread_id = str(uuid.uuid4())
+        try:
+            validate_thread_id(execution_thread_id)
+        except ValueError as exc:
+            # Rows persisted before the thread-id contract was centralized may
+            # hold IDs that were valid then (dots, unlimited length) but fail
+            # the canonical pattern now. Route through the normal failure
+            # bookkeeping instead of raising: an uncaught ValueError here would
+            # surface as HTTP 500 on manual trigger and, in the poller, abort
+            # the rest of the claimed batch every cycle while the task itself
+            # is never marked with last_error.
+            task_status = self._task_status_for_failure(task, trigger=trigger)
+            await self._task_repo.update_after_launch(
+                task["id"],
+                status=task_status,
+                next_run_at=next_run_at(
+                    task["schedule_type"],
+                    task["schedule_spec"],
+                    task["timezone"],
+                    now=now,
+                ),
+                last_run_at=now,
+                last_run_id=None,
+                last_thread_id=execution_thread_id,
+                last_error=str(exc),
+                increment_run_count=False,
+            )
+            return {
+                "outcome": "failed",
+                "task_run_id": None,
+                "run_id": None,
+                "thread_id": execution_thread_id,
+                "error": str(exc),
+            }
         # "skip" must hold for fresh-thread runs too, where every run gets a new
         # thread and the same-thread multitask ConflictError below can never
         # fire. Checked before creating this dispatch's own run row so the row
