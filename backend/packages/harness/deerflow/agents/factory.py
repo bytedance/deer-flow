@@ -309,8 +309,9 @@ def _assemble_from_features(
             from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 
             chain.append(SubagentLimitMiddleware())
-        from deerflow.tools.builtins import task_tool
+        from deerflow.tools.builtins import submit_task_plan, task_tool
 
+        extra_tools.append(submit_task_plan)
         extra_tools.append(task_tool)
 
     # --- [12] LoopDetection ---

@@ -30,6 +30,7 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.task_graph.factory import create_task_graph
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.utils.custom_events import aemit_custom_event
@@ -234,6 +235,7 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    coding_task_id: str | None = None,
 ) -> str | Command:
     """Delegate a task to a specialized subagent that runs in its own context.
 
@@ -269,6 +271,7 @@ async def task_tool(
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
         prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        coding_task_id: Optional persistent CodingTask ID. When provided, claim it before delegation and complete it after a successful subagent result.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
@@ -326,6 +329,22 @@ async def task_tool(
 
     # Get user_id for tracing (uses standard resolution order)
     user_id = resolve_runtime_user_id(runtime)
+
+    # CodingTask 绑定只在显式传入任务 ID 时启用，普通 task 调用保持原有行为。
+    coding_graph = None
+    if coding_task_id is not None:
+        if thread_id is None:
+            raise ValueError("thread_id is required when coding_task_id is provided")
+        coding_graph = create_task_graph(thread_id, user_id=user_id)
+
+    def fail_coding_task(reason: str) -> None:
+        """将已领取的 CodingTask 标记为失败，同时保留原始执行异常。"""
+        if coding_graph is None:
+            return
+        try:
+            coding_graph.fail(coding_task_id, reason=reason)
+        except Exception:
+            logger.exception(f"[trace={trace_id}] Failed to persist CodingTask {coding_task_id} failure")
 
     # Propagate the authenticated runtime context so delegated tool calls are
     # evaluated by GuardrailMiddleware with the same identity/attribution as
@@ -405,9 +424,17 @@ async def task_tool(
         executor_kwargs["app_config"] = resolved_app_config
     executor = SubagentExecutor(**executor_kwargs)
 
+    # 先持久化领取状态，再启动真实 Sub-Agent，避免绕过 DAG 依赖检查。
+    if coding_graph is not None:
+        coding_graph.claim(coding_task_id, owner=subagent_type)
+
     # Start background execution (always async to prevent blocking)
     # Use tool_call_id as task_id for better traceability
-    task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    try:
+        task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    except Exception as exc:
+        fail_coding_task(f"Failed to start subagent: {exc}")
+        raise
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -442,6 +469,7 @@ async def task_tool(
                 )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
+                fail_coding_task(error)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
@@ -496,6 +524,8 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
+                if coding_graph is not None:
+                    coding_graph.complete(coding_task_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
                 # — the work survives on result_brief like a clean success.
@@ -522,6 +552,7 @@ async def task_tool(
                 )
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task failed")
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
@@ -548,6 +579,7 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task was cancelled")
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="cancelled",
@@ -570,6 +602,7 @@ async def task_tool(
                 )
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task timed out")
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="timed_out",
@@ -606,6 +639,7 @@ async def task_tool(
                 request_cancel_background_task(task_id)
                 _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                fail_coding_task(message)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
@@ -635,7 +669,9 @@ async def task_tool(
         else:
             _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
         _subagent_usage_cache.pop(tool_call_id, None)
+        fail_coding_task("Parent run cancelled while the subagent task was running")
         raise
-    except Exception:
+    except Exception as exc:
         _subagent_usage_cache.pop(tool_call_id, None)
+        fail_coding_task(f"Subagent execution error: {exc}")
         raise

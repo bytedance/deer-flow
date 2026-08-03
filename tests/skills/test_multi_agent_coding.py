@@ -18,11 +18,27 @@ def _load_skill() -> tuple[dict, str]:
     return yaml.safe_load(frontmatter), body
 
 
-def test_skill_can_only_delegate_through_task_tool() -> None:
+def test_skill_can_only_submit_plan_and_delegate_tasks() -> None:
     frontmatter, _ = _load_skill()
 
     assert frontmatter["name"] == "multi-agent-coding"
-    assert frontmatter["allowed-tools"] == ["task"]
+    assert frontmatter["allowed-tools"] == ["submit_task_plan", "task"]
+
+
+def test_skill_persists_stable_stage_dag_before_delegation() -> None:
+    _, body = _load_skill()
+    normalized = body.lower()
+
+    assert normalized.index("submit_task_plan") < normalized.index("code-analyzer")
+    assert '"id": "coding-analysis"' in normalized
+    assert '"id": "coding-implementation"' in normalized
+    assert '"id": "coding-review"' in normalized
+    assert '"blocked_by": ["coding-analysis"]' in normalized
+    assert '"blocked_by": ["coding-implementation"]' in normalized
+
+    assert '`coding_task_id`: `coding-analysis`' in normalized
+    assert '`coding_task_id`: `coding-implementation`' in normalized
+    assert '`coding_task_id`: `coding-review`' in normalized
 
 
 def test_skill_defines_ordered_three_agent_handoffs() -> None:
