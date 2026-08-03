@@ -715,11 +715,9 @@ def _fallback_format_facts(
 ) -> tuple[str, list[str]] | tuple[None, None]:
     """Confidence-first ranking used when the primary path raises.
 
-    On exception we *cannot* reliably rely on ``get_memory_config()`` having
-    a healthy state (the exception may have come from inside the config
-    layer). Therefore the fallback deliberately sticks to the original
-    pure-confidence sort: small, deterministic, no IO. The primary path's
-    strategy-aware ranking lives in ``format_memory_for_injection`` only.
+    If strategy-aware ranking raises, the fallback deliberately sticks to the
+    original pure-confidence sort: small, deterministic, and free of external
+    dependencies.
 
     Returns a tuple ``(section_text, fact_lines)`` where ``section_text`` is the
     formatted ``"Facts:\\n..."`` section string (without any leading inter-section
@@ -756,6 +754,12 @@ def format_memory_for_injection(
     use_tiktoken: bool = True,
     guaranteed_categories: list[str] | None = None,
     guaranteed_token_budget: int = 500,
+    retrieval_strategy: Literal["legacy", "relevance"] = "legacy",
+    retrieval_relevance_weight: float = 0.6,
+    retrieval_confidence_weight: float = 0.4,
+    retrieval_diversity_weight: float = 0.0,
+    retrieval_top_k: int | None = None,
+    retrieval_duplicate_threshold: float = 0.7,
 ) -> str:
     """Format memory data for injection into system prompt.
 
@@ -777,6 +781,12 @@ def format_memory_for_injection(
             point the safety-truncation ceiling is raised to
             ``max_tokens + guaranteed_actual_usage`` to protect them.
             Ignored when *guaranteed_categories* is ``None`` or empty.
+        retrieval_strategy: Fact ranking strategy supplied by the backend.
+        retrieval_relevance_weight: Weight of lexical relevance.
+        retrieval_confidence_weight: Weight of stored confidence.
+        retrieval_diversity_weight: Weight of the near-duplicate penalty.
+        retrieval_top_k: Optional fact cap applied after ranking.
+        retrieval_duplicate_threshold: Dice threshold for near-duplicates.
 
     Returns:
         Formatted memory string for system prompt injection.
@@ -872,19 +882,6 @@ def format_memory_for_injection(
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
 
         try:
-            # Resolve retrieval config once. Lazy import avoids a top-level
-            # import cycle: memory_config imports app_config which ultimately
-            # touches prompt.py at runtime.
-            from deerflow.config.memory_config import get_memory_config
-
-            mem_cfg = get_memory_config()
-            strategy: Literal["legacy", "relevance"] = mem_cfg.retrieval_strategy
-            rw = float(mem_cfg.retrieval_relevance_weight)
-            cw = float(mem_cfg.retrieval_confidence_weight)
-            dw = float(mem_cfg.retrieval_diversity_weight)
-            top_k = mem_cfg.retrieval_top_k
-            dup_thr = float(mem_cfg.retrieval_duplicate_threshold)
-
             # For relevance ranking we use the user+history summary strings
             # (if present) joined with the text of the facts themselves as
             # the "current conversational context". This is *exactly* the
@@ -898,9 +895,6 @@ def format_memory_for_injection(
             # proportional-to-conf only). That means the relevance path
             # gracefully degrades at first turn.
             retrieval_context = base_text
-
-            def _confidence_key(fact: dict[str, Any]) -> float:
-                return _coerce_confidence(fact.get("confidence"), default=0.0)
 
             if effective_guaranteed:
 
@@ -924,11 +918,11 @@ def format_memory_for_injection(
                 guaranteed = rank_facts_for_context(
                     guaranteed_candidates,
                     context=retrieval_context,
-                    strategy=strategy,
-                    relevance_weight=rw,
-                    confidence_weight=cw,
+                    strategy=retrieval_strategy,
+                    relevance_weight=retrieval_relevance_weight,
+                    confidence_weight=retrieval_confidence_weight,
                     diversity_weight=0.0,
-                    duplicate_threshold=dup_thr,
+                    duplicate_threshold=retrieval_duplicate_threshold,
                     top_k=None,
                 )
                 # Regular facts apply the full configured strategy including
@@ -937,24 +931,24 @@ def format_memory_for_injection(
                 regular = rank_facts_for_context(
                     regular_candidates,
                     context=retrieval_context,
-                    strategy=strategy,
-                    relevance_weight=rw,
-                    confidence_weight=cw,
-                    diversity_weight=dw,
-                    duplicate_threshold=dup_thr,
-                    top_k=top_k,
+                    strategy=retrieval_strategy,
+                    relevance_weight=retrieval_relevance_weight,
+                    confidence_weight=retrieval_confidence_weight,
+                    diversity_weight=retrieval_diversity_weight,
+                    duplicate_threshold=retrieval_duplicate_threshold,
+                    top_k=retrieval_top_k,
                 )
             else:
                 guaranteed = []
                 regular = rank_facts_for_context(
                     valid_facts,
                     context=retrieval_context,
-                    strategy=strategy,
-                    relevance_weight=rw,
-                    confidence_weight=cw,
-                    diversity_weight=dw,
-                    duplicate_threshold=dup_thr,
-                    top_k=top_k,
+                    strategy=retrieval_strategy,
+                    relevance_weight=retrieval_relevance_weight,
+                    confidence_weight=retrieval_confidence_weight,
+                    diversity_weight=retrieval_diversity_weight,
+                    duplicate_threshold=retrieval_duplicate_threshold,
+                    top_k=retrieval_top_k,
                 )
 
             # ── Phase 1: select guaranteed lines ──────────────────────────

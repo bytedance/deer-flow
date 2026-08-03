@@ -58,6 +58,29 @@ def test_resolves_configured_backend(manager_class: str, expected: type[MemoryMa
     assert get_memory_manager() is manager
 
 
+def test_deermem_reads_host_retrieval_config_through_provider() -> None:
+    """The host supplies retrieval settings without a DeerFlow import inside DeerMem."""
+    set_memory_config(
+        MemoryConfig(
+            manager_class="deermem",
+            retrieval_strategy="relevance",
+            retrieval_relevance_weight=0.8,
+            retrieval_confidence_weight=0.2,
+        )
+    )
+
+    manager = get_memory_manager()
+    retrieval_config = manager._retrieval_config()
+
+    assert retrieval_config.retrieval_strategy == "relevance"
+    assert retrieval_config.retrieval_relevance_weight == pytest.approx(0.8)
+    assert retrieval_config.retrieval_confidence_weight == pytest.approx(0.2)
+    assert "retrieval_config_provider" not in manager.backend_config
+
+    set_memory_config(MemoryConfig(manager_class="deermem", retrieval_strategy="legacy"))
+    assert manager._retrieval_config().retrieval_strategy == "legacy"
+
+
 def test_unknown_backend_raises_instead_of_falling_back() -> None:
     """An unknown manager_class is a config error: raise, don't silently fall
     back to DeerMem (memory is persistent state -- a wrong store is a silent

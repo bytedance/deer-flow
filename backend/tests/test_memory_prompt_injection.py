@@ -827,17 +827,15 @@ def test_format_memory_tolerates_non_string_summary() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _activate_relevance(monkeypatch) -> None:
-    """Provide a relevance config without mutating the process singleton."""
-    from deerflow.config.memory_config import MemoryConfig
-
-    config = MemoryConfig(
-        retrieval_strategy="relevance",
-        retrieval_relevance_weight=0.6,
-        retrieval_confidence_weight=0.4,
-        retrieval_diversity_weight=0.0,
-    )
-    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+def _relevance_options(**overrides) -> dict:
+    """Return explicit portable-backend ranking options."""
+    return {
+        "retrieval_strategy": "relevance",
+        "retrieval_relevance_weight": 0.6,
+        "retrieval_confidence_weight": 0.4,
+        "retrieval_diversity_weight": 0.0,
+        **overrides,
+    }
 
 
 def test_relevance_boosts_contextually_relevant_fact_over_high_confidence_irrelevant(monkeypatch) -> None:
@@ -851,8 +849,6 @@ def test_relevance_boosts_contextually_relevant_fact_over_high_confidence_irrele
         "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
         lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
     )
-    _activate_relevance(monkeypatch)
-
     memory_data = {
         # User context summary provides the "current conversation context"
         # that prompt.py reads for ranking.
@@ -875,7 +871,7 @@ def test_relevance_boosts_contextually_relevant_fact_over_high_confidence_irrele
         ],
     }
 
-    result = format_memory_for_injection(memory_data, max_tokens=2000)
+    result = format_memory_for_injection(memory_data, max_tokens=2000, **_relevance_options())
     # The migration fact appears BEFORE the preference fact.
     migration_idx = result.index("Database migrations")
     pref_idx = result.index("User prefers friendly")
@@ -890,11 +886,6 @@ def test_legacy_strategy_still_ranks_by_confidence_only(monkeypatch) -> None:
         "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
         lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
     )
-    from deerflow.config.memory_config import MemoryConfig
-
-    config = MemoryConfig(retrieval_strategy="legacy")
-    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
-
     memory_data = {
         "user": {"workContext": {"summary": "postgres migration, alembic, DDL"}},
         "facts": [
@@ -926,15 +917,13 @@ def test_relevance_strategy_first_context_empty_graceful_degrade(monkeypatch) ->
         "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
         lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
     )
-    _activate_relevance(monkeypatch)
-
     memory_data = {
         "facts": [
             {"content": "Low confidence fact content", "category": "knowledge", "confidence": 0.3},
             {"content": "High confidence fact content", "category": "knowledge", "confidence": 0.9},
         ],
     }
-    result = format_memory_for_injection(memory_data, max_tokens=2000)
+    result = format_memory_for_injection(memory_data, max_tokens=2000, **_relevance_options())
     assert result.index("High confidence fact") < result.index("Low confidence fact")
 
 
@@ -950,17 +939,6 @@ def test_diversity_penalty_suppresses_near_duplicate_facts(monkeypatch) -> None:
         "deerflow.agents.memory.backends.deermem.deermem.core.prompt._count_tokens",
         lambda text, encoding_name="cl100k_base", *, use_tiktoken=True: len(text),
     )
-    from deerflow.config.memory_config import MemoryConfig
-
-    config = MemoryConfig(
-        retrieval_strategy="relevance",
-        retrieval_relevance_weight=0.55,
-        retrieval_confidence_weight=0.20,
-        retrieval_diversity_weight=0.25,
-        retrieval_duplicate_threshold=0.6,
-    )
-    monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
-
     memory_data = {
         "user": {"workContext": {"summary": "python debugging postgres connection"}},
         "facts": [
@@ -971,7 +949,16 @@ def test_diversity_penalty_suppresses_near_duplicate_facts(monkeypatch) -> None:
             {"content": "Enable SQLAlchemy echo pool for debugging connection leaks", "category": "knowledge", "confidence": 0.6},
         ],
     }
-    result = format_memory_for_injection(memory_data, max_tokens=500)
+    result = format_memory_for_injection(
+        memory_data,
+        max_tokens=500,
+        **_relevance_options(
+            retrieval_relevance_weight=0.55,
+            retrieval_confidence_weight=0.20,
+            retrieval_diversity_weight=0.25,
+            retrieval_duplicate_threshold=0.6,
+        ),
+    )
     # The unique debugging fact MUST appear before the duplicate if the
     # duplicate is actually penalised. We accept either duplicate at position 1
     # + debug at position 2, or (better) debug at 2 and only one duplicate at 1.

@@ -187,6 +187,16 @@ class DeerMem(MemoryManager):
         for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
+        retrieval_keys = (
+            "retrieval_strategy",
+            "retrieval_relevance_weight",
+            "retrieval_confidence_weight",
+            "retrieval_diversity_weight",
+            "retrieval_top_k",
+            "retrieval_duplicate_threshold",
+        )
+        if "retrieval_config_provider" not in config_dict and not any(key in config_dict for key in retrieval_keys) and "retrieval_config_provider" in host_hooks:
+            config_dict["retrieval_config_provider"] = host_hooks["retrieval_config_provider"]
         if "host_llm" not in config_dict:
             model_cfg = config_dict.get("model")
             if not (isinstance(model_cfg, dict) and model_cfg.get("model")):
@@ -299,6 +309,16 @@ class DeerMem(MemoryManager):
         return filtered, frozenset(signals)
 
     # ── Read ─────────────────────────────────────────────────────────────
+    def _retrieval_config(self) -> Any:
+        """Resolve host-managed retrieval settings without importing the host."""
+        provider = self._config.retrieval_config_provider
+        if callable(provider):
+            try:
+                return provider()
+            except Exception:
+                logger.warning("Retrieval config provider failed; using DeerMem defaults.", exc_info=True)
+        return self._config
+
     def get_context(
         self,
         user_id: str | None,
@@ -320,12 +340,19 @@ class DeerMem(MemoryManager):
         """
         injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
+        retrieval_config = self._retrieval_config()
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
             use_tiktoken=(self._config.token_counting == "tiktoken"),
             guaranteed_categories=self._config.guaranteed_categories,
             guaranteed_token_budget=self._config.guaranteed_token_budget,
+            retrieval_strategy=retrieval_config.retrieval_strategy,
+            retrieval_relevance_weight=retrieval_config.retrieval_relevance_weight,
+            retrieval_confidence_weight=retrieval_config.retrieval_confidence_weight,
+            retrieval_diversity_weight=retrieval_config.retrieval_diversity_weight,
+            retrieval_top_k=retrieval_config.retrieval_top_k,
+            retrieval_duplicate_threshold=retrieval_config.retrieval_duplicate_threshold,
         )
 
     def search(
@@ -393,20 +420,10 @@ class DeerMem(MemoryManager):
         agent_name: str | None,
         category: str | None,
     ) -> list[dict[str, Any]]:
-        # Lazy import to break the prompt.py → memory_config import cycle at
-        # module-load time.
-        from deerflow.config.memory_config import get_memory_config
-
-        mem_cfg = get_memory_config()
-        strategy = mem_cfg.retrieval_strategy
-        rw = float(mem_cfg.retrieval_relevance_weight)
-        cw = float(mem_cfg.retrieval_confidence_weight)
-        dw = float(mem_cfg.retrieval_diversity_weight)
-        dup_thr = float(mem_cfg.retrieval_duplicate_threshold)
-
         query_lower = query.strip().lower()
         memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=agent_name, user_id=user_id))
         raw_candidates = memory_data.get("facts", []) if isinstance(memory_data, dict) else []
+        retrieval_config = self._retrieval_config()
 
         # Category filtering happens before ranking/top_k for both strategies.
         # Legacy keeps the original full-substring match. Relevance ranks every
@@ -414,7 +431,7 @@ class DeerMem(MemoryManager):
         # string would make multi-token lexical ranking return no candidates.
         category_candidates = [fact for fact in raw_candidates if isinstance(fact.get("content"), str) and (category is None or fact.get("category") == category)]
 
-        if strategy == "legacy":
+        if retrieval_config.retrieval_strategy == "legacy":
             substring_matches = [fact for fact in category_candidates if query_lower in fact["content"].lower()]
             filtered_sorted = sorted(substring_matches, key=_coerce_source_confidence, reverse=True)
             return _compat_document({"facts": filtered_sorted[:top_k]})["facts"]
@@ -433,17 +450,17 @@ class DeerMem(MemoryManager):
         # the call-site top_k if retrieval_top_k is set and lower (so the
         # operator's global cap wins). Otherwise use call-site top_k.
         eff_top_k = top_k
-        if mem_cfg.retrieval_top_k is not None and mem_cfg.retrieval_top_k < top_k:
-            eff_top_k = mem_cfg.retrieval_top_k
+        if retrieval_config.retrieval_top_k is not None and retrieval_config.retrieval_top_k < top_k:
+            eff_top_k = retrieval_config.retrieval_top_k
 
         ranked = rank_facts_for_context(
             category_candidates,
             context=query,
-            strategy=strategy,
-            relevance_weight=rw,
-            confidence_weight=cw,
-            diversity_weight=dw,
-            duplicate_threshold=dup_thr,
+            strategy=retrieval_config.retrieval_strategy,
+            relevance_weight=retrieval_config.retrieval_relevance_weight,
+            confidence_weight=retrieval_config.retrieval_confidence_weight,
+            diversity_weight=retrieval_config.retrieval_diversity_weight,
+            duplicate_threshold=retrieval_config.retrieval_duplicate_threshold,
             top_k=eff_top_k,
         )
         # rank_facts_for_context returns shallow copies; the caller expects

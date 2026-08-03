@@ -113,6 +113,15 @@ class DeerMemConfig(BaseModel):
         le=2000,
         description="Token ceiling for guaranteed-category facts.",
     )
+    retrieval_strategy: Literal["legacy", "relevance"] = Field(
+        default="legacy",
+        description="Fact ranking strategy injected by the host; standalone DeerMem defaults to legacy.",
+    )
+    retrieval_relevance_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    retrieval_confidence_weight: float = Field(default=0.4, ge=0.0, le=1.0)
+    retrieval_diversity_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    retrieval_top_k: int | None = Field(default=None, ge=1)
+    retrieval_duplicate_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     # ── Staleness review ─────────────────────────────────────────────────
     staleness_review_enabled: bool = Field(
         default=True,
@@ -276,6 +285,24 @@ class DeerMemConfig(BaseModel):
             "programmatically."
         ),
     )
+    retrieval_config_provider: Any = Field(
+        default=None,
+        description=("Optional host hook returning the current retrieval configuration. This keeps host hot reload outside the portable backend package; standalone DeerMem uses the retrieval fields above."),
+    )
+
+    @model_validator(mode="after")
+    def _normalize_retrieval_weights(self) -> DeerMemConfig:
+        """Keep standalone backend ratio weights aligned with the host schema."""
+        total = self.retrieval_relevance_weight + self.retrieval_confidence_weight + self.retrieval_diversity_weight
+        if total <= 0.0:
+            object.__setattr__(self, "retrieval_relevance_weight", 0.0)
+            object.__setattr__(self, "retrieval_confidence_weight", 1.0)
+            object.__setattr__(self, "retrieval_diversity_weight", 0.0)
+        else:
+            object.__setattr__(self, "retrieval_relevance_weight", self.retrieval_relevance_weight / total)
+            object.__setattr__(self, "retrieval_confidence_weight", self.retrieval_confidence_weight / total)
+            object.__setattr__(self, "retrieval_diversity_weight", self.retrieval_diversity_weight / total)
+        return self
 
     @model_validator(mode="after")
     def _check_storage_path_is_directory(self) -> DeerMemConfig:

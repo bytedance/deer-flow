@@ -22,9 +22,9 @@ def _make_fact(content: str, category: str = "context", confidence: float = 0.7)
     }
 
 
-def _deer_mem_with_facts(facts: list[dict]) -> DeerMem:
+def _deer_mem_with_facts(facts: list[dict], backend_config: dict | None = None) -> DeerMem:
     """Build a DeerMem whose updater returns the given facts (no disk I/O)."""
-    mgr = DeerMem(backend_config=None)
+    mgr = DeerMem(backend_config=backend_config)
     mgr._updater = SimpleNamespace(get_memory_data=lambda agent_name=None, *, user_id=None: {"facts": facts})
     return mgr
 
@@ -184,15 +184,15 @@ class TestDeerMemSearch:
 class TestDeerMemRelevanceSearch:
     """Strategy='relevance' changes to DeerMem.search."""
 
-    def _activate_relevance(
+    def _relevance_backend_config(
         self,
-        monkeypatch,
         *,
         relevance_weight: float = 0.7,
         confidence_weight: float = 0.3,
         diversity_weight: float = 0.0,
         duplicate_threshold: float = 0.7,
-    ) -> None:
+        top_k: int | None = None,
+    ) -> dict:
         from deerflow.config.memory_config import MemoryConfig
 
         config = MemoryConfig(
@@ -201,17 +201,21 @@ class TestDeerMemRelevanceSearch:
             retrieval_confidence_weight=confidence_weight,
             retrieval_diversity_weight=diversity_weight,
             retrieval_duplicate_threshold=duplicate_threshold,
+            retrieval_top_k=top_k,
         )
-        monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+        return {
+            "retrieval_strategy": config.retrieval_strategy,
+            "retrieval_relevance_weight": config.retrieval_relevance_weight,
+            "retrieval_confidence_weight": config.retrieval_confidence_weight,
+            "retrieval_diversity_weight": config.retrieval_diversity_weight,
+            "retrieval_duplicate_threshold": config.retrieval_duplicate_threshold,
+            "retrieval_top_k": config.retrieval_top_k,
+        }
 
-    def test_legacy_strategy_unchanged_confidence_rank(self, monkeypatch) -> None:
+    def test_legacy_strategy_unchanged_confidence_rank(self) -> None:
         """strategy=legacy must produce byte-identical results to before the
         retrieval-strategy code was added: only confidence matters for the
         sort order, even when the query only matches one fact's content."""
-        from deerflow.config.memory_config import MemoryConfig
-
-        config = MemoryConfig(retrieval_strategy="legacy")
-        monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
         facts = [
             _make_fact("uv python rust go tool", confidence=0.3),  # matches "uv" but low conf
             _make_fact("unrelated fact about database", confidence=0.95),
@@ -230,11 +234,11 @@ class TestDeerMemRelevanceSearch:
         results = mgr2.search("uv")
         assert [r["confidence"] for r in results] == [0.9, 0.5, 0.2]
 
-    def test_relevance_boosts_query_matched_fact_above_high_confidence_stale(self, monkeypatch) -> None:
+    def test_relevance_boosts_query_matched_fact_above_high_confidence_stale(self) -> None:
         """strategy=relevance with high relevance_weight: facts whose content
         shares many tokens with the search query rank above high-confidence
         facts whose content matches only the bare query substring."""
-        self._activate_relevance(monkeypatch, relevance_weight=0.8, confidence_weight=0.2)
+        config = self._relevance_backend_config(relevance_weight=0.8, confidence_weight=0.2)
         facts = [
             # High confidence but zero lexical match for "pool debugging" query
             # besides the single token "uv" that is shared by everything.
@@ -243,24 +247,24 @@ class TestDeerMemRelevanceSearch:
             # search query (pool + debugging).
             _make_fact("uv sqlalchemy pool for debugging connection leaks", confidence=0.4),
         ]
-        mgr = _deer_mem_with_facts(facts)
+        mgr = _deer_mem_with_facts(facts, config)
         results = mgr.search("sqlalchemy pool debugging")
         assert len(results) == 2
         # Token-relevant result ranks first despite the large confidence gap.
         assert results[0]["confidence"] == 0.4
         assert results[0]["content"].startswith("uv sqlalchemy pool")
 
-    def test_relevance_category_filtering_before_ranking(self, monkeypatch) -> None:
+    def test_relevance_category_filtering_before_ranking(self) -> None:
         """The category argument still filters BEFORE relevance ranking and
         before top_k — preserved legacy contract, explicitly listed in issue
         #4495 as required behaviour."""
-        self._activate_relevance(monkeypatch)
+        config = self._relevance_backend_config()
         facts = [
             _make_fact("postgres migration in detail detail", "knowledge", 0.99),
             _make_fact("db migrate database schema detail", "context", 0.3),
             _make_fact("db migration detail detail", "knowledge", 0.2),
         ]
-        mgr = _deer_mem_with_facts(facts)
+        mgr = _deer_mem_with_facts(facts, config)
         # top_k=1 + category=context: must return the context fact even
         # though the two knowledge facts have higher confidence AND higher
         # relevance (both share more tokens w/ the query "migration detail").
@@ -268,12 +272,11 @@ class TestDeerMemRelevanceSearch:
         assert len(res) == 1
         assert res[0]["category"] == "context"
 
-    def test_relevance_diversity_penalty_duplicate_suppression(self, monkeypatch) -> None:
+    def test_relevance_diversity_penalty_duplicate_suppression(self) -> None:
         """With diversity_weight>0, a very high overlap duplicate receives a
         penalty that demotes it below a dissimilar fact it would otherwise
         outrank on composite+confidence alone."""
-        self._activate_relevance(
-            monkeypatch,
+        config = self._relevance_backend_config(
             relevance_weight=0.4,
             confidence_weight=0.1,
             diversity_weight=0.5,
@@ -292,7 +295,7 @@ class TestDeerMemRelevanceSearch:
                 confidence=0.55,
             ),
         ]
-        mgr = _deer_mem_with_facts(facts)
+        mgr = _deer_mem_with_facts(facts, config)
         results = mgr.search("postgres psycopg2 connection pool")
         # The unique echo/toolbar fact must rank above the duplicate if the
         # duplicate received a diversity penalty. Assert that it is not at
@@ -306,22 +309,14 @@ class TestDeerMemRelevanceSearch:
         # confidence advantage (0.9 vs 0.55).
         assert echo_idx < duplicate_idx
 
-    def test_retrieval_top_k_global_cap_applied_before_caller_top_k(self, monkeypatch) -> None:
+    def test_retrieval_top_k_global_cap_applied_before_caller_top_k(self) -> None:
         """If retrieval_top_k (global operator cap) is set and is strictly
         lower than the caller's top_k, then retrieval_top_k wins so an
         operator can trim results globally without touching individual tool
         call sites."""
-        from deerflow.config.memory_config import MemoryConfig
-
-        config = MemoryConfig(
-            retrieval_strategy="relevance",
-            retrieval_relevance_weight=0.7,
-            retrieval_confidence_weight=0.3,
-            retrieval_top_k=2,
-        )
-        monkeypatch.setattr("deerflow.config.memory_config.get_memory_config", lambda: config)
+        config = self._relevance_backend_config(top_k=2)
         facts = [_make_fact(f"postgres detail {i}", confidence=0.9 - 0.05 * i) for i in range(8)]
-        mgr = _deer_mem_with_facts(facts)
+        mgr = _deer_mem_with_facts(facts, config)
         results = mgr.search("postgres", top_k=10)
         # Caller asked for 10 but global retrieval_top_k caps at 2.
         assert len(results) == 2

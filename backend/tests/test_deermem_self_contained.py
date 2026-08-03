@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -101,6 +102,9 @@ def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_di
     def _keep(ak):
         return False
 
+    def _retrieval_config():
+        return object()
+
     trace_cm = object()  # sentinel; trace_context_manager is typed Any
     fake_llm = _FakeLLM()
     dm = DeerMem.from_config(
@@ -108,6 +112,7 @@ def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_di
         mode="middleware",
         should_keep_hidden_message=_keep,
         trace_context_manager=trace_cm,
+        retrieval_config_provider=_retrieval_config,
         host_llm_factory=lambda: fake_llm,
         callbacks=None,
     )
@@ -115,11 +120,47 @@ def test_from_config_keeps_backend_config_pure_of_injected_hooks(deermem_data_di
     assert dm._config.should_keep_hidden_message is _keep
     assert dm._config.trace_context_manager is trace_cm
     assert dm._config.host_llm is fake_llm
+    assert dm._config.retrieval_config_provider is _retrieval_config
     # backend_config field is the pure original data (no injected hooks)
     assert dm.backend_config == {"storage_path": str(deermem_data_dir), "max_facts": 20}
     assert "should_keep_hidden_message" not in dm.backend_config
     assert "trace_context_manager" not in dm.backend_config
+    assert "retrieval_config_provider" not in dm.backend_config
     assert "host_llm" not in dm.backend_config
+
+
+def test_explicit_retrieval_backend_config_overrides_host_provider(deermem_data_dir):
+    """Programmatic backend config keeps precedence over host-provided defaults."""
+
+    def _host_retrieval_config():
+        return SimpleNamespace(retrieval_strategy="relevance")
+
+    dm = DeerMem.from_config(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_strategy": "legacy",
+        },
+        retrieval_config_provider=_host_retrieval_config,
+    )
+
+    assert dm._retrieval_config() is dm._config
+    assert dm._retrieval_config().retrieval_strategy == "legacy"
+    assert dm._config.retrieval_config_provider is None
+
+
+def test_standalone_retrieval_weights_are_ratio_normalized(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_relevance_weight": 0.6,
+            "retrieval_confidence_weight": 0.6,
+            "retrieval_diversity_weight": 0.8,
+        }
+    )
+
+    assert dm._config.retrieval_relevance_weight == pytest.approx(0.3)
+    assert dm._config.retrieval_confidence_weight == pytest.approx(0.3)
+    assert dm._config.retrieval_diversity_weight == pytest.approx(0.4)
 
 
 def test_zero_config_defaults_run_non_llm_ops(deermem_data_dir):

@@ -94,6 +94,7 @@ The factory (`manager.py::get_memory_manager`) resolves the backend class, injec
 - `backend_config["storage_path"]` (str) - a writable state dir (the host's `runtime_home` by default, or whatever `config.yaml` sets). **Use this as your storage root.**
 - `callbacks` (`MemoryCallbacks` | None) - observability; `on_memory_llm_call` merges trace metadata before your LLM call (langfuse). Pass it to your LLM path; ignore if you don't trace.
 - `should_keep_hidden_message` / `trace_context_manager` / `host_llm_factory` - other host hooks; consume in `from_config` if relevant.
+- `retrieval_config_provider` - optional callable for reading the host's hot-reloadable retrieval settings without importing its config singleton.
 - Plus whatever the user puts under `config.yaml::memory.backend_config` (your backend's own knobs).
 
 Each backend's `from_config` consumes the hooks it needs (DeerMem does; noop ignores them).

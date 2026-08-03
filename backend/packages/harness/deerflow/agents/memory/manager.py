@@ -760,6 +760,7 @@ def _collect_host_hooks() -> dict[str, Any]:
         "trace_context_manager": request_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
+        "retrieval_config_provider": get_memory_config,
     }
 
 
