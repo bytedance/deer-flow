@@ -104,3 +104,18 @@ sandbox:
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
+
+
+def test_logs_sets_deer_flow_root_before_compose():
+    """Log commands should resolve Compose mounts from the repository root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmpdir}'
+DOCKER_DIR='{tmpdir}'
+COMPOSE_CMD=capture_compose
+capture_compose() {{ test "${{DEER_FLOW_ROOT:-}}" = "$PROJECT_ROOT"; }}
+unset DEER_FLOW_ROOT
+logs --gateway
+"""
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])

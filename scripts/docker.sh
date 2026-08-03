@@ -282,6 +282,12 @@ start() {
 # View Docker development logs
 logs() {
     local service=""
+
+    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
+    # reading logs so Compose does not resolve mounted paths from an empty root.
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
     
     case "$1" in
         --frontend)
