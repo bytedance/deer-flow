@@ -6,11 +6,11 @@ import shutil
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.utils.thread_id import validate_thread_id
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
-_SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_INTEGRATION_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 _UNSAFE_USER_ID_CHAR_RE = re.compile(r"[^A-Za-z0-9_\-]")
@@ -26,9 +26,7 @@ def _default_local_base_dir() -> Path:
 
 def _validate_thread_id(thread_id: str) -> str:
     """Validate a thread ID before using it in filesystem paths."""
-    if not _SAFE_THREAD_ID_RE.match(thread_id):
-        raise ValueError(f"Invalid thread_id {thread_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
-    return thread_id
+    return validate_thread_id(thread_id)
 
 
 def _validate_user_id(user_id: str) -> str:
@@ -257,6 +255,32 @@ class Paths:
         state remain user-scoped elsewhere under ``users/{user_id}``.
         """
         return self.base_dir / "integrations" / "skills"
+
+    @property
+    def skills_view_dir(self) -> Path:
+        """Global sandbox-visible skills projection: ``{base_dir}/skills_view/``."""
+        return self.base_dir / "skills_view"
+
+    @property
+    def public_skills_view_dir(self) -> Path:
+        """Enabled public skills exposed to sandboxes."""
+        return self.skills_view_dir / "public"
+
+    def user_skills_view_dir(self, user_id: str) -> Path:
+        """Per-user sandbox-visible skills projection root."""
+        return self.user_dir(user_id) / "skills_view"
+
+    def user_custom_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled custom skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "custom"
+
+    def user_legacy_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled legacy skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "legacy"
+
+    def user_integration_skills_view_dir(self, user_id: str) -> Path:
+        """Enabled managed integration skills exposed to one user's sandboxes."""
+        return self.user_skills_view_dir(user_id) / "integrations"
 
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """

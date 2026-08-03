@@ -6,7 +6,6 @@ from pathlib import Path
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
-from deerflow.skills.storage import user_should_see_legacy_skills
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +100,11 @@ class LocalSandboxProvider(SandboxProvider):
             from deerflow.config import get_app_config
 
             config = get_app_config()
-            skills_path = config.skills.get_skills_path()
             container_path = config.skills.container_path
+            projection = self._ensure_skills_projection()
 
             # Public skills: global, read-only — static, shared by all threads
-            public_skills_path = skills_path / "public"
+            public_skills_path = projection.public
             if public_skills_path.exists():
                 mappings.append(
                     PathMapping(
@@ -218,6 +217,52 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
+    def _ensure_skills_projection(user_id: str | None = None):
+        """Best-effort: a projection failure must not fail sandbox acquire.
+
+        Mirrors the surrounding skill-mount setup, which has always logged
+        and continued rather than failing the whole acquire (e.g. missing
+        config.yaml in a test double). Callers see ``None`` and skip the
+        skill mounts for this acquire; the projection self-heals on a later
+        acquire once the underlying condition clears.
+        """
+        from deerflow.config import get_app_config
+        from deerflow.skills.projection import ensure_skill_projections
+        from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+
+        try:
+            config = get_app_config()
+            if user_id is None:
+                storage = get_or_new_skill_storage(app_config=config)
+            else:
+                storage = get_or_new_user_skill_storage(user_id, app_config=config)
+            return ensure_skill_projections(storage)
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return None
+
+    @staticmethod
+    def _append_public_skill_mapping(mappings: list[PathMapping], projection) -> None:
+        if projection is None:
+            return
+        try:
+            from deerflow.config import get_app_config
+
+            container_path = get_app_config().skills.container_path.rstrip("/")
+            public_container_path = f"{container_path}/public"
+            if any(mapping.container_path.rstrip("/") == public_container_path for mapping in mappings):
+                return
+            mappings.append(
+                PathMapping(
+                    container_path=public_container_path,
+                    local_path=str(projection.public),
+                    read_only=True,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Could not append public skill mapping: %s", exc, exc_info=True)
+
+    @staticmethod
     def _sandbox_id_for_thread(thread_id: str, user_id: str) -> str:
         return f"local:{user_id}:{thread_id}"
 
@@ -232,7 +277,7 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
+    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None, skill_projection=None) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
         and /mnt/skills/custom.
 
@@ -281,56 +326,35 @@ class LocalSandboxProvider(SandboxProvider):
             ),
         ]
 
-        # Per-user custom skills mount (read-only).  This must be per-thread
-        # because ``/mnt/skills/custom`` resolves to different host directories
-        # for different users.
+        # Per-user category mounts stay present for the sandbox lifetime. Their
+        # enabled-only contents change beneath these stable roots.
         try:
             config = get_app_config()
             skills_container_path = config.skills.container_path
-            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
-            integrations_path = paths.integration_skills_dir()
-            user_custom_path.mkdir(parents=True, exist_ok=True)
-            integrations_path.mkdir(parents=True, exist_ok=True)
+            projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
 
-            mappings.append(
-                PathMapping(
-                    container_path=f"{skills_container_path}/custom",
-                    local_path=str(user_custom_path),
-                    read_only=True,
-                )
-            )
-            mappings.append(
-                PathMapping(
-                    container_path=f"{skills_container_path}/integrations",
-                    local_path=str(integrations_path),
-                    read_only=True,
-                )
-            )
-        except Exception as exc:
-            logger.warning("Could not setup per-thread custom skills mount: %s", exc, exc_info=True)
-
-        # Legacy (pre-migration global-custom) skills: only mount for users
-        # who have no per-user custom skills yet, mirroring the
-        # ``UserScopedSkillStorage._iter_skill_files`` visibility rule. Users
-        # with their own per-user custom skills cannot see LEGACY in the
-        # listing/prompt and must not be able to read it via the sandbox
-        # either — otherwise the listing layer and the sandbox layer disagree
-        # about visibility, and the sandbox layer is the more permissive one.
-        try:
-            config = get_app_config()
-            skills_container_path = config.skills.container_path
-            user_custom_path = paths.user_custom_skills_dir(effective_user_id)
-            legacy_skills_path = config.skills.get_skills_path() / "custom"
-            if user_should_see_legacy_skills(effective_user_id, host_path=str(config.skills.get_skills_path())) and legacy_skills_path.exists():
-                mappings.append(
-                    PathMapping(
-                        container_path=f"{skills_container_path}/legacy",
-                        local_path=str(legacy_skills_path),
-                        read_only=True,
-                    )
+            if projection is not None:
+                mappings.extend(
+                    [
+                        PathMapping(
+                            container_path=f"{skills_container_path}/custom",
+                            local_path=str(projection.custom),
+                            read_only=True,
+                        ),
+                        PathMapping(
+                            container_path=f"{skills_container_path}/legacy",
+                            local_path=str(projection.legacy),
+                            read_only=True,
+                        ),
+                        PathMapping(
+                            container_path=f"{skills_container_path}/integrations",
+                            local_path=str(projection.integrations),
+                            read_only=True,
+                        ),
+                    ]
                 )
         except Exception as exc:
-            logger.warning("Could not setup per-thread legacy skills mount: %s", exc, exc_info=True)
+            logger.warning("Could not setup per-thread skills projection mounts: %s", exc, exc_info=True)
 
         return mappings
 
@@ -350,13 +374,23 @@ class LocalSandboxProvider(SandboxProvider):
         global _singleton
 
         if thread_id is None:
+            skill_projection = self._ensure_skills_projection()
             with self._lock:
                 if self._generic_sandbox is None:
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=list(self._path_mappings))
+                    mappings = list(self._path_mappings)
+                    self._append_public_skill_mapping(mappings, skill_projection)
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
         effective_user_id = self._effective_acquire_user_id(user_id)
+        # Runs on every acquire, including cache hits, to self-heal drift —
+        # cheap (~3-4 ms metadata walk) when the manifest is fresh. If another
+        # worker mutated this user's skills since the last check, this
+        # triggers a full rebuild (~400 ms measured locally) under the
+        # cross-process projection lock, serializing concurrent acquires and
+        # mutations for that user. Acceptable for an editing-frequency event.
+        skill_projection = self._ensure_skills_projection(effective_user_id)
         key = self._thread_key(thread_id, effective_user_id)
 
         # Fast path under lock.
@@ -366,11 +400,18 @@ class LocalSandboxProvider(SandboxProvider):
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
                 self._thread_sandboxes.move_to_end(key)
-                return cached.id
+        if cached is not None:
+            return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id)
+        new_mappings = list(self._path_mappings)
+        self._append_public_skill_mapping(new_mappings, skill_projection)
+        new_mappings += self._build_thread_path_mappings(
+            thread_id,
+            user_id=effective_user_id,
+            skill_projection=skill_projection,
+        )
 
         with self._lock:
             # Re-check after the lock-free I/O: another caller may have

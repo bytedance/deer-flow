@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, PlainSerializer
 
 from deerflow.domain.schedule.commands import ContextChange, CreateScheduledTask, UpdateScheduledTask
 from deerflow.domain.schedule.model import ScheduledRun, ScheduledTask, ScheduleSpec, ScheduleType
+from deerflow.utils.thread_id import ThreadId
 
 UtcTimestamp = Annotated[datetime, PlainSerializer(lambda value: value.isoformat(), return_type=str)]
 
@@ -68,7 +69,7 @@ class CreateScheduledTaskRequest(BaseModel):
     through ``to_command``, never read off the wire.
     """
 
-    thread_id: str | None = None
+    thread_id: ThreadId | None = None
     context_mode: str = "fresh_thread_per_run"
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
@@ -115,7 +116,7 @@ class UpdateScheduledTaskRequest(BaseModel):
     """
 
     context_mode: str | None = None
-    thread_id: str | None = None
+    thread_id: ThreadId | None = None
     title: str | None = Field(default=None, min_length=1)
     prompt: str | None = Field(default=None, min_length=1)
     schedule_spec: dict[str, Any] | None = None

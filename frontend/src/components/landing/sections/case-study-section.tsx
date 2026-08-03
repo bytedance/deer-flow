@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
@@ -60,15 +61,19 @@ export function CaseStudySection({ className }: { className?: string }) {
             rel="noopener noreferrer"
           >
             <Card className="group/card relative h-64 overflow-hidden">
-              <div
-                className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat transition-all duration-300 group-hover/card:scale-110 group-hover/card:brightness-90"
-                style={{
-                  backgroundImage: `url(/images/${caseStudy.threadId}.jpg)`,
-                }}
-              ></div>
+              <Image
+                src={`/images/${caseStudy.threadId}.jpg`}
+                alt={`${caseStudy.title} preview`}
+                width={640}
+                height={360}
+                loading="lazy"
+                decoding="async"
+                sizes="(min-width: 1024px) 320px, (min-width: 768px) 50vw, 100vw"
+                className="absolute inset-0 z-0 h-full w-full object-cover transition-all duration-300 group-hover/card:scale-110 group-hover/card:brightness-90"
+              />
               <div
                 className={cn(
-                  "flex h-full w-full translate-y-[calc(100%-60px)] flex-col items-center",
+                  "relative z-10 flex h-full w-full translate-y-[calc(100%-60px)] flex-col items-center",
                   "transition-all duration-300",
                   "group-hover/card:translate-y-[calc(100%-128px)]",
                 )}

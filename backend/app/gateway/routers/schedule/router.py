@@ -41,6 +41,7 @@ from deerflow.domain.schedule.exceptions import (
     ThreadNotFoundError,
 )
 from deerflow.domain.schedule.model import DispatchOutcome
+from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
@@ -194,7 +195,7 @@ async def list_scheduled_task_runs(
 @router.get("/threads/{thread_id}/scheduled-tasks", response_model=list[ScheduledTaskResponse])
 @require_permission("threads", "read", owner_check=True)
 @_map_domain_errors
-async def list_thread_scheduled_tasks(thread_id: str, request: Request, service: ScheduleServiceDep):
+async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request, service: ScheduleServiceDep):
     user_id = await _require_user_id(request)
     tasks = await service.list_tasks_by_thread(user_id, thread_id)
     return [ScheduledTaskResponse.from_domain(task) for task in tasks]

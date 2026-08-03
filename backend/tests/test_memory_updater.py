@@ -5,7 +5,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
+    MemoryManifestRevisionConflict,
+    MemoryStorage,
+)
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     MemoryUpdater,
     _build_staleness_section,
@@ -43,6 +46,13 @@ def _memory_config(**overrides: object) -> DeerMemConfig:
             continue
         setattr(config, key, value)
     return config
+
+
+_DURABLE_USER_FACT = {
+    "scope": "user",
+    "durability": "durable",
+    "authority": "descriptive",
+}
 
 
 class _MemoryStorage(MemoryStorage):
@@ -116,9 +126,9 @@ def test_apply_updates_skips_existing_duplicate_and_preserves_removals() -> None
         ]
     )
     update_data = {
-        "factsToRemove": ["fact_remove"],
+        "factsToRemove": [{"id": "fact_remove", "scope": "user", "reason": "Explicit retraction in test fixture"}],
         "newFacts": [
-            {"content": "User likes Python", "category": "preference", "confidence": 0.95},
+            {**_DURABLE_USER_FACT, "content": "User likes Python", "category": "preference", "confidence": 0.95},
         ],
     }
 
@@ -133,8 +143,8 @@ def test_apply_updates_skips_whitespace_only_facts() -> None:
     current_memory = _make_memory()
     update_data = {
         "newFacts": [
-            {"content": "   ", "category": "context", "confidence": 0.9},
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "   ", "category": "context", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
         ],
     }
 
@@ -223,9 +233,9 @@ def test_apply_updates_skips_same_batch_duplicates_and_keeps_source_metadata() -
     current_memory = _make_memory()
     update_data = {
         "newFacts": [
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.91},
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.92},
-            {"content": "User works on DeerFlow", "category": "context", "confidence": 0.87},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.91},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.92},
+            {**_DURABLE_USER_FACT, "content": "User works on DeerFlow", "category": "context", "confidence": 0.87},
         ],
     }
 
@@ -263,9 +273,9 @@ def test_apply_updates_preserves_threshold_and_max_facts_trimming() -> None:
     )
     update_data = {
         "newFacts": [
-            {"content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
-            {"content": "User uses uv", "category": "context", "confidence": 0.85},
-            {"content": "User likes noisy logs", "category": "behavior", "confidence": 0.6},
+            {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+            {**_DURABLE_USER_FACT, "content": "User uses uv", "category": "context", "confidence": 0.85},
+            {**_DURABLE_USER_FACT, "content": "User likes noisy logs", "category": "behavior", "confidence": 0.6},
         ],
     }
 
@@ -289,6 +299,7 @@ def test_apply_updates_preserves_source_error() -> None:
                 "category": "correction",
                 "confidence": 0.95,
                 "sourceError": "The agent previously suggested npm start.",
+                **_DURABLE_USER_FACT,
             }
         ]
     }
@@ -309,6 +320,7 @@ def test_apply_updates_ignores_empty_source_error() -> None:
                 "category": "correction",
                 "confidence": 0.95,
                 "sourceError": "   ",
+                **_DURABLE_USER_FACT,
             }
         ]
     }
@@ -442,6 +454,154 @@ def test_create_memory_fact_rejects_invalid_confidence() -> None:
             assert exc.args == ("confidence",)
         else:
             raise AssertionError("Expected ValueError for invalid fact confidence")
+
+
+class _ConcurrentCommitStorage(_MemoryStorage):
+    """apply_changes stand-in that simulates a concurrent writer committing a
+    duplicate fact between the caller's snapshot read and its first apply.
+
+    The first apply commits ``concurrent_fact`` (as a winning concurrent
+    writer would) and then raises a manifest revision conflict, forcing the
+    caller into its conflict-retry path with a fresh snapshot. Later applies
+    succeed and persist the upserts so test assertions can observe what the
+    caller actually stored.
+    """
+
+    def __init__(self, concurrent_fact: dict[str, object], memory: dict[str, object] | None = None):
+        super().__init__(memory)
+        self._concurrent_fact = concurrent_fact
+        self._conflict_injected = False
+
+    def apply_changes(self, change_set, **scope):  # noqa: ANN001, ANN201, ANN202 - test fake
+        if not self._conflict_injected:
+            self._conflict_injected = True
+            self.memory["facts"] = [*self.memory.get("facts", []), copy.deepcopy(self._concurrent_fact)]
+            self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+            raise MemoryManifestRevisionConflict("simulated concurrent commit")
+        self.memory["facts"] = [*self.memory.get("facts", []), *change_set.get("upserts", [])]
+        self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+        return {"complete": False}
+
+
+def test_create_memory_fact_rejects_duplicate_content() -> None:
+    """Backend-level dedup: create_memory_fact itself must reject content that
+    already exists (normalized), not just the tool layer's pre-check."""
+    existing = _make_memory(
+        facts=[
+            {
+                "id": "fact_existing",
+                "content": "User prefers dark mode",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-03-18T00:00:00Z",
+                "source": "manual",
+            }
+        ]
+    )
+
+    updater = _make_updater(memory=existing)
+    try:
+        updater.create_memory_fact(content="  user prefers DARK mode ", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+
+def test_create_memory_fact_rejects_duplicate_committed_during_conflict_retry() -> None:
+    """Race regression: a concurrent writer commits the same content between
+    this caller's snapshot read and its first apply. After the revision
+    conflict, the retry must detect the duplicate from the fresh snapshot
+    instead of storing a second copy."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "User prefers dark mode",
+        "category": "preference",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _ConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    try:
+        updater.create_memory_fact(content="user prefers DARK mode", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent"]
+
+
+class _LegacyConcurrentCommitStorage(_MemoryStorage):
+    """Legacy-path stand-in (no apply_changes override) that simulates a
+    concurrent writer committing a fact between the caller's snapshot read
+    and its first save: the first save commits ``concurrent_fact`` and
+    returns False (revision conflict), later saves persist normally."""
+
+    def __init__(self, concurrent_fact: dict[str, object], memory: dict[str, object] | None = None):
+        super().__init__(memory)
+        self._concurrent_fact = concurrent_fact
+        self._conflict_injected = False
+
+    def save(self, memory_data, agent_name=None, *, user_id=None, expected_revision=None):  # noqa: ANN001, ANN201, ANN202 - test fake
+        self.save_calls.append((agent_name, user_id, expected_revision))
+        if not self._conflict_injected:
+            self._conflict_injected = True
+            self.memory["facts"] = [*self.memory.get("facts", []), copy.deepcopy(self._concurrent_fact)]
+            self.memory["revision"] = int(self.memory.get("revision") or 0) + 1
+            return False
+        self.memory = memory_data
+        return True
+
+
+def test_create_memory_fact_legacy_path_rejects_duplicate_committed_during_save_conflict() -> None:
+    """Legacy single-file path race regression: a concurrent writer commits
+    the same content between this caller's snapshot read and its first save.
+    After the revision conflict, the retry must detect the duplicate from the
+    fresh snapshot and raise ValueError("Duplicate fact") instead of the
+    generic OSError save failure."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "User prefers dark mode",
+        "category": "preference",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _LegacyConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    try:
+        updater.create_memory_fact(content="user prefers DARK mode", agent_name="researcher")
+    except ValueError as exc:
+        assert exc.args == ("Duplicate fact",)
+    else:
+        raise AssertionError("Expected ValueError for duplicate fact content")
+
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent"]
+
+
+def test_create_memory_fact_legacy_path_retries_save_conflict_and_stores() -> None:
+    """Legacy single-file path: a save conflict without a duplicate reloads
+    the fresh snapshot and retries instead of failing the create."""
+    concurrent_fact = {
+        "id": "fact_concurrent",
+        "content": "An unrelated concurrent fact",
+        "category": "context",
+        "confidence": 0.9,
+        "createdAt": "2026-03-18T00:00:00Z",
+        "source": "manual",
+    }
+    storage = _LegacyConcurrentCommitStorage(concurrent_fact=concurrent_fact)
+    updater = _make_updater(storage=storage)
+
+    _, fact_id = updater.create_memory_fact(content="Brand new fact", agent_name="researcher")
+
+    assert fact_id is not None
+    assert len(storage.save_calls) == 2
+    assert [fact["id"] for fact in storage.memory["facts"]] == ["fact_concurrent", fact_id]
 
 
 def test_delete_memory_fact_raises_for_unknown_id() -> None:
@@ -785,7 +945,9 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_wrapped_json_responses_parse(self):
         """Memory update should tolerate provider wrappers around valid JSON."""
-        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9}], "factsToRemove": []}'
+        valid_json = (
+            '{"user": {}, "history": {}, "newFacts": [{"content": "User prefers concise updates", "category": "preference", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": []}'
+        )
         response_variants = [
             f"<think>Analyze the conversation first.</think>\n{valid_json}",
             f"<think>Analyze the conversation first.\n{valid_json}",
@@ -802,7 +964,7 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_ignores_unrelated_json_before_memory_update(self):
         """Parser should not select unrelated JSON objects before the memory update."""
-        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9}], "factsToRemove": []}'
+        valid_json = '{"user": {}, "history": {}, "newFacts": [{"content": "Remember the actual update", "category": "context", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": []}'
         response = f'Example object: {{"user": "alice"}}\nActual memory update:\n{valid_json}'
 
         result, storage = self._run_update_with_response(response)
@@ -819,7 +981,11 @@ class TestUpdateMemoryStructuredResponse:
 
     def test_schema_guard_ignores_invalid_update_fields(self):
         """Parsed JSON with bad field types should not break the memory update."""
-        response = '{"user": "bad", "history": [], "newFacts": ["bad", {"content": "User works on DeerFlow", "category": "context", "confidence": 0.91}], "factsToRemove": "bad"}'
+        response = (
+            '{"user": "bad", "history": [], "newFacts": ["bad", '
+            '{"content": "User works on DeerFlow", "category": "context", "confidence": 0.91, '
+            '"scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": "bad"}'
+        )
 
         result, storage = self._run_update_with_response(response)
 
@@ -830,7 +996,7 @@ class TestUpdateMemoryStructuredResponse:
         """Malformed fact entries should be normalized per fact, not fail the whole update."""
         response = (
             '{"user": {}, "history": {}, "newFacts": ['
-            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  "}, '
+            '{"content": "  User likes async updates  ", "category": 9, "confidence": "0.91", "sourceError": "  parse issue  ", "scope": "user", "durability": "durable", "authority": "descriptive"}, '
             '{"content": "skip invalid confidence", "category": "context", "confidence": "high"}, '
             '{"content": 12, "category": "context", "confidence": 0.9}, '
             '{"content": " ", "category": "context", "confidence": 0.9}'
@@ -1024,7 +1190,7 @@ class TestFactDeduplicationCaseInsensitive:
         update_data = {
             "factsToRemove": [],
             "newFacts": [
-                {"content": "user prefers python", "category": "preference", "confidence": 0.95},
+                {**_DURABLE_USER_FACT, "content": "user prefers python", "category": "preference", "confidence": 0.95},
             ],
         }
 
@@ -1051,7 +1217,7 @@ class TestFactDeduplicationCaseInsensitive:
         update_data = {
             "factsToRemove": [],
             "newFacts": [
-                {"content": "User prefers Go", "category": "preference", "confidence": 0.85},
+                {**_DURABLE_USER_FACT, "content": "User prefers Go", "category": "preference", "confidence": 0.85},
             ],
         }
 
@@ -1142,7 +1308,7 @@ class TestFinalizeCacheIsolation:
             {
                 "user": {},
                 "history": {},
-                "newFacts": [{"content": "new fact", "category": "context", "confidence": 0.9}],
+                "newFacts": [{**_DURABLE_USER_FACT, "content": "new fact", "category": "context", "confidence": 0.9}],
                 "factsToRemove": [],
             }
         )

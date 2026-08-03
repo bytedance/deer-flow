@@ -208,7 +208,15 @@ The cached value is reused across the blocking (`runs.wait`) and streaming (`_ha
 
 ## IM File Attachment Pipeline
 
-Inbound files (images, documents) walk through `Channel.receive_file` for materialization, then `_ingest_inbound_files` for owner-bound staging. The agent sees the staged path via the `<uploaded_files>` block injected into its context.
+Inbound files (images, documents) first pass through `Channel.receive_file` for
+provider-specific materialization. Attachments that continue through the shared
+metadata path are staged by `_ingest_inbound_files`; their metadata is placed in
+`HumanMessage.additional_kwargs.files`, and `UploadsMiddleware` injects a
+`<current_uploads>` block for the current message. Some providers instead consume
+their descriptors while downloading and rewrite placeholders or message text with
+the resulting virtual path (or a failure notice). Historical uploads are not
+automatically injected on later turns; the agent discovers them with
+`list_uploaded_files`.
 
 ```mermaid
 sequenceDiagram
@@ -218,17 +226,24 @@ sequenceDiagram
     participant Mgr as ChannelManager
     participant Ch as Channel impl<br/>.receive_file
     participant FS as Uploads directory<br/>users/OWNER/.../uploads/
+    participant MW as UploadsMiddleware
     participant Agent as Agent run
 
     IM->>Worker: message with file URL/bytes
     Worker->>Mgr: InboundMessage(files=[...], connection_id, owner_user_id)
     Mgr->>Mgr: storage_user_id = _channel_storage_user_id(msg)
     Mgr->>Ch: receive_file(msg, thread_id, user_id=storage_user_id)
-    Note over Ch: provider-specific download<br/>(WeCom: decrypt_file;<br/>WeChat: read_bytes; others: HTTP GET)
-    Ch->>FS: write_upload_file_no_symlink(<br/>uploads/OWNER/.../<br/>, safe_name, data)
-    Ch-->>Mgr: msg with text rewritten to include <uploaded_files>
-    Mgr->>Mgr: _ingest_inbound_files(<br/>thread_id, msg, user_id=storage_user_id)
-    Mgr->>Agent: HumanMessage with <uploaded_files> block<br/>(paths under /mnt/user-data/uploads/)
+    Note over Ch: provider-specific download/decrypt/read;<br/>may persist or hand bytes to manager
+    Ch-->>Mgr: materialized message<br/>(provider may rewrite placeholders/text)
+    alt attachment continues through shared metadata path
+        Mgr->>FS: _ingest_inbound_files(<br/>thread_id, msg, user_id=storage_user_id)
+        FS-->>Mgr: uploaded file metadata
+        Mgr->>MW: HumanMessage with<br/>additional_kwargs.files
+        MW->>Agent: prepend <current_uploads><br/>(paths under /mnt/user-data/uploads/)
+    else provider supplies virtual path in message text
+        Ch->>FS: persist and/or sync attachment
+        Mgr->>Agent: HumanMessage with rewritten path<br/>or failure notice
+    end
     Agent->>FS: read_file / view_image (sandbox)
 ```
 

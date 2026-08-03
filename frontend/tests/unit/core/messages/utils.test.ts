@@ -456,6 +456,30 @@ describe("inline <think> tag splitting", () => {
     expect(hasReasoning(message)).toBe(false);
   });
 
+  test("a closed <think> pair inside markdown inline code stays in content", () => {
+    // The model talking about the tag literally, e.g. when explaining prompt
+    // engineering. Hollowing the code span out into the reasoning panel
+    // corrupts the visible answer.
+    const message = aiMessage(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a closed <think> pair outside code is still stripped when another sits in inline code", () => {
+    const message = aiMessage(
+      "<think>real reasoning</think>Use `<think>text</think>` markers.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>text</think>` markers.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+  });
+
   test("a backtick-prefixed <think> mid-stream is not split into reasoning", () => {
     // Simulates the moment the model has emitted the opening backtick and
     // `<think>` for a literal documentation reference, before the closing
@@ -603,6 +627,31 @@ describe("human message internal context stripping", () => {
     ]);
   });
 
+  test("parses uploaded filenames that contain parentheses", () => {
+    // Browsers name duplicate downloads "photo (1).png"; the backend emits the
+    // filename verbatim, so the parser must not stop the name at the first "(".
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- photo (1).png (12.3 KB)\n  Path: /mnt/user-data/uploads/photo (1).png\n- report (final) (2).docx (1.5 MB)\n  Path: /mnt/user-data/uploads/report (final) (2).docx\n- normal.pdf (3.0 KB)\n  Path: /mnt/user-data/uploads/normal.pdf\n</current_uploads>\n\nSummarize";
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "photo (1).png",
+        size: Math.round(12.3 * 1024),
+        path: "/mnt/user-data/uploads/photo (1).png",
+      },
+      {
+        filename: "report (final) (2).docx",
+        size: Math.round(1.5 * 1024 * 1024),
+        path: "/mnt/user-data/uploads/report (final) (2).docx",
+      },
+      {
+        filename: "normal.pdf",
+        size: 3 * 1024,
+        path: "/mnt/user-data/uploads/normal.pdf",
+      },
+    ]);
+  });
+
   test("stripInternalMarkers removes current_uploads blocks on export", () => {
     const content =
       "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
@@ -686,6 +735,22 @@ test("hides assistant copy data while that turn is streaming", () => {
 
   expect(getAssistantTurnCopyData(messages)).toBe("Partial answer");
   expect(getAssistantTurnCopyData(messages, { isStreaming: true })).toBeNull();
+});
+
+test("falls back to reasoning for a reasoning-only assistant turn's copy data", () => {
+  // A turn can end with reasoning but no answer text (e.g. stopped during
+  // thinking). getMessageCopyData already copies the reasoning in that case;
+  // the turn-level copy button must not disappear instead.
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "the actual reasoning" },
+    },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("the actual reasoning");
 });
 
 test("marks the latest assistant message as streaming", () => {
