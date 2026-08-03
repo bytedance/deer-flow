@@ -622,6 +622,14 @@ export const zhCN: Translations = {
     browserBack: "在浏览器中返回上一页",
     browserScreenshot: "浏览器截图",
     browserClose: "关闭浏览器",
+    details: "工具详情",
+    toolName: "工具",
+    toolCallId: "调用 ID",
+    input: "输入",
+    result: "结果",
+    error: "错误",
+    payloadTruncated: (limit: number) =>
+      `内容已在 ${limit.toLocaleString("zh-CN")} 个字符后截断。`,
   },
 
   humanInput: {
