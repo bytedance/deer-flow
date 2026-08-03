@@ -350,13 +350,41 @@ def _validate_materialized(case: BenchmarkCase, expected: list[BaseMessage], war
     return len(cold), cold_digest
 
 
+_HISTORY_CACHE_ENV = "DEERFLOW_CHECKPOINT_BENCH_HISTORY_CACHE"
+
+
+def _wrap_history_cache(saver: Any) -> Any:
+    """Wrap *saver* in a CachedHistorySaver with a fresh, unbounded memory cache.
+
+    Opt-in via DEERFLOW_CHECKPOINT_BENCH_HISTORY_CACHE=1 so default rows are
+    byte-identical to the pre-cache benchmark. A fresh wrapper per phase keeps
+    the cold read genuinely cold: the write-phase cache is discarded, mirroring
+    a process restart (cache lifetime == checkpointer CM lifetime).
+    """
+    from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+    from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+
+    return CachedHistorySaver(
+        saver,
+        MemoryCheckpointHistoryCache(max_entries=1_000_000),
+        key_prefix="bench:v1:checkpoint-bench",
+    )
+
+
+def _history_cache_stats(wrapper: Any, prefix: str) -> dict[str, Any]:
+    return {f"{prefix}{key}": value for key, value in wrapper.stats().items()}
+
+
 def _run_memory_case(case: BenchmarkCase, messages: list[BaseMessage]) -> dict[str, Any]:
+    cache_opt_in = os.environ.get(_HISTORY_CACHE_ENV) == "1"
     saver = InMemorySaver()
-    metrics, warm = _write_and_read(case, saver, messages)
+    write_saver = _wrap_history_cache(saver) if cache_opt_in else saver
+    metrics, warm = _write_and_read(case, write_saver, messages)
     stats = _collect_storage_stats(lambda: _memory_storage_stats(saver, _config(case)["configurable"]["thread_id"]))
-    cold_read_ms, cold = _cold_read(case, saver)
+    cold_saver = _wrap_history_cache(saver) if cache_opt_in else saver
+    cold_read_ms, cold = _cold_read(case, cold_saver)
     actual_count, digest = _validate_materialized(case, messages, warm, cold)
-    return {
+    result = {
         **metrics,
         **stats,
         "cold_read_ms": cold_read_ms,
@@ -371,12 +399,19 @@ def _run_memory_case(case: BenchmarkCase, messages: list[BaseMessage]) -> dict[s
         "actual_message_count": actual_count,
         "content_sha256": digest,
     }
+    if cache_opt_in:
+        result["history_cache_enabled"] = True
+        result.update(_history_cache_stats(write_saver, "history_cache_write_"))
+        result.update(_history_cache_stats(cold_saver, "history_cache_cold_"))
+    return result
 
 
 def _run_sqlite_case(case: BenchmarkCase, messages: list[BaseMessage], db_path: Path) -> dict[str, Any]:
+    cache_opt_in = os.environ.get(_HISTORY_CACHE_ENV) == "1"
     with SqliteSaver.from_conn_string(str(db_path)) as saver:
         saver.setup()
-        metrics, warm = _write_and_read(case, saver, messages)
+        write_saver = _wrap_history_cache(saver) if cache_opt_in else saver
+        metrics, warm = _write_and_read(case, write_saver, messages)
         stats = _collect_storage_stats(lambda: _sqlite_storage_stats(saver, _config(case)["configurable"]["thread_id"]))
         db_bytes = _file_size(db_path)
         wal_bytes = _file_size(Path(f"{db_path}-wal"))
@@ -387,10 +422,11 @@ def _run_sqlite_case(case: BenchmarkCase, messages: list[BaseMessage], db_path: 
     with SqliteSaver.from_conn_string(str(db_path)) as reopened:
         reopened.setup()
         saver_reopen_ms = (time.perf_counter() - reopen_start) * 1000
-        cold_read_ms, cold = _cold_read(case, reopened)
+        cold_saver = _wrap_history_cache(reopened) if cache_opt_in else reopened
+        cold_read_ms, cold = _cold_read(case, cold_saver)
 
     actual_count, digest = _validate_materialized(case, messages, warm, cold)
-    return {
+    result = {
         **metrics,
         **stats,
         "cold_read_ms": cold_read_ms,
@@ -403,6 +439,11 @@ def _run_sqlite_case(case: BenchmarkCase, messages: list[BaseMessage], db_path: 
         "actual_message_count": actual_count,
         "content_sha256": digest,
     }
+    if cache_opt_in:
+        result["history_cache_enabled"] = True
+        result.update(_history_cache_stats(write_saver, "history_cache_write_"))
+        result.update(_history_cache_stats(cold_saver, "history_cache_cold_"))
+    return result
 
 
 def _run_case(case: BenchmarkCase, *, work_dir: Path) -> dict[str, Any]:

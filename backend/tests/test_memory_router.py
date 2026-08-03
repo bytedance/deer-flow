@@ -213,6 +213,20 @@ def test_create_memory_fact_route_maps_conflict_to_409() -> None:
     assert response.json()["detail"] == "Memory changed concurrently; reload and retry."
 
 
+def test_create_memory_fact_route_maps_duplicate_to_409() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.create_fact.side_effect = ValueError("Duplicate fact")
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts", json={"content": "fact"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "A fact with the same content already exists."
+
+
 def test_get_memory_route_maps_corruption_to_stable_500() -> None:
     app = FastAPI()
     app.include_router(memory.router)

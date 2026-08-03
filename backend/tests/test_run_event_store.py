@@ -726,6 +726,20 @@ class TestMakeRunEventStore:
 
 class TestJsonlRunEventStore:
     @pytest.mark.anyio
+    @pytest.mark.parametrize("thread_id", ["", "thread.with.dot", "../escape", "x" * 65])
+    async def test_rejects_noncanonical_thread_ids(self, tmp_path, thread_id):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        store = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        with pytest.raises(ValueError, match="Invalid thread_id"):
+            await store.put(
+                thread_id=thread_id,
+                run_id="r1",
+                event_type="human_message",
+                category="message",
+            )
+
+    @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 

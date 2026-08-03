@@ -410,18 +410,66 @@ def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
     assert response.status_code == 404
 
 
-def test_delete_thread_route_returns_422_for_route_safe_invalid_id(tmp_path):
-    paths = Paths(tmp_path)
+def test_delete_thread_route_cleans_legacy_metadata_without_resolving_unsafe_path():
+    app, store, _checkpointer = _build_thread_app()
+    legacy_thread_id = "legacy.thread"
 
-    app = make_authed_test_app()
-    app.include_router(threads.router)
+    asyncio.run(
+        store.aput(
+            THREADS_NS,
+            legacy_thread_id,
+            {
+                "thread_id": legacy_thread_id,
+                "status": "idle",
+                "created_at": "",
+                "updated_at": "",
+                "metadata": {},
+            },
+        )
+    )
 
-    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
-        with TestClient(app) as client:
-            response = client.delete("/api/threads/thread.with.dot")
+    with (
+        patch(
+            "app.gateway.routers.threads._delete_thread_data",
+            side_effect=AssertionError("legacy thread ID must not reach filesystem cleanup"),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.delete(f"/api/threads/{legacy_thread_id}")
+
+    assert response.status_code == 200
+    assert "Skipped local data cleanup" in response.json()["message"]
+    assert asyncio.run(store.aget(THREADS_NS, legacy_thread_id)) is None
+
+
+def test_legacy_thread_metadata_mutation_is_rejected():
+    app, store, _checkpointer = _build_thread_app()
+    legacy_thread_id = "legacy.thread"
+
+    asyncio.run(
+        store.aput(
+            THREADS_NS,
+            legacy_thread_id,
+            {
+                "thread_id": legacy_thread_id,
+                "status": "idle",
+                "created_at": "",
+                "updated_at": "",
+                "metadata": {"original": True},
+            },
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.patch(
+            f"/api/threads/{legacy_thread_id}",
+            json={"metadata": {"mutated": True}},
+        )
 
     assert response.status_code == 422
-    assert "Invalid thread_id" in response.json()["detail"]
+    record = asyncio.run(store.aget(THREADS_NS, legacy_thread_id))
+    assert record is not None
+    assert record.value["metadata"] == {"original": True}
 
 
 def test_delete_thread_data_returns_generic_500_error(tmp_path):
@@ -488,6 +536,31 @@ def test_create_thread_returns_iso_timestamps() -> None:
     assert _ISO_TIMESTAMP_RE.match(body["created_at"]), body["created_at"]
     assert _ISO_TIMESTAMP_RE.match(body["updated_at"]), body["updated_at"]
     assert body["created_at"] == body["updated_at"]
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    ["", "thread.with.dot", "../escape", "x" * 65],
+)
+def test_create_thread_rejects_invalid_explicit_thread_id_before_persistence(thread_id: str) -> None:
+    app, store, checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": thread_id})
+
+    assert response.status_code == 422
+    assert asyncio.run(store.asearch(THREADS_NS)) == []
+    assert not checkpointer.storage
+
+
+def test_create_thread_preserves_valid_explicit_thread_id() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "caller_thread-1"})
+
+    assert response.status_code == 200
+    assert response.json()["thread_id"] == "caller_thread-1"
 
 
 def test_create_thread_returns_existing_when_insert_loses_race() -> None:

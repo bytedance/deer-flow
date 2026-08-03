@@ -33,6 +33,12 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
+_DURABLE_USER_FACT = {
+    "scope": "user",
+    "durability": "durable",
+    "authority": "descriptive",
+}
+
 
 def _memory_config(**overrides: object) -> DeerMemConfig:
     config = DeerMemConfig()
@@ -569,7 +575,7 @@ class TestApplyUpdatesStaleness:
             "user": {},
             "history": {},
             "newFacts": [],
-            "factsToRemove": ["fact_contradicted"],
+            "factsToRemove": [{"id": "fact_contradicted", "scope": "user", "reason": "Explicit contradiction in test fixture"}],
             "staleFactsToRemove": [{"id": "fact_stale", "reason": "old"}],
         }
 
@@ -924,7 +930,7 @@ class TestNewFactsExpectedValidDays:
         update_data = {
             "user": {},
             "history": {},
-            "newFacts": [{"content": "User speaks Spanish natively", "category": "knowledge", "confidence": 0.95, "expected_valid_days": 180}],
+            "newFacts": [{**_DURABLE_USER_FACT, "content": "User speaks Spanish natively", "category": "knowledge", "confidence": 0.95, "expected_valid_days": 180}],
             "factsToRemove": [],
         }
 
@@ -947,7 +953,7 @@ class TestNewFactsExpectedValidDays:
         update_data = {
             "user": {},
             "history": {},
-            "newFacts": [{"content": "User prefers Python", "category": "knowledge", "confidence": 0.9, "expected_valid_days": 3650}],
+            "newFacts": [{**_DURABLE_USER_FACT, "content": "User prefers Python", "category": "knowledge", "confidence": 0.9, "expected_valid_days": 3650}],
             "factsToRemove": [],
         }
 
@@ -962,7 +968,7 @@ class TestNewFactsExpectedValidDays:
         update_data = {
             "user": {},
             "history": {},
-            "newFacts": [{"content": "User uses Python", "category": "knowledge", "confidence": 0.9}],
+            "newFacts": [{**_DURABLE_USER_FACT, "content": "User uses Python", "category": "knowledge", "confidence": 0.9}],
             "factsToRemove": [],
         }
 

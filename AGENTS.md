@@ -35,6 +35,18 @@ Nginx is the single public entry: it serves the frontend and proxies `/api/langg
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
 other `/api/*` go straight to the Gateway REST routers. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
+It compresses HTML and configured textual assets, while deliberately leaving SSE,
+fonts, images, audio, and video uncompressed at the proxy layer.
+
+Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
+— **loopback by default**, matching the README's documented deployment model. A bare
+`"${PORT}:2026"` binds `0.0.0.0`, which does not.
+Nginx itself listens `default_server` on IPv4+IPv6 and the
+Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
+internal; the published nginx port is the entire external surface, and the Gateway's
+`8001` is deliberately not published. Any new published port needs an explicit bind
+address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
+in both compose files.
 
 ## Repository Map
 

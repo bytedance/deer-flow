@@ -100,6 +100,45 @@ class CheckpointGraphCacheConfig(BaseModel):
     )
 
 
+class CheckpointCacheConfig(BaseModel):
+    """Delta-history cache policy. Performance-only: never frozen, never
+    required to match across processes sharing one checkpoint database.
+
+    Applies only when ``checkpoint_channel_mode`` is ``delta``. ``max_entries``
+    bounds the process-local memory backend; ``0`` disables the cache
+    entirely. The redis backend is bounded by ``ttl_seconds`` and the server's
+    own maxmemory policy.
+    """
+
+    type: Literal["memory", "redis"] = Field(
+        default="memory",
+        description=("Checkpoint history cache backend. 'memory' = process-local LRU; 'redis' = shared cache for multi-worker deployments (async/Gateway path only; the sync embedded path rejects it)."),
+    )
+    max_entries: int = Field(
+        default=128,
+        ge=0,
+        description="LRU capacity of the memory backend. 0 disables the cache.",
+    )
+    redis_url: str | None = Field(
+        default=None,
+        description=("Redis URL for type=redis. If omitted, DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used."),
+    )
+    ttl_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "Redis entry TTL; a leak safety net, not a correctness mechanism (entries are immutable). "
+            "Thread deletion purges that thread's entries immediately; if the purge fails (redis outage), "
+            "residual copies of the thread's history persist until this TTL expires. "
+            "0 explicitly disables expiry — orphaned keys then rely on the redis maxmemory policy alone."
+        ),
+    )
+    key_prefix: str = Field(
+        default="",
+        description="Optional override for the redis key prefix; defaults to a hash of the database identity.",
+    )
+
+
 class DatabaseConfig(BaseModel):
     backend: Literal["memory", "sqlite", "postgres"] = Field(
         default="memory",
@@ -121,6 +160,10 @@ class DatabaseConfig(BaseModel):
     checkpoint_graph_cache: CheckpointGraphCacheConfig = Field(
         default_factory=CheckpointGraphCacheConfig,
         description="Size caps for the compiled checkpoint graph caches. Hot-reloadable; not restart-required.",
+    )
+    checkpoint_cache: CheckpointCacheConfig = Field(
+        default_factory=CheckpointCacheConfig,
+        description="Delta-mode checkpoint history cache. Performance-only; safe to differ across workers.",
     )
     sqlite_dir: str = Field(
         default=".deer-flow/data",

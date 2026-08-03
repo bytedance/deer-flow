@@ -431,8 +431,13 @@ export function getAssistantTurnCopyData(
       .reverse()
       .filter((message) => message.type === "ai")
       .map((message) => {
+        // extractContentFromMessage never returns null, so fall back to
+        // reasoning on empty text (same rule as getMessageCopyData) —
+        // otherwise a reasoning-only turn loses its copy button entirely.
         const content = extractContentFromMessage(message);
-        return content ?? extractReasoningContentFromMessage(message) ?? "";
+        return content.length > 0
+          ? content
+          : (extractReasoningContentFromMessage(message) ?? "");
       })
       .find((content) => content.length > 0) ?? null
   );
@@ -483,14 +488,23 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   const reasoningParts: string[] = [];
 
   // First pass: strip every fully closed `<think>...</think>` pair and
-  // collect its body as reasoning.
-  let cleaned = content.replace(THINK_TAG_RE, (_, reasoning: string) => {
-    const normalized = reasoning.trim();
-    if (normalized) {
-      reasoningParts.push(normalized);
-    }
-    return "";
-  });
+  // collect its body as reasoning. A pair whose opener sits right after a
+  // backtick is the model talking about the tag literally inside markdown
+  // inline code (same guard as the streaming pass below) — leave it in the
+  // rendered content instead of hollowing out the code span.
+  let cleaned = content.replace(
+    THINK_TAG_RE,
+    (match: string, reasoning: string, offset: number) => {
+      if (content[offset - 1] === "`") {
+        return match;
+      }
+      const normalized = reasoning.trim();
+      if (normalized) {
+        reasoningParts.push(normalized);
+      }
+      return "";
+    },
+  );
 
   // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
   // yet means the rest of the chunk is reasoning in flight. Route it into the
@@ -845,7 +859,11 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
-  const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
+  // The filename itself may contain parentheses (e.g. "photo (1).png"), so
+  // the size group is anchored on the trailing "(<number> <unit>)" pair the
+  // backend emits instead of stopping the filename at the first "(".
+  const fileRegex =
+    /- (.+)\s*\(([\d.]+\s*(?:B|KB|MB|GB|TB))\)\s*\n\s*Path:\s*([^\n]+)/gi;
   const files: FileInMessage[] = [];
   let fileMatch;
 
