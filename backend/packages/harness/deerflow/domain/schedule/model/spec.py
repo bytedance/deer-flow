@@ -161,12 +161,21 @@ class ScheduleSpec:
         single occurrence is in the past). CRON is evaluated in this schedule's
         timezone and returned as UTC. A naive `now` is read as UTC
         (schedules.py:32-33).
+
+        **Both branches return UTC** (#4607). `run_at` keeps the zone it was
+        declared in, so returning it unconverted handed the caller a non-UTC
+        offset while CRON handed back UTC. The value is persisted into
+        `scheduled_tasks.next_run_at`, and SQLAlchemy's SQLite dialect discards
+        tzinfo on bind -- so a once task declared in Asia/Shanghai fired eight
+        hours late, and a negative offset fired early, slipping past the
+        `min_once_delay_seconds` floor on the way. Postgres timestamptz
+        normalizes on write, which is why only SQLite deployments saw it.
         """
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
 
         if self.schedule_type is ScheduleType.ONCE:
-            return self.run_at if self.run_at > now else None
+            return self.run_at.astimezone(UTC) if self.run_at > now else None
 
         zone = ZoneInfo(self.timezone)
         next_local = croniter(self.cron, now.astimezone(zone)).get_next(datetime)

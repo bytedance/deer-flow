@@ -231,6 +231,35 @@ class TestNextAfter:
         spec = cron_spec("0 9 * * *", "UTC")
         assert spec.next_after(NOW.replace(tzinfo=None)) == spec.next_after(NOW)
 
+    def test_once_in_a_non_utc_zone_is_returned_as_utc(self):
+        """#4607: both branches must return UTC.
+
+        `run_at` keeps the zone it was declared in. Returning it unconverted
+        made ONCE disagree with CRON, and the value is persisted into a column
+        whose SQLite dialect discards tzinfo -- so the task fired a whole
+        offset late (+08:00 here). Comparing `utcoffset()` rather than the
+        instant is the point: the two are equal as instants either way, and it
+        is the *label* that gets thrown away on write.
+        """
+        spec = ScheduleSpec.once_at(datetime(2026, 8, 2, 9, 0), "Asia/Shanghai")  # noqa: DTZ001 -- naive local wall time is the subject
+        next_at = spec.next_after(NOW)
+        assert next_at.utcoffset() == timedelta(0)
+        assert next_at == datetime(2026, 8, 2, 1, 0, tzinfo=UTC)
+
+    def test_a_negative_offset_once_is_also_returned_as_utc(self):
+        """The negative-offset half: this one fired *early*, which additionally
+        slipped past the `min_once_delay_seconds` floor."""
+        spec = ScheduleSpec.once_at(datetime(2026, 8, 2, 9, 0), "America/New_York")  # noqa: DTZ001 -- naive local wall time is the subject
+        next_at = spec.next_after(NOW)
+        assert next_at.utcoffset() == timedelta(0)
+        assert next_at == datetime(2026, 8, 2, 13, 0, tzinfo=UTC)  # EDT, UTC-4
+
+    def test_both_branches_agree_on_the_returned_offset(self):
+        """The invariant behind the two cases above, stated once."""
+        once = ScheduleSpec.once_at(datetime(2026, 8, 2, 9, 0), "Asia/Shanghai")  # noqa: DTZ001 -- naive local wall time is the subject
+        cron = cron_spec("0 9 * * *", "Asia/Shanghai")
+        assert once.next_after(NOW).utcoffset() == cron.next_after(NOW).utcoffset()
+
 
 # ---------------------------------------------------------------- C. ensure_launchable
 
