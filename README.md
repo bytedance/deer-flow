@@ -1029,12 +1029,14 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
 DeerFlow also includes an optional `openviking` memory backend. It uses
-OpenViking's official LangChain recorder and retriever to capture completed
-turns, commit OpenViking Sessions, and recall query-relevant memories before
-each user turn. DeerFlow keeps ownership of its lifecycle and a bounded local
-capture cursor, while OpenViking owns message conversion, batching, retrieval,
-and transport behavior. Existing trusted-mode configurations remain available
-temporarily through a deprecated compatibility path. See
+the pinned `langchain-openviking` package's official recorder and retriever to
+capture completed turns, commit OpenViking Sessions, and recall query-relevant
+memories before each user turn. DeerFlow keeps ownership of its lifecycle and a
+bounded local capture cursor, while the standalone integration owns message
+conversion, batching, retrieval, and SDK transport behavior. The full
+OpenViking server package is not installed in DeerFlow. Existing trusted-mode
+configurations remain available temporarily through a deprecated compatibility
+path. See
 [OpenViking memory backend](docs/OPENVIKING.md) for configuration and legacy
 migration guidance.
 

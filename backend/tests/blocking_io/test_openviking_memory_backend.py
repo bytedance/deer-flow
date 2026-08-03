@@ -121,6 +121,11 @@ class _OfficialProbeClient:
 class _OfficialProbeRecorder:
     def __init__(self, *, probe_path: Path, **kwargs: Any):
         self._probe_path = probe_path
+        self.client = _OfficialProbeClient(
+            url=kwargs.get("url"),
+            api_key=kwargs.get("api_key"),
+            timeout=kwargs.get("timeout"),
+        )
 
     def record(self, session_id: str, messages: list[Any], peer_id: str | None = None):
         self._probe_path.write_text(session_id, encoding="utf-8")
@@ -130,7 +135,7 @@ class _OfficialProbeRecorder:
         self._probe_path.write_text(session_id, encoding="utf-8")
 
     def close(self) -> None:
-        pass
+        self.client.close()
 
 
 class _OfficialProbeRetriever:
@@ -191,7 +196,6 @@ async def test_async_official_openviking_operations_do_not_block_event_loop(
         module,
         "_load_official_integration",
         lambda: {
-            "SyncHTTPClient": _OfficialProbeClient,
             "OpenVikingCommitPolicy": _OfficialProbeCommitPolicy,
             "OpenVikingPartialWriteError": _OfficialProbePartialWriteError,
             "OpenVikingRetriever": Retriever,

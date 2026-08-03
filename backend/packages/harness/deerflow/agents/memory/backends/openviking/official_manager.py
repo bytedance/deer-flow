@@ -68,16 +68,17 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     def model_post_init(self, __context: Any) -> None:
         self._config = OfficialOpenVikingConfig.from_backend_config(self.backend_config)
         integration = _load_official_integration()
-        self._client = integration["SyncHTTPClient"](
+        self._commit_policy = integration["OpenVikingCommitPolicy"](mode="always")
+        self._recorder = integration["OpenVikingSessionRecorder"](
             url=self._config.base_url,
             api_key=self._config.api_key,
             timeout=self._config.timeout_seconds,
-        )
-        self._commit_policy = integration["OpenVikingCommitPolicy"](mode="always")
-        self._recorder = integration["OpenVikingSessionRecorder"](
-            client=self._client,
             commit_policy=self._commit_policy,
         )
+        # The public property returns the recorder-owned lazy recovery handle.
+        # Inject that same handle into retrieval; DeerFlow never constructs or
+        # separately owns an SDK client.
+        self._client = self._recorder.client
         self._retriever = integration["OpenVikingRetriever"](
             client=self._client,
             target_uri="viking://user/memories",
@@ -383,13 +384,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         except BaseException as exc:
             if first_error is None:
                 first_error = exc
-        try:
-            close = getattr(self._client, "close", None)
-            if callable(close):
-                close()
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
         if first_error is not None:
             raise first_error
 
@@ -550,9 +544,10 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         with self._client_init_lock:
             if self._client_initialized:
                 return
-            initialize = getattr(self._client, "initialize", None)
-            if callable(initialize):
-                initialize()
+            if not getattr(self._client, "_initialized", False):
+                initialize = getattr(self._client, "initialize", None)
+                if callable(initialize):
+                    initialize()
             self._client_initialized = True
 
     def _session_lock(self, session_id: str) -> threading.RLock:
@@ -643,20 +638,19 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
 
 def _load_official_integration() -> dict[str, Any]:
     try:
-        from openviking.integrations.langchain import (
+        from langchain_openviking import (
             OpenVikingCommitPolicy,
             OpenVikingPartialWriteError,
             OpenVikingRetriever,
             OpenVikingSessionRecorder,
             has_request_actor_peer_support,
         )
-        from openviking_sdk import SyncHTTPClient, use_actor_peer
+        from langchain_openviking.actor_peer import use_actor_peer
     except ImportError as exc:
-        raise ImportError("The official OpenViking memory backend requires an OpenViking release with LangChain integration support. Install `openviking[langchain]` and retry.") from exc
+        raise ImportError("The official OpenViking memory backend requires langchain-openviking==0.1.0. Install DeerFlow backend dependencies and retry.") from exc
     if not has_request_actor_peer_support():
-        raise ImportError("The installed OpenViking SDK lacks request-scoped actor-peer support. Upgrade openviking and openviking-sdk together.")
+        raise ImportError("The installed OpenViking SDK lacks request-scoped actor-peer support. Install openviking-sdk>=0.1.6,<0.2 and retry.")
     return {
-        "SyncHTTPClient": SyncHTTPClient,
         "OpenVikingCommitPolicy": OpenVikingCommitPolicy,
         "OpenVikingPartialWriteError": OpenVikingPartialWriteError,
         "OpenVikingRetriever": OpenVikingRetriever,

@@ -1014,8 +1014,10 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `resolve_runtime_user_id(runtime)`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`. `DynamicContextMiddleware` passes the same resolved identity to the memory read path. On standalone Agent Server runs, server-owned auth identity is also resolved during lead-agent construction, normalized through `make_safe_user_id` for DeerFlow storage, and explicitly reused for custom-agent config/SOUL, user skills, skill policy, and prompt assembly; ordinary client `user_id` values cannot override `langgraph_auth_user_id`. On the embedded Gateway path, `inject_authenticated_user_context` removes client-supplied `langgraph_auth_user` / `langgraph_auth_user_id` from both RunnableConfig sections before graph construction, so those reserved fields cannot impersonate Agent Server auth.
 - The optional `openviking` backend under
   `packages/harness/deerflow/agents/memory/backends/openviking/` is a
-  remote-only adapter built on OpenViking's official LangChain recorder and
-  retriever. Select it with `memory.manager_class: openviking` and keep
+  remote-only adapter built on the pinned `langchain-openviking` package's
+  official recorder and retriever. The package owns the SDK transport; DeerFlow
+  does not import or construct an OpenViking HTTP client. Select it with
+  `memory.manager_class: openviking` and keep
   `memory.mode: middleware`. DeerFlow owns recall/capture timing, authenticated
   user and agent mapping, pre-compaction capture, shutdown draining, and a
   bounded hash-only cursor below

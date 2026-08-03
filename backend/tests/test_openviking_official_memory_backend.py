@@ -57,8 +57,19 @@ class _Client:
 
 
 class _Recorder:
-    def __init__(self, *, client: _Client, commit_policy: _CommitPolicy):
-        self.client = client
+    def __init__(
+        self,
+        *,
+        commit_policy: _CommitPolicy,
+        client: _Client | None = None,
+        url: str | None = None,
+        api_key: str | None = None,
+        timeout: float = 60.0,
+        auto_initialize: bool = True,
+    ):
+        del auto_initialize
+        self.client = client or _Client(url=url, api_key=api_key, timeout=timeout)
+        self._owns_client = client is None
         self.commit_policy = commit_policy
         self.calls: list[tuple[str, list[Any], str | None, str | None]] = []
         self.flushes: list[str] = []
@@ -80,6 +91,8 @@ class _Recorder:
 
     def close(self) -> None:
         self.closed = True
+        if self._owns_client:
+            self.client.close()
 
 
 class _Retriever:
@@ -135,7 +148,6 @@ def official_integration(monkeypatch: pytest.MonkeyPatch):
         module,
         "_load_official_integration",
         lambda: {
-            "SyncHTTPClient": _Client,
             "OpenVikingCommitPolicy": _CommitPolicy,
             "OpenVikingPartialWriteError": _PartialWriteError,
             "OpenVikingRetriever": _Retriever,
@@ -143,6 +155,32 @@ def official_integration(monkeypatch: pytest.MonkeyPatch):
             "use_actor_peer": _use_actor_peer,
         },
     )
+
+
+def test_official_loader_uses_standalone_package() -> None:
+    from deerflow.agents.memory.backends.openviking.official_manager import (
+        _load_official_integration,
+    )
+
+    integration = _load_official_integration()
+
+    assert integration["OpenVikingSessionRecorder"].__module__.startswith("langchain_openviking")
+    assert integration["OpenVikingRetriever"].__module__.startswith("langchain_openviking")
+    assert integration["use_actor_peer"].__module__ == "langchain_openviking.actor_peer"
+
+
+def test_published_adapter_manager_construction_is_lazy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+
+    manager = OpenVikingMemoryManager.from_config(_config(tmp_path, base_url="http://127.0.0.1:9"))
+
+    assert isinstance(manager, OfficialOpenVikingMemoryManager)
+    assert manager._client_initialized is False
+    manager.close()
+    assert manager._resources_closed is True
 
 
 def _config(tmp_path: Path, **overrides: Any) -> dict[str, Any]:

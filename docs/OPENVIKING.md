@@ -60,16 +60,17 @@ own an independent memory lifecycle.
 ## Requirements
 
 Run OpenViking as a user-managed local or remote service with its VLM,
-embedding provider, and persistent workspace configured. The DeerFlow Python
-environment also needs an OpenViking release containing the official LangChain
-adapters and request-scoped actor-peer support:
+embedding provider, and persistent workspace configured. DeerFlow includes
+`langchain-openviking==0.1.0` and requires `openviking-sdk>=0.1.6,<0.2` for
+request-scoped actor peers. Install the normal backend environment:
 
 ```bash
-uv pip install "openviking[langchain]"
+make install
 ```
 
-Until those changes are available in a release, contributors can install the
-current OpenViking source in the DeerFlow development environment.
+The automatic-memory path does not require the full `openviking` server package
+inside DeerFlow. The standalone adapter owns its SDK transport and talks to the
+configured OpenViking service over HTTP.
 
 ## Configure DeerFlow
 
