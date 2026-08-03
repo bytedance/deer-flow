@@ -22,6 +22,16 @@ function pinnedThread(id: string, updatedAt: string): AgentThread {
 }
 
 describe("thread list model", () => {
+  it("sorts the full thread list with pinned threads first", () => {
+    const unpinned = thread("unpinned", "2026-01-02T00:00:00.000Z");
+    const pinned = pinnedThread("pinned", "2026-01-01T00:00:00.000Z");
+
+    const model = buildThreadListModel([[unpinned, pinned]]);
+
+    expect(model.threads).toEqual([pinned, unpinned]);
+    expect(model.displayedThreads).toEqual([pinned, unpinned]);
+  });
+
   it("deduplicates once while only bounding recent sidebar rows", () => {
     const pages = Array.from({ length: 5 }, (_, page) =>
       Array.from({ length: 50 }, (_, index) => {

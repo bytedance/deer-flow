@@ -34,7 +34,7 @@ export function buildThreadListModel(
     .slice(0, MAX_VISIBLE_THREADS);
   const model: ThreadListModel = {
     byId,
-    threads,
+    threads: sortedThreads,
     displayedThreads: [...pinnedThreads, ...recentThreads],
     canLoadMore: recentThreads.length < MAX_VISIBLE_THREADS,
   };
