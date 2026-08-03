@@ -339,6 +339,11 @@ stop() {
 
 # Restart Docker development environment
 restart() {
+    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
+    # restarting services so Compose resolves mounted paths from this checkout.
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"
