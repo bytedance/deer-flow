@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0011_app_key_control_plane"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 
