@@ -379,6 +379,7 @@ class McpServerConfigResponse(BaseModel):
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_name_prefix: bool = Field(default=True, description="Whether to prefix discovered tool names with the MCP server name")
     tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
+    session_init_timeout: float | None = Field(default=None, description="Timeout in seconds for MCP server bring-up (tool discovery and persistent stdio session initialization); None means no timeout")
     model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="before")

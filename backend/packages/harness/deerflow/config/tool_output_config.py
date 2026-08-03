@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from deerflow.constants import TOOL_RESULTS_DIRNAME
+
 
 class ToolOutputConfig(BaseModel):
     """Config section for tool-result output budget enforcement.
@@ -49,8 +51,12 @@ class ToolOutputConfig(BaseModel):
         description="Tail characters for fallback truncation.",
     )
     storage_subdir: str = Field(
-        default=".tool-results",
-        description="Subdirectory under the thread outputs path for persisted tool results.",
+        default=TOOL_RESULTS_DIRNAME,
+        description=(
+            "Subdirectory under the thread outputs path for persisted tool results. TOOL_RESULTS_DIRNAME is always "
+            "excluded by the workspace-changes scanner; other custom values are excluded from workspace snapshots and "
+            "run delivery verification at capture time."
+        ),
     )
     exempt_tools: list[str] = Field(
         default_factory=lambda: ["read_file", "read_file_tool"],
