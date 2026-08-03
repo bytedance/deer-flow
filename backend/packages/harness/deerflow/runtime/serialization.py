@@ -26,13 +26,13 @@ def serialize_lc_object(obj: Any) -> Any:
     # Pydantic v2
     if hasattr(obj, "model_dump"):
         try:
-            return obj.model_dump()
+            return serialize_lc_object(obj.model_dump())
         except Exception:
             pass
     # Pydantic v1 / older objects
     if hasattr(obj, "dict"):
         try:
-            return obj.dict()
+            return serialize_lc_object(obj.dict())
         except Exception:
             pass
     # Interrupt is a __slots__ class — no model_dump/dict/__dict__, so it
@@ -125,7 +125,7 @@ def serialize_messages_tuple(obj: Any) -> Any:
     """Serialize a messages-mode tuple ``(chunk, metadata)``."""
     if isinstance(obj, tuple) and len(obj) == 2:
         chunk, metadata = obj
-        return [serialize_lc_object(chunk), metadata if isinstance(metadata, dict) else {}]
+        return [serialize_lc_object(chunk), serialize_lc_object(metadata) if isinstance(metadata, dict) else {}]
     return serialize_lc_object(obj)
 
 

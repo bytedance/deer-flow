@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 
 class _FakePydanticV2:
     """Object with model_dump (Pydantic v2)."""
@@ -15,6 +17,16 @@ class _FakePydanticV1:
 
     def dict(self):
         return {"key": "v1"}
+
+
+class _FakeNestedPydanticV2:
+    def model_dump(self):
+        return {"nested": [_FakePydanticV1()]}
+
+
+class _FakeNestedPydanticV1:
+    def dict(self):
+        return {"nested": [_FakePydanticV2()]}
 
 
 class _Unprintable:
@@ -76,6 +88,18 @@ def test_serialize_pydantic_v1():
     assert serialize_lc_object(_FakePydanticV1()) == {"key": "v1"}
 
 
+def test_serialize_pydantic_exports_recursively():
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    for value, expected in [
+        (_FakeNestedPydanticV2(), {"nested": [{"key": "v1"}]}),
+        (_FakeNestedPydanticV1(), {"nested": [{"key": "v2"}]}),
+    ]:
+        result = serialize_lc_object(value)
+        assert result == expected
+        assert json.loads(json.dumps(result)) == expected
+
+
 def test_serialize_fallback_str():
     from deerflow.runtime.serialization import serialize_lc_object
 
@@ -124,6 +148,26 @@ def test_serialize_messages_tuple():
     metadata = {"langgraph_node": "agent"}
     result = serialize_messages_tuple((chunk, metadata))
     assert result == [{"key": "v2"}, {"langgraph_node": "agent"}]
+
+
+def test_serialize_messages_tuple_metadata_recursively():
+    from deerflow.runtime.serialization import serialize_messages_tuple
+
+    result = serialize_messages_tuple(
+        (
+            _FakePydanticV2(),
+            {"langgraph_node": "agent", "nested": _FakeNestedPydanticV2()},
+        )
+    )
+
+    assert result == [
+        {"key": "v2"},
+        {
+            "langgraph_node": "agent",
+            "nested": {"nested": [{"key": "v1"}]},
+        },
+    ]
+    assert json.loads(json.dumps(result)) == result
 
 
 def test_serialize_messages_tuple_non_dict_metadata():
