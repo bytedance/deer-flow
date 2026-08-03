@@ -465,7 +465,15 @@ present and expose it through `EXTENSION_TASK_STORE_KEY`; extensions retrieve it
 `task_store_from_runtime()`. Each run resolves the immutable loaded-extension snapshot
 once and binds that same object through task-store allocation and synchronous agent
 construction, so a concurrent singleton replacement cannot mix two extension
-generations without changing the LangGraph graph-factory ABI.
+generations without changing the LangGraph graph-factory ABI. The graph-build binding is
+a ContextVar scoped to synchronous construction, so it has already exited by the time the
+lead agent delegates; the run worker therefore also publishes the snapshot on runtime
+context under the host-internal `EXTENSION_SNAPSHOT_CONTEXT_KEY`, `task_tool` reads it
+back through `resolve_run_extensions()` (type-checked — runtime context is
+caller-mergeable), and `SubagentExecutor` binds it at construction. That key is written
+after the caller merge and popped when the run has none, so a caller-supplied value is
+never authoritative. Absent the key — embedded `DeerFlowClient`, standalone LangGraph
+Server — the executor keeps its `get_loaded_extensions()` fallback.
 
 Gateway `create_app()` loads plugins once, stores the immutable registry on `app.state`
 and in the process-wide singleton, and installs one canonical live diagnostics list.

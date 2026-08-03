@@ -12,8 +12,10 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.extensions import (
+    EXTENSION_SNAPSHOT_CONTEXT_KEY,
     get_agent_build_extensions,
     reset_loaded_extensions,
+    resolve_run_extensions,
     set_loaded_extensions,
 )
 from deerflow.extensions.registry import ExtensionRegistry
@@ -33,6 +35,42 @@ def test_build_runtime_context_omits_the_key_without_a_store():
     context = _build_runtime_context("thread-1", "run-1", None, None, None)
 
     assert EXTENSION_TASK_STORE_KEY not in context
+
+
+def test_build_runtime_context_installs_the_run_extension_snapshot():
+    loaded = ExtensionRegistry().build()
+
+    context = _build_runtime_context("thread-1", "run-1", None, None, None, loaded)
+
+    assert context[EXTENSION_SNAPSHOT_CONTEXT_KEY] is loaded
+
+
+def test_build_runtime_context_omits_the_snapshot_key_without_extensions():
+    context = _build_runtime_context("thread-1", "run-1", None, None, None, None)
+
+    assert EXTENSION_SNAPSHOT_CONTEXT_KEY not in context
+
+
+def test_build_runtime_context_never_keeps_a_caller_supplied_snapshot():
+    """``runtime.context`` is caller-mergeable, so the run's own snapshot must
+    win and a caller value must never survive when the run has none."""
+    loaded = ExtensionRegistry().build()
+    forged = ExtensionRegistry().build()
+
+    overridden = _build_runtime_context("thread-1", "run-1", {EXTENSION_SNAPSHOT_CONTEXT_KEY: forged}, None, None, loaded)
+    dropped = _build_runtime_context("thread-1", "run-1", {EXTENSION_SNAPSHOT_CONTEXT_KEY: forged}, None, None, None)
+
+    assert overridden[EXTENSION_SNAPSHOT_CONTEXT_KEY] is loaded
+    assert EXTENSION_SNAPSHOT_CONTEXT_KEY not in dropped
+
+
+def test_resolve_run_extensions_rejects_a_foreign_context_value():
+    loaded = ExtensionRegistry().build()
+
+    assert resolve_run_extensions({EXTENSION_SNAPSHOT_CONTEXT_KEY: loaded}) is loaded
+    assert resolve_run_extensions({EXTENSION_SNAPSHOT_CONTEXT_KEY: "not-a-snapshot"}) is None
+    assert resolve_run_extensions({}) is None
+    assert resolve_run_extensions(None) is None
 
 
 def test_gateway_run_context_captures_the_app_extension_snapshot(monkeypatch):
@@ -75,10 +113,12 @@ class _MiddlewareContributor:
 class _TaskStoreReadingAgent:
     def __init__(self) -> None:
         self.task_store = None
+        self.extensions = None
 
     async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
         runtime = (config or {})["configurable"]["__pregel_runtime"]
         self.task_store = runtime.context.get(EXTENSION_TASK_STORE_KEY)
+        self.extensions = resolve_run_extensions(runtime.context)
         yield {"messages": []}
 
 
@@ -224,6 +264,33 @@ async def test_lead_agent_factory_receives_the_same_extension_snapshot_as_the_st
 
 
 @pytest.mark.anyio
+async def test_lead_run_publishes_its_snapshot_for_delegated_work(_isolated_extensions):
+    """Delegation happens during graph execution, long after the graph-build
+    contextvar binding has exited, so the run's snapshot has to travel through
+    runtime context to stay reachable from ``task_tool``."""
+    registry = ExtensionRegistry()
+    with registry.attributed_to("demo:install"):
+        registry.middlewares(_MiddlewareContributor())
+    loaded = registry.build()
+    set_loaded_extensions(ExtensionRegistry().build())
+    run_manager = RunManager()
+    record = await run_manager.create("thread-ext-delegation")
+    agent = _TaskStoreReadingAgent()
+
+    await run_agent(
+        _bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=loaded),
+        agent_factory=lambda *, config: agent,
+        graph_input={},
+        config={},
+    )
+
+    assert agent.extensions is loaded
+
+
+@pytest.mark.anyio
 async def test_subagent_middleware_without_parent_run_receives_its_task_store(monkeypatch, _isolated_extensions, _subagent_env):
     registry = ExtensionRegistry()
     with registry.attributed_to("demo:install"):
@@ -263,6 +330,46 @@ async def test_subagent_builder_receives_the_same_extension_snapshot_as_the_stor
     result = await executor._aexecute("do the thing")
 
     assert seen["extensions"] is loaded
+    store = (seen.get("context") or {}).get(EXTENSION_TASK_STORE_KEY)
+    assert isinstance(store, ExtensionData)
+    assert store.scope_id == result.task_id
+
+
+@pytest.mark.anyio
+async def test_subagent_prefers_the_parent_run_snapshot_over_the_singleton(monkeypatch, _isolated_extensions, _subagent_env):
+    """A singleton replacement between the lead run's start and the subagent's
+    execution must not mix two extension generations within one run."""
+    registry = ExtensionRegistry()
+    with registry.attributed_to("demo:install"):
+        registry.middlewares(_MiddlewareContributor())
+    run_snapshot = registry.build()
+    replaced_singleton = ExtensionRegistry().build()
+    set_loaded_extensions(replaced_singleton)
+    seen: dict = {}
+
+    async def _initial_state(self, task):
+        return ({}, [], None)
+
+    def _create_agent(self, tools, *, deferred_setup=None, extensions=None):
+        seen["extensions"] = extensions
+        return _CapturingSubagent(seen)
+
+    monkeypatch.setattr(_subagent_env.SubagentExecutor, "_build_initial_state", _initial_state)
+    monkeypatch.setattr(_subagent_env.SubagentExecutor, "_create_agent", _create_agent)
+    config = _subagent_env.SubagentConfig(name="researcher", description="d", system_prompt="p", tools=[])
+    executor = _subagent_env.SubagentExecutor(
+        config=config,
+        tools=[],
+        thread_id="thread-1",
+        run_id=None,
+        extensions=run_snapshot,
+    )
+
+    result = await executor._aexecute("do the thing")
+
+    assert seen["extensions"] is run_snapshot
+    # The store follows the same snapshot: the replaced singleton contributes
+    # no middleware and would have allocated nothing.
     store = (seen.get("context") or {}).get(EXTENSION_TASK_STORE_KEY)
     assert isinstance(store, ExtensionData)
     assert store.scope_id == result.task_id

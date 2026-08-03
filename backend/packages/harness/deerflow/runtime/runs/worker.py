@@ -350,6 +350,7 @@ def _build_runtime_context(
     caller_context: Any | None,
     app_config: AppConfig | None = None,
     task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -375,6 +376,17 @@ def _build_runtime_context(
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
         runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
+    # Publish the run's extension snapshot so work dispatched during graph
+    # execution (task delegation) binds the same generation the lead agent was
+    # built with, instead of re-reading a singleton that may have been replaced
+    # mid-run. Written after the caller merge and popped when absent, because a
+    # caller-supplied value for this host-internal key is never authoritative.
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+    if extensions is not None:
+        runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
+    else:
+        runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -720,6 +732,7 @@ async def run_agent(
             config.get("context"),
             ctx.app_config,
             task_store,
+            extensions,
         )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))

@@ -8,9 +8,10 @@ hook-site plumbing.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 from deerflow.extensions.loader import (
     Diagnostic,
@@ -19,6 +20,15 @@ from deerflow.extensions.loader import (
     load_extensions,
 )
 from deerflow.extensions.registry import EMPTY_EXTENSIONS, ExtensionRegistry, LoadedExtensions
+
+#: Runtime-context key carrying the run's immutable extension snapshot.
+#:
+#: The graph-build binding below is a ContextVar scoped to synchronous agent
+#: construction, so it is long gone by the time a tool delegates work. Runtime
+#: context is how the run reaches that later code. The double-underscore prefix
+#: marks it as host-internal: the Gateway strips caller-supplied ``__`` keys,
+#: and this snapshot is never part of the public extension contract.
+EXTENSION_SNAPSHOT_CONTEXT_KEY = "__deerflow_extension_snapshot"
 
 _loaded: LoadedExtensions = EMPTY_EXTENSIONS
 _agent_build_extensions: ContextVar[LoadedExtensions | None] = ContextVar(
@@ -49,6 +59,20 @@ def bind_agent_build_extensions(loaded: LoadedExtensions) -> Iterator[None]:
         yield
     finally:
         _agent_build_extensions.reset(token)
+
+
+def resolve_run_extensions(context: Any | None) -> LoadedExtensions | None:
+    """Return the run's extension snapshot from *context*, or ``None``.
+
+    Runtime context is caller-mergeable, so the value is type-checked rather
+    than trusted. ``None`` means "this caller installed no snapshot" (embedded
+    client, standalone LangGraph Server) and leaves consumers on their existing
+    ``get_loaded_extensions()`` fallback.
+    """
+    if not isinstance(context, Mapping):
+        return None
+    snapshot = context.get(EXTENSION_SNAPSHOT_CONTEXT_KEY)
+    return snapshot if isinstance(snapshot, LoadedExtensions) else None
 
 
 def set_loaded_extensions(loaded: LoadedExtensions) -> None:
@@ -113,6 +137,7 @@ def reset_runtime_diagnostics() -> None:
 
 __all__ = [
     "EMPTY_EXTENSIONS",
+    "EXTENSION_SNAPSHOT_CONTEXT_KEY",
     "Diagnostic",
     "ExtensionLoadError",
     "ExtensionRegistry",
@@ -128,5 +153,6 @@ __all__ = [
     "record_runtime_diagnostics",
     "reset_loaded_extensions",
     "reset_runtime_diagnostics",
+    "resolve_run_extensions",
     "set_loaded_extensions",
 ]

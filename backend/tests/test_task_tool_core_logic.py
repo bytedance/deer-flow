@@ -259,6 +259,73 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
 
 
+def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
+    """The lead run binds one immutable extension snapshot; delegation must
+    carry that same object rather than re-reading the process singleton, which
+    a concurrent replacement could have swapped underneath the run."""
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    loaded = ExtensionRegistry().build()
+    runtime = _make_runtime()
+    runtime.context[EXTENSION_SNAPSHOT_CONTEXT_KEY] = loaded
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
+
+    assert captured["executor_kwargs"]["extensions"] is loaded
+
+
+def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
+    """Callers outside the Gateway run path (embedded client, standalone
+    LangGraph Server) install no snapshot; the executor must keep its existing
+    singleton fallback instead of receiving a forged or missing value."""
+    runtime = _make_runtime()
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
+
+    assert "extensions" not in captured["executor_kwargs"]
+
+
 def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     """The IM-channel sender identity must survive delegation: in group chats
     one thread serves many senders, so a subagent's bash commands need the

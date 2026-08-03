@@ -452,6 +452,7 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        extensions: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -476,6 +477,10 @@ class SubagentExecutor:
                 the same run as the lead agent.
             deerflow_trace_id: DeerFlow request-level correlation id propagated
                 from the parent run for Langfuse metadata correlation.
+            extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
+                captured at ``task_tool`` dispatch. When None (embedded client,
+                standalone LangGraph Server), ``_aexecute`` falls back to the
+                process-wide singleton.
         """
         self.config = config
         self.app_config = app_config
@@ -508,6 +513,12 @@ class SubagentExecutor:
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
+        # Parent run's extension snapshot. Binding it here (rather than reading
+        # the singleton at execution time) is what keeps one run on a single
+        # extension generation: a concurrent ``set_loaded_extensions()`` between
+        # the lead run's start and this subagent's execution must not swap the
+        # generation underneath the delegated work.
+        self.extensions = extensions
 
         self._base_tools = _filter_tools(
             tools,
@@ -798,7 +809,7 @@ class SubagentExecutor:
             )
         from deerflow.extensions import get_loaded_extensions
 
-        loaded_extensions = get_loaded_extensions()
+        loaded_extensions = self.extensions if self.extensions is not None else get_loaded_extensions()
         task_store = None
         if loaded_extensions.needs_task_store:
             from deerflow_extension_api import ExtensionData
