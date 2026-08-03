@@ -93,7 +93,63 @@ def test_every_duplicate_participant_must_satisfy_the_constraint():
 def test_core_constraints_are_declared():
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
-    from deerflow.extensions.ordering import CORE_ORDERING_CONSTRAINTS
+    from deerflow.extensions.ordering import core_ordering_constraints
 
-    pairs = {(c.outer, c.inner) for c in CORE_ORDERING_CONSTRAINTS}
+    pairs = {(c.outer, c.inner) for c in core_ordering_constraints()}
     assert (ToolProgressMiddleware, ToolErrorHandlingMiddleware) in pairs
+
+
+def test_core_constraints_are_a_plain_tuple():
+    """Deferred resolution must not be paid for with an object that reports one
+    thing when iterated and another when measured.
+
+    The predecessor was a ``tuple`` subclass whose backing storage stayed empty
+    (a tuple cannot fill its own storage after construction), so ``len`` was 0,
+    ``bool`` was False, ``in`` was always False and it compared unequal to the
+    very tuples tests substitute for it — while iteration yielded the real
+    constraints.
+    """
+    from deerflow.extensions.ordering import core_ordering_constraints
+
+    constraints = core_ordering_constraints()
+    iterated = list(constraints)
+
+    assert type(constraints) is tuple
+    assert len(constraints) == len(iterated)
+    assert bool(constraints) is bool(iterated)
+    assert constraints == tuple(iterated)
+    assert all(constraint in constraints for constraint in iterated)
+    assert constraints[0] is iterated[0]
+    assert list(reversed(constraints)) == list(reversed(iterated))
+
+
+def test_resolution_stays_deferred_until_first_use():
+    """Importing this module must not drag in the middleware layer.
+
+    ``extensions/`` is the layer the middleware layer calls into, so resolving
+    the table at import time would give it a backward dependency on the layer
+    it exists to serve — an import cycle waiting for the first middleware that
+    imports anything under ``extensions/`` at module level. Resolution belongs
+    at ``assert_ordering`` time, which already runs inside the middleware
+    builder.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(backend_root), str(backend_root / "packages" / "harness"), os.environ.get("PYTHONPATH", "")])}
+    probe = (
+        "import sys\n"
+        "from deerflow.extensions import ordering\n"
+        "targets = ('deerflow.agents.middlewares.tool_progress_middleware', 'deerflow.agents.middlewares.tool_error_handling_middleware')\n"
+        "print('after_import', [t for t in targets if t in sys.modules])\n"
+        "ordering.core_ordering_constraints()\n"
+        "print('after_call', sorted(t for t in targets if t in sys.modules))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert "after_import []" in result.stdout, "importing extensions.ordering must not load the middleware layer"
+    assert "after_call ['deerflow.agents.middlewares.tool_error_handling_middleware', 'deerflow.agents.middlewares.tool_progress_middleware']" in result.stdout

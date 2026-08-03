@@ -451,7 +451,14 @@ declares lead/subagent scope, stable order, and a semantic placement (`MODEL_LOG
 index. `extensions/stack.py` is the single final composition point; do not inject inside
 the shared base builder because the lead builder appends more middleware afterward.
 `extensions/ordering.py` owns host ordering invariants and validates the final composed
-stack.
+stack. Nothing under `extensions/` may import `agents.middlewares` at module scope: the
+middleware layer calls into this one, so a module-scope reference points the dependency
+backwards and closes a cycle as soon as any middleware imports something under
+`extensions/` at module level. Both tables that need middleware classes therefore resolve
+on first use — `ordering.py::core_ordering_constraints()` and `stack.py::_anchors()` —
+which is `assert_ordering` / composition time, already inside the middleware builder.
+Defer by deferring the *call*; do not fake a resolved value with a lazy container
+subclass, which reports one answer when iterated and another when measured.
 
 Contributed middlewares are wrapped by `IsolatedMiddleware`: extension failures emit
 diagnostics and fail open without repeating a downstream model/tool side effect. The

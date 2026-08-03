@@ -225,7 +225,7 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
 
 def test_middleware_ordering_guard_moved_to_declarative_constraints(monkeypatch: pytest.MonkeyPatch):
     """_build_runtime_middlewares no longer hand-validates ordering; the invariant is now
-    declared in deerflow.extensions.ordering (CORE_ORDERING_CONSTRAINTS / assert_ordering) and
+    declared in deerflow.extensions.ordering (core_ordering_constraints / assert_ordering) and
     is checked once the composing builder merges extension contributions in (Task 9).
 
     This test previously monkeypatched SandboxAuditMiddleware to a ToolErrorHandlingMiddleware

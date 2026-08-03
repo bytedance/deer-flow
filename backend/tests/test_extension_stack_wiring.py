@@ -254,8 +254,8 @@ def test_core_ordering_table_is_enforced_against_a_real_stack(monkeypatch):
     Task 7 deleted the in-builder guard and the test that forced a real
     misordering. Exercising assert_ordering with synthetic classes proves the
     function works; it does not prove the composing builder calls it with
-    CORE_ORDERING_CONSTRAINTS against the stack it actually produces. This test
-    is the only thing that does.
+    core_ordering_constraints() against the stack it actually produces. This
+    test is the only thing that does.
 
     It patches the default table rather than reordering real middlewares: the
     builder imports its middlewares inside the function body, so reordering
@@ -275,7 +275,7 @@ def test_core_ordering_table_is_enforced_against_a_real_stack(monkeypatch):
             reason="deliberately inverted for this test",
         ),
     )
-    monkeypatch.setattr(ordering_mod, "CORE_ORDERING_CONSTRAINTS", impossible)
+    monkeypatch.setattr(ordering_mod, "core_ordering_constraints", lambda: impossible)
 
     with pytest.raises(RuntimeError) as excinfo:
         _lead_stack()

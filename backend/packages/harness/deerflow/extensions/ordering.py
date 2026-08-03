@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cache
 
 from deerflow.extensions.isolation import IsolatedMiddleware
 
@@ -38,7 +39,7 @@ def assert_ordering(
     constraints: Sequence[OrderingConstraint] | None = None,
 ) -> None:
     """Raise when a constraint is violated. No-op when both sides are absent."""
-    for constraint in constraints if constraints is not None else CORE_ORDERING_CONSTRAINTS:
+    for constraint in constraints if constraints is not None else core_ordering_constraints():
         outer_indices = _indices_of(middlewares, constraint.outer)
         inner_indices = _indices_of(middlewares, constraint.inner)
         if not outer_indices or not inner_indices:
@@ -56,7 +57,25 @@ def assert_ordering(
         )
 
 
-def _core_constraints() -> tuple[OrderingConstraint, ...]:
+@cache
+def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
+    """The host's ordering invariants, resolved on first use.
+
+    Deferred deliberately, and the deferral is about dependency *direction*,
+    not just cycles: ``extensions/`` is the layer the middleware layer calls
+    into, so importing ``agents.middlewares`` at module scope here would point
+    the dependency backwards and close a cycle the moment any middleware
+    imports something under ``extensions/`` at module level. Resolution instead
+    happens at ``assert_ordering`` time, which already runs inside the
+    middleware builder — a forward reference within one layer.
+
+    Returns a plain tuple. The predecessor deferred by way of a ``tuple``
+    subclass overriding only ``__iter__``; because a tuple cannot populate its
+    own storage after construction, every operation reading that storage
+    (``len``, ``bool``, ``in``, indexing, slicing, ``reversed``, ``==``)
+    reported an empty sequence while iteration yielded the real constraints.
+    Deferring the call instead of faking the value keeps one answer.
+    """
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 
@@ -67,17 +86,3 @@ def _core_constraints() -> tuple[OrderingConstraint, ...]:
             reason=("ToolProgressMiddleware reads deerflow_tool_meta in _update_state_from_result, so its wrap_tool_call chain must enclose the ToolErrorHandlingMiddleware step that stamps it"),
         ),
     )
-
-
-class _LazyConstraints(tuple):
-    """Defer the middleware imports until first use to avoid an import cycle."""
-
-    _resolved: tuple[OrderingConstraint, ...] | None = None
-
-    def __iter__(self):
-        if _LazyConstraints._resolved is None:
-            _LazyConstraints._resolved = _core_constraints()
-        return iter(_LazyConstraints._resolved)
-
-
-CORE_ORDERING_CONSTRAINTS = _LazyConstraints()
