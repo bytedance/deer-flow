@@ -3,6 +3,7 @@
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { ArtifactsProvider } from "@/components/workspace/artifacts";
 import { SubtasksProvider } from "@/core/tasks/context";
+import { ToolStreamingProvider } from "@/core/tasks/tool-streaming";
 
 export default function AgentChatLayout({
   children,
@@ -11,9 +12,11 @@ export default function AgentChatLayout({
 }) {
   return (
     <SubtasksProvider>
-      <ArtifactsProvider>
-        <PromptInputProvider>{children}</PromptInputProvider>
-      </ArtifactsProvider>
+      <ToolStreamingProvider>
+        <ArtifactsProvider>
+          <PromptInputProvider>{children}</PromptInputProvider>
+        </ArtifactsProvider>
+      </ToolStreamingProvider>
     </SubtasksProvider>
   );
 }

@@ -257,6 +257,34 @@ def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: py
         build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
 
+def test_tool_streaming_is_inner_of_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
+    """ToolStreamingMiddleware must sit inner (higher index) of ToolErrorHandlingMiddleware.
+
+    Regression for the #4150 review: when ToolStreamingMiddleware sat outer,
+    ToolErrorHandlingMiddleware (inner) caught tool exceptions first and
+    converted them to error ToolMessages, so ToolStreaming never saw a raw
+    exception and its error-chunk path was dead code.  Framework rule: first
+    in list = outermost, so ToolErrorHandling must appear at a lower index.
+    """
+    from deerflow.agents.middlewares.tool_streaming_middleware import ToolStreamingMiddleware
+    from deerflow.config.tool_streaming_config import ToolStreamingConfig
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    app_config = _make_app_config()
+    app_config = app_config.model_copy(update={"tool_streaming": ToolStreamingConfig(enabled=True)})
+
+    middlewares = build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
+
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    streaming_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolStreamingMiddleware))
+    assert error_idx < streaming_idx, (
+        f"ToolErrorHandlingMiddleware (index {error_idx}) must be outer (lower index) of "
+        f"ToolStreamingMiddleware (index {streaming_idx}) so raw tool exceptions reach the "
+        f"streaming error-chunk path first; order: {[type(m).__name__ for m in middlewares]}"
+    )
+
+
 def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(
         sys.modules,

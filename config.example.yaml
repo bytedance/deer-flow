@@ -1135,6 +1135,20 @@ loop_detection:
 #     - task
 
 # ============================================================================
+# Tool Output Streaming (issue #4150)
+# ============================================================================
+# When enabled, the ToolStreamingMiddleware emits real-time `tool_output_chunk`
+# custom stream events during tool execution (start / chunk / final lifecycle).
+# These events propagate to the frontend SSE stream and also flow through
+# subagents via the custom-event bridge in SubagentExecutor.
+#
+# Defaults to disabled (opt-in). Tool execution results still arrive through
+# the canonical ToolMessage regardless of this setting.
+
+# tool_streaming:
+#   enabled: false
+
+# ============================================================================
 # Read-Before-Write File Gate (issue #3857)
 # ============================================================================
 # Blocks write_file (append / overwrite of an existing file) and str_replace

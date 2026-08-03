@@ -26,6 +26,11 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import {
+  type ToolOutputChunkEvent,
+  toolStreamUpdateFromEvent,
+  useToolStreaming,
+} from "../tasks/tool-streaming";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -1509,6 +1514,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { updateToolStream } = useToolStreaming();
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -1707,6 +1713,16 @@ export function useThreadStream({
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
         });
+        return;
+      }
+
+      if (eventType === "tool_output_chunk") {
+        const e = event as ToolOutputChunkEvent;
+        // Partial chunks upsert/accumulate; final and error chunks tear the
+        // entry down (the canonical ToolMessage carries the full result), so
+        // the streaming map only ever holds actively-streaming tool calls
+        // instead of growing for the lifetime of the thread.
+        updateToolStream(e.tool_call_id, toolStreamUpdateFromEvent(e));
         return;
       }
 
