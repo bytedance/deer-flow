@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.gateway.routers import memory
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError
@@ -587,3 +588,50 @@ def test_reload_memory_route_returns_501_when_read_also_unsupported() -> None:
         with TestClient(app) as client:
             response = client.post("/api/memory/reload")
     assert response.status_code == 501
+
+
+# ── config ─────────────────────────────────────────────────────────────────
+
+
+def _memory_config(**backend_overrides: object) -> SimpleNamespace:
+    backend_config = {"storage_path": "/secret/.deer-flow", "max_facts": 100, **backend_overrides}
+    return SimpleNamespace(
+        enabled=True,
+        mode="middleware",
+        injection_enabled=True,
+        shutdown_flush_timeout_seconds=30.0,
+        manager_class="deermem",
+        backend_config=backend_config,
+    )
+
+
+def test_memory_config_redacts_storage_path_for_non_admin() -> None:
+    """Host storage paths are admin-only info — non-admin callers get None."""
+    app = FastAPI()
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_config", return_value=_memory_config()):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["backend_config"]["storage_path"] is None
+    # Non-path knobs stay intact
+    assert body["backend_config"]["max_facts"] == 100
+
+
+def test_memory_config_preserves_storage_path_for_admin() -> None:
+    """Admin callers keep the full backend_config including storage_path."""
+    app = FastAPI()
+
+    class _AdminStubMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.user = SimpleNamespace(system_role="admin")
+            return await call_next(request)
+
+    app.add_middleware(_AdminStubMiddleware)
+    app.include_router(memory.router)
+    with patch("app.gateway.routers.memory.get_memory_config", return_value=_memory_config()):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/config")
+    assert response.status_code == 200
+    assert response.json()["backend_config"]["storage_path"] == "/secret/.deer-flow"

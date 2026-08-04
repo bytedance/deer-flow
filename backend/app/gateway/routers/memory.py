@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from app.gateway.deps import require_admin_user
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
@@ -13,6 +14,22 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
+
+_ADMIN_REQUIRED_DETAIL = "Admin privileges required to view memory configuration."
+
+
+async def _is_admin_user(request: Request) -> bool:
+    """Non-raising admin check used to gate host-path disclosure in responses.
+
+    Fails closed: any error (missing middleware state, auth failure) is treated
+    as non-admin so host paths are redacted rather than accidentally exposed.
+    Mirrors ``integrations._is_admin_user``.
+    """
+    try:
+        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    except Exception:
+        return False
+    return True
 
 
 def _resolve_memory_user_id(request: Request) -> str:
@@ -438,7 +455,7 @@ async def import_memory(request: MemoryResponse, http_request: Request) -> Memor
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+async def get_memory_config_endpoint(request: Request) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -471,13 +488,19 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         ```
     """
     config = get_memory_config()
+    backend_config = config.backend_config
+    if "storage_path" in backend_config and not await _is_admin_user(request):
+        # Host filesystem paths are admin-only info; redact them for
+        # non-admin callers of this otherwise non-gated route. Mirrors the
+        # redaction in integrations.py for lark-cli status responses.
+        backend_config = {**backend_config, "storage_path": None}
     return MemoryConfigResponse(
         enabled=config.enabled,
         mode=config.mode,
         injection_enabled=config.injection_enabled,
         shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
         manager_class=config.manager_class,
-        backend_config=config.backend_config,
+        backend_config=backend_config,
     )
 
 
