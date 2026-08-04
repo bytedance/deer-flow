@@ -38,6 +38,12 @@ from deerflow.utils.custom_events import aemit_custom_event
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
+
+_CODING_WORKSPACE_INSTRUCTION = (
+    "本任务已经绑定独立 Coding Worktree。所有文件工具统一通过 "
+    "`/mnt/user-data/workspace` 访问它；不要使用或猜测主机上的真实 Worktree 路径。"
+)
+
 logger = logging.getLogger(__name__)
 
 # Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
@@ -412,6 +418,7 @@ async def task_tool(
                     raise RuntimeError("thread_data is required when using a coding worktree")
                 thread_data = dict(thread_data)
                 thread_data["workspace_path"] = coding_task.worktree
+                prompt = f"{_CODING_WORKSPACE_INSTRUCTION}\n\n{prompt}"
 
         # 创建执行器，并把 CodingTask 选定的工作区上下文传给子 Agent。
         executor_kwargs = {

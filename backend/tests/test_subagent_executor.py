@@ -314,6 +314,7 @@ class TestAgentConstruction:
             tools=[],
             app_config=app_config,
             parent_model="parent-model",
+            thread_data={"workspace_path": "E:/projectA/.worktrees/coding-run"},
         )
         provider = object()
         executor._authz_provider = provider
@@ -338,6 +339,7 @@ class TestAgentConstruction:
             "lazy_init": True,
             "deferred_setup": None,
             "agent_name": "test-agent",
+            "workspace_path_override": "E:/projectA/.worktrees/coding-run",
             "authorization_provider": provider,
         }
         assert captured["agent"]["model"] is model

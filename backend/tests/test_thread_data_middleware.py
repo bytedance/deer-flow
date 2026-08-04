@@ -19,6 +19,43 @@ class TestThreadDataMiddleware:
         assert _as_posix(result["thread_data"]["uploads_path"]).endswith("threads/thread-123/user-data/uploads")
         assert _as_posix(result["thread_data"]["outputs_path"]).endswith("threads/thread-123/user-data/outputs")
 
+    def test_before_agent_preserves_bound_workspace_for_subagent(self, tmp_path):
+        worktree = tmp_path / "target-repo" / ".worktrees" / "coding-run"
+        middleware = ThreadDataMiddleware(
+            base_dir=str(tmp_path / "deerflow-data"),
+            lazy_init=True,
+            workspace_path_override=str(worktree),
+        )
+        state = {
+            "thread_data": {
+                "workspace_path": "stale-workspace",
+                "uploads_path": "stale-uploads",
+                "outputs_path": "stale-outputs",
+            }
+        }
+
+        result = middleware.before_agent(
+            state=state,
+            runtime=Runtime(context={"thread_id": "thread-123", "user_id": "runtime-user"}),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] == str(worktree)
+        assert result["thread_data"]["uploads_path"] != "stale-uploads"
+        assert result["thread_data"]["outputs_path"] != "stale-outputs"
+
+    def test_before_agent_does_not_trust_workspace_override_for_lead_agent(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path / "deerflow-data"), lazy_init=True)
+        state = {"thread_data": {"workspace_path": str(tmp_path / "untrusted")}}
+
+        result = middleware.before_agent(
+            state=state,
+            runtime=Runtime(context={"thread_id": "thread-123", "user_id": "runtime-user"}),
+        )
+
+        assert result is not None
+        assert result["thread_data"]["workspace_path"] != state["thread_data"]["workspace_path"]
+
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context=None)

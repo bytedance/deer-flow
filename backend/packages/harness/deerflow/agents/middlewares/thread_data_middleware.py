@@ -36,7 +36,12 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     state_schema = ThreadDataMiddlewareState
 
-    def __init__(self, base_dir: str | None = None, lazy_init: bool = True):
+    def __init__(
+        self,
+        base_dir: str | None = None,
+        lazy_init: bool = True,
+        workspace_path_override: str | None = None,
+    ):
         """Initialize the middleware.
 
         Args:
@@ -44,10 +49,12 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             lazy_init: If True, defer directory creation until needed.
                       If False, create directories eagerly in before_agent().
                       Default is True for optimal performance.
+            workspace_path_override: 子 Agent 已绑定的可信 Worktree 路径。
         """
         super().__init__()
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
+        self._workspace_path_override = workspace_path_override
 
     def _get_thread_paths(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Get the paths for a thread's data directories.
@@ -98,6 +105,9 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             # Eager initialization: create directories immediately
             paths = self._create_thread_directories(thread_id, user_id=user_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
+
+        if self._workspace_path_override is not None:
+            paths["workspace_path"] = self._workspace_path_override
 
         messages = list(state.get("messages", []))
         last_message = messages[-1] if messages else None

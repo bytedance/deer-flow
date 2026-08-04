@@ -897,6 +897,17 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
+    # Coding 子 Agent 的 workspace_path 可以是用户选择仓库中的真实 Worktree。
+    # 只允许当前线程已绑定目录内的绝对路径，不能借此访问其他主机目录。
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            _validate_resolved_user_data_path(candidate.resolve(), thread_data)
+        except PermissionError:
+            pass
+        else:
+            return
+
     # Custom mount paths — respect read_only config
     if _is_custom_mount_path(path):
         mount = _get_custom_mount_for_path(path)

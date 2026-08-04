@@ -159,6 +159,7 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    workspace_path_override: str | None = None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -185,7 +186,10 @@ def _build_runtime_middlewares(
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
-        ThreadDataMiddleware(lazy_init=lazy_init),
+        ThreadDataMiddleware(
+            lazy_init=lazy_init,
+            workspace_path_override=workspace_path_override,
+        ),
     ]
     if include_uploads:
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -319,6 +323,7 @@ def build_subagent_runtime_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
     authorization_provider=None,
+    workspace_path_override: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -333,6 +338,7 @@ def build_subagent_runtime_middlewares(
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        workspace_path_override=workspace_path_override,
     )
 
     if model_name is None and app_config.models:

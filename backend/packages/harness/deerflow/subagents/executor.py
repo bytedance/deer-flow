@@ -520,6 +520,8 @@ class SubagentExecutor:
             "deferred_setup": deferred_setup,
             "agent_name": self.config.name,
         }
+        if self.thread_data is not None and (workspace_path := self.thread_data.get("workspace_path")):
+            middleware_kwargs["workspace_path_override"] = workspace_path
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider

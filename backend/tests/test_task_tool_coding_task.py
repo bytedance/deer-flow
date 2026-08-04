@@ -324,7 +324,11 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
     assert runtime.state["thread_data"]["workspace_path"] == "D:/sandbox/thread-1/user-data/workspace"
     assert calls == [
         ("claim", "task-1", "code-analyzer"),
-        ("execute", "Inspect the code", "tool-call-1"),
+        (
+            "execute",
+            f"{task_tool_module._CODING_WORKSPACE_INSTRUCTION}\n\nInspect the code",
+            "tool-call-1",
+        ),
         ("complete", "task-1"),
     ]
 
