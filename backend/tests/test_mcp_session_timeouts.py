@@ -148,6 +148,63 @@ async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path,
     assert "github" in timeout_warnings[0].getMessage()
 
 
+@pytest.mark.asyncio
+async def test_discovery_timeout_from_sdk_with_opt_out_is_reported_without_logging_error(caplog) -> None:
+    """With session_init_timeout opted out (None), a TimeoutError raised by
+    discovery itself (e.g. an internal timeout inside the MCP SDK) must still
+    be reported gracefully. The skip must go through the generic failure path —
+    never through the "timed out (%.1fs)" format with a None value, which
+    would raise inside the logging module and silently drop the warning."""
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "flaky_server": {
+                    "type": "stdio",
+                    "command": "uvx",
+                    "args": ["flaky-mcp"],
+                    "session_init_timeout": None,
+                },
+            }
+        }
+    )
+    servers_config = {
+        "flaky_server": {"transport": "stdio", "command": "uvx", "args": ["flaky-mcp"]},
+    }
+
+    class FakeClient:
+        def __init__(
+            self,
+            connections,
+            *,
+            callbacks=None,
+            tool_interceptors=None,
+            tool_name_prefix=False,
+        ) -> None:
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+            self.tool_name_prefix = tool_name_prefix
+
+        async def get_tools(self, *, server_name=None):
+            raise TimeoutError("internal SDK timeout")
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+        patch("langchain_mcp_adapters.tools.load_mcp_tools", new_callable=AsyncMock),
+        caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"),
+    ):
+        tools = await get_mcp_tools()
+
+    assert tools == []
+    # getMessage() on every captured record must not raise: pre-fix, the only
+    # record for this server was the broken "timed out (%.1fs)" % None format.
+    assert any("tool discovery failed" in record.getMessage() for record in caplog.records)
+    assert not any("timed out" in record.getMessage() for record in caplog.records)
+
+
 def test_gateway_response_model_session_init_timeout_default_matches_runtime_config() -> None:
     """A server created via PUT /api/mcp/config without session_init_timeout
     must get the same bring-up timeout as one created in the config file —

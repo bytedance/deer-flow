@@ -722,15 +722,22 @@ async def get_mcp_tools() -> list[BaseTool]:
                     # POSIX, process-tree termination on Windows), so the npx
                     # subprocess and any children it spawned are reaped — no
                     # orphan processes accumulate across repeated timeouts.
-                    return await asyncio.wait_for(discovery, timeout=session_init_timeout)
+                    try:
+                        return await asyncio.wait_for(discovery, timeout=session_init_timeout)
+                    except TimeoutError:
+                        # Only our own bound is logged as "timed out": the
+                        # branch condition guarantees the value is not None, so
+                        # the %.1f format cannot fail. A TimeoutError raised by
+                        # discovery itself (e.g. an internal SDK timeout on the
+                        # opted-out path) falls through to the generic failure
+                        # handler below instead.
+                        logger.warning(
+                            "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
+                            server_name,
+                            session_init_timeout,
+                        )
+                        return []
                 return await discovery
-            except TimeoutError:
-                logger.warning(
-                    "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
-                    server_name,
-                    session_init_timeout,
-                )
-                return []
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
