@@ -519,10 +519,22 @@ def _make_session_pool_tool(
             # teardown of a session stuck mid-creation (it signals close and
             # waits for the owner task's __aexit__ to run in its own task),
             # so a hung server cannot leak a session or block the turn.
-            session = await asyncio.wait_for(
-                pool.get_session(server_name, scope_key, session_connection),
-                timeout=session_init_timeout,
-            )
+            try:
+                session = await asyncio.wait_for(
+                    pool.get_session(server_name, scope_key, session_connection),
+                    timeout=session_init_timeout,
+                )
+            except TimeoutError:
+                # Surface the timeout at the same log level as discovery
+                # timeouts: the tool call still fails with a TimeoutError the
+                # model can react to, but operators need the WARNING to
+                # diagnose tool-call failures caused by hung MCP sessions.
+                logger.warning(
+                    "MCP session initialization for server '%s' timed out after %.1fs",
+                    server_name,
+                    session_init_timeout,
+                )
+                raise
         else:
             session = await pool.get_session(server_name, scope_key, session_connection)
 

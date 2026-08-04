@@ -10,6 +10,7 @@ on both stages and the per-server independence of the discovery timeout.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -107,8 +108,10 @@ async def test_discovery_timeout_skips_hung_server_without_blocking_healthy_serv
 
 
 @pytest.mark.asyncio
-async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path) -> None:
-    """A server that never finishes initialize() must not block the tool call."""
+async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path, caplog) -> None:
+    """A server that never finishes initialize() must not block the tool call,
+    and the timeout must be visible in logs at the same level as discovery
+    timeouts so operators can diagnose hung MCP sessions."""
     mock_pool = MagicMock()
 
     async def hanging_get_session(*_args, **_kwargs) -> None:
@@ -123,6 +126,7 @@ async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path)
             "deerflow.mcp.tools._prepare_stdio_workspace",
             return_value=(tmp_path, tmp_path / "tmp", {}),
         ),
+        caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"),
     ):
         wrapped = _make_session_pool_tool(
             _tool("github_search"),
@@ -138,6 +142,21 @@ async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path)
         # Bounds the regression: the timeout must fire promptly, not wait on the
         # hung session.
         assert loop.time() - start < 1.0
+
+    timeout_warnings = [record for record in caplog.records if record.levelno == logging.WARNING and "timed out" in record.getMessage()]
+    assert timeout_warnings, "session-init timeout must be logged like discovery timeouts"
+    assert "github" in timeout_warnings[0].getMessage()
+
+
+def test_gateway_response_model_session_init_timeout_default_matches_runtime_config() -> None:
+    """A server created via PUT /api/mcp/config without session_init_timeout
+    must get the same bring-up timeout as one created in the config file —
+    the response model's default feeds model_dump() into the persisted config."""
+    from app.gateway.routers.mcp import McpServerConfigResponse
+
+    assert McpServerConfigResponse.model_validate({}).session_init_timeout == DEFAULT_MCP_SESSION_INIT_TIMEOUT
+    # An explicit null stays an explicit opt-out (no timeout).
+    assert McpServerConfigResponse.model_validate({"session_init_timeout": None}).session_init_timeout is None
 
 
 @pytest.mark.asyncio
