@@ -78,6 +78,28 @@ describe("startConnectionPoll", () => {
     expect(fetchConnections).toHaveBeenCalledTimes(1);
   });
 
+  test("does not fetch after the bind window expires before the next tick", async () => {
+    const fetchConnections = rs.fn(async () => [
+      connection("telegram", "connected"),
+    ]);
+    const onConnected = rs.fn();
+    let nowValue = 0;
+    startConnectionPoll({
+      provider: "telegram",
+      expiresInSeconds: 1,
+      fetchConnections,
+      onConnected,
+      intervalMs: 2000,
+      now: () => nowValue,
+    });
+
+    nowValue = 2000;
+    await rs.advanceTimersByTimeAsync(2000);
+
+    expect(fetchConnections).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
+  });
+
   test("a non-finite expires_in falls back to a finite deadline and terminates", async () => {
     const fetchConnections = rs.fn(async () => [
       connection("telegram", "pending"),
@@ -100,9 +122,9 @@ describe("startConnectionPoll", () => {
     // running forever (Date.now() >= NaN would otherwise never be true).
     nowValue = 10_000_000;
     await rs.advanceTimersByTimeAsync(1000);
-    expect(fetchConnections).toHaveBeenCalledTimes(2);
+    expect(fetchConnections).toHaveBeenCalledTimes(1);
 
     await rs.advanceTimersByTimeAsync(10000);
-    expect(fetchConnections).toHaveBeenCalledTimes(2);
+    expect(fetchConnections).toHaveBeenCalledTimes(1);
   });
 });

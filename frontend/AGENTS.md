@@ -83,6 +83,9 @@ The frontend is a stateful chat application. Users create **threads** (conversat
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
+   IM channel connection polling treats `expires_in` as a hard bind deadline:
+   a timer that wakes at or after that deadline must stop without issuing one
+   final connections request.
 6. Components subscribe to thread state and render updates
 
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.

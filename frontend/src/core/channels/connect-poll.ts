@@ -61,7 +61,7 @@ export function startConnectionPoll(
   const schedule = () => {
     timer = setTimeout(() => {
       timer = undefined;
-      if (cancelled) {
+      if (cancelled || now() >= deadline) {
         return;
       }
       void fetchConnections()
