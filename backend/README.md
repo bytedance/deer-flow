@@ -215,6 +215,7 @@ no services required:
 uv pip install 'deerflow-harness[tui]'   # optional 'textual' dependency
 deerflow                                 # launch the TUI
 deerflow --print "summarize this repo"   # headless one-shot
+deerflow --recursion-limit 250 --print "run a longer task"
 ```
 
 Sessions opened in the TUI appear in the Web UI sidebar (it writes the shared

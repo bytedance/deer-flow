@@ -1,5 +1,7 @@
 """Tests for TUI launch-mode planning + arg parsing (pure, no Textual)."""
 
+import pytest
+
 from deerflow.tui.cli import LaunchPlan, plan_launch
 
 
@@ -24,6 +26,28 @@ def test_print_with_message():
     assert p.mode == "print"
     assert p.message == "summarize this repo"
     assert p.read_stdin is False
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_recursion_limit(mode):
+    p = plan(["--recursion-limit", "250", mode, "hello"])
+    assert p.recursion_limit == 250
+
+
+def test_headless_recursion_limit_is_optional():
+    p = plan(["--print", "hello"])
+    assert p.recursion_limit is None
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
+def test_headless_recursion_limit_must_be_positive(value):
+    with pytest.raises(SystemExit):
+        plan(["--recursion-limit", value, "--print", "hello"])
+
+
+def test_recursion_limit_is_rejected_for_tui_mode():
+    with pytest.raises(SystemExit):
+        plan(["--recursion-limit", "250"])
 
 
 def test_print_without_value_reads_stdin_when_piped():
