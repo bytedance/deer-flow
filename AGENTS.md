@@ -112,6 +112,9 @@ make up / down   # Build/stop the production Docker stack (browser at localhost:
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
+Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
+checkout before invoking Compose, matching the start and stop commands.
+
 Run `make help` for the full list.
 
 **Per-module commands drive a single module** (run inside that module):
