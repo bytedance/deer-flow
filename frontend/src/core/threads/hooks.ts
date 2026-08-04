@@ -646,6 +646,97 @@ export function restoreLocalTurnMessageOrder(
 }
 
 /**
+ * Reconnect/reload counterpart of {@link restoreLocalTurnMessageOrder}.
+ *
+ * After a mid-run page reload the local-turn baseline is empty, so the local
+ * restore never runs — yet the same ordering race still applies: replayed
+ * `messages-tuple` steps can reach the merged list before the turn's human
+ * message (the retained replay buffer may even have dropped it), and the
+ * live-only human is then woven in before the next shared history anchor,
+ * leaving steps of the SAME run above the user message they belong to.
+ *
+ * Canonical history is seq-sorted, so a visible AI/tool step sitting above
+ * the last visible human while another message of the same run sits below it
+ * (a "same-run sandwich") is provably misplaced. Run_id-less steps are
+ * live-only (history rows always carry run_id) and are attributable to the
+ * reconnected run only when a run_id-less step also follows the human —
+ * otherwise they may be orphans from an older turn (#4399) or a stray
+ * transient and must keep their position. A resent turn after an interrupted
+ * run fails both checks and is left untouched.
+ */
+export function restoreReconnectedTurnMessageOrder(
+  messages: Message[],
+): Message[] {
+  let humanIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      humanIndex = index;
+      break;
+    }
+  }
+  if (humanIndex <= 0) {
+    return messages;
+  }
+
+  // Only the segment since the previous visible human can belong to the
+  // active turn; older turns are anchored by their own human message.
+  let segmentStart = 0;
+  for (let index = humanIndex - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      segmentStart = index + 1;
+      break;
+    }
+  }
+  if (segmentStart >= humanIndex) {
+    return messages;
+  }
+
+  const runIdsAfter = new Set<string>();
+  let hasLiveOnlyStepAfter = false;
+  for (const message of messages.slice(humanIndex + 1)) {
+    const runId = getMessageRunId(message);
+    if (runId) {
+      runIdsAfter.add(runId);
+    } else if (
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message)
+    ) {
+      hasLiveOnlyStepAfter = true;
+    }
+  }
+
+  const misplacedSteps: Message[] = [];
+  const stablePrefix = messages.slice(0, segmentStart);
+  for (const message of messages.slice(segmentStart, humanIndex)) {
+    const isVisibleStep =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message);
+    const runId = getMessageRunId(message);
+    if (
+      isVisibleStep &&
+      ((runId !== undefined && runIdsAfter.has(runId)) ||
+        (runId === undefined && hasLiveOnlyStepAfter))
+    ) {
+      misplacedSteps.push(message);
+    } else {
+      stablePrefix.push(message);
+    }
+  }
+  if (misplacedSteps.length === 0) {
+    return messages;
+  }
+
+  return [
+    ...stablePrefix,
+    messages[humanIndex]!,
+    ...misplacedSteps,
+    ...messages.slice(humanIndex + 1),
+  ];
+}
+
+/**
  * Keep a run-scoped ledger of every visible message that reached a committed
  * UI frame. Live checkpoint windows can roll forward between two
  * summarization events; replacing this ledger with only the newest window
@@ -2419,7 +2510,7 @@ export function useThreadStream({
     );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
     return localTurnOrderBaseline === null
-      ? merged
+      ? restoreReconnectedTurnMessageOrder(merged)
       : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
   }, [
     previouslyRenderedOrder,

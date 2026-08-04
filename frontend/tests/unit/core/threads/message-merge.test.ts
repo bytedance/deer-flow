@@ -23,6 +23,7 @@ import {
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
   restoreLocalTurnMessageOrder,
+  restoreReconnectedTurnMessageOrder,
   type ThreadMessagesPageResponse,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
@@ -1621,6 +1622,243 @@ test("local turn order keeps early streamed steps behind the user message", () =
     earlyAssistantStep,
     laterAssistantStep,
   ]);
+});
+
+test("reconnected turn order moves same-run steps back behind the user message", () => {
+  // Reload mid-run: replayed `messages-tuple` steps reach the merged list
+  // before the turn's human message (the retained replay buffer may have
+  // dropped it). The live-only human is woven before the next shared anchor,
+  // leaving same-run steps above the user message they belong to.
+  const stepA1 = {
+    id: "step-a1",
+    type: "ai",
+    content: "Searching the web",
+    run_id: "run-r",
+  } as Message;
+  const stepA2 = {
+    id: "step-a2",
+    type: "tool",
+    content: "search results",
+    tool_call_id: "tc-a2",
+    run_id: "run-r",
+  } as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Analyze deerflow",
+  } as Message;
+  const stepB1 = {
+    id: "step-b1",
+    type: "ai",
+    content: "Reading the source",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([stepA1, stepA2, human, stepB1]),
+  ).toEqual([human, stepA1, stepA2, stepB1]);
+});
+
+test("reconnected turn order leaves a resent turn after an interrupted run untouched", () => {
+  // Legit layout: an interrupted earlier run left steps without a final
+  // answer, then the user sent a new message. The earlier run's steps must
+  // NOT be pulled below the new human message.
+  const interruptedStep = {
+    id: "step-old",
+    type: "ai",
+    content: "Interrupted run step",
+    run_id: "run-1",
+  } as Message;
+  const human = {
+    id: "human-2",
+    type: "human",
+    content: "Same question again",
+    run_id: "run-2",
+  } as Message;
+  const newStep = {
+    id: "step-new",
+    type: "ai",
+    content: "New run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([interruptedStep, human, newStep]),
+  ).toEqual([interruptedStep, human, newStep]);
+});
+
+test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const answer1 = {
+    id: "answer-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-1",
+  } as Message;
+  const misplacedStep = {
+    id: "step-misplaced",
+    type: "ai",
+    content: "Second run step above the human",
+    run_id: "run-2",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step below the human",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      answer1,
+      misplacedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, answer1, human2, misplacedStep, step2]);
+});
+
+test("reconnected turn order moves live-only steps before any history loads", () => {
+  // Right after reconnect no history page has landed yet: every live message
+  // lacks run_id. A run_id-less step below the human proves the live stream
+  // is past turn start, so run_id-less steps above the human belong to the
+  // same reconnected run.
+  const earlyStep = {
+    id: "live-early",
+    type: "ai",
+    content: "Replayed step",
+  } as Message;
+  const human = {
+    id: "live-human",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "live-later",
+    type: "ai",
+    content: "Fresh step",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([earlyStep, human, laterStep]),
+  ).toEqual([human, earlyStep, laterStep]);
+});
+
+test("reconnected turn order keeps run_id-less steps when no run_id-less step follows the human", () => {
+  // A run_id-less step above the human is only attributable to the current
+  // run when the run_id-less live stream continues below the human. With
+  // every message below the human carrying a (different) run_id, the stray
+  // step may belong to an older turn and must stay put.
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const strayStep = {
+    id: "stray",
+    type: "ai",
+    content: "Ambiguous step",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+    run_id: "run-2",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      strayStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, strayStep, human2, step2]);
+});
+
+test("reconnected turn order keeps hidden control messages and older-run orphans in place", () => {
+  const orphanStep = {
+    id: "orphan",
+    type: "ai",
+    content: "Pagination orphan from an older run",
+    run_id: "run-0",
+  } as Message;
+  const hiddenControl = {
+    id: "control",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const misplacedStep = {
+    id: "misplaced",
+    type: "ai",
+    content: "Same-run step",
+    run_id: "run-r",
+  } as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "Later same-run step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      orphanStep,
+      hiddenControl,
+      misplacedStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([orphanStep, hiddenControl, human, misplacedStep, laterStep]);
+});
+
+test("reconnected turn order is a no-op when the human message already leads its turn", () => {
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const step = {
+    id: "step",
+    type: "ai",
+    content: "Step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(restoreReconnectedTurnMessageOrder([human, step])).toEqual([
+    human,
+    step,
+  ]);
+  expect(restoreReconnectedTurnMessageOrder([step])).toEqual([step]);
+  expect(restoreReconnectedTurnMessageOrder([])).toEqual([]);
 });
 
 test("rendered message ledger does not retain explicitly superseded messages", () => {
