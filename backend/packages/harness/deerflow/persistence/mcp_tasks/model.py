@@ -31,6 +31,7 @@ class McpTaskRow(Base):
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_poll_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     poll_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_poll_error_count: Mapped[int] = mapped_column(Integer, default=0)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

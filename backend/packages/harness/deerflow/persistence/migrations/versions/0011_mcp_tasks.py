@@ -44,6 +44,7 @@ def upgrade() -> None:
         sa.Column("last_polled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_poll_error", sa.Text(), nullable=True),
         sa.Column("poll_attempt_count", sa.Integer(), nullable=False),
+        sa.Column("consecutive_poll_error_count", sa.Integer(), nullable=False),
         sa.Column("lease_owner", sa.String(length=128), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("cancel_requested_at", sa.DateTime(timezone=True), nullable=True),

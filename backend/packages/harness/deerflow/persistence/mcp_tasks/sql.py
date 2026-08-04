@@ -167,6 +167,7 @@ class McpTaskRepository:
             "next_poll_at": next_poll_at,
             "last_polled_at": polled_at,
             "last_poll_error": None,
+            "consecutive_poll_error_count": 0,
             "lease_owner": None,
             "lease_expires_at": None,
             "updated_at": polled_at,
@@ -206,6 +207,7 @@ class McpTaskRepository:
             .values(
                 next_poll_at=next_poll_at,
                 last_poll_error=error,
+                consecutive_poll_error_count=McpTaskRow.consecutive_poll_error_count + 1,
                 lease_owner=None,
                 lease_expires_at=None,
                 updated_at=datetime.now(UTC),

@@ -185,3 +185,39 @@ async def test_release_claim_retries_transient_poll_failure(tmp_path):
     assert stored["last_poll_error"] == "temporary network failure"
     assert datetime.fromisoformat(stored["next_poll_at"]) == retry_at
     assert stored["lease_owner"] is None
+
+
+@pytest.mark.asyncio
+async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-6", now=now)
+
+    for expected_errors in (1, 2):
+        await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+        await repo.release_claim(
+            "task-6",
+            lease_owner="worker-1",
+            next_poll_at=now - timedelta(seconds=1),
+            error="temporary network failure",
+        )
+        stored = await repo.get("task-6", user_id="user-1")
+        assert stored is not None
+        assert stored["consecutive_poll_error_count"] == expected_errors
+
+    await repo.claim_due_tasks(now=now, lease_owner="worker-1", lease_seconds=60, limit=10)
+    applied = await repo.apply_snapshot(
+        "task-6",
+        lease_owner="worker-1",
+        status="working",
+        result=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now + timedelta(seconds=5),
+        polled_at=now,
+    )
+    assert applied is True
+
+    stored = await repo.get("task-6", user_id="user-1")
+    assert stored is not None
+    assert stored["consecutive_poll_error_count"] == 0
