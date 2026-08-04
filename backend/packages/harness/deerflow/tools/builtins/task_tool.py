@@ -336,10 +336,11 @@ async def task_tool(
         if thread_id is None:
             raise ValueError("thread_id is required when coding_task_id is provided")
         coding_graph = create_task_graph(thread_id, user_id=user_id)
+    coding_task_claimed = False
 
     def fail_coding_task(reason: str) -> None:
         """将已领取的 CodingTask 标记为失败，同时保留原始执行异常。"""
-        if coding_graph is None:
+        if coding_graph is None or not coding_task_claimed:
             return
         try:
             coding_graph.fail(coding_task_id, reason=reason)
@@ -401,36 +402,41 @@ async def task_tool(
         available_tools_kwargs["app_config"] = resolved_app_config
     tools = get_available_tools(**available_tools_kwargs)
 
-    # Create executor
-    executor_kwargs = {
-        "config": config,
-        "tools": tools,
-        "parent_model": parent_model,
-        "sandbox_state": sandbox_state,
-        "thread_data": thread_data,
-        "thread_id": thread_id,
-        "trace_id": trace_id,
-        "user_id": user_id,
-        "user_role": user_role,
-        "oauth_provider": oauth_provider,
-        "oauth_id": oauth_id,
-        "run_id": run_id,
-        "channel_user_id": channel_user_id,
-        "is_internal": is_internal,
-        "authz_attributes": authz_attributes,
-        "deerflow_trace_id": deerflow_trace_id,
-    }
-    if resolved_app_config is not None:
-        executor_kwargs["app_config"] = resolved_app_config
-    executor = SubagentExecutor(**executor_kwargs)
-
-    # 先持久化领取状态，再启动真实 Sub-Agent，避免绕过 DAG 依赖检查。
-    if coding_graph is not None:
-        coding_graph.claim(coding_task_id, owner=subagent_type)
-
-    # Start background execution (always async to prevent blocking)
-    # Use tool_call_id as task_id for better traceability
     try:
+        # 先持久化领取状态，再准备工作区并启动真实 Sub-Agent，避免绕过 DAG 依赖检查。
+        if coding_graph is not None:
+            coding_task = coding_graph.claim(coding_task_id, owner=subagent_type)
+            coding_task_claimed = True
+            if coding_task.worktree is not None:
+                if thread_data is None:
+                    raise RuntimeError("thread_data is required when using a coding worktree")
+                thread_data = dict(thread_data)
+                thread_data["workspace_path"] = coding_task.worktree
+
+        # 创建执行器，并把 CodingTask 选定的工作区上下文传给子 Agent。
+        executor_kwargs = {
+            "config": config,
+            "tools": tools,
+            "parent_model": parent_model,
+            "sandbox_state": sandbox_state,
+            "thread_data": thread_data,
+            "thread_id": thread_id,
+            "trace_id": trace_id,
+            "user_id": user_id,
+            "user_role": user_role,
+            "oauth_provider": oauth_provider,
+            "oauth_id": oauth_id,
+            "run_id": run_id,
+            "channel_user_id": channel_user_id,
+            "is_internal": is_internal,
+            "authz_attributes": authz_attributes,
+            "deerflow_trace_id": deerflow_trace_id,
+        }
+        if resolved_app_config is not None:
+            executor_kwargs["app_config"] = resolved_app_config
+        executor = SubagentExecutor(**executor_kwargs)
+
+        # 后台启动，避免阻塞主 Agent；工具调用 ID 同时作为任务 ID，便于追踪。
         task_id = executor.execute_async(prompt, task_id=tool_call_id)
     except Exception as exc:
         fail_coding_task(f"Failed to start subagent: {exc}")

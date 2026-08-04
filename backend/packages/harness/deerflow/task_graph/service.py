@@ -8,6 +8,16 @@ class TaskGraph:
     def __init__(self, store: JsonTaskStore):
         self.store = store
 
+    def bind_worktree(self, task_ids: list[str], worktree: str) -> list[CodingTask]:
+        """给一组 CodingTask 绑定同一个已验证 Worktree 的完整路径。"""
+        task_list = []
+        for task_id in task_ids:
+            task_list.append(self.store.load(task_id))
+        for task in task_list:
+            task.worktree = worktree
+            self.store.save(task)
+        return task_list
+
     def add_tasks(self, tasks: list[CodingTask]) -> list[CodingTask]:
         """接收 Coding Agent 制定的一整批任务计划，确认这份计划合法后，再保存到磁盘。"""
         seen: set[str] = set()

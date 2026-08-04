@@ -22,7 +22,11 @@ def test_skill_can_only_submit_plan_and_delegate_tasks() -> None:
     frontmatter, _ = _load_skill()
 
     assert frontmatter["name"] == "multi-agent-coding"
-    assert frontmatter["allowed-tools"] == ["submit_task_plan", "task"]
+    assert frontmatter["allowed-tools"] == [
+        "submit_task_plan",
+        "create_coding_worktree",
+        "task",
+    ]
 
 
 def test_skill_persists_stable_stage_dag_before_delegation() -> None:
@@ -30,6 +34,8 @@ def test_skill_persists_stable_stage_dag_before_delegation() -> None:
     normalized = body.lower()
 
     assert normalized.index("submit_task_plan") < normalized.index("code-analyzer")
+    assert normalized.index("submit_task_plan") < normalized.index("create_coding_worktree")
+    assert normalized.index("create_coding_worktree") < normalized.index("code-analyzer")
     assert '"id": "coding-analysis"' in normalized
     assert '"id": "coding-implementation"' in normalized
     assert '"id": "coding-review"' in normalized

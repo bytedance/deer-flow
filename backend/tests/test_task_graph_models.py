@@ -12,6 +12,7 @@ def test_coding_task_has_safe_defaults():
     assert task.owner is None
     assert task.failure_reason is None
     assert task.blocked_by == []
+    assert task.worktree is None
 
 
 def test_coding_tasks_do_not_share_blocked_by_list():

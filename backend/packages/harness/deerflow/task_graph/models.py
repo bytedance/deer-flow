@@ -22,3 +22,5 @@ class CodingTask:
     owner: str | None = None
     failure_reason: str | None = None
     blocked_by: list[str] = field(default_factory=list)
+    # 目标仓库中已验证存在的 Worktree 完整路径，供子 Agent 直接切换工作区。
+    worktree: str | None = None

@@ -3,6 +3,7 @@ name: multi-agent-coding
 description: "Coordinate code analysis, implementation, and review through specialized subagents."
 allowed-tools:
   - submit_task_plan
+  - create_coding_worktree
   - task
 ---
 
@@ -44,6 +45,16 @@ allowed-tools:
 ```
 
 只有 `submit_task_plan` 成功保存整张 DAG 后才能开始委派。任务状态由 `task(coding_task_id=...)` 根据真实 Sub-Agent 终态自动回写；不要根据报告文字手工宣称任务已完成。
+
+## Prepare Isolated Worktree
+
+保存 DAG 后、委派任何子 Agent 前，先确认用户明确指定了要修改的本地 Git 仓库，然后调用一次 `create_coding_worktree`：
+
+- `repository_path`: 用户为本次 Coding Run 选择的本地 Git 仓库绝对路径，可以位于任意磁盘
+- `name`: `coding-run`
+- `task_ids`: `coding-analysis`、`coding-implementation`、`coding-review`
+
+该工具会在用户的目标仓库中创建并验证 `coding/coding-run` 分支对应的独立 Worktree，然后把完整 Worktree 路径绑定到三个阶段任务。子 Agent 修改目标项目的 Worktree；DeerFlow 自己的线程 Workspace 不是目标代码仓库。只有工具成功返回后才能开始 Analyze；创建或验证失败时立即停止，不得委派任何子 Agent。
 
 ## Workflow
 

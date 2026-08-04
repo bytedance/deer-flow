@@ -147,6 +147,42 @@ def test_recover_resets_failed_task_for_a_new_claim(task_graph):
         graph.recover("task-2")
 
 
+def test_bind_worktree_persists_one_worktree_for_the_whole_pipeline(task_graph):
+    graph, store = task_graph
+    tasks = [
+        CodingTask(id="coding-analysis", subject="Analyze", description="Analyze change"),
+        CodingTask(
+            id="coding-implementation",
+            subject="Implement",
+            description="Implement change",
+            blocked_by=["coding-analysis"],
+        ),
+        CodingTask(
+            id="coding-review",
+            subject="Review",
+            description="Review change",
+            blocked_by=["coding-implementation"],
+        ),
+    ]
+    graph.add_tasks(tasks)
+
+    bound = graph.bind_worktree([task.id for task in tasks], "coding-run")
+
+    assert [task.worktree for task in bound] == ["coding-run"] * 3
+    assert all(task.status is TaskStatus.pending for task in bound)
+    assert [store.load(task.id).worktree for task in tasks] == ["coding-run"] * 3
+
+
+def test_bind_worktree_validates_the_whole_batch_before_persisting(task_graph):
+    graph, store = task_graph
+    store.save(CodingTask(id="coding-analysis", subject="Analyze", description="Analyze change"))
+
+    with pytest.raises(FileNotFoundError):
+        graph.bind_worktree(["coding-analysis", "missing-task"], "coding-run")
+
+    assert store.load("coding-analysis").worktree is None
+
+
 def test_add_tasks_validates_the_whole_batch_before_persisting(task_graph):
     graph, store = task_graph
     tasks = [

@@ -7,6 +7,7 @@ from .submit_task_plan_tool import submit_task_plan
 from .task_tool import task_tool
 from .update_agent_tool import update_agent
 from .view_image_tool import view_image_tool
+from .worktree_tool import create_coding_worktree
 
 __all__ = [
     "setup_agent",
@@ -18,4 +19,5 @@ __all__ = [
     "submit_task_plan",
     "task_tool",
     "list_uploaded_files",
+    "create_coding_worktree",
 ]
