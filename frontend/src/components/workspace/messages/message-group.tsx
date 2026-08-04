@@ -592,7 +592,7 @@ function ToolCall({
   messageId?: string;
   name: string;
   args: Record<string, unknown>;
-  result?: string | Record<string, unknown>;
+  result?: unknown;
   resultIsError?: boolean;
   isLast?: boolean;
   isLoading?: boolean;
@@ -947,7 +947,7 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
-  result?: string | Record<string, unknown>;
+  result?: unknown;
   resultIsError?: boolean;
   browserView?: BrowserViewMeta;
 }
