@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
@@ -1494,7 +1495,27 @@ class MemoryUpdater:
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
             attempted = True
-            response = model.invoke(prompt, config=invoke_config)
+            started = time.monotonic()
+            try:
+                response = model.invoke(prompt, config=invoke_config)
+            except BaseException as exc:
+                self._notify_llm_result(
+                    invoke_config,
+                    prompt=prompt,
+                    response=None,
+                    error=exc,
+                    started=started,
+                    model_name=model_name,
+                )
+                raise
+            self._notify_llm_result(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=None,
+                started=started,
+                model_name=model_name,
+            )
             success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
@@ -1532,6 +1553,34 @@ class MemoryUpdater:
                     response=response,
                     success=success,
                 )
+
+    def _notify_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        started: float,
+        model_name: str | None,
+    ) -> None:
+        """Fire the optional host result hook without affecting the update."""
+        if self._callbacks is None:
+            return
+        hook = getattr(self._callbacks, "on_memory_llm_result", None)
+        if hook is None:
+            return
+        try:
+            hook(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                model_name=model_name,
+            )
+        except BaseException:
+            logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(
         self,

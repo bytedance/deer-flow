@@ -12,6 +12,13 @@ from deerflow_extension_api.contracts import (
     ExtensionRegistry,
     HostPolicySnapshot,
     MiddlewareContributor,
+    SystemModelCallObserver,
+    SystemModelRequest,
+    SystemModelResult,
+    SystemOperationKind,
+    TaskInfo,
+    TaskLifecycleContributor,
+    TaskOutcome,
     extension,
 )
 from deerflow_extension_api.placement import (
@@ -30,7 +37,7 @@ from deerflow_extension_api.state import ExtensionData
 #: (contributors and observers), so minors may break and only patches promise
 #: to be additive. From 1.0 on, bump the major on any breaking change; see the
 #: spec's evolution rules for what counts as additive.
-API_VERSION = "0.1.0"
+API_VERSION = "0.1.1"
 
 __all__ = [
     "API_VERSION",
@@ -44,6 +51,13 @@ __all__ = [
     "MiddlewareContributor",
     "MiddlewarePlacement",
     "Placement",
+    "SystemModelCallObserver",
+    "SystemModelRequest",
+    "SystemModelResult",
+    "SystemOperationKind",
+    "TaskInfo",
+    "TaskLifecycleContributor",
+    "TaskOutcome",
     "extension",
     "task_store_from_runtime",
 ]
