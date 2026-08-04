@@ -29,6 +29,7 @@ deer-flow/
 │   ├── Makefile               # Backend-only commands (dev, gateway, lint)
 │   ├── langgraph.json         # LangGraph Studio graph configuration
 │   ├── packages/
+│   │   ├── extension-api/     # public, host-independent extension contracts (import: deerflow_extension_api.*)
 │   │   └── harness/           # deerflow-harness package (import: deerflow.*)
 │   │       ├── pyproject.toml
 │   │       └── deerflow/
@@ -49,6 +50,7 @@ deer-flow/
 │   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
 │   │           ├── mcp/               # MCP integration (tools, cache, client)
 │   │           ├── integrations/      # Managed first-party integration installers (e.g. Lark CLI skill pack)
+│   │           ├── extensions/        # Python plugin loader, registry, placement, and isolation
 │   │           ├── models/            # Model factory with thinking/vision support
 │   │           ├── skills/            # Skills discovery, loading, parsing
 │   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
@@ -435,6 +437,59 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 34. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
 35. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, writes a readable `ToolMessage.content` fallback plus structured `ToolMessage.artifact.human_input` request payload, and interrupts via `Command(goto=END)` (must be last). Payloads are versioned: legacy modes (`free_text` / `choice_with_other`) keep `version: 1` unchanged, while the v2 `form` mode (from `fields`) carries `version: 2` so older frontends reject the payload and degrade to the plain-text fallback. Field normalization is deterministic and lives in the middleware, not the tool schema — the middleware short-circuits before tool execution, so tool-arg typing alone provides no runtime validation. Validation is atomic: any structurally broken entry (non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member like `__proto__`/`constructor`, exceeding the caps of 16 fields / 24 options per field / 200 chars per text, or the whole normalized definition exceeding `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8 — the per-item caps alone admit forms whose IM text fallback would blow channel delivery limits and truncate away trailing fields) degrades the whole form to the legacy option/free-text modes, so a card can never render "complete" while silently missing a business field; benign issues keep local degradation (unknown types — including unhashable JSON like `type: []`, which must never raise from the membership probe — and option-less selects become `text`), and options are trimmed/deduped with blanks dropped (both form-level and top-level) because the frontend parser rejects blank option labels. Model-produced XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar string/number leaves are retained, and residual XML tags are removed before the same trimming and deduplication. Checkbox fields are booleans that default to an explicit "no"; `required` on a checkbox means must-agree/consent semantics. The response protocol is deliberately unchanged (v1 `text`/`option` only): form cards submit a readable text summary as `response_kind: "text"`, so journal persistence and answered-card recovery need no new allowlist entries. Because this middleware can short-circuit tool execution before LangChain emits `on_tool_end`, `RunJournal` performs a root-run final reconciliation for allowlisted clarification `ToolMessage`s whose `tool_call_id` was produced by the current run, so human-input request cards remain recoverable from `run_events` after checkpoint compaction. Human Input Card replies are submitted as `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden response sources (currently `ask_clarification`) as `llm.human.input`, which preserves answered-card state after compaction without exposing generic internal hidden context.
 
+### Python Extension System (Middleware Slice)
+
+Third-party Python packages can expose an `install(registry, config)` function and be
+loaded, in deterministic order, from the startup-only top-level `plugins:` list in
+`config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
+through Gateway APIs, while importing Python entry points is an operator-controlled code
+execution boundary. A plugin marked `required: true` fails Gateway construction when it
+cannot load; optional plugins fail open with attributed diagnostics.
+
+The public package is `packages/extension-api/` and must never import `deerflow`. In this
+slice its registry contract exposes middleware contribution only. Each contribution
+declares lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
+`MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, or `STANDARD`) rather than a fragile list
+index. `extensions/stack.py` is the single final composition point; do not inject inside
+the shared base builder because the lead builder appends more middleware afterward.
+`extensions/ordering.py` owns host ordering invariants and validates the final composed
+stack. Nothing under `extensions/` may import `agents.middlewares` at module scope: the
+middleware layer calls into this one, so a module-scope reference points the dependency
+backwards and closes a cycle as soon as any middleware imports something under
+`extensions/` at module level. Both tables that need middleware classes therefore resolve
+on first use — `ordering.py::core_ordering_constraints()` and `stack.py::_anchors()` —
+which is `assert_ordering` / composition time, already inside the middleware builder.
+Defer by deferring the *call*; do not fake a resolved value with a lazy container
+subclass, which reports one answer when iterated and another when measured.
+
+Contributed middlewares are wrapped by `IsolatedMiddleware`: extension failures emit
+diagnostics and fail open without repeating a downstream model/tool side effect. The
+wrapper mirrors lifecycle hooks, tools, transformers, and state schema implemented by
+the inner middleware. LangChain treats each sync/async model or tool wrapper pair as one
+capability, so a single-sided wrapper receives a pass-through counterpart; implement
+both sides when the extension must observe both synchronous and asynchronous execution
+paths. Lead runs and
+subagents allocate an `ExtensionData` task store only when middleware contributors are
+present and expose it through `EXTENSION_TASK_STORE_KEY`; extensions retrieve it with
+`task_store_from_runtime()`. Each run resolves the immutable loaded-extension snapshot
+once and binds that same object through task-store allocation and synchronous agent
+construction, so a concurrent singleton replacement cannot mix two extension
+generations without changing the LangGraph graph-factory ABI. The graph-build binding is
+a ContextVar scoped to synchronous construction, so it has already exited by the time the
+lead agent delegates; the run worker therefore also publishes the snapshot on runtime
+context under the host-internal `EXTENSION_SNAPSHOT_CONTEXT_KEY`, `task_tool` reads it
+back through `resolve_run_extensions()` (type-checked — runtime context is
+caller-mergeable), and `SubagentExecutor` binds it at construction. That key is written
+after the caller merge and popped when the run has none, so a caller-supplied value is
+never authoritative. Absent the key — embedded `DeerFlowClient`, standalone LangGraph
+Server — the executor keeps its `get_loaded_extensions()` fallback.
+
+Gateway `create_app()` loads plugins once, stores the immutable registry on `app.state`
+and in the process-wide singleton, and installs one canonical live diagnostics list.
+Changing `plugins` requires a restart. Later extension contribution points must be added
+to the public contract and host runtime in the same slice; never accept a registration
+method that the current host silently ignores.
+
 ### Configuration System
 
 **Main Configuration** (`config.yaml`):
@@ -447,7 +502,7 @@ Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** direc
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `run_ownership`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig`, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `stream_bridge`, `sandbox`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `run_ownership`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`.
 
 **Persistence backend resolution**: the unified `database` section selects the
 Gateway's LangGraph checkpointer, LangGraph Store, and DeerFlow SQL repositories.

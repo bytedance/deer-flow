@@ -2473,3 +2473,35 @@ authorization:
 #         # Security features (enabled by default):
 #         pkce_enabled: true               # PKCE (S256) for authorization code flow
 #         nonce_enabled: true              # Nonce validation in ID tokens
+
+# --- Plugins ----------------------------------------------------------------
+# Extension packages, loaded once at startup in the order listed here. Each
+# entry names an install entry point as "module.path:install"; the `config`
+# block is handed to that package verbatim and validated by the package itself.
+#
+# Loading is explicit on purpose: an installed package does nothing until it is
+# listed here, and the list order is what fixes middleware ordering.
+#
+# This is deliberately separate from the `extensions:` block above (MCP servers,
+# skills, config-declared middlewares). That one is backed by
+# extensions_config.json, which the Gateway can rewrite through an HTTP
+# endpoint; a list that causes code to be imported must stay in this
+# operator-controlled file only.
+#
+# This initial extension-system slice accepts middleware contributors. Their
+# install functions register semantically placed middlewares for the lead and/or
+# subagent stack; the examples below intentionally cover only that surface.
+#
+# plugins:
+#   - use: acme_request_observer:install
+#     config:
+#       enabled: true
+#       placement: model_logical
+#   - use: acme_tool_observer:install
+#     config:
+#       enabled: true
+#       placement: tool_raw
+#   # `required: true` turns a load failure into a startup failure. Use it for
+#   # packages whose absence changes behaviour rather than just observability.
+#   - use: acme_required_middleware:install
+#     required: true

@@ -7,6 +7,11 @@ dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.30",
     "croniter>=6.0.0",
+    # Exact pin by design (extension-system version contract): the host pins
+    # the contract version it implements, extensions declare ranges. A range
+    # here would let pip resolve a newer contract package than this harness
+    # implements, making newer extensions look supported at runtime.
+    "deerflow-extension-api==0.1.0",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",

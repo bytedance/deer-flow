@@ -223,13 +223,17 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
     assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
 
 
-def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: pytest.MonkeyPatch):
-    """_build_runtime_middlewares must raise RuntimeError when ToolProgressMiddleware ends up
-    at a higher index than ToolErrorHandlingMiddleware.
+def test_middleware_ordering_guard_moved_to_declarative_constraints(monkeypatch: pytest.MonkeyPatch):
+    """_build_runtime_middlewares no longer hand-validates ordering; the invariant is now
+    declared in deerflow.extensions.ordering (core_ordering_constraints / assert_ordering) and
+    is checked once the composing builder merges extension contributions in (Task 9).
 
-    We trigger the wrong-order condition by patching SandboxAuditMiddleware to be an actual
-    ToolErrorHandlingMiddleware instance, which appears BEFORE ToolProgressMiddleware in the
-    list. The guard's isinstance() check finds it first, making error_idx < progress_idx.
+    This test previously monkeypatched SandboxAuditMiddleware to a ToolErrorHandlingMiddleware
+    instance to force the wrong-order condition and asserted that the builder itself raised.
+    That in-builder guard was deleted on purpose: validating here would check a stack that
+    hasn't received extension contributions yet. Building under the same wrong-order condition
+    must no longer raise inside this builder; deerflow.extensions.ordering has the equivalent
+    coverage (see test_extension_ordering.py and test_core_constraints_are_declared).
     """
     from deerflow.agents.middlewares.tool_error_handling_middleware import (
         ToolErrorHandlingMiddleware,
@@ -240,7 +244,7 @@ def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: py
     _stub_runtime_middleware_imports(monkeypatch)
     # Override the SandboxAuditMiddleware stub with a real ToolErrorHandlingMiddleware so it
     # becomes the FIRST ToolErrorHandlingMiddleware in the list, appearing before
-    # ToolProgressMiddleware and triggering the ordering guard.
+    # ToolProgressMiddleware — the same wrong-order condition the deleted guard used to catch.
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.sandbox_audit_middleware",
@@ -253,8 +257,9 @@ def test_middleware_ordering_guard_raises_when_progress_is_inner(monkeypatch: py
     app_config = _make_app_config()
     app_config = app_config.model_copy(update={"tool_progress": ToolProgressConfig(enabled=True)})
 
-    with pytest.raises(RuntimeError, match="ToolProgressMiddleware must be outer"):
-        build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
+    # No raise here: the invariant is enforced by assert_ordering at the composing builder,
+    # not inside _build_runtime_middlewares.
+    build_lead_runtime_middlewares(app_config=app_config, lazy_init=False)
 
 
 def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monkeypatch: pytest.MonkeyPatch):
