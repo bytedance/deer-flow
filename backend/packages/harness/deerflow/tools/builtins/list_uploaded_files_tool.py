@@ -14,13 +14,13 @@ from typing import Annotated, Any
 from langchain.tools import tool
 from langgraph.config import get_config
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.uploads.summary import format_extension_counts
 from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.utils.input_sanitization import neutralize_untrusted_tags
 
 logger = logging.getLogger(__name__)
 

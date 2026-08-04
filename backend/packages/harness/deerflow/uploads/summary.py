@@ -3,7 +3,7 @@
 from collections import Counter
 from collections.abc import Iterable
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.utils.input_sanitization import neutralize_untrusted_tags
 
 
 def format_extension_counts(extensions: Iterable[str]) -> str:

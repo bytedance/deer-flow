@@ -18,3 +18,7 @@ def test_format_extension_counts_neutralizes_untrusted_tags():
 
     assert "&lt;system&gt;" in summary
     assert "<system>" not in summary
+
+
+def test_format_extension_counts_returns_empty_string_for_empty_iterable():
+    assert format_extension_counts([]) == ""
