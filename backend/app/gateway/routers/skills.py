@@ -2,7 +2,7 @@ import asyncio
 import logging
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -248,12 +248,7 @@ async def get_custom_skill(skill_name: str, request: Request, config: AppConfig 
 async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> CustomSkillContentResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        skills = storage.load_skills(enabled_only=False)
-        skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
-        if skill is None:
-            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=storage.read_custom_skill(skill_name))
+        return await asyncio.to_thread(_read_custom_skill_response_sync, skill_name, config)
     except HTTPException:
         raise
     except Exception as e:
@@ -261,19 +256,33 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
         raise HTTPException(status_code=500, detail=f"Failed to get custom skill: {str(e)}")
 
 
+def _read_custom_skill_response_sync(skill_name: str, config: AppConfig) -> CustomSkillContentResponse:
+    storage = _get_user_skill_storage(config)
+    skills = storage.load_skills(enabled_only=False)
+    skill = next((s for s in skills if s.name == skill_name and s.category == SkillCategory.CUSTOM), None)
+    if skill is None:
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+    return CustomSkillContentResponse(**_skill_to_response(skill).model_dump(), content=storage.read_custom_skill(skill_name))
+
+
+def _prepare_custom_skill_update(skill_name: str, content: str, config: AppConfig) -> SkillStorage:
+    storage = _get_user_skill_storage(config)
+    storage.ensure_custom_skill_is_editable(skill_name)
+    storage.validate_skill_markdown_content(skill_name, content)
+    return storage
+
+
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
 async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        storage.ensure_custom_skill_is_editable(skill_name)
-        storage.validate_skill_markdown_content(skill_name, body.content)
+        storage = await asyncio.to_thread(_prepare_custom_skill_update, skill_name, body.content, config)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content, app_config=config)
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
+        prev_content = await asyncio.to_thread(storage.read_custom_skill, skill_name)
         await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
         await asyncio.to_thread(
             storage.append_history,
@@ -361,21 +370,15 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
 async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
-        storage = _get_user_skill_storage(config)
-        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
-            raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        history = storage.read_history(skill_name)
-        if not history:
-            raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
-        record = history[body.history_index]
-        target_content = record.get("prev_content")
-        if target_content is None:
-            raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
-        storage.validate_skill_markdown_content(skill_name, target_content)
+        storage, record, target_content = await asyncio.to_thread(
+            _read_custom_skill_rollback_target,
+            skill_name,
+            body.history_index,
+            config,
+        )
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
-        skill_file = storage.get_custom_skill_file(skill_name)
-        current_content = skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+        current_content = await asyncio.to_thread(_read_current_custom_skill_content, storage, skill_name)
         history_entry = {
             "action": "rollback",
             "author": "human",
@@ -404,6 +407,26 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
     except Exception as e:
         logger.error("Failed to roll back custom skill %s: %s", skill_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to roll back custom skill: {str(e)}")
+
+
+def _read_custom_skill_rollback_target(skill_name: str, history_index: int, config: AppConfig) -> tuple[SkillStorage, dict[str, Any], str]:
+    storage = _get_user_skill_storage(config)
+    if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+        raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
+    history = storage.read_history(skill_name)
+    if not history:
+        raise HTTPException(status_code=400, detail=f"Custom skill '{skill_name}' has no history")
+    record = history[history_index]
+    target_content = record.get("prev_content")
+    if target_content is None:
+        raise HTTPException(status_code=400, detail="Selected history entry has no previous content to roll back to")
+    storage.validate_skill_markdown_content(skill_name, target_content)
+    return storage, record, target_content
+
+
+def _read_current_custom_skill_content(storage: SkillStorage, skill_name: str) -> str | None:
+    skill_file = storage.get_custom_skill_file(skill_name)
+    return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
 
 
 @router.get(

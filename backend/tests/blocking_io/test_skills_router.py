@@ -22,7 +22,14 @@ from uuid import UUID
 import pytest
 from fastapi import Request
 
-from app.gateway.routers.skills import _get_user_skill_storage, get_custom_skill_history
+from app.gateway.routers.skills import (
+    CustomSkillUpdateRequest,
+    SkillRollbackRequest,
+    _get_user_skill_storage,
+    get_custom_skill_history,
+    rollback_custom_skill,
+    update_custom_skill,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -63,3 +70,116 @@ async def test_get_custom_skill_history_does_not_block_event_loop(tmp_path: Path
 
     assert len(response.history) == 1
     assert response.history[-1]["action"] == "human_edit"
+
+
+async def test_rollback_custom_skill_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path / "skills")
+    original = "---\nname: demo-skill\ndescription: Demo\n---\n\n# Original\n"
+    edited = "---\nname: demo-skill\ndescription: Demo\n---\n\n# Edited\n"
+
+    def _seed() -> None:
+        storage = _get_user_skill_storage(config)
+        skill_file = storage.get_custom_skill_file("demo-skill")
+        skill_file.parent.mkdir(parents=True, exist_ok=True)
+        skill_file.write_text(edited, encoding="utf-8")
+        history_file = storage.get_skill_history_file("demo-skill")
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        history_file.write_text(
+            json.dumps(
+                {
+                    "action": "human_edit",
+                    "prev_content": original,
+                    "new_content": edited,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    async def _static_scan(*_args, **_kwargs) -> list:
+        return []
+
+    async def _scan(*_args, **_kwargs) -> SimpleNamespace:
+        return SimpleNamespace(decision="allow", reason="ok")
+
+    async def _refresh(_user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.gateway.routers.skills._scan_static_skill_markdown_or_raise",
+        _static_scan,
+    )
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async",
+        _refresh,
+    )
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.get_effective_user_id",
+        lambda: "default",
+    )
+
+    request = await asyncio.to_thread(_admin_request)
+    await asyncio.to_thread(_seed)
+
+    response = await rollback_custom_skill(
+        "demo-skill",
+        SkillRollbackRequest(history_index=-1),
+        request,
+        config,
+    )
+
+    assert response.content == original
+
+
+async def test_update_custom_skill_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path / "skills")
+    original = "---\nname: demo-skill\ndescription: Demo\n---\n\n# Original\n"
+    updated = "---\nname: demo-skill\ndescription: Demo\n---\n\n# Updated\n"
+
+    def _seed() -> None:
+        storage = _get_user_skill_storage(config)
+        skill_file = storage.get_custom_skill_file("demo-skill")
+        skill_file.parent.mkdir(parents=True, exist_ok=True)
+        skill_file.write_text(original, encoding="utf-8")
+
+    async def _static_scan(*_args, **_kwargs) -> list:
+        return []
+
+    async def _scan(*_args, **_kwargs) -> SimpleNamespace:
+        return SimpleNamespace(decision="allow", reason="ok")
+
+    async def _refresh(_user_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.gateway.routers.skills._scan_static_skill_markdown_or_raise",
+        _static_scan,
+    )
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async",
+        _refresh,
+    )
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.get_effective_user_id",
+        lambda: "default",
+    )
+
+    request = await asyncio.to_thread(_admin_request)
+    await asyncio.to_thread(_seed)
+
+    response = await update_custom_skill(
+        "demo-skill",
+        CustomSkillUpdateRequest(content=updated),
+        request,
+        config,
+    )
+
+    assert response.content == updated
