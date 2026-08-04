@@ -118,6 +118,10 @@ def scan_workspace_roots(
         cache_dir.mkdir(parents=True, exist_ok=True)
     # Operator-customized tool_output.storage_subdir values arrive here; the
     # default name is already part of EXCLUDED_DIR_NAMES, so merging is safe.
+    # Only single-segment directory names are meaningful: os.walk yields
+    # one-segment dirnames, so a nested value like "cache/tool-results" would
+    # never match. ToolOutputConfig enforces the single-segment contract, so a
+    # multi-segment value is a caller error, not a silent no-op.
     excluded_dir_names = EXCLUDED_DIR_NAMES | extra_excluded_dir_names if extra_excluded_dir_names else EXCLUDED_DIR_NAMES
     files: dict[str, FileSnapshot] = {}
     scanned = 0

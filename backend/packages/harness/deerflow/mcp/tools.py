@@ -700,6 +700,16 @@ async def get_mcp_tools() -> list[BaseTool]:
                     # construction indefinitely. Per-server because the gather
                     # below runs each server independently — one slow server
                     # must not prevent the others from contributing tools.
+                    #
+                    # Cancellation here is safe: discovery runs inside the
+                    # adapter's nested async context managers (load_mcp_tools →
+                    # create_session → _create_stdio_session → stdio_client),
+                    # and wait_for's CancelledError unwinds them. stdio_client's
+                    # finally closes stdin, waits for a graceful exit, then
+                    # escalates to _terminate_process_tree (SIGTERM→SIGKILL on
+                    # POSIX, process-tree termination on Windows), so the npx
+                    # subprocess and any children it spawned are reaped — no
+                    # orphan processes accumulate across repeated timeouts.
                     return await asyncio.wait_for(discovery, timeout=session_init_timeout)
                 return await discovery
             except TimeoutError:

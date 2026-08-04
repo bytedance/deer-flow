@@ -215,8 +215,10 @@ def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str
     deliverables: counting them as produced artifacts would fail run delivery
     verification for any run that externalized a tool output without also
     presenting a real artifact. The default name is excluded by the scanner
-    itself; a custom ``tool_output.storage_subdir`` is threaded through the
-    snapshot capture here so before/after diffs stay consistent.
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
     """
     storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
     return frozenset({storage_subdir})
