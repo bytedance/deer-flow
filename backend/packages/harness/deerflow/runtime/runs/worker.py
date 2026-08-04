@@ -36,6 +36,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -216,10 +217,15 @@ async def _produced_output_paths(
         return []
     try:
         after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
-        return get_changed_output_paths(before, after)
+        changed = get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
         return []
+    # Externalized tool outputs are process feedback the model reads back
+    # with read_file, not artifacts the run has to present; counting them
+    # would fail delivery verification on any run that externalizes one.
+    tool_results_prefix = f"/mnt/user-data/outputs/{ToolOutputConfig().storage_subdir}/"
+    return [path for path in changed if not path.startswith(tool_results_prefix)]
 
 
 # Keep this streaming policy separate from middleware write-authorization sets.
