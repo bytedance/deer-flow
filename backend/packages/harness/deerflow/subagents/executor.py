@@ -452,6 +452,7 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        extensions: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -476,6 +477,10 @@ class SubagentExecutor:
                 the same run as the lead agent.
             deerflow_trace_id: DeerFlow request-level correlation id propagated
                 from the parent run for Langfuse metadata correlation.
+            extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
+                captured at ``task_tool`` dispatch. When None (embedded client,
+                standalone LangGraph Server), ``_aexecute`` falls back to the
+                process-wide singleton.
         """
         self.config = config
         self.app_config = app_config
@@ -508,6 +513,12 @@ class SubagentExecutor:
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
+        # Parent run's extension snapshot. Binding it here (rather than reading
+        # the singleton at execution time) is what keeps one run on a single
+        # extension generation: a concurrent ``set_loaded_extensions()`` between
+        # the lead run's start and this subagent's execution must not swap the
+        # generation underneath the delegated work.
+        self.extensions = extensions
 
         self._base_tools = _filter_tools(
             tools,
@@ -530,7 +541,13 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+    def _create_agent(
+        self,
+        tools: list[BaseTool] | None = None,
+        *,
+        deferred_setup: "DeferredToolSetup | None" = None,
+        extensions=None,
+    ):
         """Create the agent instance.
 
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
@@ -564,6 +581,8 @@ class SubagentExecutor:
             "available_skills": self._available_skill_names,
             "user_id": self.user_id or DEFAULT_USER_ID,
         }
+        if extensions is not None:
+            middleware_kwargs["extensions"] = extensions
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
@@ -788,6 +807,14 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+        from deerflow.extensions import get_loaded_extensions
+
+        loaded_extensions = self.extensions if self.extensions is not None else get_loaded_extensions()
+        task_store = None
+        if loaded_extensions.needs_task_store:
+            from deerflow_extension_api import ExtensionData
+
+            task_store = ExtensionData(result.task_id)
         ai_messages = result.ai_messages
         if ai_messages is None:
             ai_messages = []
@@ -805,7 +832,11 @@ class SubagentExecutor:
         collector: SubagentTokenCollector | None = None
         try:
             state, final_tools, deferred_setup = await self._build_initial_state(task)
-            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
+            agent = self._create_agent(
+                final_tools,
+                deferred_setup=deferred_setup,
+                extensions=loaded_extensions,
+            )
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"
@@ -866,6 +897,10 @@ class SubagentExecutor:
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id
+            if task_store is not None:
+                from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+                context[EXTENSION_TASK_STORE_KEY] = task_store
             if self.channel_user_id:
                 context["channel_user_id"] = self.channel_user_id
             # Authorization identity: is_internal written unconditionally

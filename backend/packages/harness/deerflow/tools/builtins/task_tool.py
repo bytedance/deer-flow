@@ -14,6 +14,7 @@ from langgraph.types import Command
 
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
+from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -360,6 +361,10 @@ async def task_tool(
     # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
     is_internal = parent_context.get("is_internal") is True
     authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
+    # The run's immutable extension snapshot, published by the run worker. Stays
+    # None outside that path (embedded client, standalone LangGraph Server), where
+    # the executor keeps its process-singleton fallback.
+    run_extensions = resolve_run_extensions(parent_context)
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -415,6 +420,8 @@ async def task_tool(
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
+    if run_extensions is not None:
+        executor_kwargs["extensions"] = run_extensions
     executor = SubagentExecutor(**executor_kwargs)
 
     # Start background execution (always async to prevent blocking)
