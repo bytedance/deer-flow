@@ -18,7 +18,12 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import (
+    MemoryAuthorizationError,
+    MemoryManager,
+    MemoryManagerError,
+)
+from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.utils.messages import message_to_text
 
 from .official_config import OfficialOpenVikingConfig, is_safe_peer_id
@@ -43,8 +48,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
 
     _config: OfficialOpenVikingConfig = PrivateAttr()
     _client: Any = PrivateAttr()
-    _client_initialized: bool = PrivateAttr(default=False)
-    _client_init_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _recorder: Any = PrivateAttr()
     _retriever: Any = PrivateAttr()
     _commit_policy: Any = PrivateAttr()
@@ -176,7 +179,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         try:
             peer_id = self._resolve_scope(user_id, agent_name)
             try:
-                self._ensure_client_initialized()
                 with self._actor_peer_scope(peer_id):
                     documents = self._retriever.invoke(query.strip())
             except Exception as exc:
@@ -232,7 +234,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
                     "conds": [category],
                 }
             try:
-                self._ensure_client_initialized()
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(query.strip())
             except Exception as exc:
@@ -268,7 +269,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             return False
         try:
             try:
-                self._ensure_client_initialized()
                 health = getattr(self._client, "health", None)
                 healthy = bool(health()) if callable(health) else True
             except Exception:
@@ -334,7 +334,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             if not state.get("commit_pending"):
                 continue
             try:
-                self._ensure_client_initialized()
                 with self._actor_peer_scope(peer_id):
                     self._recorder.flush(session_id)
                 self._save_cursor(
@@ -374,18 +373,10 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     def _close_resources(self) -> None:
         """Close owned adapter and transport resources exactly once."""
 
-        first_error: BaseException | None = None
-        try:
-            self._recorder.close()
-        except BaseException as exc:
-            first_error = exc
-        try:
-            asyncio.run(self._retriever.aclose())
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
-        if first_error is not None:
-            raise first_error
+        # The retriever receives the recorder-owned client handle and therefore
+        # owns no transport or cache to close. Closing the recorder is both
+        # sufficient and safe from synchronous or asynchronous host contexts.
+        self._recorder.close()
 
     def _write_conversation(
         self,
@@ -431,7 +422,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         if state.get("commit_pending"):
             self._mark_commit_pending(session_id, peer_id)
             try:
-                self._ensure_client_initialized()
                 with self._actor_peer_scope(peer_id):
                     self._recorder.flush(session_id)
             except Exception as exc:
@@ -468,7 +458,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             return
 
         try:
-            self._ensure_client_initialized()
             with self._actor_peer_scope(peer_id):
                 result = self._recorder.record(
                     session_id,
@@ -530,25 +519,11 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     def _resolve_scope(self, user_id: str | None, agent_name: str | None) -> str:
         resolved_user = str(user_id or "default")
         if resolved_user != self._config.owner_user_id:
-            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+            raise MemoryAuthorizationError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
         return _canonical_peer_id(agent_name, self._config.default_peer_id)
 
     def _actor_peer_scope(self, peer_id: str) -> AbstractContextManager[None]:
         return self._use_actor_peer(peer_id)
-
-    def _ensure_client_initialized(self) -> None:
-        """Initialize the shared SDK transport once, including outside Gateway."""
-
-        if self._client_initialized:
-            return
-        with self._client_init_lock:
-            if self._client_initialized:
-                return
-            if not getattr(self._client, "_initialized", False):
-                initialize = getattr(self._client, "initialize", None)
-                if callable(initialize):
-                    initialize()
-            self._client_initialized = True
 
     def _session_lock(self, session_id: str) -> threading.RLock:
         with self._session_locks_guard:
@@ -660,10 +635,26 @@ def _load_official_integration() -> dict[str, Any]:
 
 
 def _canonical_peer_id(agent_name: str | None, default_peer_id: str) -> str:
-    value = default_peer_id if agent_name is None else str(agent_name).strip().lower()
-    if value == _DEFAULT_AGENT_SCOPE or not is_safe_peer_id(value):
+    if agent_name is None:
+        return default_peer_id
+
+    raw_name = str(agent_name).strip()
+    if not AGENT_NAME_PATTERN.fullmatch(raw_name):
+        raise ValueError(f"Invalid DeerFlow agent name: {raw_name!r}")
+
+    value = raw_name.lower()
+    if value == _DEFAULT_AGENT_SCOPE:
         raise ValueError(f"Invalid OpenViking peer scope: {value!r}")
-    return value
+    if is_safe_peer_id(value):
+        # Preserve the existing mapping for every already-compatible name so
+        # existing OpenViking Sessions remain reachable.
+        return value
+
+    # DeerFlow permits leading hyphens and names longer than OpenViking's
+    # 64-character peer limit. Map only those edge cases to a stable safe ID;
+    # the digest prevents truncation/sanitization collisions.
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    return f"df-agent-{digest}"
 
 
 def _session_id(owner_user_id: str, peer_id: str, thread_id: str) -> str:

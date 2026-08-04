@@ -1032,8 +1032,10 @@ DeerFlow also includes an optional `openviking` memory backend. It uses
 the pinned `langchain-openviking` package's official recorder and retriever to
 capture completed turns, commit OpenViking Sessions, and recall query-relevant
 memories before each user turn. DeerFlow keeps ownership of its lifecycle and a
-bounded local capture cursor, while the standalone integration owns message
-conversion, batching, retrieval, and SDK transport behavior. The full
+bounded local capture cursor, which must live on persistent storage across
+restarts, while the standalone integration owns message conversion, batching,
+retrieval, and SDK transport behavior. Credential-owner mismatches always fail
+closed before the model call, independent of availability policy. The full
 OpenViking server package is not installed in DeerFlow. Existing trusted-mode
 configurations remain available temporarily through a deprecated compatibility
 path. See

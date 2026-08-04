@@ -765,9 +765,11 @@ def _get_memory_context(
 """
     except Exception as exc:
         logger.exception("Failed to load memory context")
-        from deerflow.agents.memory import MemoryManagerError
+        from deerflow.agents.memory import MemoryAuthorizationError, MemoryManagerError
 
         failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryAuthorizationError):
+            raise
         if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
             raise
         return ""
@@ -819,9 +821,11 @@ async def _aget_memory_context(
         return f"<memory>\n{memory_content}\n</memory>\n"
     except Exception as exc:
         logger.exception("Failed to load memory context")
-        from deerflow.agents.memory import MemoryManagerError
+        from deerflow.agents.memory import MemoryAuthorizationError, MemoryManagerError
 
         failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryAuthorizationError):
+            raise
         if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
             raise
         return ""

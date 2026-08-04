@@ -1025,11 +1025,16 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   conversion, 100-message batching, partial-write reporting, Session commits,
   retrieval, and HTTP transport. One ordinary OpenViking USER credential is
   bound to the configured `owner_user_id`; requests for another DeerFlow user
-  are rejected before remote access, while the top-level agent maps to the
-  request-scoped OpenViking peer. Query-aware recall is injected only into the
-  current model request and async entrypoints offload synchronous SDK and cursor
-  IO. Configuration containing the old explicit `auth_mode` continues through
-  the deprecated custom-HTTP adapter with a migration warning. Neither path
+  always fail closed before remote access or model compute, even when
+  `failure_policy.read` is `fail_open`. Compatible top-level agent names keep
+  their lowercase request-scoped peer ID; DeerFlow-valid names outside
+  OpenViking's syntax use a stable collision-resistant fallback. Query-aware
+  recall is injected only into the current model request and both sync and async
+  model hooks enforce the same five-second wall-clock budget while SDK and
+  cursor IO run off the event loop. The cursor `storage_path` must remain
+  persistent across restarts; losing it can replay the retained transcript.
+  Configuration containing the old explicit `auth_mode` continues through the
+  deprecated custom-HTTP adapter with a migration warning. Neither path
   implements DeerMem fact CRUD/import/export or imports the embedded OpenViking
   runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.

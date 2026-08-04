@@ -17,11 +17,13 @@ from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
 from deerflow.agents.memory.backends.openviking.official_config import (
     OfficialOpenVikingConfig,
     is_legacy_openviking_config,
+    is_safe_peer_id,
 )
 from deerflow.agents.memory.backends.openviking.official_manager import (
     OfficialOpenVikingMemoryManager,
+    _canonical_peer_id,
 )
-from deerflow.agents.memory.manager import MemoryManagerError
+from deerflow.agents.memory.manager import MemoryAuthorizationError, MemoryManagerError
 
 
 class _CommitPolicy:
@@ -67,8 +69,8 @@ class _Recorder:
         timeout: float = 60.0,
         auto_initialize: bool = True,
     ):
-        del auto_initialize
-        self.client = client or _Client(url=url, api_key=api_key, timeout=timeout)
+        self._client = client or _Client(url=url, api_key=api_key, timeout=timeout)
+        self._auto_initialize = auto_initialize
         self._owns_client = client is None
         self.commit_policy = commit_policy
         self.calls: list[tuple[str, list[Any], str | None, str | None]] = []
@@ -76,6 +78,12 @@ class _Recorder:
         self.flush_actor_peers: list[str | None] = []
         self.failures: list[BaseException] = []
         self.closed = False
+
+    @property
+    def client(self) -> _Client:
+        if self._auto_initialize and not self._client.initialized:
+            self._client.initialize()
+        return self._client
 
     def record(self, session_id: str, messages: list[Any], peer_id: str | None = None):
         self.calls.append((session_id, list(messages), peer_id, _ACTOR_PEER.get()))
@@ -92,7 +100,7 @@ class _Recorder:
     def close(self) -> None:
         self.closed = True
         if self._owns_client:
-            self.client.close()
+            self._client.close()
 
 
 class _Retriever:
@@ -169,7 +177,7 @@ def test_official_loader_uses_standalone_package() -> None:
     assert integration["use_actor_peer"].__module__ == "langchain_openviking.actor_peer"
 
 
-def test_published_adapter_manager_construction_is_lazy(
+def test_published_adapter_manager_delegates_client_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -178,7 +186,6 @@ def test_published_adapter_manager_construction_is_lazy(
     manager = OpenVikingMemoryManager.from_config(_config(tmp_path, base_url="http://127.0.0.1:9"))
 
     assert isinstance(manager, OfficialOpenVikingMemoryManager)
-    assert manager._client_initialized is False
     manager.close()
     assert manager._resources_closed is True
 
@@ -307,54 +314,45 @@ def test_manager_shares_one_official_client_and_uses_query_aware_policy(
     }
 
 
-def test_direct_use_lazily_initializes_shared_client_once(
+def test_official_recorder_initializes_shared_client_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     official_integration: None,
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
-
-    assert manager._client.initialized is False
-    manager.get_context("alice", query="first")
-    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
 
     assert manager._client.initialized is True
     assert manager._client.initialize_calls == 1
-
-
-def test_concurrent_direct_use_initializes_shared_client_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    official_integration: None,
-) -> None:
-    manager = _manager(tmp_path, monkeypatch)
-    original_initialize = manager._client.initialize
-    initialize_started = threading.Event()
-    release_initialize = threading.Event()
-
-    def initialize() -> None:
-        initialize_started.set()
-        assert release_initialize.wait(2)
-        original_initialize()
-
-    manager._client.initialize = initialize
-    threads = [
-        threading.Thread(
-            target=manager.get_context,
-            args=("alice",),
-            kwargs={"query": f"query-{index}"},
-        )
-        for index in range(4)
-    ]
-    for thread in threads:
-        thread.start()
-    assert initialize_started.wait(1)
-    release_initialize.set()
-    for thread in threads:
-        thread.join(2)
-        assert not thread.is_alive()
+    manager.get_context("alice", query="first")
+    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
 
     assert manager._client.initialize_calls == 1
+
+
+@pytest.mark.parametrize("agent_name", ["research", "Agent-A", "a" * 64])
+def test_canonical_peer_id_preserves_existing_safe_mapping(agent_name: str) -> None:
+    expected = agent_name.lower()
+
+    assert _canonical_peer_id(agent_name, "deerflow") == expected
+
+
+@pytest.mark.parametrize("agent_name", ["-research", "a" * 65])
+def test_canonical_peer_id_maps_deerflow_only_names_to_stable_safe_fallback(
+    agent_name: str,
+) -> None:
+    first = _canonical_peer_id(agent_name, "deerflow")
+    second = _canonical_peer_id(agent_name, "deerflow")
+
+    assert first == second
+    assert first.startswith("df-agent-")
+    assert is_safe_peer_id(first)
+
+
+def test_canonical_peer_id_fallback_is_collision_resistant() -> None:
+    assert _canonical_peer_id("-research", "deerflow") != _canonical_peer_id(
+        "research",
+        "deerflow",
+    )
 
 
 def test_recall_is_query_aware_peer_scoped_and_user_isolated(
@@ -373,7 +371,7 @@ def test_recall_is_query_aware_peer_scoped_and_user_isolated(
 
     assert context == "- [preferences] Prefers concise answers."
     assert manager._retriever.calls == [("How should you answer?", "research", 4, None)]
-    with pytest.raises(MemoryManagerError, match="Refusing to share"):
+    with pytest.raises(MemoryAuthorizationError, match="Refusing to share"):
         manager.get_context("bob", query="private query")
 
 
@@ -444,7 +442,7 @@ def test_warm_honors_warn_and_fail_fast_policies(
     official_integration: None,
 ) -> None:
     warn_manager = _manager(tmp_path / "warn", monkeypatch, startup_policy="warn")
-    warn_manager._client.initialize = lambda: (_ for _ in ()).throw(RuntimeError("unavailable"))
+    warn_manager._client.health = lambda: (_ for _ in ()).throw(RuntimeError("unavailable"))
     assert warn_manager.warm() is False
 
     fail_fast_manager = _manager(
@@ -697,7 +695,22 @@ def test_close_releases_shared_client_once_and_is_idempotent(
     manager.close()
 
     assert manager._recorder.closed is True
-    assert manager._retriever.closed is True
+    assert manager._retriever.closed is False
+    assert manager._client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_is_safe_when_called_from_a_running_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    manager.close()
+
+    assert manager._recorder.closed is True
+    assert manager._retriever.closed is False
     assert manager._client.closed is True
 
 

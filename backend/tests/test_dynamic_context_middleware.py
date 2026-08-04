@@ -5,6 +5,8 @@ the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
 import hashlib
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -377,6 +379,96 @@ def test_turn_aware_cache_key_includes_query_even_when_message_id_is_reused(
         "first query",
         "different query",
     ]
+
+
+def test_turn_aware_sync_recall_respects_injection_timeout(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    import deerflow.agents.middlewares.dynamic_context_middleware as middleware_module
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    class BlockingMemoryManager:
+        context_refresh_policy = "turn"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_context(self, **kwargs: Any) -> str:
+            del kwargs
+            self.calls += 1
+            started.set()
+            try:
+                assert release.wait(2)
+                return "late memory"
+            finally:
+                finished.set()
+
+    manager = BlockingMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(middleware_module, "_INJECT_TIMEOUT_SECONDS", 0.02)
+    middleware = _make_middleware(agent_name="research")
+    runtime = _fake_runtime(user_id="alice")
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="Latest question", id="msg-2")],
+        state={"thread_id": "thread-1"},
+        runtime=runtime,
+    )
+    handled: list[ModelRequest] = []
+
+    started_at = time.monotonic()
+    middleware.wrap_model_call(
+        request,
+        lambda value: handled.append(value) or mock.MagicMock(),
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert started.wait(0.25)
+    assert elapsed < 0.25
+    assert handled == [request]
+    assert manager.calls == 1
+    assert runtime.context[DYNAMIC_MEMORY_CONTEXT_KEY]["content"] == ""
+
+    # The blocking SDK call cannot be cancelled. It is abandoned after the
+    # model-call budget and allowed to finish on its daemon worker instead.
+    release.set()
+    assert finished.wait(1)
+
+    middleware.wrap_model_call(request, lambda value: mock.MagicMock())
+    assert manager.calls == 1
+
+
+def test_turn_aware_sync_recall_propagates_authorization_error(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    from deerflow.agents.memory import MemoryAuthorizationError
+
+    class UnauthorizedMemoryManager:
+        context_refresh_policy = "turn"
+
+        def get_context(self, **kwargs: Any) -> str:
+            del kwargs
+            raise MemoryAuthorizationError("wrong owner")
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        lambda: UnauthorizedMemoryManager(),
+    )
+    middleware = _make_middleware(agent_name="research")
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="Latest question", id="msg-2")],
+        state={"thread_id": "thread-1"},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.Mock()
+
+    with pytest.raises(MemoryAuthorizationError, match="wrong owner"):
+        middleware.wrap_model_call(request, handler)
+
+    handler.assert_not_called()
 
 
 def test_disabled_memory_does_not_resolve_turn_aware_manager(monkeypatch):

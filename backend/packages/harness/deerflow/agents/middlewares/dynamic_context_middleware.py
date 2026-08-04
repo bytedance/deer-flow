@@ -32,8 +32,12 @@ import asyncio
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextvars import copy_context
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, override
 
@@ -70,6 +74,35 @@ _TURN_MEMORY_MARKER_KEY = "dynamic_memory_context"
 # Suffix the ID-swap gives the real user message; the reminder SystemMessage
 # takes the original id so ``add_messages`` can replace it in place.
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+
+def _run_sync_with_timeout(callback: Callable[[], str], timeout: float) -> str:
+    """Run blocking context retrieval with the sync hook's wall-clock budget.
+
+    Python cannot forcibly cancel a blocking HTTP call. This mirrors the async
+    ``to_thread`` + ``wait_for`` contract: the model call continues after the
+    budget while the daemon worker is allowed to finish in the background.
+    OpenViking's own HTTP timeout still bounds that abandoned worker.
+    """
+
+    result: Future[str] = Future()
+    context = copy_context()
+
+    def invoke() -> None:
+        try:
+            result.set_result(context.run(callback))
+        except BaseException as exc:
+            result.set_exception(exc)
+
+    threading.Thread(
+        target=invoke,
+        name="deerflow-memory-context-loader",
+        daemon=True,
+    ).start()
+    try:
+        return result.result(timeout=timeout)
+    except FutureTimeoutError as exc:
+        raise TimeoutError from exc
 
 
 def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
@@ -527,7 +560,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         target, query, cache_key, run_context = plan
         cached, content = self._cached_turn_context(run_context, cache_key)
         if not cached:
-            content = self._load_turn_context(request, query)
+            try:
+                content = _run_sync_with_timeout(
+                    lambda: self._load_turn_context(request, query),
+                    _INJECT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "DynamicContextMiddleware: query-aware memory retrieval timed out (%.1fs); continuing without memory for this turn",
+                    _INJECT_TIMEOUT_SECONDS,
+                )
+                content = ""
             self._store_turn_context(run_context, cache_key, content)
         self._record_turn_context(run_context, content)
         return handler(self._request_with_turn_context(request, target, content))

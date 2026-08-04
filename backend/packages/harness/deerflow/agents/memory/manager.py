@@ -68,6 +68,15 @@ class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
 
 
+class MemoryAuthorizationError(MemoryManagerError):
+    """The authenticated request cannot access the selected memory scope.
+
+    Availability policies such as ``fail_open`` must never suppress this
+    error. A backend raises it when continuing would cross an identity or
+    authorization boundary rather than merely lose optional context.
+    """
+
+
 class MemoryConflictError(MemoryManagerError):
     """The requested write lost an optimistic-concurrency race."""
 

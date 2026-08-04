@@ -13,6 +13,7 @@ them directly from ``deerflow.agents.memory.backends.deermem.deermem.core.*``.
 """
 
 from deerflow.agents.memory.manager import (
+    MemoryAuthorizationError,
     MemoryConflictError,
     MemoryCorruptionError,
     MemoryManager,
@@ -24,6 +25,7 @@ from deerflow.agents.memory.manager import (
 __all__ = [
     "MemoryManager",
     "MemoryManagerError",
+    "MemoryAuthorizationError",
     "MemoryConflictError",
     "MemoryCorruptionError",
     "get_memory_manager",

@@ -33,7 +33,9 @@ mapping in DeerFlow's existing memory seam.
   history compaction.
 - Stable mapping from a DeerFlow thread to an OpenViking Session.
 - Request-scoped actor peers. The default DeerFlow agent uses
-  `default_peer_id`; named top-level agents use their validated agent name.
+  `default_peer_id`; compatible top-level agent names keep their lowercase
+  identity, while DeerFlow-valid names outside OpenViking's peer syntax use a
+  stable collision-resistant fallback.
 
 The backend supports automatic memory with `memory.mode: middleware`. Explicit
 OpenViking resources and model-invoked operations belong in MCP and are outside
@@ -48,10 +50,12 @@ root key.
 
 `owner_user_id` binds that credential to exactly one DeerFlow user. If a request
 arrives for another DeerFlow user, the backend fails closed before contacting
-OpenViking. This first setup is intended for a personal deployment or one
-pre-provisioned user credential. Automatic provisioning and encrypted
-per-user credential storage for hosted multi-user deployments require a
-separate integration phase.
+OpenViking. This identity-boundary error is never suppressed by `fail_open`.
+With query-aware recall enabled it is reported before the model call, so an
+invalid request does not spend model compute and then fail during capture. This
+first setup is intended for a personal deployment or one pre-provisioned user
+credential. Automatic provisioning and encrypted per-user credential storage
+for hosted multi-user deployments require a separate integration phase.
 
 OpenViking peers represent top-level DeerFlow agents within the credential-bound
 user. Normal internal subagents do not create separate peers because they do not
@@ -133,8 +137,10 @@ There is no separate OpenViking setup wizard yet. Configuration remains in
   unhealthy or unauthorized connection. The Gateway currently logs failed
   memory warm-up and continues serving; `warn` also returns a degraded result
   without raising.
-- `failure_policy.read: fail_open` continues a turn without recalled memory.
-  `fail_closed` rejects the read.
+- `failure_policy.read: fail_open` continues a turn without recalled memory
+  after an operational retrieval failure. `fail_closed` rejects the read.
+- Identity and authorization failures always fail closed. Availability policy
+  cannot turn an owner mismatch into an anonymous or cross-user memory read.
 - `failure_policy.write: fail_open` logs a write failure while retaining all
   unconfirmed cursor progress for the next capture. `fail_closed` also fails the
   host operation.
@@ -146,9 +152,11 @@ There is no separate OpenViking setup wizard yet. Configuration remains in
   known pending commits within the host budget, and closes the shared client.
 
 The cursor protects one running DeerFlow process from duplicate snapshot writes.
-It is not a distributed outbox. Multiple Gateway replicas sharing one
-credential and thread still require server-side idempotency keys before the
-integration can claim at-least-once delivery.
+Its `storage_path` must be on persistent storage that survives DeerFlow
+restarts. Losing the cursor can make the next capture submit the retained
+transcript again. It is not a distributed outbox. Multiple Gateway replicas
+sharing one credential and thread still require server-side idempotency keys
+before the integration can claim at-least-once delivery.
 
 ## Existing trusted configuration
 
