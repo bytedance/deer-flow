@@ -44,12 +44,18 @@ def _persistence_engine(tmp_path):
     import asyncio
 
     from app.gateway import deps
+    from app.gateway.routers import auth as auth_router
     from deerflow.persistence.engine import close_engine, init_engine
 
     url = f"sqlite+aiosqlite:///{tmp_path}/auth_types.db"
     asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
     deps._cached_local_provider = None
     deps._cached_repo = None
+    # _INITIALIZE_ADMIN_GUARD binds to the first loop that contends on it
+    # (the throwaway asyncio.run loop in the concurrency test); reset it so a
+    # future test contending from a different loop does not hit
+    # "Lock ... is bound to a different event loop".
+    auth_router._INITIALIZE_ADMIN_GUARD = asyncio.Lock()
     try:
         yield
     finally:
@@ -1199,3 +1205,33 @@ def test_initialize_concurrent_requests_create_single_admin() -> None:
 
     provider = asyncio.run(deps.get_local_provider().count_admin_users())
     assert provider == 1
+
+
+def test_admin_role_unique_index_backstops_second_admin() -> None:
+    """DB-level backstop: the partial unique index uq_users_admin_role rejects
+    a second admin row even without the in-process lock (cross-worker
+    scenario with GATEWAY_WORKERS > 1)."""
+    import asyncio
+
+    from app.gateway import deps
+
+    async def _scenario() -> str:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="admin-db-a@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        try:
+            await provider.create_user(
+                email="admin-db-b@example.com",
+                password="Tr0ub4dor3a",
+                system_role="admin",
+                needs_setup=False,
+            )
+            return "second-created"
+        except ValueError:
+            return "rejected"
+
+    assert asyncio.run(_scenario()) == "rejected"
