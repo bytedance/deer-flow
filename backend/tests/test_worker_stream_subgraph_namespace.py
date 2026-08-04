@@ -562,3 +562,136 @@ class TestWorkerSubgraphStreamIntegration:
         assert any(_PARENT_FINAL_ID in _collect_ids(payload) for payload in bare_values)
         custom_types = [payload.get("type") for event, payload in events if event == "custom" and isinstance(payload, dict)]
         assert "task_started" in custom_types and "task_completed" in custom_types
+
+
+class TestMessageSeqStamping:
+    """A values frame carries the feed seq of messages already persisted.
+
+    The checkpoint has no seq of its own and loses messages to summarization,
+    so a client merging it with the seq-ordered feed cannot place a surviving
+    old message once the feed's loaded page window no longer reaches back to it
+    (#4666). The worker already holds the event store, so it attaches the seq
+    that store assigned. Nothing is written back to the checkpoint.
+    """
+
+    @staticmethod
+    async def _seeded_store():
+        from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+        store = MemoryRunEventStore()
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1__user", "content": "MARK-FIRST"},
+        )
+        return store
+
+    @pytest.mark.asyncio
+    async def test_root_values_frame_stamps_a_persisted_message(self):
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        bridge = _FakeBridge()
+        await _publish_stream_item(
+            bridge=bridge,
+            run_id="run-1",
+            mode="values",
+            chunk={"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]},
+            namespace=(),
+            file_tool_chunk_batcher=None,
+            subagent_events=_FakeSubagentEvents(),
+            seq_stamper=_MessageSeqStamper(await self._seeded_store(), "t1"),
+        )
+
+        _run, _event, payload = bridge.published[0]
+        assert payload["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_message_not_in_the_feed_is_left_unstamped(self):
+        """A message still streaming has no seq yet — and needs none: appending
+        it at the tail is already its correct position."""
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        bridge = _FakeBridge()
+        await _publish_stream_item(
+            bridge=bridge,
+            run_id="run-1",
+            mode="values",
+            chunk={"messages": [{"type": "ai", "id": "not-persisted-yet", "content": "…"}]},
+            namespace=(),
+            file_tool_chunk_batcher=None,
+            subagent_events=_FakeSubagentEvents(),
+            seq_stamper=_MessageSeqStamper(await self._seeded_store(), "t1"),
+        )
+
+        _run, _event, payload = bridge.published[0]
+        assert "deerflow_seq" not in (payload["messages"][0].get("additional_kwargs") or {})
+
+    @pytest.mark.asyncio
+    async def test_subgraph_frames_are_not_stamped(self):
+        """A subagent frame does not belong to the thread feed's ordering."""
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        bridge = _FakeBridge()
+        await _publish_stream_item(
+            bridge=bridge,
+            run_id="run-1",
+            mode="values",
+            chunk={"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]},
+            namespace=SUBAGENT_NS,
+            file_tool_chunk_batcher=None,
+            subagent_events=_FakeSubagentEvents(),
+            seq_stamper=_MessageSeqStamper(await self._seeded_store(), "t1"),
+        )
+
+        _run, _event, payload = bridge.published[0]
+        assert "deerflow_seq" not in (payload["messages"][0].get("additional_kwargs") or {})
+
+    @pytest.mark.asyncio
+    async def test_no_stamper_publishes_the_frame_unchanged(self):
+        bridge = _FakeBridge()
+        await _publish_stream_item(
+            bridge=bridge,
+            run_id="run-1",
+            mode="values",
+            chunk={"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]},
+            namespace=(),
+            file_tool_chunk_batcher=None,
+            subagent_events=_FakeSubagentEvents(),
+        )
+
+        _run, _event, payload = bridge.published[0]
+        assert "deerflow_seq" not in (payload["messages"][0].get("additional_kwargs") or {})
+
+    @pytest.mark.asyncio
+    async def test_a_resolved_identity_is_not_looked_up_twice(self):
+        """Only a frame carrying messages it has not seen costs a query — in a
+        real run that is the compaction frame, not every frame."""
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        store = await self._seeded_store()
+        calls: list[list[str]] = []
+        original = store.get_message_seqs
+
+        async def counting(thread_id, identities):
+            calls.append(list(identities))
+            return await original(thread_id, identities)
+
+        store.get_message_seqs = counting  # type: ignore[method-assign]
+        stamper = _MessageSeqStamper(store, "t1")
+        frame = {"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]}
+
+        for _ in range(3):
+            await _publish_stream_item(
+                bridge=_FakeBridge(),
+                run_id="run-1",
+                mode="values",
+                chunk=dict(frame),
+                namespace=(),
+                file_tool_chunk_batcher=None,
+                subagent_events=_FakeSubagentEvents(),
+                seq_stamper=stamper,
+            )
+
+        assert len(calls) == 1

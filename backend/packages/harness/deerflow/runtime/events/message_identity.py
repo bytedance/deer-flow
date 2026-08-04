@@ -20,7 +20,13 @@ from typing import Any
 
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 
-__all__ = ["message_identity"]
+__all__ = ["MESSAGE_SEQ_KEY", "message_identity"]
+
+#: ``additional_kwargs`` key carrying a message's thread-feed seq to clients.
+#: Server-owned display metadata: it is attached when a frame is serialized and
+#: must be stripped from anything a client sends back, or a replayed message
+#: would write it into the checkpoint (where a fork re-seeds and reassigns seq).
+MESSAGE_SEQ_KEY = "deerflow_seq"
 
 
 def message_identity(message: Mapping[str, Any]) -> str | None:
