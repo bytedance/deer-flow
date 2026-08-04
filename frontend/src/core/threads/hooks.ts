@@ -499,7 +499,6 @@ export function mergeMessages(
   const beforeAnchor = new Map<string, Message[]>();
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
-  let hasSharedAnchor = false;
 
   // A summarized checkpoint is not necessarily a contiguous history suffix:
   // middleware may retain protected prompt/input messages at the front and a
@@ -517,17 +516,22 @@ export function mergeMessages(
       continue;
     }
 
-    if (pending.length > 0 && hasSharedAnchor) {
+    // A summarized checkpoint may start with a protected message whose true
+    // canonical position is separated from this anchor by unloaded pages —
+    // rescued dynamic-context messages are the common case. Its position
+    // relative to this anchor is still known (both the checkpoint and
+    // seq-sorted history place it earlier), so it is woven in before the
+    // anchor like any other live-only segment. Dropping it instead was how a
+    // user's own question disappeared from a long thread once the first
+    // history page no longer reached back to it (#4666): a collapsed unloaded
+    // gap is recoverable by paging, a discarded message is not.
+    if (pending.length > 0) {
       beforeAnchor.set(identity, [
         ...(beforeAnchor.get(identity) ?? []),
         ...pending,
       ]);
     }
-    // A summarized checkpoint may start with a protected message whose true
-    // canonical position is separated from this anchor by unloaded pages.
-    // Suppress that ambiguous prefix instead of visually collapsing the gap.
     pending = [];
-    hasSharedAnchor = true;
     lastAnchorIdentity = identity;
 
     // A hidden checkpoint control message must not replace a visible canonical

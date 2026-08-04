@@ -53,7 +53,17 @@ test("mergeMessages removes duplicate messages already present in history", () =
   expect(mergeMessages([human, ai, human, ai], [], [])).toEqual([human, ai]);
 });
 
-test("mergeMessages does not collapse an unloaded gap before the first shared anchor", () => {
+test("mergeMessages keeps a protected early message before the first shared anchor instead of dropping it", () => {
+  // #4065 established that an early message rescued by summarization must not
+  // be appended to the tail: its canonical position is earlier, and the tail is
+  // provably wrong. Suppressing it entirely was the other half of that fix, and
+  // it is how a user's own question disappeared from a long thread once the
+  // first history page no longer reached back to it (#4666).
+  //
+  // Both concerns hold at once: the message stays before the first shared
+  // anchor (never the tail), which is the one position both the checkpoint and
+  // seq-sorted history agree on. The gap to the unloaded pages remains, but a
+  // gap is recoverable by paging — a dropped message is not.
   const protectedEarly = {
     id: "protected-early",
     type: "human",
@@ -72,7 +82,7 @@ test("mergeMessages does not collapse an unloaded gap before the first shared an
 
   expect(
     mergeMessages([latestHuman, latestAi], [protectedEarly, latestHuman], []),
-  ).toEqual([latestHuman, latestAi]);
+  ).toEqual([protectedEarly, latestHuman, latestAi]);
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {
@@ -2092,4 +2102,44 @@ test("refresh reconstructs the same 1-to-6 order from run events without a bridg
       (message) => message.content,
     ),
   ).toEqual(["1", "2", "3", "4", "5", "6"]);
+});
+
+test("a compacted checkpoint's protected user message survives a history page window that misses it (#4666)", () => {
+  // Captured from a real two-round long run: once the thread passes the
+  // 50-row `/messages/page` window AND context compaction fires, the two
+  // sources stop overlapping at the head. History's first page starts
+  // mid-run, while the compacted checkpoint still carries the turn's first
+  // user message (summarization rescues the dynamic-context triplet).
+  //
+  // That message is the user's own question. Suppressing it because its
+  // canonical position sits in an unloaded page makes it vanish from the
+  // transcript entirely — the "用户消息消失" reports in #4666 / #4508 / #4363.
+  const reminder = {
+    id: "u1",
+    type: "system",
+    content: "<system-reminder><current_date>…</current_date>",
+    additional_kwargs: { hide_from_ui: true, dynamic_context_reminder: true },
+  } as unknown as Message;
+  const firstUserMessage = {
+    id: "u1__user",
+    type: "human",
+    content: "MARK-FIRST-QUESTION",
+  } as Message;
+  const recentStep = { id: "step-40", type: "ai", content: "step 40" } as Message;
+  const laterUserMessage = {
+    id: "u2",
+    type: "human",
+    content: "SECOND-QUESTION",
+  } as Message;
+
+  // First history page: starts mid-run, has_more=true — no first user message.
+  const canonicalWindow = [recentStep, laterUserMessage];
+  // Compacted checkpoint: reminder + rescued first user message + recent tail.
+  const compactedCheckpoint = [reminder, firstUserMessage, recentStep];
+
+  const merged = mergeMessages(canonicalWindow, compactedCheckpoint, []);
+
+  expect(merged.map((message) => message.content)).toContain(
+    "MARK-FIRST-QUESTION",
+  );
 });

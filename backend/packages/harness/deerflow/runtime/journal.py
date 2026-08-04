@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
-_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
 
@@ -613,16 +612,27 @@ class RunJournal(BaseCallbackHandler):
         return []
 
     def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
+        """Whether a final-output ToolMessage still needs persisting.
+
+        A middleware can answer a tool call itself and short-circuit execution,
+        so LangChain never emits ``on_tool_end`` and the result never reaches
+        the event store. The user saw that result during the run, and it
+        disappeared on reload (#4666). Any such result is reconciled here; the
+        scope is bounded by three independent conditions rather than a tool-name
+        allowlist: it must be user-visible, the call must belong to this run's
+        lead agent (``_remember_current_run_tool_calls`` records lead-agent
+        calls only, so subagent results stay in their own step feed), and it
+        must not already be persisted.
+        """
         if message.additional_kwargs.get("hide_from_ui") is True:
             return False
         tool_call_id = getattr(message, "tool_call_id", None)
         if not isinstance(tool_call_id, str) or not tool_call_id:
             return False
-        tool_call_name = self._current_run_tool_call_names.get(tool_call_id)
-        if tool_call_name is None:
-            return False
-        message_name = getattr(message, "name", None)
-        if message_name not in _RECONCILED_TOOL_MESSAGE_NAMES and tool_call_name not in _RECONCILED_TOOL_MESSAGE_NAMES:
+        # The call must belong to this run: a retained ToolMessage from an
+        # earlier run is already persisted under its own run and must not be
+        # re-attributed here.
+        if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
