@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
+import { AUTH_REQUEST_TIMEOUT_MS } from "@/core/auth/constants";
 import { userSchema, type User } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
@@ -41,9 +42,18 @@ export function GatewayOfflineBanner({
     // server-rendered prop and stays true until a full reload).
     if (user !== null) return;
 
+    let active = true;
+    let activeController: AbortController | null = null;
+
     const probe = async () => {
       if (inFlightRef.current) return;
       inFlightRef.current = true;
+      const controller = new AbortController();
+      activeController = controller;
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        AUTH_REQUEST_TIMEOUT_MS,
+      );
       let res: Response | null = null;
       let errored = false;
       let parsedUser: User | null = null;
@@ -51,6 +61,7 @@ export function GatewayOfflineBanner({
         res = await fetch("/api/v1/auth/me", {
           credentials: "include",
           cache: "no-store",
+          signal: controller.signal,
         });
         // Reuse the probe's own response body instead of triggering a
         // second /auth/me request via refreshUser() — halves the recovery
@@ -68,12 +79,21 @@ export function GatewayOfflineBanner({
           }
         }
       } catch (err) {
-        console.warn("[gateway-offline-banner] probe failed:", err);
+        if (active && !controller.signal.aborted) {
+          console.warn("[gateway-offline-banner] probe failed:", err);
+        }
         errored = true;
       } finally {
-        inFlightRef.current = false;
+        window.clearTimeout(timeout);
+        if (activeController === controller) {
+          activeController = null;
+        }
+        if (active) {
+          inFlightRef.current = false;
+        }
       }
 
+      if (!active) return;
       const action = decideProbeAction(
         authFailuresRef.current,
         classifyProbe(res, errored, parsedUser),
@@ -98,7 +118,11 @@ export function GatewayOfflineBanner({
       void probe();
     }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
     return () => {
+      active = false;
       window.clearInterval(handle);
+      activeController?.abort();
+      activeController = null;
+      inFlightRef.current = false;
     };
   }, [gatewayUnavailable, user, applyUser, refreshUser]);
 

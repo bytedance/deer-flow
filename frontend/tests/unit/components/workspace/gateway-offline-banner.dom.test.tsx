@@ -8,7 +8,9 @@ import {
 } from "@testing-library/react";
 
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
+import { OFFLINE_BANNER_RETRY_INTERVAL_MS } from "@/components/workspace/gateway-offline-banner-helpers";
 import { AuthProvider } from "@/core/auth/AuthProvider";
+import { AUTH_REQUEST_TIMEOUT_MS } from "@/core/auth/constants";
 
 // AuthProvider pulls useRouter/usePathname from next/navigation. Hand it a
 // no-op router so logout()'s `router.push("/")` stays inert under happy-dom
@@ -44,6 +46,7 @@ rs.mock("@/core/i18n/hooks", () => ({
 
 afterEach(() => {
   rs.restoreAllMocks();
+  rs.useRealTimers();
   cleanup();
 });
 
@@ -94,6 +97,43 @@ function renderBanner() {
 }
 
 describe("GatewayOfflineBanner logout recovery (#3001)", () => {
+  it("retries after a hung probe reaches the auth request deadline", async () => {
+    rs.useFakeTimers();
+    const authSignals: AbortSignal[] = [];
+    let authCalls = 0;
+    rs.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      authCalls += 1;
+      if (authCalls === 1) {
+        const signal = init?.signal;
+        if (!signal) {
+          return new Promise<Response>(() => undefined);
+        }
+        authSignals.push(signal);
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve(
+        new Response("service unavailable", { status: 503 }),
+      );
+    });
+
+    renderBanner();
+    expect(authCalls).toBe(1);
+
+    await rs.advanceTimersByTimeAsync(OFFLINE_BANNER_RETRY_INTERVAL_MS);
+
+    expect(AUTH_REQUEST_TIMEOUT_MS).toBeLessThan(
+      OFFLINE_BANNER_RETRY_INTERVAL_MS,
+    );
+    expect(authSignals[0]?.aborted).toBe(true);
+    expect(authCalls).toBe(2);
+  });
+
   it("renders a <button> (not a GET-style link) as the logout affordance", async () => {
     installFetch();
     renderBanner();
