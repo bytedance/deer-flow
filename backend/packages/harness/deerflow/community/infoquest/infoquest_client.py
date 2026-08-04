@@ -13,6 +13,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_TIMEOUT_SECONDS = 30
+
 
 class InfoQuestClient:
     """Client for interacting with the InfoQuest web search and fetch API."""
@@ -63,7 +65,12 @@ class InfoQuestClient:
 
         logger.debug("Sending crawl request to InfoQuest API")
         try:
-            response = requests.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data)
+            response = requests.post(
+                "https://reader.infoquest.bytepluses.com",
+                headers=headers,
+                json=data,
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            )
 
             # Check if status code is not 200
             if response.status_code != 200:
@@ -164,7 +171,12 @@ class InfoQuestClient:
         if site != "":
             params["site"] = site
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+        response = requests.post(
+            "https://search.infoquest.bytepluses.com",
+            headers=headers,
+            json=params,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
 
         # Print partial response for debugging
@@ -339,7 +351,12 @@ class InfoQuestClient:
         elif self.image_size:
             logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+        response = requests.post(
+            "https://search.infoquest.bytepluses.com",
+            headers=headers,
+            json=params,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
 
         # Print partial response for debugging
