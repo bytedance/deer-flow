@@ -301,16 +301,16 @@ class DynamicContextMiddleware(AgentMiddleware):
             # earlier message here would move the old first user prompt to the
             # tail, ahead of the latest question, and the model would answer
             # the stale first message as if it were the current turn.
-            first_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
-            if first_idx is None:
+            target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
+            if target_idx is None:
                 return None
             date_reminder, memory_block = self._build_full_reminder(runtime)
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
+                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
-                messages[first_idx].id,
+                messages[target_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
             return {"messages": result_msgs}
 
         if last_date == current_date:
