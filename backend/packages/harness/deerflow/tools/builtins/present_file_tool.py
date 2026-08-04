@@ -7,7 +7,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
@@ -28,6 +28,11 @@ def _get_thread_id(runtime: Runtime) -> str | None:
         return get_config().get("configurable", {}).get("thread_id")
     except RuntimeError:
         return None
+
+
+def _resolve_present_files_user_id(runtime: Runtime) -> str:
+    """Resolve the user bucket used when translating present_files paths."""
+    return resolve_runtime_user_id(runtime)
 
 
 def _normalize_presented_filepath(
@@ -66,7 +71,7 @@ def _normalize_presented_filepath(
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
         try:
-            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=_resolve_present_files_user_id(runtime))
         except TypeError:
             actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
     else:

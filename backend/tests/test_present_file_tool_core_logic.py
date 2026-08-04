@@ -51,6 +51,46 @@ def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/summary.json"]
 
 
+def test_present_files_uses_runtime_context_user_for_virtual_outputs_path(tmp_path, monkeypatch):
+    outputs_dir = tmp_path / "users" / "runtime-user" / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    artifact_path = outputs_dir / "report_status.json"
+    artifact_path.write_text("{}")
+    seen = {}
+
+    def resolve_virtual_path(thread_id, path, *, user_id=None):
+        seen["thread_id"] = thread_id
+        seen["path"] = path
+        seen["user_id"] = user_id
+        return artifact_path.resolve()
+
+    monkeypatch.setattr(
+        present_file_tool_module,
+        "get_paths",
+        lambda: SimpleNamespace(resolve_virtual_path=resolve_virtual_path),
+    )
+
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs_dir)}},
+        context={"thread_id": "thread-1", "user_id": "runtime-user"},
+        config={},
+    )
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=runtime,
+        filepaths=["/mnt/user-data/outputs/report_status.json"],
+        tool_call_id="tc-user",
+    )
+
+    assert seen == {
+        "thread_id": "thread-1",
+        "path": "/mnt/user-data/outputs/report_status.json",
+        "user_id": "runtime-user",
+    }
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/report_status.json"]
+    assert result.update["messages"][0].content == "Successfully presented files"
+
+
 def test_present_files_uses_config_thread_id_when_context_missing(tmp_path, monkeypatch):
     outputs_dir = tmp_path / "threads" / "thread-from-config" / "user-data" / "outputs"
     outputs_dir.mkdir(parents=True)
@@ -76,6 +116,20 @@ def test_present_files_uses_config_thread_id_when_context_missing(tmp_path, monk
     )
 
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/summary.json"]
+    assert result.update["messages"][0].content == "Successfully presented files"
+
+
+def test_present_files_allows_empty_file_list(tmp_path):
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=[],
+        tool_call_id="tc-empty",
+    )
+
+    assert result.update["artifacts"] == []
     assert result.update["messages"][0].content == "Successfully presented files"
 
 
