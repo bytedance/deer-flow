@@ -84,7 +84,15 @@ def _neutralize_boundary_tokens(text: str) -> str:
 
 
 def neutralize_untrusted_tags(text: str) -> str:
-    """Neutralize framework tags and boundary tokens in untrusted data."""
+    """Neutralize framework/injection control tokens in untrusted data.
+
+    Applies exactly two structural defenses: blocked framework tags are
+    HTML-escaped, and real user-input boundary markers are replaced with inert
+    look-alikes. It intentionally does not wrap the text in boundary markers;
+    framing is the responsibility of the user-message middleware, while other
+    callers inject the result as plain data. Empty or whitespace-only text is
+    returned unchanged so callers do not emit marker noise.
+    """
     if not text.strip():
         return text
     text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
