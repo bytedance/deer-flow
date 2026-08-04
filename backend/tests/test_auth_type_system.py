@@ -1157,3 +1157,45 @@ def test_oidc_callback_access_and_csrf_cookie_stay_session_only():
     assert "secure" in csrf_cookies[0]
     assert "max-age" not in access_cookies[0]
     assert "max-age" not in csrf_cookies[0]
+
+
+def test_initialize_concurrent_requests_create_single_admin() -> None:
+    """Two racing /initialize requests must yield exactly one admin.
+
+    The count-then-create sequence is serialized by
+    ``_INITIALIZE_ADMIN_GUARD``. Without it, two concurrent requests could
+    both observe "no admin exists" and create separate admin accounts
+    (TOCTOU) — the email uniqueness constraint only blocks same-email races.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway import deps
+    from app.gateway.routers import auth
+
+    async def _scenario() -> list:
+        request = SimpleNamespace()
+        response = SimpleNamespace()
+
+        async def _initialize(email: str):
+            body = auth.InitializeAdminRequest(email=email, password="Tr0ub4dor3a", remember_me=False)
+            return await auth.initialize_admin(request, response, body)
+
+        with (
+            patch("app.gateway.routers.auth.create_access_token", return_value="token"),
+            patch("app.gateway.routers.auth.set_session_cookie"),
+        ):
+            return await asyncio.gather(
+                _initialize("admin-race-a@example.com"),
+                _initialize("admin-race-b@example.com"),
+                return_exceptions=True,
+            )
+
+    results = asyncio.run(_scenario())
+    statuses = sorted(r.status_code if isinstance(r, HTTPException) else 201 for r in results)
+    assert statuses == [201, 409], statuses
+
+    provider = asyncio.run(deps.get_local_provider().count_admin_users())
+    assert provider == 1
