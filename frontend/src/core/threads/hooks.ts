@@ -19,7 +19,11 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
-import { isHiddenFromUIMessage } from "../messages/utils";
+import {
+  hasContent,
+  hasToolCalls,
+  isHiddenFromUIMessage,
+} from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
@@ -659,10 +663,19 @@ export function restoreLocalTurnMessageOrder(
  * the last visible human while another message of the same run sits below it
  * (a "same-run sandwich") is provably misplaced. Run_id-less steps are
  * live-only (history rows always carry run_id) and are attributable to the
- * reconnected run only when a run_id-less step also follows the human —
- * otherwise they may be orphans from an older turn (#4399) or a stray
- * transient and must keep their position. A resent turn after an interrupted
- * run fails both checks and is left untouched.
+ * reconnected run only when a run_id-less step also follows the human.
+ *
+ * Only steps after the last terminal assistant answer (visible content, no
+ * tool calls) in the segment are candidates: such an answer completes the
+ * turn that owns it, so everything up to it belongs to a finished turn and
+ * must keep its position even when run_ids are absent or uniform across
+ * turns (branch-seeded history, mocked feeds). A still-streaming text step
+ * can look like a terminal answer before its tool call arrives (#4304); it
+ * then stays above the human until canonical history heals the order — an
+ * accepted transient, far safer than pulling a completed turn's answer
+ * below the next user message. A resent turn after an interrupted run and
+ * pagination orphans from older turns (#4399) fail the checks as well and
+ * are left untouched.
  */
 export function restoreReconnectedTurnMessageOrder(
   messages: Message[],
@@ -693,6 +706,21 @@ export function restoreReconnectedTurnMessageOrder(
     return messages;
   }
 
+  // A terminal assistant answer completes the turn that owns it. Only steps
+  // after the last such boundary can belong to the active turn.
+  let candidateStart = segmentStart;
+  for (let index = segmentStart; index < humanIndex; index++) {
+    const message = messages[index]!;
+    if (
+      message.type === "ai" &&
+      !isHiddenFromUIMessage(message) &&
+      hasContent(message) &&
+      !hasToolCalls(message)
+    ) {
+      candidateStart = index + 1;
+    }
+  }
+
   const runIdsAfter = new Set<string>();
   let hasLiveOnlyStepAfter = false;
   for (const message of messages.slice(humanIndex + 1)) {
@@ -708,8 +736,8 @@ export function restoreReconnectedTurnMessageOrder(
   }
 
   const misplacedSteps: Message[] = [];
-  const stablePrefix = messages.slice(0, segmentStart);
-  for (const message of messages.slice(segmentStart, humanIndex)) {
+  const stablePrefix = messages.slice(0, candidateStart);
+  for (const message of messages.slice(candidateStart, humanIndex)) {
     const isVisibleStep =
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message);

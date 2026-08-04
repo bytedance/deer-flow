@@ -1633,8 +1633,9 @@ test("reconnected turn order moves same-run steps back behind the user message",
     id: "step-a1",
     type: "ai",
     content: "Searching the web",
+    tool_calls: [{ id: "tc-a1", name: "web_search", args: {} }],
     run_id: "run-r",
-  } as Message;
+  } as unknown as Message;
   const stepA2 = {
     id: "step-a2",
     type: "tool",
@@ -1705,8 +1706,9 @@ test("reconnected turn order only moves steps of the sandwiched run in multi-tur
     id: "step-misplaced",
     type: "ai",
     content: "Second run step above the human",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
     run_id: "run-2",
-  } as Message;
+  } as unknown as Message;
   const human2 = {
     id: "human-2",
     type: "human",
@@ -1740,7 +1742,8 @@ test("reconnected turn order moves live-only steps before any history loads", ()
     id: "live-early",
     type: "ai",
     content: "Replayed step",
-  } as Message;
+    tool_calls: [{ id: "tc-early", name: "web_search", args: {} }],
+  } as unknown as Message;
   const human = {
     id: "live-human",
     type: "human",
@@ -1803,8 +1806,9 @@ test("reconnected turn order keeps hidden control messages and older-run orphans
     id: "orphan",
     type: "ai",
     content: "Pagination orphan from an older run",
+    tool_calls: [{ id: "tc-orphan", name: "web_search", args: {} }],
     run_id: "run-0",
-  } as Message;
+  } as unknown as Message;
   const hiddenControl = {
     id: "control",
     type: "human",
@@ -1815,8 +1819,9 @@ test("reconnected turn order keeps hidden control messages and older-run orphans
     id: "misplaced",
     type: "ai",
     content: "Same-run step",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
     run_id: "run-r",
-  } as Message;
+  } as unknown as Message;
   const human = {
     id: "human-r",
     type: "human",
@@ -1859,6 +1864,118 @@ test("reconnected turn order is a no-op when the human message already leads its
   ]);
   expect(restoreReconnectedTurnMessageOrder([step])).toEqual([step]);
   expect(restoreReconnectedTurnMessageOrder([])).toEqual([]);
+});
+
+test("reconnected turn order keeps a completed turn's answer above the next human message", () => {
+  // Regression for the branch-thread e2e shape: history feeds where every
+  // message shares one run_id (branch-seeded threads, mocked feeds). A
+  // terminal answer completes its turn and must never be pulled below the
+  // next human message even though the naive same-run check would match.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const answer1 = {
+    id: "ai-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-x",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const intermediate = {
+    id: "ai-2",
+    type: "ai",
+    content: "Intermediate answer",
+    run_id: "run-x",
+  } as Message;
+  const toolCalling = {
+    id: "ai-3",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "write_todos", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const toolResult = {
+    id: "tool-1",
+    type: "tool",
+    tool_call_id: "tc-1",
+    content: "Todos updated",
+    run_id: "run-x",
+  } as Message;
+  const final = {
+    id: "ai-4",
+    type: "ai",
+    content: "Final answer",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      answer1,
+      human2,
+      intermediate,
+      toolCalling,
+      toolResult,
+      final,
+    ]),
+  ).toEqual([
+    human1,
+    answer1,
+    human2,
+    intermediate,
+    toolCalling,
+    toolResult,
+    final,
+  ]);
+});
+
+test("reconnected turn order treats a content-only streaming text as a boundary", () => {
+  // Accepted transient (#4304): a still-streaming text step looks like a
+  // terminal answer until its tool call arrives, so it stays above the human
+  // until canonical history heals the order. Tool-calling steps after the
+  // last such boundary are still restored.
+  const streamingText = {
+    id: "streaming-text",
+    type: "ai",
+    content: "Let me analyze this",
+    run_id: "run-r",
+  } as Message;
+  const toolStep = {
+    id: "tool-step",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-2", name: "write_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      streamingText,
+      toolStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([streamingText, human, toolStep, laterStep]);
 });
 
 test("rendered message ledger does not retain explicitly superseded messages", () => {
