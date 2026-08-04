@@ -1680,7 +1680,7 @@ def _make_start_run_persistence_context():
         run_events_config=None,
         thread_store=thread_store,
         checkpoint_channel_mode="full",
-        scheduled_task_service=None,
+        run_completion_hook=None,
     )
     request = SimpleNamespace(
         headers={},

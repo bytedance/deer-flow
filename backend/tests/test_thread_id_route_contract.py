@@ -74,7 +74,6 @@ def _collect_thread_id_routes():
         browser,
         feedback,
         runs,
-        scheduled_tasks,
         skills,
         suggestions,
         thread_runs,
@@ -82,7 +81,11 @@ def _collect_thread_id_routes():
         uploads,
     )
 
-    routers = [artifacts, browser, feedback, runs, scheduled_tasks, skills, suggestions, thread_runs, threads, uploads]
+    # The schedule slice's router lives in its own package (app/gateway/routers/schedule/),
+    # so it is imported separately rather than as a sibling module.
+    from app.gateway.routers.schedule import router as schedule_router
+
+    routers = [artifacts, browser, feedback, runs, skills, suggestions, thread_runs, threads, uploads, schedule_router]
     cases = []
     for module in routers:
         for route in module.router.routes:
@@ -95,7 +98,10 @@ def _collect_thread_id_routes():
             for method in sorted(methods):
                 if (method, path) in RUNTIME_WHITELIST:
                     continue
-                cases.append((module.__name__.rsplit(".", 1)[-1], method, path))
+                # Full dotted path, not the last segment: a router that lives in
+                # its own package (app/gateway/routers/schedule/router.py) is not
+                # importable as app.gateway.routers.<last-segment>.
+                cases.append((module.__name__, method, path))
     return cases
 
 
@@ -126,22 +132,24 @@ def test_sweep_covers_expected_surface():
 @pytest.mark.parametrize(
     ("router_name", "method", "path"),
     _THREAD_ID_ROUTES,
-    ids=[f"{name}:{method}:{path}" for name, method, path in _THREAD_ID_ROUTES],
+    ids=[f"{name.rsplit(chr(46), 1)[-1]}:{method}:{path}" for name, method, path in _THREAD_ID_ROUTES],
 )
 def test_noncanonical_thread_id_gets_422(router_name, method, path):
     """Runtime guard: a non-canonical thread_id yields 422 naming thread_id."""
     import importlib
     from unittest.mock import MagicMock
 
-    from app.gateway.deps import get_config
+    from app.gateway.deps import get_config, get_schedule_service
 
-    module = importlib.import_module(f"app.gateway.routers.{router_name}")
+    module = importlib.import_module(router_name)
     app = make_authed_test_app()
     app.include_router(module.router)
     # get_config 503s when no config.yaml exists (CI), and dependency solving
     # precedes path-param validation — override it so the 422 contract is
-    # exercised regardless of the environment.
+    # exercised regardless of the environment. get_schedule_service 503s for
+    # the same structural reason (no SQL backend configured in this test app).
     app.dependency_overrides[get_config] = MagicMock()
+    app.dependency_overrides[get_schedule_service] = MagicMock()
 
     url = path.replace("{thread_id}", BAD_THREAD_ID)
     # Other path params get a harmless canonical placeholder.

@@ -31,6 +31,13 @@ class ScheduledTaskRow(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    """Optimistic-concurrency token owned by the write paths.
+
+    Every committed write increments it; `save` additionally compares it, so a
+    read-modify-write that raced a dispatch or completion is refused instead of
+    rolling back the fields those writes own.
+    """
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

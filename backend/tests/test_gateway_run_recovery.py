@@ -14,6 +14,7 @@ from fastapi import FastAPI
 import deerflow.runtime as runtime_module
 from app.gateway import deps as gateway_deps
 from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence import engine as engine_module
 from deerflow.persistence import thread_meta as thread_meta_module
 from deerflow.runtime import END_SENTINEL, MemoryStreamBridge, RunManager
@@ -224,6 +225,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
         database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
+        scheduler=SchedulerConfig(),
     )
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
@@ -269,6 +271,7 @@ async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_succe
         database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
+        scheduler=SchedulerConfig(),
     )
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"old-running"})
