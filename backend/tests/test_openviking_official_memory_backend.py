@@ -273,6 +273,34 @@ def test_official_config_rejects_invalid_default_peer_id(
         OfficialOpenVikingConfig.from_backend_config(_config(tmp_path, default_peer_id=peer_id))
 
 
+def test_official_config_rejects_generated_peer_namespace_as_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
+
+    with pytest.raises(
+        ValueError,
+        match="default_peer_id must not start with the reserved prefix 'df-agent-'",
+    ):
+        OfficialOpenVikingConfig.from_backend_config(
+            _config(tmp_path, default_peer_id="df-agent-custom"),
+        )
+
+
+def test_official_config_accepts_custom_default_peer_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
+
+    config = OfficialOpenVikingConfig.from_backend_config(
+        _config(tmp_path, default_peer_id="assistant"),
+    )
+
+    assert config.default_peer_id == "assistant"
+
+
 @pytest.mark.parametrize(
     "legacy_field, value",
     [
@@ -353,6 +381,31 @@ def test_canonical_peer_id_fallback_is_collision_resistant() -> None:
         "research",
         "deerflow",
     )
+
+
+def test_canonical_peer_id_reserves_default_peer_for_unnamed_agent() -> None:
+    first = _canonical_peer_id("deerflow", "deerflow")
+    second = _canonical_peer_id("DeerFlow", "deerflow")
+
+    assert first == second
+    assert first.startswith("df-agent-")
+    assert first != _canonical_peer_id(None, "deerflow")
+
+
+def test_canonical_peer_id_reserves_custom_default_peer() -> None:
+    mapped = _canonical_peer_id("assistant", "assistant")
+
+    assert mapped.startswith("df-agent-")
+    assert mapped != _canonical_peer_id(None, "assistant")
+
+
+def test_canonical_peer_id_reserves_generated_peer_namespace() -> None:
+    generated = _canonical_peer_id("-agent", "deerflow")
+    remapped = _canonical_peer_id(generated, "deerflow")
+
+    assert remapped.startswith("df-agent-")
+    assert remapped != generated
+    assert remapped == _canonical_peer_id(generated, "deerflow")
 
 
 def test_recall_is_query_aware_peer_scoped_and_user_isolated(

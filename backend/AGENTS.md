@@ -1028,7 +1028,9 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   always fail closed before remote access or model compute, even when
   `failure_policy.read` is `fail_open`. Compatible top-level agent names keep
   their lowercase request-scoped peer ID; DeerFlow-valid names outside
-  OpenViking's syntax use a stable collision-resistant fallback. Query-aware
+  OpenViking's syntax use a stable collision-resistant fallback. The generated
+  `df-agent-` namespace and configured default peer are reserved so named agents
+  cannot alias another memory partition. Query-aware
   recall is injected only into the current model request and both sync and async
   model hooks enforce the same five-second wall-clock budget while SDK and
   cursor IO run off the event loop. The cursor `storage_path` must remain

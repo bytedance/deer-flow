@@ -10,6 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 _SAFE_PEER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+GENERATED_PEER_PREFIX = "df-agent-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +98,8 @@ class OfficialOpenVikingConfig:
             raise ValueError("OpenViking default_peer_id must not be empty")
         if not is_safe_peer_id(self.default_peer_id):
             raise ValueError("OpenViking default_peer_id must start with a lowercase letter or digit and contain at most 64 lowercase letters, digits, '_' or '-'")
+        if self.default_peer_id.startswith(GENERATED_PEER_PREFIX):
+            raise ValueError(f"OpenViking default_peer_id must not start with the reserved prefix {GENERATED_PEER_PREFIX!r}")
         if not isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
             raise ValueError("OpenViking timeout_seconds must be a finite value > 0")
         if self.search_mode not in {"find", "search"}:

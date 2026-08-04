@@ -26,7 +26,11 @@ from deerflow.agents.memory.manager import (
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.utils.messages import message_to_text
 
-from .official_config import OfficialOpenVikingConfig, is_safe_peer_id
+from .official_config import (
+    GENERATED_PEER_PREFIX,
+    OfficialOpenVikingConfig,
+    is_safe_peer_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -645,16 +649,17 @@ def _canonical_peer_id(agent_name: str | None, default_peer_id: str) -> str:
     value = raw_name.lower()
     if value == _DEFAULT_AGENT_SCOPE:
         raise ValueError(f"Invalid OpenViking peer scope: {value!r}")
-    if is_safe_peer_id(value):
+    if is_safe_peer_id(value) and value != default_peer_id and not value.startswith(GENERATED_PEER_PREFIX):
         # Preserve the existing mapping for every already-compatible name so
-        # existing OpenViking Sessions remain reachable.
+        # existing OpenViking Sessions remain reachable. The configured default
+        # and generated namespace are reserved to keep all branches disjoint.
         return value
 
     # DeerFlow permits leading hyphens and names longer than OpenViking's
-    # 64-character peer limit. Map only those edge cases to a stable safe ID;
+    # 64-character peer limit. Reserved names follow the same stable mapping;
     # the digest prevents truncation/sanitization collisions.
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
-    return f"df-agent-{digest}"
+    return f"{GENERATED_PEER_PREFIX}{digest}"
 
 
 def _session_id(owner_user_id: str, peer_id: str, thread_id: str) -> str:

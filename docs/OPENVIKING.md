@@ -35,7 +35,9 @@ mapping in DeerFlow's existing memory seam.
 - Request-scoped actor peers. The default DeerFlow agent uses
   `default_peer_id`; compatible top-level agent names keep their lowercase
   identity, while DeerFlow-valid names outside OpenViking's peer syntax use a
-  stable collision-resistant fallback.
+  stable collision-resistant fallback. The `df-agent-` prefix is reserved for
+  generated IDs, and a named agent matching `default_peer_id` is remapped so it
+  cannot share the unnamed agent's memory partition.
 
 The backend supports automatic memory with `memory.mode: middleware`. Explicit
 OpenViking resources and model-invoked operations belong in MCP and are outside
