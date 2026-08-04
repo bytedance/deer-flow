@@ -85,7 +85,17 @@ class McpTaskService:
         )
         if not claimed:
             return
-        await asyncio.gather(*(self._poll_one(task, now=now) for task in claimed))
+        results = await asyncio.gather(
+            *(self._poll_one(task, now=now) for task in claimed),
+            return_exceptions=True,
+        )
+        for record, result in zip(claimed, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Unexpected MCP task poll failure (task_id=%s); the lease will expire for recovery",
+                    record.get("id"),
+                    exc_info=(type(result), result, result.__traceback__),
+                )
 
     async def _poll_one(self, record: dict, *, now: datetime) -> None:
         driver_name = str(record.get("driver_name") or "")
@@ -151,8 +161,13 @@ class McpTaskService:
         if task is None:
             return
         self._stop.set()
-        await task
-        self._task = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._task = None
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

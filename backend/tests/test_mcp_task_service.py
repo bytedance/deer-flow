@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -39,6 +41,13 @@ class FakeRepository:
         return True
 
 
+class FailingApplyRepository(FakeRepository):
+    async def apply_snapshot(self, task_id, **kwargs):
+        if task_id == "task-1":
+            raise RuntimeError("database unavailable")
+        return await super().apply_snapshot(task_id, **kwargs)
+
+
 class FakeDriver:
     def __init__(self, snapshots=None, *, submission=None, error: Exception | None = None):
         self.snapshots = list(snapshots or [])
@@ -61,6 +70,22 @@ class FakeDriver:
 
     async def cancel(self, task):
         raise AssertionError(f"unexpected cancel: {task}")
+
+
+class HangingDriver(FakeDriver):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def get_status(self, task):
+        self.status_calls.append(task)
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 
 def _claimed_row(*, driver_name="fake"):
@@ -197,6 +222,34 @@ async def test_run_once_releases_claim_when_driver_is_missing_or_fails():
 
 
 @pytest.mark.asyncio
+async def test_run_once_isolates_unexpected_failure_to_its_claimed_task(caplog):
+    rows = [_claimed_row(), {**_claimed_row(), "id": "task-2", "remote_task_id": "remote-2"}]
+    repo = FailingApplyRepository(rows)
+    driver = FakeDriver(
+        [
+            TaskSnapshot(status=TaskStatus.COMPLETED, result={"report": "first"}),
+            TaskSnapshot(status=TaskStatus.COMPLETED, result={"report": "second"}),
+        ]
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await service.run_once(now=datetime.now(UTC))
+
+    assert [task_id for task_id, _update in repo.applied] == ["task-2"]
+    assert "task_id=task-1" in caplog.text
+    assert "database unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_start_runs_recovery_poll_immediately_and_stop_is_clean():
     repo = FakeRepository([])
     service = McpTaskService(
@@ -215,3 +268,24 @@ async def test_start_runs_recovery_poll_immediately_and_stop_is_clean():
     await service.stop()
 
     assert repo.claimed is True
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_hung_driver_poll():
+    repo = FakeRepository([_claimed_row()])
+    driver = HangingDriver()
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.start()
+    await asyncio.wait_for(driver.started.wait(), timeout=1)
+    await asyncio.wait_for(service.stop(), timeout=1)
+
+    assert driver.cancelled is True
