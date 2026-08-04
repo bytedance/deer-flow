@@ -171,6 +171,10 @@ const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
+// Thread-global feed position, attached by the backend to history rows and to
+// `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
+// `deerflow/runtime/events/message_identity.py`.
+const MESSAGE_SEQ_KEY = "deerflow_seq";
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -187,6 +191,12 @@ const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
   "DeerFlowSummarizationMiddleware.before_model",
 ]);
+
+/** Thread-global feed position, when the backend has attached one. */
+function messageSeq(message: Message): number | undefined {
+  const seq = message.additional_kwargs?.[MESSAGE_SEQ_KEY];
+  return typeof seq === "number" ? seq : undefined;
+}
 
 function messageIdentity(message: Message): string | undefined {
   if (
@@ -309,9 +319,16 @@ export function buildVisibleHistoryMessages(
     // Carry the owning run_id onto the content message so historical subtask
     // cards can fetch their persisted step history on expand (#3779). run_id
     // lives on the RunMessage wrapper and would otherwise be dropped here.
+    // seq rides along for the same reason: it is the thread-global position
+    // this feed is ordered by, and merging needs it on the message itself to
+    // place a checkpoint copy that falls outside the loaded window (#4666).
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      additional_kwargs: {
+        ...message.content.additional_kwargs,
+        [MESSAGE_SEQ_KEY]: message.seq,
+      },
     })),
   ]);
 }
@@ -500,6 +517,20 @@ export function mergeMessages(
   let pending: Message[] = [];
   let lastAnchorIdentity: string | undefined;
 
+  // Lower bound of the history page window that is currently loaded. A live
+  // message whose seq is below it belongs before everything on screen, which
+  // is knowledge the anchor weaving below cannot reach: the anchor only says
+  // "earlier than this row", and after compaction the nearest anchor can sit
+  // deep inside the window (#4666 — measured at row 25 of 50).
+  const canonicalMinSeq = canonical.reduce<number | undefined>(
+    (min, message) => {
+      const seq = messageSeq(message);
+      return seq !== undefined && (min === undefined || seq < min) ? seq : min;
+    },
+    undefined,
+  );
+  const beforeWindow: Message[] = [];
+
   // A summarized checkpoint is not necessarily a contiguous history suffix:
   // middleware may retain protected prompt/input messages at the front and a
   // recent tail at the back. Treat every shared identity as an ordering anchor,
@@ -526,10 +557,25 @@ export function mergeMessages(
     // history page no longer reached back to it (#4666): a collapsed unloaded
     // gap is recoverable by paging, a discarded message is not.
     if (pending.length > 0) {
-      beforeAnchor.set(identity, [
-        ...(beforeAnchor.get(identity) ?? []),
-        ...pending,
-      ]);
+      const woven: Message[] = [];
+      for (const pendingMessage of pending) {
+        const seq = messageSeq(pendingMessage);
+        if (
+          seq !== undefined &&
+          canonicalMinSeq !== undefined &&
+          seq < canonicalMinSeq
+        ) {
+          beforeWindow.push(pendingMessage);
+        } else {
+          woven.push(pendingMessage);
+        }
+      }
+      if (woven.length > 0) {
+        beforeAnchor.set(identity, [
+          ...(beforeAnchor.get(identity) ?? []),
+          ...woven,
+        ]);
+      }
     }
     pending = [];
     lastAnchorIdentity = identity;
@@ -568,6 +614,9 @@ export function mergeMessages(
   }
 
   const merged = dedupeMessagesByIdentity([
+    ...[...beforeWindow].sort(
+      (left, right) => (messageSeq(left) ?? 0) - (messageSeq(right) ?? 0),
+    ),
     ...canonicalAndLive,
     ...optimisticMessages,
   ]);

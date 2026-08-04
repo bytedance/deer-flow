@@ -889,8 +889,8 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   // run_id is carried onto each content message (#3779) so historical subtask
   // cards can fetch their persisted step history on expand.
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]))).toEqual([
-    { ...newHuman, run_id: "run-new" },
-    { ...newAi, run_id: "run-new" },
+    { ...newHuman, run_id: "run-new", additional_kwargs: { deerflow_seq: 3 } },
+    { ...newAi, run_id: "run-new", additional_kwargs: { deerflow_seq: 4 } },
   ]);
 });
 
@@ -2142,4 +2142,66 @@ test("a compacted checkpoint's protected user message survives a history page wi
   expect(merged.map((message) => message.content)).toContain(
     "MARK-FIRST-QUESTION",
   );
+});
+
+test("a checkpoint message earlier than the loaded window is placed by its seq (#4666)", () => {
+  // With `deerflow_seq` on both sides, placement stops being a guess. Captured
+  // shape: after compaction the checkpoint still holds the turn's first user
+  // message (seq=2) while the first history page starts at seq=29, so the only
+  // anchor available to the old rule sat 25 rows into the window.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const firstUserMessage = withSeq(
+    { id: "u1__user", type: "human", content: "MARK-FIRST-QUESTION" } as Message,
+    2,
+  );
+  const windowStep = withSeq(
+    { id: "step-29", type: "ai", content: "…step 29" } as Message,
+    29,
+  );
+  const laterUserMessage = withSeq(
+    { id: "u2", type: "human", content: "SECOND-QUESTION" } as Message,
+    41,
+  );
+
+  const anchorStep = withSeq(
+    { id: "step-58", type: "ai", content: "…step 58" } as Message,
+    58,
+  );
+
+  // The anchor must sit INSIDE the window, as it does in the captured run
+  // (canonical #25 of 50): weaving before the anchor is what puts the message
+  // in the middle, and only seq can say it belongs at the head.
+  const canonicalWindow = [windowStep, laterUserMessage, anchorStep];
+  const compactedCheckpoint = [firstUserMessage, anchorStep];
+
+  expect(
+    mergeMessages(canonicalWindow, compactedCheckpoint, []).map((m) => m.content),
+  ).toEqual([
+    "MARK-FIRST-QUESTION",
+    "…step 29",
+    "SECOND-QUESTION",
+    "…step 58",
+  ]);
+});
+
+test("buildVisibleHistoryMessages carries each row's seq onto the message", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 7,
+      content: { id: "m1", type: "human", content: "hi" } as Message,
+      metadata: { caller: "" },
+      created_at: "2026-08-04T00:00:00Z",
+    },
+  ] as RunMessage[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set())[0]!.additional_kwargs
+      ?.deerflow_seq,
+  ).toBe(7);
 });

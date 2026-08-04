@@ -526,6 +526,27 @@ filesystem cleanup, so the raw value is never interpolated into a host path;
 new runs, workspace/sandbox operations, and other state-producing mutations
 remain blocked.
 
+**Message feed seq for client ordering** (#4666): a checkpoint carries no seq of
+its own and loses messages to summarization, so a client merging a `values` frame
+with the seq-ordered thread feed cannot place a message the checkpoint kept once
+the feed's loaded page window (`GET /messages/page`, `limit=50`) no longer reaches
+back to it. `RunEventStore.get_message_seqs(thread_id, identities)` resolves the
+seq the store already assigned, keyed by
+`runtime/events/message_identity.py::message_identity` — the backend half of the
+identity rule `frontend/src/core/threads/hooks.ts::messageIdentity` applies (tool
+messages by `tool_call_id`; `X` / `X__user` human copies collapse to one). The two
+halves must stay in sync: a mismatch is silent, degrading placement rather than
+raising. `worker.py::_MessageSeqStamper` attaches the result as
+`additional_kwargs.deerflow_seq` when a root `values` frame is serialized —
+subgraph frames are not stamped, and nothing is written back to the checkpoint.
+The stamper is built once per run so goal continuations reuse its cache; only a
+frame introducing unresolved identities costs a query, which in practice is the
+compaction frame alone (measured: 1 lookup across 25 frames). `deerflow_seq` is
+server-owned and joins `_SERVER_OWNED_MESSAGE_METADATA_KEYS` in
+`services.py::normalize_input`, because a replayed message carrying it back would
+write a thread-scoped seq into the checkpoint that a fork re-seeds and reassigns
+(#4380).
+
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via
