@@ -1,4 +1,5 @@
 from . import (
+    admin_safety,
     artifacts,
     assistants_compat,
     browser,
@@ -15,6 +16,7 @@ from . import (
 
 __all__ = [
     "artifacts",
+    "admin_safety",
     "assistants_compat",
     "browser",
     "input_polish",

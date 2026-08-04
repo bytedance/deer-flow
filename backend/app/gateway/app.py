@@ -14,6 +14,7 @@ from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, ge
 from app.gateway.deps import langgraph_runtime
 from app.gateway.routers import (
     admin_billing,
+    admin_safety,
     agents,
     artifacts,
     assistants_compat,
@@ -33,11 +34,13 @@ from app.gateway.routers import (
     models,
     runs,
     scheduled_tasks,
+    skill_market,
     skills,
     suggestions,
     thread_runs,
     threads,
     uploads,
+    user_mcp,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
@@ -584,15 +587,18 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Wallet balance and simulated recharge API.
     app.include_router(billing.router)
     app.include_router(admin_billing.router)
+    app.include_router(admin_safety.router)
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
+    app.include_router(user_mcp.router)
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+    app.include_router(skill_market.router)
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)

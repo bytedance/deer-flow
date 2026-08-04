@@ -3,7 +3,7 @@
  *
  * Issue #3527: when a non-admin user opens Settings → Tools, the gateway
  * returns 403 `{detail: "Admin privileges required to manage MCP
- * configuration."}` for `GET /api/mcp/config`. The previous client
+ * configuration."}` for `GET /api/user/mcp/config`. The previous client
  * silently treated the 403 body as a valid `MCPConfig`, so the UI then
  * crashed with `Cannot convert undefined or null to object` when it tried
  * `Object.entries(config.mcp_servers)`.
@@ -129,7 +129,7 @@ describe("updateMCPServerState", () => {
     await expect(updateMCPServerState("github", false)).resolves.toEqual({
       mcp_servers: { github: { enabled: false } },
     });
-    expect(mockedFetch).toHaveBeenCalledWith("/api/mcp/config", {
+    expect(mockedFetch).toHaveBeenCalledWith("/api/user/mcp/config", {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",

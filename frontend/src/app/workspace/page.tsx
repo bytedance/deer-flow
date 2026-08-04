@@ -1,11 +1,12 @@
 import { redirect } from "next/navigation";
 
-import { DEMO_THREAD_IDS } from "@/core/threads/static-demo";
-import { env } from "@/env";
+import { getWorkspaceHomePath } from "@/core/auth/role-routing";
+import { getServerSideUser } from "@/core/auth/server";
 
-export default function WorkspacePage() {
-  if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
-    return redirect(`/workspace/chats/${DEMO_THREAD_IDS[0]}`);
+export default async function WorkspacePage() {
+  const result = await getServerSideUser();
+  if (result.tag === "authenticated") {
+    redirect(getWorkspaceHomePath(result.user.system_role));
   }
-  return redirect("/workspace/chats/new");
+  redirect("/login");
 }

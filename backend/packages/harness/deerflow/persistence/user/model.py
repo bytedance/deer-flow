@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import Boolean, DateTime, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -46,7 +46,7 @@ class UserRow(Base):
 
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    is_frozen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_frozen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
     __table_args__ = (

@@ -1,4 +1,4 @@
-# 🦌 DeerFlow - 2.0
+# 🦌 DeerFlow 多租户积分版
 
 [English](./README.md) | 中文 | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
@@ -9,12 +9,27 @@
 <a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 > 2026 年 2 月 28 日，DeerFlow 2 发布后登上 GitHub Trending 第 1 名。非常感谢社区的支持，这是大家一起做到的。
 
-DeerFlow（**D**eep **E**xploration and **E**fficient **R**esearch **Flow**）是一个开源的 **super agent harness**。它把 **sub-agents**、**memory** 和 **sandbox** 组织在一起，再配合可扩展的 **skills**，让 agent 可以完成几乎任何事情。
+本仓库是基于 [DeerFlow 2.0](https://github.com/bytedance/deer-flow) 的二次开发版本：[`Magicorang/deer-flow2.0`](https://github.com/Magicorang/deer-flow2.0)。它保留 DeerFlow 的 Agent、记忆、Sandbox 与 Skills 能力，并将其扩展为面向中国大陆用户的多租户积分制平台。
 
 https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
-> [!NOTE]
-> **DeerFlow 2.0 是一次彻底重写。** 它和 v1 没有共用代码。如果你要找的是最初的 Deep Research 框架，可以前往 [`1.x` 分支](https://github.com/bytedance/deer-flow/tree/main-1.x)。那里仍然欢迎贡献；当前的主要开发已经转向 2.0。
+> [!IMPORTANT]
+> 本项目使用平台统一配置的模型供应商 API Key。注册用户不需要填写自己的模型 Key；每个用户即一个独立租户，按实际模型 Token 消耗扣减积分。
+
+## 二次开发功能
+
+- **独立租户**：用户的会话、记忆、工具、集成、MCP 配置和已安装技能均按租户隔离。
+- **积分计费**：按模型分别配置输入/输出 Token 单价、积分倍率与任务预占额度；余额不足时在执行前阻止任务并提示充值。
+- **充值占位**：提供微信支付、支付宝充值入口与订单记录，当前本地开发环境可模拟支付成功。
+- **运营后台**：管理员可查看租户、用量账单、充值订单、积分余额，手动调整积分并冻结或解冻账号；管理员自身不会被误冻结。
+- **技能市场**：管理员发布和管理 Skill，用户可在设置中的技能市场安装或移除自己的 Skill。
+- **内容安全与审计**：对输入和流式输出执行安全检查；命中违规规则会立刻终止输出、显示拦截提示、保留积分扣减，并记录可审计事件。
+
+## 本地访问
+
+启动开发服务后访问 `http://localhost:2026`，根路径会自动进入登录页。普通用户登录后进入自己的工作台；管理员登录后进入独立的运营后台。
+
+> 充值支付目前为前端预留与本地模拟流程，尚未接入真实的微信支付或支付宝。
 
 ## 官网
 
@@ -84,7 +99,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 如果你在用 Claude Code、Codex、Cursor、Windsurf 或其他 coding agent，可以直接把下面这句话发给它：
 
 ```text
-如果还没 clone DeerFlow，就先 clone，然后按照 https://raw.githubusercontent.com/bytedance/deer-flow/main/Install.md 把它的本地开发环境初始化好
+如果还没 clone DeerFlow 多租户积分版，就先 clone，然后根据本仓库的 README 初始化本地开发环境
 ```
 
 这条提示词是给 coding agent 用的。它会在需要时先 clone 仓库，优先选择 Docker，完成初始化，并在结束时告诉你下一条启动命令，以及还缺哪些配置需要你补充。
@@ -93,11 +108,11 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 ### 配置
 
-1. **克隆 DeerFlow 仓库**
+1. **克隆本项目仓库**
 
    ```bash
-   git clone https://github.com/bytedance/deer-flow.git
-   cd deer-flow
+   git clone https://github.com/Magicorang/deer-flow2.0.git
+   cd deer-flow2.0
    ```
 
 2. **运行安装向导（推荐）**

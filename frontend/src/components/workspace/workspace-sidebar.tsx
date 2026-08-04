@@ -8,6 +8,7 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useAuth } from "@/core/auth/AuthProvider";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
 import { RecentChatList } from "./recent-chat-list";
@@ -19,6 +20,8 @@ export function WorkspaceSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
   const { open: isSidebarOpen } = useSidebar();
+  const { user } = useAuth();
+  const isAdmin = user?.system_role === "admin";
   return (
     <>
       <Sidebar variant="sidebar" collapsible="icon" {...props}>
@@ -26,9 +29,13 @@ export function WorkspaceSidebar({
           <WorkspaceHeader />
         </SidebarHeader>
         <SidebarContent>
-          <WorkspaceNavChatList />
-          <WorkspaceChannelsList />
-          {isSidebarOpen && <RecentChatList />}
+          {!isAdmin && (
+            <>
+              <WorkspaceNavChatList />
+              <WorkspaceChannelsList />
+              {isSidebarOpen && <RecentChatList />}
+            </>
+          )}
         </SidebarContent>
         <SidebarFooter>
           <WorkspaceNavMenu />

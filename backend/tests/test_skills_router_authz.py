@@ -1,11 +1,10 @@
 """Authorization regression tests for the skills router.
 
-Custom skill SKILL.md content is injected into every user's agent system
-prompt. The mutating endpoints that write global shared state (install,
-toggle PUBLIC skills, edit/delete custom skill content, and the endpoints
-that expose raw custom-skill content/history) must be admin-only, matching
-the MCP router which guards the equivalent global extensions_config mutations
-with ``require_admin_user``.
+The mutating endpoints that write global shared state (install, toggle PUBLIC
+skills, edit/delete custom skill content, and the endpoints that expose raw
+custom-skill content/history) must be admin-only, matching the MCP router
+which guards the equivalent global extensions_config mutations with
+``require_admin_user``.
 
 Under per-user skill isolation, ``list_custom_skills`` is open to all
 authenticated users (they see only their own custom skills), but all other
@@ -52,9 +51,9 @@ def _make_app(*, system_role: str) -> FastAPI:
 # Under per-user skill isolation, list_custom_skills is open to normal users
 # (they see only their own skills), so it is NOT in this list.
 # All other mutating endpoints write/read global shared state and must be
-# admin-only. PUT /api/skills/{name} is included: toggling enabled writes
-# the shared extensions_config.json (for PUBLIC skills) and changes every
-# tenant's injected skill set.
+# admin-only. PUT /api/skills/{name} is deliberately excluded: the router
+# first determines the skill category, then allows tenant-local custom skill
+# state changes while continuing to require admin rights for PUBLIC skills.
 _GUARDED_ENDPOINTS = [
     ("post", "/api/skills/install", {"thread_id": "t1", "path": "mnt/user-data/outputs/x.skill"}),
     ("post", "/api/skills/reload", None),
@@ -63,7 +62,6 @@ _GUARDED_ENDPOINTS = [
     ("delete", "/api/skills/custom/demo", None),
     ("get", "/api/skills/custom/demo/history", None),
     ("post", "/api/skills/custom/demo/rollback", {"history_index": -1}),
-    ("put", "/api/skills/demo", {"enabled": False}),
 ]
 
 

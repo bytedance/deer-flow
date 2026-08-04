@@ -1409,6 +1409,10 @@ export function useThreadStream({
   >(() => new Set());
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
+  const [blockedRunIds, setBlockedRunIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [blockedResponse, setBlockedResponse] = useState<Message | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
@@ -1662,6 +1666,26 @@ export function useThreadStream({
         setTasks({});
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
+        return;
+      }
+
+      if (eventType === "content_blocked") {
+        const payload = event as { run_id?: unknown; message?: unknown };
+        const runId =
+          typeof payload.run_id === "string" ? payload.run_id : null;
+        const message =
+          typeof payload.message === "string"
+            ? payload.message
+            : "抱歉，当前请求或回复内容可能违反平台内容安全规范，已停止生成。";
+        if (runId) {
+          setBlockedRunIds((current) => new Set([...current, runId]));
+          setBlockedResponse({
+            id: `safety-${runId}`,
+            type: "ai",
+            content: message,
+            additional_kwargs: { run_id: runId },
+          } as Message);
+        }
         return;
       }
 
@@ -2342,6 +2366,13 @@ export function useThreadStream({
     persistedMessages,
     thread.isLoading,
   );
+  const safeRenderMessages = useMemo(
+    () =>
+      renderMessages.filter(
+        (message) => !blockedRunIds.has(getMessageRunId(message) ?? ""),
+      ),
+    [blockedRunIds, renderMessages],
+  );
 
   const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
@@ -2396,8 +2427,10 @@ export function useThreadStream({
     );
     const merged = mergeMessages(
       effectiveHistory,
-      renderMessages,
-      visibleOptimisticMessages,
+      safeRenderMessages,
+      blockedResponse
+        ? [...visibleOptimisticMessages, blockedResponse]
+        : visibleOptimisticMessages,
     );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
     return localTurnOrderBaseline === null
@@ -2405,11 +2438,12 @@ export function useThreadStream({
       : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
   }, [
     previouslyRenderedOrder,
-    renderMessages,
+    safeRenderMessages,
     threadId,
     transientHistoryOrder,
     visibleHistory,
     visibleOptimisticMessages,
+    blockedResponse,
   ]);
   useEffect(() => {
     const visibleMergedMessages = mergedMessages.filter(

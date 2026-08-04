@@ -1,4 +1,4 @@
-# 🦌 DeerFlow - 2.0
+# 🦌 DeerFlow Multi-tenant Credits Edition
 
 English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
 
@@ -9,7 +9,9 @@ English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](.
 <a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 > On February 28th, 2026, DeerFlow claimed the 🏆 #1 spot on GitHub Trending following the launch of version 2. Thanks a million to our incredible community — you made this happen! 💪🔥
 
-DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
+This repository is the multi-tenant, credit-billing edition of DeerFlow 2.0, maintained at [`Magicorang/deer-flow2.0`](https://github.com/Magicorang/deer-flow2.0). It extends the upstream Agent harness with isolated tenant data, platform-managed model credentials, token-based credits, operations tooling, a skill marketplace, and streaming content safety controls.
+
+For the complete product description, local access behavior, and Chinese-language setup notes, see [README_zh.md](./README_zh.md).
 
 https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 

@@ -571,7 +571,9 @@ def _make_session_pool_tool(
     )
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -593,7 +595,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     # to always read the latest configuration from disk. This ensures that changes
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
-    extensions_config = ExtensionsConfig.from_file()
+    extensions_config = extensions_config or ExtensionsConfig.from_file()
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:

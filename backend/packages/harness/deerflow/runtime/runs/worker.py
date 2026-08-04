@@ -71,6 +71,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
+from deerflow.safety.streaming_guard import DEFAULT_RULE_SET, SafetyVerdict, StreamingContentGuard
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     is_trace_id_from_request_header,
@@ -86,6 +87,41 @@ from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+
+
+def streamed_message_text(chunk: Any) -> str:
+    """Return a text delta from LangGraph's `(message_chunk, metadata)` frame."""
+    if not isinstance(chunk, tuple) or not chunk:
+        return ""
+    content = getattr(chunk[0], "content", None)
+    return content if isinstance(content, str) else ""
+
+
+async def persist_output_safety_detection(record: RunRecord, verdict: SafetyVerdict) -> None:
+    """Best-effort audit persistence that must never delay an output block."""
+    if not verdict.blocked or not record.user_id:
+        return
+    try:
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.safety.service import ContentSafetyService
+
+        session_factory = get_session_factory()
+        if session_factory is None:
+            return
+        await ContentSafetyService(session_factory).create_risk_event(
+            user_id=record.user_id,
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            direction="output",
+            category=verdict.category or "unsafe_content",
+            severity=verdict.severity or "high",
+            rule_version=DEFAULT_RULE_SET.version,
+            confidence_bps=10_000,
+            redacted_excerpt=verdict.redacted_excerpt or "***",
+        )
+    except Exception:
+        logger.warning("Failed to persist output-safety detection for run %s", record.run_id, exc_info=True)
+
 
 _checkpoint_locks_guard = threading.Lock()
 _checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
@@ -550,6 +586,23 @@ async def run_agent(
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+    output_safety_guard = StreamingContentGuard(DEFAULT_RULE_SET)
+
+    async def _block_unsafe_output(chunk: Any) -> bool:
+        text = streamed_message_text(chunk)
+        if not text:
+            return False
+        verdict, _ = output_safety_guard.push_output(text)
+        if not verdict.blocked:
+            return False
+        await persist_output_safety_detection(record, verdict)
+        await bridge.publish(
+            run_id,
+            "custom",
+            {"type": "content_blocked", "run_id": run_id, "message": verdict.user_message},
+        )
+        record.abort_event.set()
+        return True
 
     async def _finish_cancellation(
         action: str,
@@ -861,6 +914,8 @@ async def run_agent(
                                 break
                             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             sse_event = _lg_mode_to_sse_event(single_mode)
+                            if single_mode == "messages" and await _block_unsafe_output(chunk):
+                                break
                             await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
                             if single_mode == "custom":
                                 await subagent_events.add(chunk)
@@ -885,6 +940,8 @@ async def run_agent(
                             # fallback: a delegated subagent's marked fallback is the
                             # executor's to map (task_failed), not this run's.
                             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        if not namespace and mode == "messages" and await _block_unsafe_output(chunk):
+                            break
                         await _publish_stream_item(
                             bridge=bridge,
                             run_id=run_id,

@@ -4,7 +4,6 @@ import {
   BugIcon,
   ChevronsUpDown,
   GlobeIcon,
-  InfoIcon,
   MailIcon,
   ShieldCheckIcon,
   Settings2Icon,
@@ -85,14 +84,16 @@ export function WorkspaceNavMenu() {
                 sideOffset={4}
               >
                 <DropdownMenuGroup>
-                  <DropdownMenuItem
-                    onClick={() => {
-                      openSettings("appearance");
-                    }}
-                  >
-                    <Settings2Icon />
-                    {t.common.settings}
-                  </DropdownMenuItem>
+                  {user?.system_role !== "admin" && (
+                    <DropdownMenuItem
+                      onClick={() => {
+                        openSettings("appearance");
+                      }}
+                    >
+                      <Settings2Icon />
+                      {t.common.settings}
+                    </DropdownMenuItem>
+                  )}
                   {user?.system_role === "admin" && (
                     <DropdownMenuItem
                       onClick={() => router.push("/workspace/admin")}
@@ -140,15 +141,6 @@ export function WorkspaceNavMenu() {
                     </DropdownMenuItem>
                   </a>
                 </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => {
-                    openSettings("about");
-                  }}
-                >
-                  <InfoIcon />
-                  {t.workspace.about}
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           ) : (

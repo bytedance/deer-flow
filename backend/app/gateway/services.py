@@ -74,10 +74,58 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.safety.streaming_guard import DEFAULT_RULE_SET, SafetyVerdict, StreamingContentGuard
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+def inspect_run_input_for_safety(payload: object) -> SafetyVerdict:
+    """Inspect user-message text before a model run or wallet reservation exists."""
+    if not isinstance(payload, Mapping):
+        return SafetyVerdict.allow()
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return SafetyVerdict.allow()
+    text_parts: list[str] = []
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") not in {"user", "human"}:
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            text_parts.append(content)
+    return StreamingContentGuard(DEFAULT_RULE_SET).inspect_input("\n".join(text_parts))
+
+
+async def persist_input_safety_detection(
+    *,
+    user_id: str | None,
+    thread_id: str,
+    verdict: SafetyVerdict,
+) -> None:
+    """Record a blocked prompt without allowing audit storage to bypass blocking."""
+    if not user_id or not verdict.blocked:
+        return
+    try:
+        from deerflow.persistence.safety.service import ContentSafetyService
+
+        session_factory = get_session_factory()
+        if session_factory is None:
+            return
+        await ContentSafetyService(session_factory).create_risk_event(
+            user_id=user_id,
+            thread_id=thread_id,
+            run_id=None,
+            direction="input",
+            category=verdict.category or "unsafe_content",
+            severity=verdict.severity or "high",
+            rule_version=DEFAULT_RULE_SET.version,
+            confidence_bps=10_000,
+            redacted_excerpt=verdict.redacted_excerpt or "***",
+        )
+    except Exception:
+        logger.warning("Failed to persist input-safety detection for thread %s", sanitize_log_param(thread_id), exc_info=True)
 
 
 def _billing_enabled() -> bool:
@@ -1146,6 +1194,18 @@ async def start_run(
             allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    input_safety_verdict = inspect_run_input_for_safety(body.input)
+    if input_safety_verdict.blocked:
+        await persist_input_safety_detection(
+            user_id=owner_user_id,
+            thread_id=thread_id,
+            verdict=input_safety_verdict,
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "CONTENT_BLOCKED", "message": input_safety_verdict.user_message},
+        )
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:

@@ -6,3 +6,7 @@ export interface Skill {
   enabled: boolean;
   editable: boolean;
 }
+
+export interface SkillDetails extends Skill {
+  content: string;
+}

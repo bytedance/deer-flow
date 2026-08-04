@@ -40,8 +40,10 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
+from deerflow.persistence.engine import get_session_factory
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
+from deerflow.safety.streaming_guard import BLOCKED_RESPONSE_TEXT
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -56,6 +58,68 @@ THREAD_MESSAGE_PAGE_SCAN_BATCH = 201
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+
+
+def redact_blocked_output_messages(
+    rows: list[dict[str, Any]],
+    blocked_run_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Replace every blocked run's persisted AI text with one safe notice.
+
+    The stream guard can stop a run only after a few chunks have already been
+    checkpointed.  This projection keeps those chunks from reappearing after
+    page reload without mutating the underlying audit evidence.
+    """
+    if not blocked_run_ids:
+        return rows
+    redacted_runs: set[str] = set()
+    projected: list[dict[str, Any]] = []
+    for row in rows:
+        run_id = row.get("run_id")
+        content = row.get("content")
+        if run_id not in blocked_run_ids or not isinstance(content, dict) or content.get("type") != "ai":
+            projected.append(row)
+            continue
+        if run_id in redacted_runs:
+            continue
+        safe_row = deepcopy(row)
+        safe_content = dict(content)
+        safe_content["content"] = BLOCKED_RESPONSE_TEXT
+        safe_content["additional_kwargs"] = {
+            **(content.get("additional_kwargs") if isinstance(content.get("additional_kwargs"), dict) else {}),
+            "content_blocked": True,
+        }
+        safe_row["content"] = safe_content
+        projected.append(safe_row)
+        redacted_runs.add(run_id)
+    return projected
+
+
+async def _blocked_output_run_ids(thread_id: str, user_id: str | None) -> set[str]:
+    """Return only this tenant's runs that have an output-safety incident."""
+    if not user_id:
+        return set()
+    session_factory = get_session_factory()
+    if session_factory is None:
+        return set()
+    try:
+        from sqlalchemy import select
+
+        from deerflow.persistence.safety.model import RiskEventRow
+
+        async with session_factory() as session:
+            rows = await session.scalars(
+                select(RiskEventRow.run_id).where(
+                    RiskEventRow.user_id == user_id,
+                    RiskEventRow.thread_id == thread_id,
+                    RiskEventRow.direction == "output",
+                    RiskEventRow.run_id.is_not(None),
+                )
+            )
+            return {run_id for run_id in rows if isinstance(run_id, str)}
+    except Exception:
+        logger.warning("Failed to load output-safety events for thread %s", sanitize_log_param(thread_id), exc_info=True)
+        return set()
 
 
 def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
@@ -1096,6 +1160,7 @@ async def list_thread_messages(
     user_id = await get_current_user(request)
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
+    blocked_output_run_ids = await _blocked_output_run_ids(thread_id, user_id)
     messages, _ = await _scan_visible_thread_messages(
         thread_id,
         limit=limit,
@@ -1108,6 +1173,7 @@ async def list_thread_messages(
         include_extra=False,
         batch_size=THREAD_MESSAGE_LEGACY_SCAN_BATCH,
     )
+    messages = redact_blocked_output_messages(messages, blocked_output_run_ids)
 
     # Find the last AI message per run_id. AI messages are persisted by
     # RunJournal with event_type "llm.ai.response" (see runtime/journal.py);
@@ -1278,7 +1344,8 @@ async def _scan_thread_message_page(
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
     run_mgr = get_run_manager(request)
     hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
-    return await _scan_visible_thread_messages(
+    blocked_output_run_ids = await _blocked_output_run_ids(thread_id, user_id)
+    rows, has_more = await _scan_visible_thread_messages(
         thread_id,
         limit=limit,
         before_seq=before_seq,
@@ -1290,6 +1357,7 @@ async def _scan_thread_message_page(
         include_extra=True,
         batch_size=THREAD_MESSAGE_PAGE_SCAN_BATCH,
     )
+    return redact_blocked_output_messages(rows, blocked_output_run_ids), has_more
 
 
 async def _enrich_thread_message_page(

@@ -57,6 +57,12 @@ class SkillsListResponse(BaseModel):
     skills: list[SkillResponse]
 
 
+class SkillDetailsResponse(SkillResponse):
+    """Full read-only Markdown for a skill visible to the requesting tenant."""
+
+    content: str = Field(..., description="Raw SKILL.md content")
+
+
 class SkillUpdateRequest(BaseModel):
     """Request model for updating a skill."""
 
@@ -161,6 +167,31 @@ async def list_skills(config: AppConfig = Depends(get_config)) -> SkillsListResp
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
+
+
+@router.get("/skills/{skill_name}/details", response_model=SkillDetailsResponse, summary="Get Visible Skill Details")
+async def get_skill_details(skill_name: str, config: AppConfig = Depends(get_config)) -> SkillDetailsResponse:
+    """Return the complete `SKILL.md` only after resolving it from caller-visible storage."""
+    normalized_name = skill_name.replace("\r\n", "").replace("\n", "")
+
+    def _read_visible_skill() -> tuple[Skill, str] | None:
+        storage = _get_user_skill_storage(config)
+        skill = next((item for item in storage.load_skills(enabled_only=False) if item.name == normalized_name), None)
+        if skill is None:
+            return None
+        return skill, skill.skill_file.read_text(encoding="utf-8")
+
+    try:
+        found = await asyncio.to_thread(_read_visible_skill)
+        if found is None:
+            raise HTTPException(status_code=404, detail="Skill not found")
+        skill, content = found
+        return SkillDetailsResponse(**_skill_to_response(skill).model_dump(), content=content)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        logger.error("Failed to read visible skill %s: %s", normalized_name, exc)
+        raise HTTPException(status_code=404, detail="Skill not found") from exc
 
 
 @router.post(
@@ -479,11 +510,6 @@ def _write_extensions_skill_state(
     description="Update a skill's enabled status by modifying the extensions_config.json file.",
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
-    # Enabling/disabling a skill writes the shared extensions_config.json and
-    # refreshes the system prompt for every tenant, so it is a global mutation
-    # (there is no per-user skill state). Guard it as admin-only like the other
-    # global config writes, matching the MCP router.
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 
@@ -503,6 +529,9 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
         # so that two users with same-named custom skills can toggle independently.
         if skill.category == SkillCategory.PUBLIC:
+            # Public skills alter shared configuration, while custom skills
+            # below use the current user's isolated state file.
+            await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
             await asyncio.to_thread(
                 _write_extensions_skill_state,
                 storage,

@@ -1,26 +1,18 @@
-import { Footer } from "@/components/landing/footer";
-import { Header } from "@/components/landing/header";
-import { Hero } from "@/components/landing/hero";
-import { CaseStudySection } from "@/components/landing/sections/case-study-section";
-import { CommunitySection } from "@/components/landing/sections/community-section";
-import { SandboxSection } from "@/components/landing/sections/sandbox-section";
-import { SkillsSection } from "@/components/landing/sections/skills-section";
-import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
-import { DEFAULT_LOCALE } from "@/core/i18n/locale";
+import { redirect } from "next/navigation";
 
-export default function LandingPage() {
-  return (
-    <div className="min-h-screen w-full overflow-x-clip bg-[#0a0a0a]">
-      <Header locale={DEFAULT_LOCALE} />
-      <main className="flex w-full flex-col">
-        <Hero />
-        <CaseStudySection />
-        <SkillsSection />
-        <SandboxSection />
-        <WhatsNewSection />
-        <CommunitySection />
-      </main>
-      <Footer />
-    </div>
-  );
+import { getWorkspaceHomePath } from "@/core/auth/role-routing";
+import { getServerSideUser } from "@/core/auth/server";
+
+export default async function HomePage() {
+  const result = await getServerSideUser();
+  if (result.tag === "authenticated") {
+    redirect(getWorkspaceHomePath(result.user.system_role));
+  }
+  if (result.tag === "needs_setup" || result.tag === "system_setup_required") {
+    redirect("/setup");
+  }
+  if (result.tag === "config_error") {
+    throw new Error(result.message);
+  }
+  redirect("/login");
 }

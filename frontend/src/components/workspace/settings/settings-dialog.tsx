@@ -3,7 +3,6 @@
 import {
   BellIcon,
   CableIcon,
-  InfoIcon,
   BrainIcon,
   PaletteIcon,
   PlugZapIcon,
@@ -21,8 +20,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
+
+import {
+  getVisibleSettingsSectionIds,
+  type VisibleSettingsSection,
+} from "./settings-sections";
 
 function SettingsPageLoading() {
   return (
@@ -84,12 +89,6 @@ const ToolSettingsPage = dynamic(
     import("./tool-settings-page").then((module) => module.ToolSettingsPage),
   { loading: SettingsPageLoading },
 );
-const AboutSettingsPage = dynamic(
-  () =>
-    import("./about-settings-page").then((module) => module.AboutSettingsPage),
-  { loading: SettingsPageLoading },
-);
-
 export type SettingsSection =
   | "account"
   | "appearance"
@@ -98,8 +97,7 @@ export type SettingsSection =
   | "memory"
   | "tools"
   | "skills"
-  | "notification"
-  | "about";
+  | "notification";
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSection;
@@ -108,6 +106,7 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const { user } = useAuth();
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
 
@@ -153,7 +152,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
-      { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
       t.settings.sections.account,
@@ -164,8 +162,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
-      t.settings.sections.about,
     ],
+  );
+  const visibleSectionIds = getVisibleSettingsSectionIds(user?.system_role);
+  const visibleSections = sections.filter((section) =>
+    visibleSectionIds.includes(section.id as VisibleSettingsSection),
   );
   return (
     <Dialog
@@ -185,7 +186,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
           <nav className="bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
             <ul className="space-y-1 pr-1">
-              {sections.map(({ id, label, icon: Icon }) => {
+              {visibleSections.map(({ id, label, icon: Icon }) => {
                 const active = activeSection === id;
                 return (
                   <li key={id}>
@@ -221,7 +222,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "integrations" && <IntegrationsSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

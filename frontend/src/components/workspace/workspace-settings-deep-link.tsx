@@ -18,7 +18,6 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "tools",
   "skills",
   "notification",
-  "about",
 ]);
 
 function asSettingsSection(value: string | null): SettingsSection | null {

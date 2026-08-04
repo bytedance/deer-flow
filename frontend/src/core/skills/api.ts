@@ -1,7 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Skill } from "./type";
+import type { Skill, SkillDetails } from "./type";
 
 export class SkillRequestError extends Error {
   readonly status: number;
@@ -31,6 +31,21 @@ export async function loadSkills() {
   }
   const json = await skills.json();
   return json.skills as Skill[];
+}
+
+export async function loadSkillDetails(
+  skillName: string,
+): Promise<SkillDetails> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/${encodeURIComponent(skillName)}/details`,
+  );
+  if (!response.ok) {
+    throw new SkillRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
+  }
+  return response.json();
 }
 
 export async function enableSkill(skillName: string, enabled: boolean) {

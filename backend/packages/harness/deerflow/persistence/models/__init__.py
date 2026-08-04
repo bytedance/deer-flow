@@ -15,6 +15,13 @@ there is no matching entity directory.
 """
 
 from deerflow.persistence.agents.model import AgentRow
+from deerflow.persistence.billing.model import (
+    CreditLedgerRow,
+    ModelPricePolicyRow,
+    PaymentOrderRow,
+    UsageRecordRow,
+    WalletRow,
+)
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -24,24 +31,35 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.safety.model import AdminAuditLogRow, RiskEventRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.skill_market.model import MarketSkillInstallRow, MarketSkillRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
 __all__ = [
     "AgentRow",
+    "CreditLedgerRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",
     "ChannelCredentialRow",
     "ChannelOAuthStateRow",
     "FeedbackRow",
+    "MarketSkillRow",
+    "MarketSkillInstallRow",
+    "ModelPricePolicyRow",
+    "PaymentOrderRow",
     "RunEventRow",
     "RunRow",
+    "RiskEventRow",
+    "AdminAuditLogRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "ThreadMetaRow",
     "UserRow",
+    "UsageRecordRow",
+    "WalletRow",
     "WebhookDeliveryRow",
 ]

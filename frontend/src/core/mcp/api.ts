@@ -26,7 +26,7 @@ async function readErrorDetail(
 }
 
 export async function loadMCPConfig() {
-  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`);
+  const response = await fetch(`${getBackendBaseURL()}/api/user/mcp/config`);
   if (!response.ok) {
     throw new MCPConfigRequestError(
       response.status,
@@ -37,7 +37,7 @@ export async function loadMCPConfig() {
 }
 
 export async function updateMCPConfig(config: MCPConfig) {
-  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`, {
+  const response = await fetch(`${getBackendBaseURL()}/api/user/mcp/config`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -57,7 +57,7 @@ export async function updateMCPServerState(
   serverName: string,
   enabled: boolean,
 ) {
-  const response = await fetch(`${getBackendBaseURL()}/api/mcp/config`, {
+  const response = await fetch(`${getBackendBaseURL()}/api/user/mcp/config`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",

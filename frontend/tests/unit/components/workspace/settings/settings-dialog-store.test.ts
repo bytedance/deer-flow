@@ -51,7 +51,7 @@ test("notifies subscribers only on real state changes", () => {
   expect(notifications).toBe(2);
 
   unsubscribe();
-  openSettingsDialog("about");
+  openSettingsDialog("account");
   // No further notifications after unsubscribe.
   expect(notifications).toBe(2);
 });

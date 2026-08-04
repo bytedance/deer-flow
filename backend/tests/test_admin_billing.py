@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 
 def test_model_pricing_rejects_model_missing_from_config(monkeypatch):
@@ -41,3 +42,10 @@ def test_freezing_non_admin_or_one_of_many_admins_is_allowed():
 
     validate_admin_freeze(target_is_admin=False, active_admin_count=1)
     validate_admin_freeze(target_is_admin=True, active_admin_count=2)
+
+
+def test_credit_adjustment_rejects_zero_delta():
+    from app.gateway.routers.admin_billing import CreditAdjustment
+
+    with pytest.raises(ValidationError, match="credits must not be zero"):
+        CreditAdjustment(credits=0, reason="no-op")

@@ -1,26 +1,17 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import type { ReactNode } from "react";
+import { getServerSideUser } from "@/core/auth/server";
 
-import { AgentsFeatureDisabled } from "@/components/workspace/agents/agents-feature-disabled";
-import { useAgentsApiEnabled } from "@/core/agents";
-import { useI18n } from "@/core/i18n/hooks";
+import { AgentsClientLayout } from "./agents-client-layout";
 
-export default function AgentsLayout({ children }: { children: ReactNode }) {
-  const { t } = useI18n();
-  const { enabled, isLoading } = useAgentsApiEnabled();
+export default async function AgentsLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const result = await getServerSideUser();
+  if (result.tag !== "authenticated") redirect("/login");
+  if (result.user.system_role === "admin") redirect("/workspace/admin");
 
-  if (isLoading) {
-    return (
-      <div className="text-muted-foreground flex size-full items-center justify-center text-sm">
-        {t.common.loading}
-      </div>
-    );
-  }
-
-  if (!enabled) {
-    return <AgentsFeatureDisabled />;
-  }
-
-  return <>{children}</>;
+  return <AgentsClientLayout>{children}</AgentsClientLayout>;
 }

@@ -126,11 +126,14 @@ def get_available_tools(
     if include_mcp:
         try:
             from deerflow.config.extensions_config import ExtensionsConfig
-            from deerflow.mcp.cache import get_cached_mcp_tools
+            from deerflow.mcp.cache import get_cached_mcp_tools, get_cached_user_mcp_tools
+            from deerflow.mcp.user_config import load_user_mcp_config
+            from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 
-            extensions_config = ExtensionsConfig.from_file()
+            user_id = get_effective_user_id()
+            extensions_config = ExtensionsConfig.from_file() if user_id == DEFAULT_USER_ID else load_user_mcp_config(user_id)
             if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
+                mcp_tools = get_cached_mcp_tools() if user_id == DEFAULT_USER_ID else get_cached_user_mcp_tools(user_id)
                 if mcp_tools:
                     logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
 

@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
+_user_mcp_tools_cache: dict[str, list[BaseTool]] = {}
+_user_initialization_locks: dict[str, asyncio.Lock] = {}
 
 # Cache-invalidation key for the resolved extensions config file. We track the
 # resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
@@ -187,6 +189,44 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             return []
 
     return _mcp_tools_cache or []
+
+
+async def initialize_user_mcp_tools(user_id: str) -> list[BaseTool]:
+    """Initialize one tenant's MCP tools without touching the global cache."""
+    lock = _user_initialization_locks.setdefault(user_id, asyncio.Lock())
+    async with lock:
+        if user_id not in _user_mcp_tools_cache:
+            from deerflow.mcp.tools import get_mcp_tools
+            from deerflow.mcp.user_config import load_user_mcp_config
+
+            _user_mcp_tools_cache[user_id] = await get_mcp_tools(load_user_mcp_config(user_id))
+        return _user_mcp_tools_cache[user_id]
+
+
+def get_cached_user_mcp_tools(user_id: str) -> list[BaseTool]:
+    """Synchronously access the cache for the current authenticated tenant."""
+    if user_id not in _user_mcp_tools_cache:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    executor.submit(asyncio.run, initialize_user_mcp_tools(user_id)).result()
+            else:
+                loop.run_until_complete(initialize_user_mcp_tools(user_id))
+        except RuntimeError:
+            asyncio.run(initialize_user_mcp_tools(user_id))
+        except Exception:
+            logger.exception("Failed to initialize MCP tools for tenant %s", user_id)
+            return []
+    return _user_mcp_tools_cache.get(user_id, [])
+
+
+def reset_user_mcp_tools_cache(user_id: str) -> None:
+    """Invalidate only one tenant's discovery cache after its config changes."""
+    _user_mcp_tools_cache.pop(user_id, None)
+    _user_initialization_locks.pop(user_id, None)
 
 
 def reset_mcp_tools_cache() -> None:
