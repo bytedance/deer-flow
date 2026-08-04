@@ -32,6 +32,18 @@ async def _is_admin_user(request: Request) -> bool:
     return True
 
 
+async def _redact_backend_config(backend_config: dict, request: Request) -> dict:
+    """Return ``backend_config`` with host paths redacted for non-admin callers.
+
+    Applied by **every** host-path-emitting memory route (config and status)
+    so the redaction cannot be bypassed by hitting the other endpoint.
+    Mirrors ``integrations.py``'s per-route ``_is_admin_user`` gating.
+    """
+    if "storage_path" in backend_config and not await _is_admin_user(request):
+        return {**backend_config, "storage_path": None}
+    return backend_config
+
+
 def _resolve_memory_user_id(request: Request) -> str:
     """Resolve the memory owner for this request.
 
@@ -488,12 +500,7 @@ async def get_memory_config_endpoint(request: Request) -> MemoryConfigResponse:
         ```
     """
     config = get_memory_config()
-    backend_config = config.backend_config
-    if "storage_path" in backend_config and not await _is_admin_user(request):
-        # Host filesystem paths are admin-only info; redact them for
-        # non-admin callers of this otherwise non-gated route. Mirrors the
-        # redaction in integrations.py for lark-cli status responses.
-        backend_config = {**backend_config, "storage_path": None}
+    backend_config = await _redact_backend_config(config.backend_config, request)
     return MemoryConfigResponse(
         enabled=config.enabled,
         mode=config.mode,
@@ -528,7 +535,7 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             injection_enabled=config.injection_enabled,
             shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
             manager_class=config.manager_class,
-            backend_config=config.backend_config,
+            backend_config=await _redact_backend_config(config.backend_config, http_request),
         ),
         data=MemoryResponse(**memory_data),
     )

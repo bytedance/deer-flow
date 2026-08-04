@@ -635,3 +635,49 @@ def test_memory_config_preserves_storage_path_for_admin() -> None:
             response = client.get("/api/memory/config")
     assert response.status_code == 200
     assert response.json()["backend_config"]["storage_path"] == "/secret/.deer-flow"
+
+
+def test_memory_status_redacts_storage_path_for_non_admin() -> None:
+    """/api/memory/status must not leak storage_path to non-admin callers —
+    the same host-path redaction applies as on /api/memory/config."""
+    app = FastAPI()
+    app.include_router(memory.router)
+
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory = lambda *, user_id: _sample_memory()  # sync fn via to_thread
+    with (
+        patch("app.gateway.routers.memory.get_memory_config", return_value=_memory_config()),
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr),
+    ):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/status")
+    assert response.status_code == 200
+    body = response.json()
+    # Redacted identically to /api/memory/config: null, other knobs intact
+    # (response_model_exclude_none does not recurse into plain dict values).
+    assert body["config"]["backend_config"]["storage_path"] is None
+    assert body["config"]["backend_config"]["max_facts"] == 100
+
+
+def test_memory_status_preserves_storage_path_for_admin() -> None:
+    """Admin callers keep the full backend_config on the status route."""
+    app = FastAPI()
+
+    class _AdminStubMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.user = SimpleNamespace(system_role="admin")
+            return await call_next(request)
+
+    app.add_middleware(_AdminStubMiddleware)
+    app.include_router(memory.router)
+
+    mock_mgr = MagicMock()
+    mock_mgr.get_memory = lambda *, user_id: _sample_memory()
+    with (
+        patch("app.gateway.routers.memory.get_memory_config", return_value=_memory_config()),
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr),
+    ):
+        with TestClient(app) as client:
+            response = client.get("/api/memory/status")
+    assert response.status_code == 200
+    assert response.json()["config"]["backend_config"]["storage_path"] == "/secret/.deer-flow"
