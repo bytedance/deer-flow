@@ -19,6 +19,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    # Idempotent: a DB whose full-metadata create_all already provisioned the
+    # index (fresh DB, from the ORM model) must not have it re-created here —
+    # and if the index exists, the admin-role constraint is already enforced,
+    # so no duplicate admins can exist and the dedup below is unnecessary.
+    existing_indexes = {idx["name"] for idx in inspector.get_indexes("users")}
+    if "uq_users_admin_role" in existing_indexes:
+        return
+
     # Demote duplicate admins created by the pre-fix initialize TOCTOU
     # (concurrent /initialize with different emails), keeping the
     # earliest-created account (deterministic tie-break by id).
