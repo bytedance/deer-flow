@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 32
+config_version: 33
 
 # ============================================================================
 # Logging
@@ -2053,6 +2053,24 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+
+# ============================================================================
+# Long-running MCP Tasks Configuration
+# ============================================================================
+# Protocol-neutral durable task runtime. This foundation is disabled by
+# default; an MCP task driver must be configured before tasks can be submitted.
+# All fields are restart-required (captured at Gateway lifespan startup).
+#
+# mcp_tasks:
+#   enabled: false               # Master switch for the background status poller
+#   poll_interval_seconds: 5     # Scan interval and default task retry interval
+#   lease_seconds: 120           # Expired claims become recoverable after this delay
+#   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+mcp_tasks:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_polls: 8
 
 # ============================================================================
 # Run Ownership Configuration

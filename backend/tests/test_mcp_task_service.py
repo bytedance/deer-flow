@@ -1,0 +1,217 @@
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from app.mcp_tasks.service import McpTaskService
+from deerflow.mcp.tasks import (
+    McpTaskDriverRegistry,
+    TaskSnapshot,
+    TaskStatus,
+    TaskSubmission,
+    TaskSubmitRequest,
+)
+
+
+class FakeRepository:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.claimed = False
+        self.applied = []
+        self.released = []
+        self.created = []
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        return {"id": kwargs["task_id"], **kwargs}
+
+    async def claim_due_tasks(self, **_kwargs):
+        if self.claimed:
+            return []
+        self.claimed = True
+        return [dict(row) for row in self.rows]
+
+    async def apply_snapshot(self, task_id, **kwargs):
+        self.applied.append((task_id, kwargs))
+        return True
+
+    async def release_claim(self, task_id, **kwargs):
+        self.released.append((task_id, kwargs))
+        return True
+
+
+class FakeDriver:
+    def __init__(self, snapshots=None, *, submission=None, error: Exception | None = None):
+        self.snapshots = list(snapshots or [])
+        self.submission = submission
+        self.error = error
+        self.status_calls = []
+        self.submit_calls = []
+
+    async def submit(self, request):
+        self.submit_calls.append(request)
+        if self.submission is None:
+            raise AssertionError(f"unexpected submit: {request}")
+        return self.submission
+
+    async def get_status(self, task):
+        self.status_calls.append(task)
+        if self.error is not None:
+            raise self.error
+        return self.snapshots.pop(0)
+
+    async def cancel(self, task):
+        raise AssertionError(f"unexpected cancel: {task}")
+
+
+def _claimed_row(*, driver_name="fake"):
+    return {
+        "id": "task-1",
+        "user_id": "user-1",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "tool_call_id": "call-1",
+        "server_name": "reports",
+        "driver_name": driver_name,
+        "remote_task_id": "remote-1",
+        "task_name": "Generate report",
+        "status": "working",
+        "driver_data": {"status_tool": "status"},
+        "lease_owner": "ignored-by-service-fixture",
+    }
+
+
+@pytest.mark.asyncio
+async def test_submit_persists_remote_handle_before_returning():
+    now = datetime.now(UTC)
+    repo = FakeRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED, poll_after_seconds=9),
+            driver_data={"status_tool": "status"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = TaskSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
+        task_name="Generate report",
+        arguments={"topic": "MCP"},
+        driver_data={"submit_tool": "submit"},
+    )
+
+    created = await service.submit(driver_name="fake", request=request, now=now)
+
+    assert created["remote_task_id"] == "remote-1"
+    persisted = repo.created[0]
+    assert persisted["next_poll_at"] == now + timedelta(seconds=9)
+    assert persisted["driver_data"] == {"submit_tool": "submit", "status_tool": "status"}
+    assert driver.submit_calls[0].local_task_id == created["id"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_polls_without_an_llm_and_schedules_next_poll():
+    repo = FakeRepository([_claimed_row()])
+    driver = FakeDriver([TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=12)])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    now = datetime.now(UTC)
+
+    await service.run_once(now=now)
+
+    assert driver.status_calls[0].remote_task_id == "remote-1"
+    _, update = repo.applied[0]
+    assert update["status"] == "working"
+    assert update["next_poll_at"] == now + timedelta(seconds=12)
+
+
+@pytest.mark.asyncio
+async def test_run_once_stops_polling_terminal_and_input_required_snapshots():
+    rows = [_claimed_row(), {**_claimed_row(), "id": "task-2", "remote_task_id": "remote-2"}]
+    repo = FakeRepository(rows)
+    driver = FakeDriver(
+        [
+            TaskSnapshot(status=TaskStatus.COMPLETED, result={"report": "ready"}),
+            TaskSnapshot(status=TaskStatus.INPUT_REQUIRED, input_required={"prompt": "Approve?"}),
+        ]
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    updates = {task_id: update for task_id, update in repo.applied}
+    assert updates["task-1"]["status"] == "completed"
+    assert updates["task-1"]["next_poll_at"] is None
+    assert updates["task-2"]["status"] == "input_required"
+    assert updates["task-2"]["input_required"] == {"prompt": "Approve?"}
+    assert updates["task-2"]["next_poll_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_once_releases_claim_when_driver_is_missing_or_fails():
+    rows = [_claimed_row(driver_name="missing"), {**_claimed_row(), "id": "task-2", "remote_task_id": "remote-2", "driver_name": "broken"}]
+    repo = FakeRepository(rows)
+    registry = McpTaskDriverRegistry()
+    registry.register("broken", FakeDriver(error=RuntimeError("network down")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    now = datetime.now(UTC)
+
+    await service.run_once(now=now)
+
+    released = {task_id: update for task_id, update in repo.released}
+    assert "No MCP task driver registered" in released["task-1"]["error"]
+    assert released["task-2"]["error"] == "network down"
+    assert all(update["next_poll_at"] == now + timedelta(seconds=5) for update in released.values())
+
+
+@pytest.mark.asyncio
+async def test_start_runs_recovery_poll_immediately_and_stop_is_clean():
+    repo = FakeRepository([])
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=60,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.start()
+    for _ in range(20):
+        if repo.claimed:
+            break
+        await __import__("asyncio").sleep(0)
+    await service.stop()
+
+    assert repo.claimed is True
