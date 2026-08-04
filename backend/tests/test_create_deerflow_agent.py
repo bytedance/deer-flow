@@ -240,6 +240,7 @@ def test_subagent_injects_task_tool(mock_create_agent):
     tool_names = [t.name for t in call_kwargs["tools"]]
     assert "submit_task_plan" in tool_names
     assert "create_coding_worktree" in tool_names
+    assert "recover_coding_task" in tool_names
     assert "task" in tool_names
 
 

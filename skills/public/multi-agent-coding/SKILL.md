@@ -2,8 +2,10 @@
 name: multi-agent-coding
 description: "Coordinate code analysis, implementation, and review through specialized subagents."
 allowed-tools:
+  - ask_clarification
   - submit_task_plan
   - create_coding_worktree
+  - recover_coding_task
   - task
 ---
 
@@ -16,6 +18,17 @@ allowed-tools:
 1. 确认输入中存在一个 `coding_brief`，并且至少包含 `goal`、`acceptance_criteria` 和 `tasks`。
 2. 如果缺少必要字段，停止执行并列出缺失字段，不要自行补全需求。
 3. 如果 `open_questions` 中仍有会影响安全实现的问题，停止执行并要求用户先确认。
+
+## Approval Gate
+
+Input Gate 通过后，先调用一次 `ask_clarification`，参数固定为：
+
+- `question`: `Approve this coding plan and start the isolated coding run?`
+- `clarification_type`: `risk_confirmation`
+- `context`: `coding_plan_approval`
+- `options`: `Approve coding plan`、`Reject coding plan`
+
+该调用会结束当前运行并等待用户回复。只有消息历史中匹配该请求的结构化回复明确选择 `Approve coding plan`，才能继续保存 DAG、创建 Worktree 或委派子 Agent。选择拒绝或没有匹配回复时停止，`failure_stage` 记为 `input`；不要把普通对话文字当成批准。
 
 ## Persist Task DAG
 
@@ -93,7 +106,16 @@ allowed-tools:
 
 ## Failure Handling
 
-If any delegation returns failed, stop the pipeline and do not claim success.
+If any delegation returns failed, do not claim success. 记录失败阶段对应的 `coding_task_id`，然后调用 `ask_clarification`：
+
+- `question`: 说明真实失败阶段与原因，并询问是否重试该任务
+- `clarification_type`: `risk_confirmation`
+- `context`: `coding_task_recovery:{coding_task_id}`，把占位符替换为真实任务 ID
+- `options`: `Retry failed task`、`Stop pipeline`
+
+该调用会结束当前运行。只有匹配本任务请求的结构化回复选择 `Retry failed task` 后，才能调用 `recover_coding_task(coding_task_id=...)`，再使用原参数和已得到的完整上游报告重新调用同一个 `task`。选择 `Stop pipeline` 时直接返回失败。
+
+Each retry requires a fresh human confirmation. Do not retry automatically. 如果重试后再次失败，必须重新走上述人工确认步骤；不得在一次确认后循环恢复或连续重试。
 
 把已经得到的报告和失败原因原样保留在最终结果中。审查结果为 `FAIL` 时返回失败，不要在本 Skill 内自动重新调用实现 Agent。
 
