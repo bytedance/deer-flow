@@ -1040,7 +1040,9 @@ batching, retrieval, and SDK transport behavior. Credential-owner mismatches
 always fail closed before the model call, independent of availability policy. The full
 OpenViking server package is not installed in DeerFlow. Existing trusted-mode
 configurations remain available temporarily through a deprecated compatibility
-path. See
+path only when they contain an explicit legacy-only setting. Ambiguous configs
+without `owner_user_id` now fail with migration guidance instead of silently
+defaulting to trusted mode. See
 [OpenViking memory backend](docs/OPENVIKING.md) for configuration and legacy
 migration guidance.
 

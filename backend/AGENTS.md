@@ -1041,11 +1041,14 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   and already-due commits but does not turn every deployment into a semantic
   conversation boundary. This lifecycle cursor is single-worker state, not a
   distributed outbox.
-  Configuration without the maintained adapter's required `owner_user_id`
-  continues through the deprecated custom-HTTP adapter with a migration
-  warning, including minimal legacy configurations that relied on trusted-mode
-  defaults. Neither path implements DeerMem fact CRUD/import/export or imports
-  the embedded OpenViking runtime.
+  The deprecated custom-HTTP adapter is selected only by explicit legacy-only
+  fields such as `auth_mode`, `account`, old pool settings, or old retrieval and
+  failure-policy values. A minimal config containing only shared URL/key fields
+  and no `owner_user_id` fails with migration guidance instead of silently
+  defaulting to trusted mode. Persistent manager-construction failures remain
+  retryable, while their full tracebacks are process-rate-limited to one per
+  minute. Neither path implements DeerMem fact CRUD/import/export or imports the
+  embedded OpenViking runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
 - Middleware extraction classifies proposed facts with extraction-only `scope`/`durability`/`authority` labels. `_apply_updates` accepts only `user` + `durable` + `descriptive` new/consolidated facts, accepts only wholly user-scoped summary prose with `authority=descriptive`, and rejects missing labels per item without aborting unrelated updates. Contradiction removals use object entries with `id`, `scope`, `reason`, and optional zero-based `replacementFactIndex`; task/project removals fail closed, and a paired removal runs only when the referenced replacement survives the scope/confidence gates, deduplication, and max-fact trim under another fact ID. The labels are not persisted, so no storage migration is required. Staleness removals retain their independent candidate/cap guardrails, while tool-mode CRUD remains outside this extraction gate. Custom `memory.backend_config.prompts_dir` templates (including per-agent overrides) must carry the same classification fields; an un-migrated template makes the fail-closed gate reject every extraction-driven write, observable only through `rejected_by_scope_gate` and the >60% fact-rejection warning.

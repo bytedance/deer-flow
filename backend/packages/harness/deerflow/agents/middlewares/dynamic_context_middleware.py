@@ -34,6 +34,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
@@ -62,6 +63,9 @@ logger = logging.getLogger(__name__)
 # tiktoken BPE download that blocks until the OS TCP timeout (~26 min).
 # This cap ensures the request degrades gracefully instead of hanging.
 _INJECT_TIMEOUT_SECONDS = 5.0
+_MEMORY_MANAGER_INIT_FAILURE_LOG_INTERVAL_SECONDS = 60.0
+_memory_manager_init_failure_log_lock = threading.Lock()
+_memory_manager_init_failure_last_logged_at = float("-inf")
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
@@ -75,6 +79,19 @@ _TURN_MEMORY_MARKER_KEY = "dynamic_memory_context"
 # Suffix the ID-swap gives the real user message; the reminder SystemMessage
 # takes the original id so ``add_messages`` can replace it in place.
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+
+def _should_log_memory_manager_init_failure() -> bool:
+    """Return whether this process should emit another initialization traceback."""
+
+    global _memory_manager_init_failure_last_logged_at
+
+    now = time.monotonic()
+    with _memory_manager_init_failure_log_lock:
+        if now - _memory_manager_init_failure_last_logged_at < _MEMORY_MANAGER_INIT_FAILURE_LOG_INTERVAL_SECONDS:
+            return False
+        _memory_manager_init_failure_last_logged_at = now
+        return True
 
 
 def _run_sync_with_timeout(callback: Callable[[], str], timeout: float) -> str:
@@ -252,7 +269,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             # Identity-boundary failures are never availability failures.
             raise
         except Exception as exc:
-            logger.exception("Failed to initialize the memory manager for context injection")
+            if _should_log_memory_manager_init_failure():
+                logger.exception("Failed to initialize the memory manager for context injection")
             if self._read_failure_is_closed():
                 if isinstance(exc, MemoryManagerError):
                     raise

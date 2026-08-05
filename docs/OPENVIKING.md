@@ -163,6 +163,9 @@ commits explicitly.
 ## Failure behavior
 
 - Invalid configuration and missing credentials fail at manager construction.
+- Manager construction is still retried on later model calls so transient
+  failures can recover, but repeated initialization tracebacks are limited to
+  one per minute per process.
 - `startup_policy: fail_fast` makes the backend's startup probe raise for an
   unhealthy or unauthorized connection. The Gateway currently logs failed
   memory warm-up and continues serving; `warn` also returns a degraded result
@@ -198,11 +201,12 @@ cross-worker claiming before the integration can claim at-least-once delivery.
 
 ## Existing trusted configuration
 
-Existing configurations without `owner_user_id` continue to use the previous
-implementation and log a migration warning. This includes minimal old
-configurations that contain only `base_url` and `api_key_env`, whose omitted
-`auth_mode` previously defaulted to trusted mode. The old schema did not accept
-`owner_user_id`, so this field is also the unambiguous migration boundary. This
-compatibility path preserves existing deployments but is not used for new
-setups. Remove legacy auth and connection fields, provide a USER API key, and
-add `owner_user_id` to select the maintained adapter.
+Existing configurations that explicitly contain a legacy-only field continue
+to use the previous implementation and log a migration warning. Examples
+include `auth_mode`, `account`, old connection-pool settings,
+`retrieval.injection_query`, and the old `raise` or `log_and_drop` failure
+policies. A minimal config containing only shared fields such as `base_url` and
+`api_key_env` is ambiguous and now fails with migration guidance instead of
+silently defaulting to trusted mode. Add `owner_user_id` and use a USER API key
+to select the maintained adapter. To keep the deprecated backend temporarily,
+set its legacy `auth_mode` explicitly.

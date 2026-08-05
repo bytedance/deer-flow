@@ -11,6 +11,22 @@ from urllib.parse import urlparse
 
 _SAFE_PEER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 GENERATED_PEER_PREFIX = "df-agent-"
+_LEGACY_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "account",
+        "allow_insecure_dev",
+        "auth_mode",
+        "connect_timeout_seconds",
+        "max_connections",
+        "max_keepalive_connections",
+        "max_retries",
+        "pool_timeout_seconds",
+        "read_timeout_seconds",
+        "write_timeout_seconds",
+    }
+)
+_LEGACY_READ_FAILURE_POLICIES = frozenset({"raise"})
+_LEGACY_WRITE_FAILURE_POLICIES = frozenset({"log_and_drop", "raise"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,12 +155,27 @@ class OpenVikingAdapterConfig:
 def is_legacy_openviking_config(backend_config: dict[str, Any] | None) -> bool:
     """Return whether a config selects the deprecated custom HTTP backend.
 
-    ``owner_user_id`` is required by the credential-bound adapter and was not a
-    valid field in the old schema, so it is an unambiguous migration boundary.
-    Existing configs that relied on legacy defaults do not contain it.
+    Legacy mode must be selected by a field or policy value that only its old
+    schema accepts. Shared connection fields alone are ambiguous and must not
+    silently opt a new or mistyped configuration into trusted mode.
     """
 
-    return "owner_user_id" not in (backend_config or {})
+    cfg = backend_config or {}
+    if "owner_user_id" in cfg:
+        return False
+    if _LEGACY_TOP_LEVEL_FIELDS.intersection(cfg):
+        return True
+
+    retrieval = cfg.get("retrieval")
+    if isinstance(retrieval, dict) and "injection_query" in retrieval:
+        return True
+
+    failure_policy = cfg.get("failure_policy")
+    if not isinstance(failure_policy, dict):
+        return False
+    read_policy = str(failure_policy.get("read", "")).strip().lower()
+    write_policy = str(failure_policy.get("write", "")).strip().lower()
+    return read_policy in _LEGACY_READ_FAILURE_POLICIES or write_policy in _LEGACY_WRITE_FAILURE_POLICIES
 
 
 def is_safe_peer_id(value: str) -> bool:

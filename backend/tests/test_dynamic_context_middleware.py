@@ -654,6 +654,50 @@ def test_manager_construction_failure_fails_open_for_sync_model_hook(monkeypatch
     handler.assert_called_once_with(request)
 
 
+def test_repeated_manager_construction_failure_rate_limits_tracebacks(
+    monkeypatch,
+    caplog,
+):
+    import deerflow.agents.memory as memory_package
+    import deerflow.agents.middlewares.dynamic_context_middleware as middleware_module
+
+    manager_factory = mock.Mock(side_effect=ValueError("invalid memory backend config"))
+    monkeypatch.setattr(memory_package, "get_memory_manager", manager_factory)
+    monkeypatch.setattr(
+        middleware_module,
+        "_memory_manager_init_failure_last_logged_at",
+        float("-inf"),
+    )
+    now = [100.0]
+    monkeypatch.setattr(middleware_module.time, "monotonic", lambda: now[0])
+    middleware = _make_middleware()
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.Mock(return_value=mock.MagicMock())
+
+    for _ in range(20):
+        middleware.wrap_model_call(request, handler)
+
+    matching_records = [record for record in caplog.records if record.getMessage() == "Failed to initialize the memory manager for context injection"]
+    assert manager_factory.call_count == 20
+    assert handler.call_count == 20
+    assert len(matching_records) == 1
+    assert matching_records[0].exc_info is not None
+
+    now[0] += middleware_module._MEMORY_MANAGER_INIT_FAILURE_LOG_INTERVAL_SECONDS
+    middleware.wrap_model_call(request, handler)
+
+    matching_records = [record for record in caplog.records if record.getMessage() == "Failed to initialize the memory manager for context injection"]
+    assert manager_factory.call_count == 21
+    assert handler.call_count == 21
+    assert len(matching_records) == 2
+    assert all(record.exc_info is not None for record in matching_records)
+
+
 @pytest.mark.asyncio
 async def test_manager_construction_failure_fails_open_for_async_model_hook(
     monkeypatch,

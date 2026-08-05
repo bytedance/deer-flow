@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class OpenVikingMemoryManager(OpenVikingAdapterMemoryManager):
-    """Select the credential-bound adapter or preserve an existing legacy config."""
+    """Select the credential-bound adapter or an explicitly legacy config."""
 
     @classmethod
     def from_config(
@@ -34,6 +34,8 @@ class OpenVikingMemoryManager(OpenVikingAdapterMemoryManager):
                 mode=mode,
                 **host_hooks,
             )
+        if "owner_user_id" not in (backend_config or {}):
+            raise ValueError("OpenViking owner_user_id is required for the official adapter. Add owner_user_id and use a USER API key, or temporarily select the deprecated legacy adapter by setting auth_mode: trusted explicitly.")
         return super().from_config(
             backend_config,
             mode=mode,

@@ -376,7 +376,13 @@ def test_commit_config_is_validated(
     [
         ("auth_mode", "trusted"),
         ("account", "deerflow"),
+        ("connect_timeout_seconds", 2.0),
+        ("read_timeout_seconds", 10.0),
+        ("write_timeout_seconds", 10.0),
+        ("pool_timeout_seconds", 2.0),
         ("max_connections", 100),
+        ("max_keepalive_connections", 20),
+        ("max_retries", 1),
         ("allow_insecure_dev", True),
     ],
 )
@@ -390,11 +396,13 @@ def test_legacy_selector_recognizes_custom_http_only_fields(
 def test_legacy_selector_recognizes_nested_legacy_policy_fields() -> None:
     assert is_legacy_openviking_config({"retrieval": {"injection_query": "profile"}})
     assert is_legacy_openviking_config({"failure_policy": {"write": "log_and_drop"}})
-    assert is_legacy_openviking_config({"failure_policy": {"write": "fail_open"}})
+    assert is_legacy_openviking_config({"failure_policy": {"read": "raise"}})
+    assert is_legacy_openviking_config({"failure_policy": {"write": "raise"}})
+    assert not is_legacy_openviking_config({"failure_policy": {"write": "fail_open"}})
 
 
-def test_legacy_selector_preserves_minimal_existing_configs() -> None:
-    assert is_legacy_openviking_config(
+def test_legacy_selector_does_not_guess_for_ambiguous_minimal_config() -> None:
+    assert not is_legacy_openviking_config(
         {
             "base_url": "http://127.0.0.1:1933",
             "api_key_env": "OPENVIKING_API_KEY",
@@ -402,7 +410,24 @@ def test_legacy_selector_preserves_minimal_existing_configs() -> None:
     )
 
 
-def test_minimal_existing_config_still_constructs_legacy_manager(
+def test_ambiguous_minimal_config_fails_with_migration_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "legacy-key")
+
+    with pytest.raises(
+        ValueError,
+        match=r"owner_user_id.*auth_mode: trusted",
+    ):
+        OpenVikingMemoryManager.from_config(
+            {
+                "base_url": "http://127.0.0.1:1933",
+                "api_key_env": "OPENVIKING_API_KEY",
+            }
+        )
+
+
+def test_explicit_trusted_mode_preserves_minimal_legacy_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENVIKING_API_KEY", "legacy-key")
@@ -411,14 +436,14 @@ def test_minimal_existing_config_still_constructs_legacy_manager(
         {
             "base_url": "http://127.0.0.1:1933",
             "api_key_env": "OPENVIKING_API_KEY",
+            "auth_mode": "trusted",
         }
     )
-
     assert isinstance(manager, LegacyOpenVikingMemoryManager)
     manager.close()
 
 
-def test_legacy_selector_uses_owner_binding_as_schema_boundary() -> None:
+def test_legacy_selector_requires_an_explicit_schema_marker() -> None:
     assert not is_legacy_openviking_config(
         {
             "base_url": "http://127.0.0.1:1933",
@@ -426,10 +451,17 @@ def test_legacy_selector_uses_owner_binding_as_schema_boundary() -> None:
             "owner_user_id": "default",
         }
     )
+    assert not is_legacy_openviking_config(
+        {
+            "base_url": "http://127.0.0.1:1933",
+            "api_key_env": "OPENVIKING_API_KEY",
+        }
+    )
     assert is_legacy_openviking_config(
         {
             "base_url": "http://127.0.0.1:1933",
             "api_key_env": "OPENVIKING_API_KEY",
+            "auth_mode": "trusted",
         }
     )
 
