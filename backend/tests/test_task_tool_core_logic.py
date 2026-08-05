@@ -3329,6 +3329,8 @@ def test_task_tool_forwards_execution_only_knowledge_scope(monkeypatch):
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+
+
 def test_task_tool_polling_forwards_tool_output_chunks_to_parent_writer(monkeypatch):
     """When a SubagentResult carries tool_output_chunks, the polling loop must
     forward new chunks to the parent stream writer so custom events from the
@@ -3346,8 +3348,16 @@ def test_task_tool_polling_forwards_tool_output_chunks_to_parent_writer(monkeypa
         FakeSubagentStatus.COMPLETED,
         result="done",
     )
-    # _make_result returns SimpleNamespace; attach extra field.
-    result.tool_output_chunks = [custom_chunk_1, custom_chunk_2]
+    # Match the production atomic drain contract: chunks and terminal status
+    # come from one snapshot, so cleanup cannot race past the final chunk.
+    pending_chunks = [custom_chunk_1, custom_chunk_2]
+
+    def drain_tool_output_chunks():
+        chunks = list(pending_chunks)
+        pending_chunks.clear()
+        return chunks, result.status
+
+    result.drain_tool_output_chunks = drain_tool_output_chunks
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
