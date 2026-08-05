@@ -239,10 +239,13 @@ class TestGetPdfConverter:
 
 
 class TestConvertFileToMarkdown:
-    def test_small_file_runs_synchronously(self, tmp_path):
-        """Small files (< 1 MB) are converted in the event loop thread."""
+    def test_small_file_conversion_runs_synchronously(self, tmp_path):
+        """Small-file conversion stays inline while metadata IO is offloaded."""
         pdf = tmp_path / "small.pdf"
         pdf.write_bytes(b"%PDF-1.4 " + b"x" * 100)  # well under 1 MB
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
 
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
@@ -250,13 +253,14 @@ class TestConvertFileToMarkdown:
                 "deerflow.utils.file_conversion._do_convert",
                 return_value="# Small PDF",
             ) as mock_convert,
-            patch("asyncio.to_thread") as mock_thread,
+            patch("asyncio.to_thread", side_effect=fake_to_thread) as mock_thread,
         ):
             md_path = _run(convert_file_to_markdown(pdf))
 
-        # asyncio.to_thread must NOT have been called
-        mock_thread.assert_not_called()
         mock_convert.assert_called_once()
+        threaded_functions = [call.args[0] for call in mock_thread.call_args_list]
+        assert mock_convert not in threaded_functions
+        assert len(threaded_functions) == 2  # source stat + Markdown write
         assert md_path == pdf.with_suffix(".md")
         assert md_path.read_text() == "# Small PDF"
 
@@ -279,7 +283,7 @@ class TestConvertFileToMarkdown:
         ):
             md_path = _run(convert_file_to_markdown(pdf))
 
-        mock_thread.assert_called_once()
+        assert mock_thread.call_count == 3  # source stat + conversion + Markdown write
         assert md_path == pdf.with_suffix(".md")
         assert md_path.read_text() == "# Large PDF"
 

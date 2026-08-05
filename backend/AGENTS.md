@@ -261,6 +261,8 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   `test_integrations_router.py` (locks Lark integration install and auth
   completion route handlers offloading archive filesystem work and `lark-cli`
   subprocesses);
+  `test_file_conversion.py` (locks source metadata reads and generated
+  Markdown writes off the event loop);
   `test_uploads_middleware.py` (locks `UploadsMiddleware.abefore_agent`
   offloading the uploads-directory scan off the event loop);
   `test_uploads_router.py` (locks Gateway upload/list/delete endpoints
