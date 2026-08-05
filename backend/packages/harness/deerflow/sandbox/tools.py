@@ -28,7 +28,10 @@ from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.security import (
+    LOCAL_HOST_BASH_DISABLED_MESSAGE,
+    is_host_bash_allowed,
+)
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,9 @@ _IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
 _IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
-_URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
+_URL_IN_COMMAND_PATTERN = re.compile(
+    r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE
+)
 _DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
@@ -71,7 +76,21 @@ _WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
 _WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
-_LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
+_LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {
+    "!",
+    "{",
+    "case",
+    "do",
+    "elif",
+    "else",
+    "for",
+    "if",
+    "select",
+    "then",
+    "time",
+    "until",
+    "while",
+}
 _LOCAL_BASH_COMMAND_END_KEYWORDS = {"}", "done", "esac", "fi"}
 _LOCAL_BASH_ROOT_PATH_COMMANDS = {
     "awk",
@@ -254,7 +273,9 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
         return True
 
 
-def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) -> list[str]:
+def _drop_disabled_skill_paths(
+    paths: list[str], *, user_id: str | None = None
+) -> list[str]:
     """Filter out paths that belong to a disabled skill.
 
     ``_is_disabled_skill_path`` gates the *requested* path, which is enough for
@@ -358,7 +379,9 @@ def _resolve_skills_path(path: str) -> str:
 
 def _is_acp_workspace_path(path: str) -> bool:
     """Check if a path is under the ACP workspace virtual path."""
-    return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(f"{_ACP_WORKSPACE_VIRTUAL_PATH}/")
+    return path == _ACP_WORKSPACE_VIRTUAL_PATH or path.startswith(
+        f"{_ACP_WORKSPACE_VIRTUAL_PATH}/"
+    )
 
 
 def _get_custom_mounts():
@@ -409,7 +432,9 @@ def _get_custom_mount_for_path(path: str):
     return best
 
 
-def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
+def _extract_thread_id_from_thread_data(
+    thread_data: "ThreadDataState | None",
+) -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
     The workspace_path has the form
@@ -444,7 +469,9 @@ def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
             from deerflow.config.paths import get_paths
             from deerflow.runtime.user_context import get_effective_user_id
 
-            host_path = get_paths().acp_workspace_dir(thread_id, user_id=get_effective_user_id())
+            host_path = get_paths().acp_workspace_dir(
+                thread_id, user_id=get_effective_user_id()
+            )
             if host_path.exists():
                 return str(host_path)
         except Exception:
@@ -486,7 +513,9 @@ def _resolve_acp_workspace_path(path: str, thread_id: str | None = None) -> str:
 
     host_path = _get_acp_workspace_host_path(thread_id)
     if host_path is None:
-        raise FileNotFoundError(f"ACP workspace directory not available for path: {path}")
+        raise FileNotFoundError(
+            f"ACP workspace directory not available for path: {path}"
+        )
 
     if path == _ACP_WORKSPACE_VIRTUAL_PATH:
         return host_path
@@ -560,8 +589,12 @@ def _clamp_max_results(value: int, *, default: int, upper_bound: int) -> int:
     return min(value, upper_bound)
 
 
-def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound: int) -> int:
-    requested_max_results = _clamp_max_results(requested, default=default, upper_bound=upper_bound)
+def _resolve_max_results(
+    name: str, requested: int, *, default: int, upper_bound: int
+) -> int:
+    requested_max_results = _clamp_max_results(
+        requested, default=default, upper_bound=upper_bound
+    )
     configured_max_results = _clamp_max_results(
         _get_tool_config_int(name, "max_results", default),
         default=default,
@@ -591,11 +624,15 @@ def _format_glob_results(root_path: str, matches: list[str], truncated: bool) ->
         lines[0] += f" (showing first {len(matches)})"
     lines.extend(f"{index}. {path}" for index, path in enumerate(matches, start=1))
     if truncated:
-        lines.append("Results truncated. Narrow the path or pattern to see fewer matches.")
+        lines.append(
+            "Results truncated. Narrow the path or pattern to see fewer matches."
+        )
     return "\n".join(lines)
 
 
-def _format_grep_results(root_path: str, matches: list[GrepMatch], truncated: bool) -> str:
+def _format_grep_results(
+    root_path: str, matches: list[GrepMatch], truncated: bool
+) -> str:
     if not matches:
         return f"No matches found under {root_path}"
 
@@ -620,7 +657,9 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     if not relative:
         return base
     separator = _path_separator_for_style(base)
-    normalized_relative = relative.replace("\\" if separator == "/" else "/", separator).lstrip("/\\")
+    normalized_relative = relative.replace(
+        "\\" if separator == "/" else "/", separator
+    ).lstrip("/\\")
     stripped_base = base.rstrip("/\\")
     return f"{stripped_base}{separator}{normalized_relative}"
 
@@ -646,7 +685,9 @@ def _truncate_write_file_error_detail(detail: str, max_chars: int) -> str:
     if len(detail) <= max_chars:
         return detail
     total = len(detail)
-    marker_max_len = len(f"\n... [write_file error truncated: {total} chars skipped] ...\n")
+    marker_max_len = len(
+        f"\n... [write_file error truncated: {total} chars skipped] ...\n"
+    )
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return detail[:max_chars]
@@ -698,7 +739,9 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
         return path
 
     # Longest-prefix-first replacement with segment-boundary checks.
-    for virtual_base, actual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+    for virtual_base, actual_base in sorted(
+        mappings.items(), key=lambda item: len(item[0]), reverse=True
+    ):
         if path == virtual_base:
             return actual_base
         if path.startswith(f"{virtual_base}/"):
@@ -738,11 +781,16 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
 
 def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str, str]:
     """Build actual-to-virtual mappings for output masking."""
-    return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
+    return {
+        actual: virtual
+        for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()
+    }
 
 
 @lru_cache(maxsize=512)
-def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+def _compiled_mask_patterns(
+    sources: tuple[tuple[str, str], ...],
+) -> tuple[tuple[re.Pattern[str], str, str], ...]:
     """Compile the host→virtual masking patterns once per source set.
 
     ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
@@ -776,7 +824,13 @@ def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple
                 if variant in seen:
                     continue
                 seen.add(variant)
-                compiled.append((build_output_mask_pattern(variant, separator_agnostic=True), variant, virtual_base))
+                compiled.append(
+                    (
+                        build_output_mask_pattern(variant, separator_agnostic=True),
+                        variant,
+                        virtual_base,
+                    )
+                )
     return tuple(compiled)
 
 
@@ -818,13 +872,17 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     except Exception:
         pass
 
-    acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
+    acp_host = _get_acp_workspace_host_path(
+        _extract_thread_id_from_thread_data(thread_data)
+    )
     if acp_host:
         sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
     if thread_data is not None:
         mappings = _thread_actual_to_virtual_mappings(thread_data)
-        for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
+        for actual_base, virtual_base in sorted(
+            mappings.items(), key=lambda item: len(item[0]), reverse=True
+        ):
             sources.append((actual_base, virtual_base))
 
     if not sources:
@@ -833,7 +891,9 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     result = output
     for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
 
-        def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
+        def replace_match(
+            match: re.Match, _base: str = base, _virtual: str = virtual
+        ) -> str:
             matched_path = match.group(0)
             if matched_path == _base:
                 return _virtual
@@ -854,7 +914,9 @@ def _reject_path_traversal(path: str) -> None:
             raise PermissionError("Access denied: path traversal detected")
 
 
-def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
+def validate_local_tool_path(
+    path: str, thread_data: ThreadDataState | None, *, read_only: bool = False
+) -> None:
     """Validate that a virtual path is allowed for local-sandbox access.
 
     This function is a security gate — it checks whether *path* may be
@@ -891,24 +953,43 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     # ACP workspace paths — read-only access only
     if _is_acp_workspace_path(path):
         if not read_only:
-            raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
+            raise PermissionError(
+                f"Write access to ACP workspace is not allowed: {path}"
+            )
         return
 
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
 
+    # Coding 子 Agent 的 workspace_path 可以是用户选择仓库中的真实 Worktree。
+    # 只允许当前线程已绑定目录内的绝对路径，不能借此访问其他主机目录。
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            _validate_resolved_user_data_path(candidate.resolve(), thread_data)
+        except PermissionError:
+            pass
+        else:
+            return
+
     # Custom mount paths — respect read_only config
     if _is_custom_mount_path(path):
         mount = _get_custom_mount_for_path(path)
         if mount and mount.read_only and not read_only:
-            raise PermissionError(f"Write access to read-only mount is not allowed: {path}")
+            raise PermissionError(
+                f"Write access to read-only mount is not allowed: {path}"
+            )
         return
 
-    raise PermissionError(f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed")
+    raise PermissionError(
+        f"Only paths under {VIRTUAL_PATH_PREFIX}/, {_get_skills_container_path()}/, {_ACP_WORKSPACE_VIRTUAL_PATH}/, or configured mount paths are allowed"
+    )
 
 
-def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
+def _validate_resolved_user_data_path(
+    resolved: Path, thread_data: ThreadDataState
+) -> None:
     """Verify that a resolved host path stays inside allowed per-thread roots.
 
     Raises PermissionError if the path escapes workspace/uploads/outputs.
@@ -936,7 +1017,9 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
     raise PermissionError("Access denied: path traversal detected")
 
 
-def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
+def _resolve_and_validate_user_data_path(
+    path: str, thread_data: ThreadDataState
+) -> str:
     """Resolve a /mnt/user-data virtual path and validate it stays in bounds.
 
     Returns the resolved host path string.
@@ -980,7 +1063,9 @@ def _has_dotdot_path_segment(token: str) -> bool:
 
 def _split_shell_tokens(command: str) -> list[str]:
     try:
-        normalized = command.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+        normalized = (
+            command.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+        )
         lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         lexer.commenters = ""
@@ -1006,9 +1091,14 @@ def _is_shell_assignment(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
 
 
-def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+def _is_allowed_local_bash_absolute_path(
+    path: str, allowed_paths: list[str], *, allow_system_paths: bool
+) -> bool:
     # Check for MCP filesystem server allowed paths
-    if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
+    if any(
+        path.startswith(allowed_path) or path == allowed_path.rstrip("/")
+        for allowed_path in allowed_paths
+    ):
         _reject_path_traversal(path)
         return True
 
@@ -1031,7 +1121,10 @@ def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *,
         _reject_path_traversal(path)
         return True
 
-    if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
+    if allow_system_paths and any(
+        path == prefix.rstrip("/") or path.startswith(prefix)
+        for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES
+    ):
         return True
 
     return False
@@ -1059,20 +1152,34 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
     return None, index
 
 
-def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+def _validate_local_bash_cwd_target(
+    command_name: str, target: str | None, allowed_paths: list[str]
+) -> None:
     if target is None or target == "-":
-        raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
     if target.startswith(("$", "`")):
-        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
     if target.startswith("~"):
-        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
     if target.startswith("/"):
         _reject_path_traversal(target)
-        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
-            raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        if not _is_allowed_local_bash_absolute_path(
+            target, allowed_paths, allow_system_paths=False
+        ):
+            raise PermissionError(
+                f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}"
+            )
 
 
-def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
+def _validate_local_bash_root_path_args(
+    command_name: str, tokens: list[str], start_index: int
+) -> None:
     if command_name not in _LOCAL_BASH_ROOT_PATH_COMMANDS:
         return
 
@@ -1085,14 +1192,18 @@ def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], st
             index += 2
             continue
         if token == "/" and not _is_non_file_url_token(token):
-            raise PermissionError(f"Unsafe absolute paths in command: /. Use paths under {VIRTUAL_PATH_PREFIX}")
+            raise PermissionError(
+                f"Unsafe absolute paths in command: /. Use paths under {VIRTUAL_PATH_PREFIX}"
+            )
         index += 1
 
 
 def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
-        raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
 
     tokens = _split_shell_tokens(command)
 
@@ -1121,7 +1232,11 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             continue
 
         command_name = token.rsplit("/", 1)[-1]
-        if at_command_start and command_name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS | _LOCAL_BASH_COMMAND_END_KEYWORDS:
+        if (
+            at_command_start
+            and command_name
+            in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS | _LOCAL_BASH_COMMAND_END_KEYWORDS
+        ):
             index += 1
             continue
 
@@ -1202,7 +1317,9 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
-def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
+def validate_local_bash_command_paths(
+    command: str, thread_data: ThreadDataState | None
+) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
     This validation is only a best-effort guard for the explicit
@@ -1223,7 +1340,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
     if file_url_match:
-        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
@@ -1236,17 +1355,23 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue
-        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
+        if _is_allowed_local_bash_absolute_path(
+            absolute_path, allowed_paths, allow_system_paths=True
+        ):
             continue
 
         unsafe_paths.append(absolute_path)
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(
+            f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}"
+        )
 
 
-def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
+def replace_virtual_paths_in_command(
+    command: str, thread_data: ThreadDataState | None
+) -> str:
     """Replace /mnt/user-data virtual paths in a command string for local sandbox.
 
     Skills paths (/mnt/skills) and ACP workspace paths (/mnt/acp-workspace)
@@ -1284,7 +1409,9 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # ``:`` (PATH-style concatenation) or ``,``, which the shell-oriented
         # class rejects — narrowing to it would stop translating paths that
         # translate today. ``$`` covers a command ending exactly at the root.
-        pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
+        pattern = re.compile(
+            rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?"
+        )
 
         def replace_user_data_match(match: re.Match) -> str:
             return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
@@ -1365,10 +1492,14 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Sandbox ID not found in state")
     sandbox = get_sandbox_provider().get(sandbox_id)
     if sandbox is None:
-        raise SandboxNotFoundError(f"Sandbox with ID '{sandbox_id}' not found", sandbox_id=sandbox_id)
+        raise SandboxNotFoundError(
+            f"Sandbox with ID '{sandbox_id}' not found", sandbox_id=sandbox_id
+        )
 
     if runtime.context is not None:
-        runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for downstream use
+        runtime.context["sandbox_id"] = (
+            sandbox_id  # Ensure sandbox_id is in context for downstream use
+        )
     return sandbox
 
 
@@ -1407,14 +1538,20 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             sandbox = get_sandbox_provider().get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    runtime.context["sandbox_id"] = (
+                        sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    )
                 return sandbox
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+        thread_id = (
+            runtime.config.get("configurable", {}).get("thread_id")
+            if runtime.config
+            else None
+        )
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
@@ -1427,10 +1564,14 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
-        raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+        raise SandboxNotFoundError(
+            "Sandbox not found after acquisition", sandbox_id=sandbox_id
+        )
 
     if runtime.context is not None:
-        runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+        runtime.context["sandbox_id"] = (
+            sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+        )
     return sandbox
 
 
@@ -1461,18 +1602,26 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     thread_id = runtime.context.get("thread_id") if runtime.context else None
     if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+        thread_id = (
+            runtime.config.get("configurable", {}).get("thread_id")
+            if runtime.config
+            else None
+        )
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = await provider.acquire_async(
+        thread_id, user_id=resolve_runtime_user_id(runtime)
+    )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
-        raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+        raise SandboxNotFoundError(
+            "Sandbox not found after acquisition", sandbox_id=sandbox_id
+        )
 
     if runtime.context is not None:
         runtime.context["sandbox_id"] = sandbox_id
@@ -1561,7 +1710,11 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     """
     if not injected_env or not output:
         return output
-    for value in sorted((v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH), key=len, reverse=True):
+    for value in sorted(
+        (v for v in injected_env.values() if v and len(v) >= _MIN_MASK_LENGTH),
+        key=len,
+        reverse=True,
+    ):
         output = output.replace(value, _SECRET_REDACTION)
     return output
 
@@ -1611,7 +1764,9 @@ def _truncate_read_file_output(output: str, max_chars: int) -> str:
     total = len(output)
     # Compute the exact worst-case marker length: both numeric fields are at
     # their maximum (total chars), so this is a tight upper bound.
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ...")
+    marker_max_len = len(
+        f"\n... [truncated: showing first {total} of {total} chars. Use start_line/end_line to read a specific range] ..."
+    )
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
@@ -1634,7 +1789,9 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
     total = len(output)
-    marker_max_len = len(f"\n... [truncated: showing first {total} of {total} chars. Use a more specific path to see fewer results] ...")
+    marker_max_len = len(
+        f"\n... [truncated: showing first {total} of {total} chars. Use a more specific path to see fewer results] ..."
+    )
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
         return output[:max_chars]
@@ -1686,7 +1843,10 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
         return None
     channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
-    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
+    if (
+        isinstance(channel_user_id, str)
+        and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN
+    ):
         return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
     return f"unset {CHANNEL_USER_ID_ENV}; "
 
@@ -1727,7 +1887,9 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
         try:
             token = value()
         except Exception:
-            logger.warning("github_token provider raised; skipping env overlay", exc_info=True)
+            logger.warning(
+                "github_token provider raised; skipping env overlay", exc_info=True
+            )
             return None
     else:
         token = value
@@ -1739,7 +1901,9 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
-def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+def _lark_cli_env_from_runtime(
+    runtime: Runtime, command: str, *, sandbox_paths: bool
+) -> dict[str, str] | None:
     """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
 
     Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
@@ -1756,12 +1920,20 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
     try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+        from deerflow.integrations.lark_cli import (
+            lark_cli_env_overlay,
+            sandbox_lark_broker_active,
+        )
 
         broker = sandbox_paths and sandbox_lark_broker_active()
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
+        return lark_cli_env_overlay(
+            resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker
+        )
     except Exception:
-        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
+        logger.warning(
+            "Could not build Lark CLI env overlay; running command without managed auth",
+            exc_info=True,
+        )
         return None
 
 
@@ -1791,7 +1963,9 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
+        lark_cli_env = _lark_cli_env_from_runtime(
+            runtime, command, sandbox_paths=not is_local_sandbox(runtime)
+        )
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
@@ -1813,13 +1987,19 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
 
                 sandbox_cfg = get_app_config().sandbox
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
-                command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
+                command_timeout = (
+                    sandbox_cfg.bash_command_timeout if sandbox_cfg else None
+                )
             except Exception:
                 max_chars = 20000
                 command_timeout = None
-            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            output = sandbox.execute_command(
+                command, env=injected_env, timeout=command_timeout
+            )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(
+                    mask_local_paths_in_output(output, thread_data), injected_env
+                ),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
@@ -1833,17 +2013,26 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
+        return _truncate_bash_output(
+            mask_secret_values(
+                sandbox.execute_command(command, env=injected_env), injected_env
+            ),
+            max_chars,
+        )
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return (
+            f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        )
 
 
 async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+    return await _run_sync_tool_after_async_sandbox_init(
+        bash_tool.func, runtime, description, command
+    )
 
 
 bash_tool.coroutine = _bash_tool_async
@@ -1907,11 +2096,15 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
+        return (
+            f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
+        )
 
 
 async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
+    return await _run_sync_tool_after_async_sandbox_init(
+        ls_tool.func, runtime, description, path
+    )
 
 
 ls_tool.coroutine = _ls_tool_async
@@ -1956,9 +2149,13 @@ def glob_tool(
             if thread_data is None:
                 raise SandboxRuntimeError("Thread data not available for local sandbox")
             path = _resolve_local_read_path(path, thread_data)
-        matches, truncated = sandbox.glob(path, pattern, include_dirs=include_dirs, max_results=effective_max_results)
+        matches, truncated = sandbox.glob(
+            path, pattern, include_dirs=include_dirs, max_results=effective_max_results
+        )
         if thread_data is not None:
-            matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
+            matches = [
+                mask_local_paths_in_output(match, thread_data) for match in matches
+            ]
         # The gate above only covers `path` itself; the search descends into it,
         # so a root above a disabled skill still surfaces its files.
         matches = _drop_disabled_skill_paths(matches, user_id=user_id)
@@ -2059,7 +2256,11 @@ def grep_tool(
             ]
         # The gate above only covers `path` itself; the search descends into it,
         # so a root above a disabled skill still surfaces its file contents.
-        allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
+        allowed = set(
+            _drop_disabled_skill_paths(
+                [match.path for match in matches], user_id=user_id
+            )
+        )
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
     except SandboxError as e:
@@ -2118,7 +2319,9 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
         if _is_skills_path(path):
             path = _resolve_skills_path(path)
         elif _is_acp_workspace_path(path):
-            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+            path = _resolve_acp_workspace_path(
+                path, _extract_thread_id_from_thread_data(thread_data)
+            )
         elif not _is_custom_mount_path(path):
             path = _resolve_and_validate_user_data_path(path, thread_data)
         # Custom mount paths are resolved by LocalSandbox._resolve_path()
@@ -2165,7 +2368,9 @@ def read_file_tool(
                 if _is_skills_path(path):
                     path = _resolve_skills_path(path)
                 elif _is_acp_workspace_path(path):
-                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
+                    path = _resolve_acp_workspace_path(
+                        path, _extract_thread_id_from_thread_data(thread_data)
+                    )
                 elif not _is_custom_mount_path(path):
                     path = _resolve_and_validate_user_data_path(path, thread_data)
                 # Custom mount paths are resolved by LocalSandbox._resolve_path()
@@ -2209,7 +2414,9 @@ async def _read_file_tool_async(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
+    return await _run_sync_tool_after_async_sandbox_init(
+        read_file_tool.func, runtime, description, path, start_line, end_line
+    )
 
 
 read_file_tool.coroutine = _read_file_tool_async
@@ -2325,7 +2532,9 @@ async def _write_file_tool_async(
     content: str,
     append: bool = False,
 ) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+    return await _run_sync_tool_after_async_sandbox_init(
+        write_file_tool.func, runtime, description, path, content, append
+    )
 
 
 write_file_tool.coroutine = _write_file_tool_async
@@ -2384,7 +2593,9 @@ def str_replace_tool(
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:
-        return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
+        return (
+            f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
+        )
 
 
 async def _str_replace_tool_async(

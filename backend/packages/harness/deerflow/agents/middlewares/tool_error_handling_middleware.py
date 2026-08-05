@@ -39,7 +39,9 @@ _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
 
 
-def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
+def _stamp_task_exception_status(
+    message: ToolMessage, *, tool_name: str, error: str
+) -> ToolMessage:
     """Stamp failed metadata on task exception wrappers produced here."""
     if tool_name != _TASK_TOOL_NAME:
         return message
@@ -63,10 +65,14 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
         else:
-            self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
+            self._skill_read_tool_names = frozenset(
+                app_config.summarization.skill_file_read_tool_names
+            )
             self._skills_root = app_config.skills.container_path
 
-    def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
+    def _build_error_message(
+        self, request: ToolCallRequest, exc: Exception
+    ) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
         detail = str(exc).strip() or exc.__class__.__name__
@@ -84,7 +90,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # failures raised before task_tool can build its own Command still
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
-        message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        message = _stamp_task_exception_status(
+            message, tool_name=tool_name, error=structured_error
+        )
         return stamp_exception_meta(message, structured_error)
 
     def _stamp_skill_read_metadata(
@@ -104,7 +112,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         path = _tool_call_path(request.tool_call)
         if path is None:
             return message
-        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
+        entry = build_skill_entry_metadata_from_read(
+            path, content, skills_root=self._skills_root
+        )
         if entry is None:
             return message
         existing = dict(message.additional_kwargs or {})
@@ -112,7 +122,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         message.additional_kwargs = existing
         return message
 
-    def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+    def _maybe_stamp(
+        self, result: ToolMessage | Command, request: ToolCallRequest
+    ) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
         if not isinstance(result, ToolMessage):
             return result
@@ -131,7 +143,11 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.exception(
+                "Tool execution failed (sync): name=%s id=%s",
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -147,7 +163,11 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             # Preserve LangGraph control-flow signals (interrupt/pause/resume).
             raise
         except Exception as exc:
-            logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
+            logger.exception(
+                "Tool execution failed (async): name=%s id=%s",
+                request.tool_call.get("name"),
+                request.tool_call.get("id"),
+            )
             return self._build_error_message(request, exc)
         return normalize_tool_result(self._maybe_stamp(result, request))
 
@@ -160,13 +180,22 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    workspace_path_override: str | None = None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
-    from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
-    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+    from deerflow.agents.middlewares.input_sanitization_middleware import (
+        InputSanitizationMiddleware,
+    )
+    from deerflow.agents.middlewares.llm_error_handling_middleware import (
+        LLMErrorHandlingMiddleware,
+    )
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
-    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+    from deerflow.agents.middlewares.tool_output_budget_middleware import (
+        ToolOutputBudgetMiddleware,
+    )
+    from deerflow.agents.middlewares.tool_result_sanitization_middleware import (
+        ToolResultSanitizationMiddleware,
+    )
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
@@ -186,7 +215,10 @@ def _build_runtime_middlewares(
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
-        ThreadDataMiddleware(lazy_init=lazy_init),
+        ThreadDataMiddleware(
+            lazy_init=lazy_init,
+            workspace_path_override=workspace_path_override,
+        ),
     ]
     if include_uploads:
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -197,7 +229,9 @@ def _build_runtime_middlewares(
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
     if include_dangling_tool_call_patch:
-        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+        from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+            DanglingToolCallMiddleware,
+        )
 
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
@@ -212,7 +246,9 @@ def _build_runtime_middlewares(
         if authorization_provider is None:
             from deerflow.authz.runtime import resolve_authorization_provider
 
-            authorization_provider = resolve_authorization_provider(authorization_config)
+            authorization_provider = resolve_authorization_provider(
+                authorization_config
+            )
         if authorization_provider is not None:
             from deerflow.authz.adapter import GuardrailAuthorizationAdapter
             from deerflow.guardrails.middleware import GuardrailMiddleware
@@ -237,21 +273,36 @@ def _build_runtime_middlewares(
         from deerflow.reflection import resolve_variable
 
         provider_cls = resolve_variable(guardrails_config.provider.use)
-        provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
+        provider_kwargs = (
+            dict(guardrails_config.provider.config)
+            if guardrails_config.provider.config
+            else {}
+        )
         # Pass framework hint if the provider accepts it (e.g. for config discovery).
         # Built-in providers like AllowlistProvider don't need it, so only inject
         # when the constructor accepts 'framework' or '**kwargs'.
         if "framework" not in provider_kwargs:
             try:
                 sig = inspect.signature(provider_cls.__init__)
-                if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                if "framework" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                ):
                     provider_kwargs["framework"] = "deerflow"
             except (ValueError, TypeError):
                 pass
         provider = provider_cls(**provider_kwargs)
-        tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
+        tail.append(
+            GuardrailMiddleware(
+                provider,
+                fail_closed=guardrails_config.fail_closed,
+                passport=guardrails_config.passport,
+            )
+        )
 
-    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import (
+        SandboxAuditMiddleware,
+    )
 
     tail.append(SandboxAuditMiddleware())
 
@@ -261,7 +312,9 @@ def _build_runtime_middlewares(
     # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
     # ToolMessage itself so downstream callers receive a well-formed result.
     if app_config.read_before_write.enabled:
-        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+        from deerflow.agents.middlewares.read_before_write_middleware import (
+            ReadBeforeWriteMiddleware,
+        )
 
         tail.append(ReadBeforeWriteMiddleware())
 
@@ -272,7 +325,9 @@ def _build_runtime_middlewares(
     tool_progress_config = app_config.tool_progress
     _ToolProgressMiddleware = None
     if tool_progress_config.enabled:
-        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
+        from deerflow.agents.middlewares.tool_progress_middleware import (
+            ToolProgressMiddleware as _ToolProgressMiddleware,
+        )
 
         tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
 
@@ -285,10 +340,30 @@ def _build_runtime_middlewares(
     # rather than silently no-oping at runtime if a future insertion reverses the order.
     # Uses isinstance (not type().__name__) so subclasses and renames are covered.
     if _ToolProgressMiddleware is not None:
-        _progress_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolProgressMiddleware)), None)
-        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
-        if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
-            raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
+        _progress_idx = next(
+            (
+                i
+                for i, m in enumerate(middlewares)
+                if isinstance(m, _ToolProgressMiddleware)
+            ),
+            None,
+        )
+        _error_idx = next(
+            (
+                i
+                for i, m in enumerate(middlewares)
+                if isinstance(m, ToolErrorHandlingMiddleware)
+            ),
+            None,
+        )
+        if (
+            _progress_idx is not None
+            and _error_idx is not None
+            and _progress_idx > _error_idx
+        ):
+            raise RuntimeError(
+                f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order"
+            )
 
     return middlewares
 
@@ -307,7 +382,13 @@ def build_lead_runtime_middlewares(
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tool_names=(
+            frozenset({deferred_setup.tool_search_tool.name})
+            if authorization_provider is not None
+            and deferred_setup is not None
+            and deferred_setup.tool_search_tool is not None
+            else frozenset()
+        ),
     )
 
 
@@ -322,6 +403,7 @@ def build_subagent_runtime_middlewares(
     available_skills: set[str] | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    workspace_path_override: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -335,15 +417,26 @@ def build_subagent_runtime_middlewares(
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tool_names=(
+            frozenset({deferred_setup.tool_search_tool.name})
+            if authorization_provider is not None
+            and deferred_setup is not None
+            and deferred_setup.tool_search_tool is not None
+            else frozenset()
+        ),
+        workspace_path_override=workspace_path_override,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
     # active authority. Mirror the lead agent's activation + policy pair so a
     # subagent keeps its ordinary tool set until a slash command or a completed
     # SKILL.md read activates the corresponding allowed-tools declaration.
-    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
-    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import (
+        SkillActivationMiddleware,
+    )
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import (
+        SkillToolPolicyMiddleware,
+    )
 
     slash_source_owner_token = secrets.token_urlsafe(24)
     middlewares.append(
@@ -368,7 +461,9 @@ def build_subagent_runtime_middlewares(
 
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
-        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+        from deerflow.agents.middlewares.view_image_middleware import (
+            ViewImageMiddleware,
+        )
 
         middlewares.append(ViewImageMiddleware())
 
@@ -381,10 +476,18 @@ def build_subagent_runtime_middlewares(
     # tool-policy filtering); promotion is read from graph state. Empty/None
     # setup (deferral disabled or no MCP tool survived) is a pure no-op.
     if deferred_setup is not None and deferred_setup.deferred_names:
-        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
+        from deerflow.agents.middlewares.deferred_tool_filter_middleware import (
+            DeferredToolFilterMiddleware,
+        )
 
-        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
+        middlewares.append(
+            DeferredToolFilterMiddleware(
+                deferred_setup.deferred_names, deferred_setup.catalog_hash
+            )
+        )
+        from deerflow.agents.middlewares.mcp_routing_middleware import (
+            assert_mcp_routing_before_deferred_filter,
+        )
 
         assert_mcp_routing_before_deferred_filter(middlewares)
 
@@ -404,7 +507,9 @@ def build_subagent_runtime_middlewares(
     # turn/token budget with lead-visible stop reason is Phase 2.
     loop_detection_config = app_config.loop_detection
     if loop_detection_config.enabled:
-        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+        from deerflow.agents.middlewares.loop_detection_middleware import (
+            LoopDetectionMiddleware,
+        )
 
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
@@ -428,15 +533,21 @@ def build_subagent_runtime_middlewares(
     # silently changed by flipping the summarization switch.
     summarization_enabled = app_config.summarization.enabled
     if agent_name is not None:
-        token_budget_config = app_config.subagents.get_token_budget_for(agent_name, summarization_enabled=summarization_enabled)
+        token_budget_config = app_config.subagents.get_token_budget_for(
+            agent_name, summarization_enabled=summarization_enabled
+        )
     else:
         token_budget_config = app_config.subagents.token_budget
     if token_budget_config.enabled:
-        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+        from deerflow.agents.middlewares.token_budget_middleware import (
+            TokenBudgetMiddleware,
+        )
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
 
-    from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+    from deerflow.agents.middlewares.configured_extensions import (
+        load_configured_extension_middlewares,
+    )
 
     middlewares.extend(load_configured_extension_middlewares(app_config))
 
@@ -446,7 +557,9 @@ def build_subagent_runtime_middlewares(
     # propagate back to the lead agent via the task tool result.
     safety_config = app_config.safety_finish_reason
     if safety_config.enabled:
-        from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+        from deerflow.agents.middlewares.safety_finish_reason_middleware import (
+            SafetyFinishReasonMiddleware,
+        )
 
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
@@ -457,7 +570,9 @@ def build_subagent_runtime_middlewares(
     # leave an assistant tool-call + tool-result tail with no leading user
     # context, which strict providers reject. The same middleware also keeps
     # skill references durable when their original read results are compacted.
-    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.durable_context_middleware import (
+        DurableContextMiddleware,
+    )
 
     middlewares.append(
         DurableContextMiddleware(
@@ -498,7 +613,9 @@ def build_subagent_runtime_middlewares(
     # ``step_events.py``) or it drops steps captured after the compaction
     # point. It does not implement ``consume_stop_reason``, so it does not
     # interfere with the Phase 2 guard-cap stop-reason channel.
-    from deerflow.agents.middlewares.summarization_middleware import create_summarization_middleware
+    from deerflow.agents.middlewares.summarization_middleware import (
+        create_summarization_middleware,
+    )
 
     summarization_middleware = create_summarization_middleware(
         app_config=app_config,
@@ -524,7 +641,9 @@ def build_subagent_runtime_middlewares(
     # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
     # inert to the Phase 2 guard-cap channel, and must sit inner of
     # DurableContextMiddleware to observe the injected system message.
-    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import (
+        SystemMessageCoalescingMiddleware,
+    )
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 

@@ -6,7 +6,17 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, list_uploaded_files, present_file_tool, review_skill_package, task_tool, view_image_tool
+from deerflow.tools.builtins import (
+    ask_clarification_tool,
+    create_coding_worktree,
+    list_uploaded_files,
+    present_file_tool,
+    recover_coding_task,
+    review_skill_package,
+    submit_task_plan,
+    task_tool,
+    view_image_tool,
+)
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -19,6 +29,9 @@ BUILTIN_TOOLS = [
 ]
 
 SUBAGENT_TOOLS = [
+    submit_task_plan,
+    create_coding_worktree,
+    recover_coding_task,
     task_tool,
     # task_status_tool is no longer exposed to LLM (backend handles polling internally)
 ]
@@ -37,7 +50,10 @@ def _is_host_bash_tool(tool: object) -> bool:
 
 def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
     """Attach a sync wrapper to async-only tools used by sync agent callers."""
-    if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
+    if (
+        getattr(tool, "func", None) is None
+        and getattr(tool, "coroutine", None) is not None
+    ):
         tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
     return tool
 
@@ -69,13 +85,17 @@ def get_available_tools(
         List of available tools.
     """
     config = app_config or get_app_config()
-    tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    tool_configs = [
+        tool for tool in config.tools if groups is None or tool.group in groups
+    ]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
 
-    loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]
+    loaded_tools_raw = [
+        (cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs
+    ]
 
     # Warn when the config ``name`` field and the tool object's ``.name``
     # attribute diverge — this mismatch is the root cause of issue #1803 where
@@ -115,7 +135,9 @@ def get_available_tools(
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         builtin_tools.append(view_image_tool)
-        logger.info(f"Including view_image_tool for model '{model_name}' (supports_vision=True)")
+        logger.info(
+            f"Including view_image_tool for model '{model_name}' (supports_vision=True)"
+        )
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
@@ -142,14 +164,18 @@ def get_available_tools(
                     for t in mcp_tools:
                         tag_mcp_tool(t)
         except ImportError:
-            logger.warning("MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools.")
+            logger.warning(
+                "MCP module not available. Install 'langchain-mcp-adapters' package to enable MCP tools."
+            )
         except Exception as e:
             logger.error(f"Failed to get cached MCP tools: {e}")
 
     # Add invoke_acp_agent tool if any ACP agents are configured
     acp_tools: list[BaseTool] = []
     try:
-        from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
+        from deerflow.tools.builtins.invoke_acp_agent_tool import (
+            build_invoke_acp_agent_tool,
+        )
 
         if app_config is None:
             from deerflow.config.acp_config import get_acp_agents
@@ -159,16 +185,23 @@ def get_available_tools(
             acp_agents = getattr(config, "acp_agents", {}) or {}
         if acp_agents:
             acp_tools.append(build_invoke_acp_agent_tool(acp_agents))
-            logger.info(f"Including invoke_acp_agent tool ({len(acp_agents)} agent(s): {list(acp_agents.keys())})")
+            logger.info(
+                f"Including invoke_acp_agent tool ({len(acp_agents)} agent(s): {list(acp_agents.keys())})"
+            )
     except Exception as e:
         logger.warning(f"Failed to load ACP tool: {e}")
 
-    logger.info(f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}")
+    logger.info(
+        f"Total tools loaded: {len(loaded_tools)}, built-in tools: {len(builtin_tools)}, MCP tools: {len(mcp_tools)}, ACP tools: {len(acp_tools)}"
+    )
 
     # Deduplicate by tool name — config-loaded tools take priority, followed by
     # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
     # receive ambiguous or concatenated function schemas (issue #1803).
-    all_tools = [_ensure_sync_invocable_tool(t) for t in loaded_tools + builtin_tools + mcp_tools + acp_tools]
+    all_tools = [
+        _ensure_sync_invocable_tool(t)
+        for t in loaded_tools + builtin_tools + mcp_tools + acp_tools
+    ]
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
     for t in all_tools:

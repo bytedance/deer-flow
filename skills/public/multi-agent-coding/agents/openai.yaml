@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi-Agent Coding"
+  short_description: "Coordinate analysis, implementation, and review"
+  default_prompt: "Use $multi-agent-coding to execute this coding brief through analysis, implementation, and review."

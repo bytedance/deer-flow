@@ -72,7 +72,9 @@ def test_delta_creation_selects_delta_state_and_copies_middleware(mock_create_ag
 
 
 @patch("deerflow.agents.factory.create_agent")
-def test_custom_state_schema_is_preserved_in_full_mode_and_adapted_in_delta_mode(mock_create_agent):
+def test_custom_state_schema_is_preserved_in_full_mode_and_adapted_in_delta_mode(
+    mock_create_agent,
+):
     mock_create_agent.return_value = MagicMock(name="compiled_graph")
 
     create_deerflow_agent(_make_mock_model(), state_schema=_CustomState)
@@ -86,7 +88,9 @@ def test_custom_state_schema_is_preserved_in_full_mode_and_adapted_in_delta_mode
     adapted = mock_create_agent.call_args.kwargs["state_schema"]
     hints = get_type_hints(adapted, include_extras=True)
     assert "custom_value" in hints
-    assert any(isinstance(item, DeltaChannel) for item in hints["messages"].__metadata__)
+    assert any(
+        isinstance(item, DeltaChannel) for item in hints["messages"].__metadata__
+    )
 
 
 def test_delta_checkpointer_combination_is_rejected_before_any_persistence():
@@ -220,7 +224,9 @@ def test_vision_without_sandbox_does_not_inject_view_image_tool(mock_create_agen
 
 
 def test_view_image_middleware_preserves_viewed_images_reducer():
-    middleware_hints = get_type_hints(ViewImageMiddleware.state_schema, include_extras=True)
+    middleware_hints = get_type_hints(
+        ViewImageMiddleware.state_schema, include_extras=True
+    )
     thread_hints = get_type_hints(ThreadState, include_extras=True)
 
     assert middleware_hints["viewed_images"] == thread_hints["viewed_images"]
@@ -238,6 +244,9 @@ def test_subagent_injects_task_tool(mock_create_agent):
 
     call_kwargs = mock_create_agent.call_args[1]
     tool_names = [t.name for t in call_kwargs["tools"]]
+    assert "submit_task_plan" in tool_names
+    assert "create_coding_worktree" in tool_names
+    assert "recover_coding_task" in tool_names
     assert "task" in tool_names
 
 
@@ -281,7 +290,11 @@ def test_tool_deduplication(mock_create_agent):
     mock_create_agent.return_value = MagicMock()
     user_clarification = _make_mock_tool("ask_clarification")
 
-    create_deerflow_agent(_make_mock_model(), tools=[user_clarification], features=RuntimeFeatures(sandbox=False))
+    create_deerflow_agent(
+        _make_mock_model(),
+        tools=[user_clarification],
+        features=RuntimeFeatures(sandbox=False),
+    )
 
     call_kwargs = mock_create_agent.call_args[1]
     names = [t.name for t in call_kwargs["tools"]]
@@ -389,7 +402,9 @@ def test_always_on_error_handling(mock_create_agent):
     mw_types = [type(m).__name__ for m in middleware]
     assert "DanglingToolCallMiddleware" in mw_types
     assert "ToolErrorHandlingMiddleware" in mw_types
-    tool_error_middleware = next(m for m in middleware if type(m).__name__ == "ToolErrorHandlingMiddleware")
+    tool_error_middleware = next(
+        m for m in middleware if type(m).__name__ == "ToolErrorHandlingMiddleware"
+    )
     assert tool_error_middleware._app_config is None
 
 
@@ -397,7 +412,9 @@ def test_always_on_error_handling(mock_create_agent):
 # 17. Vision with custom middleware follows thread-data availability
 # ---------------------------------------------------------------------------
 @patch("deerflow.agents.factory.create_agent")
-def test_vision_custom_middleware_without_sandbox_does_not_inject_tool(mock_create_agent):
+def test_vision_custom_middleware_without_sandbox_does_not_inject_tool(
+    mock_create_agent,
+):
     """Custom vision middleware without thread data does not get view_image_tool auto-injected."""
     from langchain.agents.middleware import AgentMiddleware
 
@@ -459,7 +476,9 @@ def test_prev_decorator():
 def test_extra_next_inserts_after_anchor(mock_create_agent):
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
 
     mock_create_agent.return_value = MagicMock()
 
@@ -489,7 +508,9 @@ def test_extra_next_inserts_after_anchor(mock_create_agent):
 def test_extra_prev_inserts_before_anchor(mock_create_agent):
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.clarification_middleware import (
+        ClarificationMiddleware,
+    )
 
     mock_create_agent.return_value = MagicMock()
 
@@ -544,7 +565,9 @@ def test_extra_unanchored_before_clarification(mock_create_agent):
 def test_extra_conflict_same_next_target():
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
 
     @Next(DanglingToolCallMiddleware)
     class MW1(AgentMiddleware):
@@ -568,7 +591,9 @@ def test_extra_conflict_same_next_target():
 def test_extra_conflict_same_prev_target():
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.clarification_middleware import (
+        ClarificationMiddleware,
+    )
 
     @Prev(ClarificationMiddleware)
     class MW1(AgentMiddleware):
@@ -592,8 +617,12 @@ def test_extra_conflict_same_prev_target():
 def test_extra_both_next_and_prev_error():
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
-    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.clarification_middleware import (
+        ClarificationMiddleware,
+    )
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
 
     class MW(AgentMiddleware):
         pass
@@ -616,7 +645,9 @@ def test_extra_both_next_and_prev_error():
 def test_extra_cross_external_anchoring(mock_create_agent):
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
 
     mock_create_agent.return_value = MagicMock()
 
@@ -762,7 +793,9 @@ def test_loop_detection_custom_middleware(mock_create_agent):
 @patch("deerflow.agents.factory.create_agent")
 def test_plan_mode_adds_todo_middleware(mock_create_agent):
     mock_create_agent.return_value = MagicMock()
-    create_deerflow_agent(_make_mock_model(), features=RuntimeFeatures(sandbox=False), plan_mode=True)
+    create_deerflow_agent(
+        _make_mock_model(), features=RuntimeFeatures(sandbox=False), plan_mode=True
+    )
 
     call_kwargs = mock_create_agent.call_args[1]
     mw_types = [type(m).__name__ for m in call_kwargs["middleware"]]
@@ -898,7 +931,9 @@ def test_next_clarification_preserves_tail_invariant(mock_create_agent):
     """Even with @Next(ClarificationMiddleware), Clarification stays last."""
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.middlewares.clarification_middleware import (
+        ClarificationMiddleware,
+    )
 
     mock_create_agent.return_value = MagicMock()
 
@@ -925,7 +960,9 @@ def test_next_clarification_preserves_tail_invariant(mock_create_agent):
 def test_extra_opposite_direction_same_anchor_conflict():
     from langchain.agents.middleware import AgentMiddleware
 
-    from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.dangling_tool_call_middleware import (
+        DanglingToolCallMiddleware,
+    )
 
     @Next(DanglingToolCallMiddleware)
     class AfterDangling(AgentMiddleware):

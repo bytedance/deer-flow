@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Issue Coding"
+  short_description: "Turn a GitHub issue into an executable coding brief"
+  default_prompt: "Use $github-issue-coding to turn a GitHub issue into a coding brief."

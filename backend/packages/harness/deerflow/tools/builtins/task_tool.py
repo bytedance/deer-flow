@@ -15,8 +15,15 @@ from langgraph.types import Command
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
-from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.sandbox.security import (
+    LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+    is_host_bash_allowed,
+)
+from deerflow.subagents import (
+    SubagentExecutor,
+    get_available_subagent_names,
+    get_subagent_config,
+)
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -30,12 +37,23 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.task_graph.factory import create_task_graph
 from deerflow.tools.types import Runtime
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import (
+    DEERFLOW_TRACE_METADATA_KEY,
+    get_current_trace_id,
+    normalize_trace_id,
+)
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+
+
+_CODING_WORKSPACE_INSTRUCTION = (
+    "本任务已经绑定独立 Coding Worktree。所有文件工具统一通过 "
+    "`/mnt/user-data/workspace` 访问它；不要使用或猜测主机上的真实 Worktree 路径。"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +71,9 @@ def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
     return bool(getattr(getattr(app_config, "token_usage", None), "enabled", False))
 
 
-def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, enabled: bool = True) -> None:
+def _cache_subagent_usage(
+    tool_call_id: str, usage: dict | None, *, enabled: bool = True
+) -> None:
     if enabled and usage:
         _subagent_usage_cache[tool_call_id] = usage
 
@@ -64,7 +84,16 @@ def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
-    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+    return (
+        result.status
+        in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.CANCELLED,
+            SubagentStatus.TIMED_OUT,
+        }
+        or getattr(result, "completed_at", None) is not None
+    )
 
 
 async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
@@ -79,7 +108,9 @@ async def _await_subagent_terminal(task_id: str, max_polls: int) -> Any | None:
     return None
 
 
-async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls: int) -> None:
+async def _deferred_cleanup_subagent_task(
+    task_id: str, trace_id: str, max_polls: int
+) -> None:
     """Keep polling a cancelled subagent until it can be safely removed."""
     cleanup_poll_count = 0
     while True:
@@ -90,25 +121,39 @@ async def _deferred_cleanup_subagent_task(task_id: str, trace_id: str, max_polls
             cleanup_background_task(task_id)
             return
         if cleanup_poll_count >= max_polls:
-            logger.warning(f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls")
+            logger.warning(
+                f"[trace={trace_id}] Deferred cleanup for task {task_id} timed out after {cleanup_poll_count} polls"
+            )
             return
         await asyncio.sleep(5)
         cleanup_poll_count += 1
 
 
-def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, task_id: str) -> None:
+def _log_cleanup_failure(
+    cleanup_task: asyncio.Task[None], *, trace_id: str, task_id: str
+) -> None:
     if cleanup_task.cancelled():
         return
 
     exc = cleanup_task.exception()
     if exc is not None:
-        logger.error(f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}")
+        logger.error(
+            f"[trace={trace_id}] Deferred cleanup failed for task {task_id}: {exc}"
+        )
 
 
-def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: int) -> None:
-    logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
-    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls))
-    cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id))
+def _schedule_deferred_subagent_cleanup(
+    task_id: str, trace_id: str, max_polls: int
+) -> None:
+    logger.debug(
+        f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}"
+    )
+    cleanup_task = asyncio.create_task(
+        _deferred_cleanup_subagent_task(task_id, trace_id, max_polls)
+    )
+    cleanup_task.add_done_callback(
+        lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id)
+    )
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
@@ -166,7 +211,9 @@ def _report_subagent_usage(runtime: Any, result: Any) -> None:
         return
     journal = _find_usage_recorder(runtime)
     if journal is None:
-        logger.debug("No usage recorder found in runtime callbacks — subagent token usage not recorded")
+        logger.debug(
+            "No usage recorder found in runtime callbacks — subagent token usage not recorded"
+        )
         return
     try:
         journal.record_external_llm_usage_records(records)
@@ -184,7 +231,9 @@ def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     return None
 
 
-def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
+def _merge_skill_allowlists(
+    parent: list[str] | None, child: list[str] | None
+) -> list[str] | None:
     """Return the effective subagent skill allowlist under the parent policy."""
     if parent is None:
         return child
@@ -205,7 +254,9 @@ def _task_result_command(
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
 ) -> Command:
-    content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
+    content, metadata_error = format_subagent_result_message(
+        status, result=result, error=error, stop_reason=stop_reason
+    )
     return Command(
         update={
             "messages": [
@@ -234,6 +285,7 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    coding_task_id: str | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -281,13 +333,22 @@ async def task_tool(
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
         prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        coding_task_id: Optional persistent CodingTask ID. When provided, claim it before delegation and complete it after a successful subagent result.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    available_subagent_names = (
+        get_available_subagent_names(app_config=runtime_app_config)
+        if runtime_app_config is not None
+        else get_available_subagent_names()
+    )
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = (
+        get_subagent_config(subagent_type, app_config=runtime_app_config)
+        if runtime_app_config is not None
+        else get_subagent_config(subagent_type)
+    )
     if config is None:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
@@ -297,7 +358,11 @@ async def task_tool(
             error=error,
         )
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        host_bash_allowed = (
+            is_host_bash_allowed(runtime_app_config)
+            if runtime_app_config is not None
+            else is_host_bash_allowed()
+        )
         if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
@@ -339,6 +404,25 @@ async def task_tool(
     # Get user_id for tracing (uses standard resolution order)
     user_id = resolve_runtime_user_id(runtime)
 
+    # CodingTask 绑定只在显式传入任务 ID 时启用，普通 task 调用保持原有行为。
+    coding_graph = None
+    if coding_task_id is not None:
+        if thread_id is None:
+            raise ValueError("thread_id is required when coding_task_id is provided")
+        coding_graph = create_task_graph(thread_id, user_id=user_id)
+    coding_task_claimed = False
+
+    def fail_coding_task(reason: str) -> None:
+        """将已领取的 CodingTask 标记为失败，同时保留原始执行异常。"""
+        if coding_graph is None or not coding_task_claimed:
+            return
+        try:
+            coding_graph.fail(coding_task_id, reason=reason)
+        except Exception:
+            logger.exception(
+                f"[trace={trace_id}] Failed to persist CodingTask {coding_task_id} failure"
+            )
+
     # Propagate the authenticated runtime context so delegated tool calls are
     # evaluated by GuardrailMiddleware with the same identity/attribution as
     # the lead agent. Sourced from the server-side context written by
@@ -359,12 +443,20 @@ async def task_tool(
     # authz_attributes (validated Mapping, copied). These follow the same
     # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
     is_internal = parent_context.get("is_internal") is True
-    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
-    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+    authz_attributes = normalize_authz_attributes(
+        parent_context.get("authz_attributes")
+    )
+    deerflow_trace_id = (
+        normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY))
+        or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY))
+        or get_current_trace_id()
+    )
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:
-        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+        overrides["skills"] = _merge_skill_allowlists(
+            list(parent_available_skills), config.skills
+        )
 
     if overrides:
         config = replace(config, **overrides)
@@ -376,9 +468,15 @@ async def task_tool(
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
-    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
+    if (
+        config.model == "inherit"
+        and parent_model is None
+        and resolved_app_config is None
+    ):
         resolved_app_config = get_app_config()
-    effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+    effective_model = resolve_subagent_model_name(
+        config, parent_model, app_config=resolved_app_config
+    )
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting).
     # Subagents also must not get list_uploaded_files — they have an independent
@@ -394,32 +492,48 @@ async def task_tool(
         available_tools_kwargs["app_config"] = resolved_app_config
     tools = get_available_tools(**available_tools_kwargs)
 
-    # Create executor
-    executor_kwargs = {
-        "config": config,
-        "tools": tools,
-        "parent_model": parent_model,
-        "sandbox_state": sandbox_state,
-        "thread_data": thread_data,
-        "thread_id": thread_id,
-        "trace_id": trace_id,
-        "user_id": user_id,
-        "user_role": user_role,
-        "oauth_provider": oauth_provider,
-        "oauth_id": oauth_id,
-        "run_id": run_id,
-        "channel_user_id": channel_user_id,
-        "is_internal": is_internal,
-        "authz_attributes": authz_attributes,
-        "deerflow_trace_id": deerflow_trace_id,
-    }
-    if resolved_app_config is not None:
-        executor_kwargs["app_config"] = resolved_app_config
-    executor = SubagentExecutor(**executor_kwargs)
+    try:
+        # 先持久化领取状态，再准备工作区并启动真实 Sub-Agent，避免绕过 DAG 依赖检查。
+        if coding_graph is not None:
+            coding_task = coding_graph.claim(coding_task_id, owner=subagent_type)
+            coding_task_claimed = True
+            if coding_task.worktree is not None:
+                if thread_data is None:
+                    raise RuntimeError(
+                        "thread_data is required when using a coding worktree"
+                    )
+                thread_data = dict(thread_data)
+                thread_data["workspace_path"] = coding_task.worktree
+                prompt = f"{_CODING_WORKSPACE_INSTRUCTION}\n\n{prompt}"
 
-    # Start background execution (always async to prevent blocking)
-    # Use tool_call_id as task_id for better traceability
-    task_id = executor.execute_async(prompt, task_id=tool_call_id)
+        # 创建执行器，并把 CodingTask 选定的工作区上下文传给子 Agent。
+        executor_kwargs = {
+            "config": config,
+            "tools": tools,
+            "parent_model": parent_model,
+            "sandbox_state": sandbox_state,
+            "thread_data": thread_data,
+            "thread_id": thread_id,
+            "trace_id": trace_id,
+            "user_id": user_id,
+            "user_role": user_role,
+            "oauth_provider": oauth_provider,
+            "oauth_id": oauth_id,
+            "run_id": run_id,
+            "channel_user_id": channel_user_id,
+            "is_internal": is_internal,
+            "authz_attributes": authz_attributes,
+            "deerflow_trace_id": deerflow_trace_id,
+        }
+        if resolved_app_config is not None:
+            executor_kwargs["app_config"] = resolved_app_config
+        executor = SubagentExecutor(**executor_kwargs)
+
+        # 后台启动，避免阻塞主 Agent；工具调用 ID 同时作为任务 ID，便于追踪。
+        task_id = executor.execute_async(prompt, task_id=tool_call_id)
+    except Exception as exc:
+        fail_coding_task(f"Failed to start subagent: {exc}")
+        raise
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -428,7 +542,9 @@ async def task_tool(
     # Polling timeout: execution timeout + 60s buffer, checked every 5s
     max_poll_count = (config.timeout_seconds + 60) // 5
 
-    logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
+    logger.info(
+        f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)"
+    )
 
     writer = get_stream_writer()
     # Send Task Started message'
@@ -447,13 +563,20 @@ async def task_tool(
             result = get_background_task_result(task_id)
 
             if result is None:
-                logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
+                logger.error(
+                    f"[trace={trace_id}] Task {task_id} not found in background tasks"
+                )
                 await aemit_custom_event(
-                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"},
+                    {
+                        "type": "task_failed",
+                        "task_id": task_id,
+                        "error": "Task disappeared from background tasks",
+                    },
                     writer=writer,
                 )
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
+                fail_coding_task(error)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
@@ -462,7 +585,9 @@ async def task_tool(
 
             # Log status changes for debugging
             if result.status != last_status:
-                logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
+                logger.info(
+                    f"[trace={trace_id}] Task {task_id} status: {result.status.value}"
+                )
                 last_status = result.status
 
             # The collector publishes cumulative records. Reuse one snapshot for
@@ -489,7 +614,9 @@ async def task_tool(
                         },
                         writer=writer,
                     )
-                    logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
+                    logger.info(
+                        f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}"
+                    )
                 last_message_count = current_message_count
 
             # Check if task completed, failed, or timed out
@@ -506,8 +633,12 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
+                logger.info(
+                    f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls"
+                )
                 cleanup_background_task(task_id)
+                if coding_graph is not None:
+                    coding_graph.complete(coding_task_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
                 # — the work survives on result_brief like a clean success.
@@ -532,8 +663,11 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
+                logger.error(
+                    f"[trace={trace_id}] Task {task_id} failed: {result.error}"
+                )
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task failed")
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
@@ -558,8 +692,11 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
+                logger.info(
+                    f"[trace={trace_id}] Task {task_id} cancelled: {result.error}"
+                )
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task was cancelled")
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="cancelled",
@@ -580,8 +717,11 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
+                logger.warning(
+                    f"[trace={trace_id}] Task {task_id} timed out: {result.error}"
+                )
                 cleanup_background_task(task_id)
+                fail_coding_task(result.error or "Subagent task timed out")
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="timed_out",
@@ -599,7 +739,9 @@ async def task_tool(
             # This catches edge cases where the background task gets stuck
             if poll_count > max_poll_count:
                 timeout_minutes = config.timeout_seconds // 60
-                logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
+                logger.error(
+                    f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)"
+                )
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -618,6 +760,7 @@ async def task_tool(
                 request_cancel_background_task(task_id)
                 _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                fail_coding_task(message)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
@@ -634,7 +777,9 @@ async def task_tool(
         # before the parent worker persists get_completion_data().
         terminal_result = None
         try:
-            terminal_result = await asyncio.shield(_await_subagent_terminal(task_id, max_poll_count))
+            terminal_result = await asyncio.shield(
+                _await_subagent_terminal(task_id, max_poll_count)
+            )
         except asyncio.CancelledError:
             pass
 
@@ -647,7 +792,9 @@ async def task_tool(
         else:
             _schedule_deferred_subagent_cleanup(task_id, trace_id, max_poll_count)
         _subagent_usage_cache.pop(tool_call_id, None)
+        fail_coding_task("Parent run cancelled while the subagent task was running")
         raise
-    except Exception:
+    except Exception as exc:
         _subagent_usage_cache.pop(tool_call_id, None)
+        fail_coding_task(f"Subagent execution error: {exc}")
         raise

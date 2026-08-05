@@ -42,7 +42,9 @@ _MOCKED_MODULE_NAMES = [
     "deerflow.skills.storage",
 ]
 
-_LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgraph")) >= Version("1.2.6")
+_LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(
+    package_version("langgraph")
+) >= Version("1.2.6")
 
 
 def _default_app_config():
@@ -94,8 +96,12 @@ def _setup_executor_classes():
     for name in _MOCKED_MODULE_NAMES:
         sys.modules[name] = MagicMock()
     storage_module = ModuleType("deerflow.skills.storage")
-    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
+    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(
+        load_skills=lambda *, enabled_only: []
+    )
+    storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: (
+        SimpleNamespace(load_skills=lambda *, enabled_only: [])
+    )
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
 
@@ -256,7 +262,9 @@ class _MsgHelper:
         return msg
 
     def tool(self, content, tool_call_id, name=None, msg_id=None):
-        msg = self.classes["ToolMessage"](content=content, tool_call_id=tool_call_id, name=name)
+        msg = self.classes["ToolMessage"](
+            content=content, tool_call_id=tool_call_id, name=name
+        )
         if msg_id:
             msg.id = msg_id
         return msg
@@ -295,7 +303,9 @@ class TestAgentConstruction:
         captured: dict[str, dict] = {}
 
         def fake_get_app_config():
-            raise AssertionError("ambient get_app_config() must not be used when app_config is explicit")
+            raise AssertionError(
+                "ambient get_app_config() must not be used when app_config is explicit"
+            )
 
         def fake_create_chat_model(**kwargs):
             captured["model"] = kwargs
@@ -330,6 +340,7 @@ class TestAgentConstruction:
             tools=[],
             app_config=app_config,
             parent_model="parent-model",
+            thread_data={"workspace_path": "E:/projectA/.worktrees/coding-run"},
         )
         provider = object()
         executor._authz_provider = provider
@@ -356,12 +367,15 @@ class TestAgentConstruction:
             "agent_name": "test-agent",
             "available_skills": set(),
             "user_id": "default",
+            "workspace_path_override": "E:/projectA/.worktrees/coding-run",
             "authorization_provider": provider,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
-        assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
+        assert (
+            captured["agent"]["system_prompt"] is None
+        )  # system_prompt is merged into initial state messages
 
     @pytest.mark.anyio
     async def test_load_skills_uses_explicit_app_config_for_skill_storage(
@@ -384,9 +398,17 @@ class TestAgentConstruction:
         def fake_get_or_new_user_skill_storage(user_id, *, app_config=None):
             captured["user_id"] = user_id
             captured["app_config"] = app_config
-            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="demo-skill", skill_file=skill_file)])
+            return SimpleNamespace(
+                load_skills=lambda *, enabled_only: [
+                    SimpleNamespace(name="demo-skill", skill_file=skill_file)
+                ]
+            )
 
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", fake_get_or_new_user_skill_storage)
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            fake_get_or_new_user_skill_storage,
+        )
 
         executor = SubagentExecutor(
             config=base_config,
@@ -412,14 +434,42 @@ class TestAgentConstruction:
 
         def user_storage(user_id: str, *, app_config=None):
             storage_calls.append((user_id, app_config))
-            return SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="shared-skill", owner=user_id)])
+            return SimpleNamespace(
+                load_skills=lambda *, enabled_only: [
+                    SimpleNamespace(name="shared-skill", owner=user_id)
+                ]
+            )
 
-        global_storage = MagicMock(side_effect=AssertionError("subagents must not read the global-only skill catalog"))
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", global_storage)
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", user_storage)
+        global_storage = MagicMock(
+            side_effect=AssertionError(
+                "subagents must not read the global-only skill catalog"
+            )
+        )
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            global_storage,
+        )
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            user_storage,
+        )
 
-        alice = SubagentExecutor(config=base_config, tools=[], app_config=app_config, thread_id="alice-thread", user_id="alice")
-        bob = SubagentExecutor(config=base_config, tools=[], app_config=app_config, thread_id="bob-thread", user_id="bob")
+        alice = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            thread_id="alice-thread",
+            user_id="alice",
+        )
+        bob = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            thread_id="bob-thread",
+            user_id="bob",
+        )
 
         alice_skills = await alice._load_skills()
         bob_skills = await bob._load_skills()
@@ -437,12 +487,28 @@ class TestAgentConstruction:
         monkeypatch: pytest.MonkeyPatch,
     ):
         SubagentExecutor = classes["SubagentExecutor"]
-        user_storage = MagicMock(return_value=SimpleNamespace(load_skills=lambda *, enabled_only: []))
-        global_storage = MagicMock(side_effect=AssertionError("subagents must not read the global-only skill catalog"))
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_skill_storage", global_storage)
-        monkeypatch.setattr(sys.modules["deerflow.skills.storage"], "get_or_new_user_skill_storage", user_storage)
+        user_storage = MagicMock(
+            return_value=SimpleNamespace(load_skills=lambda *, enabled_only: [])
+        )
+        global_storage = MagicMock(
+            side_effect=AssertionError(
+                "subagents must not read the global-only skill catalog"
+            )
+        )
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_skill_storage",
+            global_storage,
+        )
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            user_storage,
+        )
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread", user_id=None)
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread", user_id=None
+        )
 
         assert await executor._load_skills() == []
         user_storage.assert_called_once_with("default")
@@ -467,7 +533,13 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: [
+                    SimpleNamespace(
+                        name="my-skill", skill_file=skill_file, allowed_tools=None
+                    )
+                ]
+            ),
         )
 
         executor = SubagentExecutor(
@@ -476,7 +548,9 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         messages = state["messages"]
         # Should have exactly 2 messages: one combined SystemMessage + one HumanMessage
@@ -507,7 +581,9 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: []
+            ),
         )
 
         executor = SubagentExecutor(
@@ -516,7 +592,9 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -552,13 +630,21 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="my-skill", skill_file=skill_file, allowed_tools=None)]),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: [
+                    SimpleNamespace(
+                        name="my-skill", skill_file=skill_file, allowed_tools=None
+                    )
+                ]
+            ),
         )
 
         SubagentExecutor = classes["SubagentExecutor"]
         executor = SubagentExecutor(config=config, tools=[], thread_id="test-thread")
 
-        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+        state, _final_tools, _deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         messages = state["messages"]
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -589,7 +675,9 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: []
+            ),
         )
         monkeypatch.setattr(
             executor_module,
@@ -597,7 +685,9 @@ class TestAgentConstruction:
             lambda: SimpleNamespace(
                 tool_search=SimpleNamespace(enabled=True),
                 authorization=SimpleNamespace(enabled=False),
-                skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
+                skills=SimpleNamespace(
+                    deferred_discovery=True, container_path="/mnt/skills"
+                ),
             ),
         )
 
@@ -606,9 +696,13 @@ class TestAgentConstruction:
             "Evaluate arithmetic."
             return expression
 
-        executor = SubagentExecutor(config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread"
+        )
 
-        state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+        state, final_tools, deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         assert "tool_search" in [t.name for t in final_tools]
         assert deferred_setup.deferred_names == frozenset({"mcp_calc"})
@@ -638,7 +732,9 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: []
+            ),
         )
         monkeypatch.setattr(
             executor_module,
@@ -646,7 +742,9 @@ class TestAgentConstruction:
             lambda: SimpleNamespace(
                 tool_search=SimpleNamespace(enabled=False),
                 authorization=SimpleNamespace(enabled=False),
-                skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
+                skills=SimpleNamespace(
+                    deferred_discovery=True, container_path="/mnt/skills"
+                ),
             ),
         )
 
@@ -655,9 +753,13 @@ class TestAgentConstruction:
             "Evaluate arithmetic."
             return expression
 
-        executor = SubagentExecutor(config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[tag_mcp_tool(mcp_calc)], thread_id="test-thread"
+        )
 
-        state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+        state, final_tools, deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         assert "tool_search" not in [t.name for t in final_tools]
         assert deferred_setup.deferred_names == frozenset()
@@ -670,13 +772,18 @@ class TestAgentConstruction:
         base_config,
         monkeypatch: pytest.MonkeyPatch,
     ):
-        from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+        from deerflow.config.authorization_config import (
+            AuthorizationConfig,
+            AuthorizationProviderConfig,
+        )
 
         SubagentExecutor = classes["SubagentExecutor"]
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_skill_storage",
-            lambda *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            lambda *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: []
+            ),
         )
         app_config = SimpleNamespace(
             authorization=AuthorizationConfig(
@@ -688,7 +795,9 @@ class TestAgentConstruction:
             ),
             models=[SimpleNamespace(name="test-model")],
             tool_search=SimpleNamespace(enabled=False),
-            skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
+            skills=SimpleNamespace(
+                deferred_discovery=True, container_path="/mnt/skills"
+            ),
         )
         executor = SubagentExecutor(
             config=base_config,
@@ -699,7 +808,9 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        _state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+        _state, final_tools, deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         assert [tool.name for tool in final_tools] == ["safe_tool"]
         assert deferred_setup.deferred_names == frozenset()
@@ -733,7 +844,9 @@ class TestAgentConstruction:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: []
+            ),
         )
         monkeypatch.setattr(
             executor_module,
@@ -741,7 +854,9 @@ class TestAgentConstruction:
             lambda: SimpleNamespace(
                 tool_search=SimpleNamespace(enabled=True),
                 authorization=SimpleNamespace(enabled=False),
-                skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
+                skills=SimpleNamespace(
+                    deferred_discovery=True, container_path="/mnt/skills"
+                ),
             ),
         )
 
@@ -774,7 +889,9 @@ class TestAgentConstruction:
             thread_id="test-thread",
         )
 
-        _state, final_tools, deferred_setup = await executor._build_initial_state("Do the task")
+        _state, final_tools, deferred_setup = await executor._build_initial_state(
+            "Do the task"
+        )
 
         names = {t.name for t in final_tools}
         # The policy-denied MCP tool is gone and never reaches the catalog.
@@ -796,14 +913,19 @@ class TestAgentConstruction:
         from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
         SubagentExecutor = classes["SubagentExecutor"]
-        app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")], tool_search=SimpleNamespace(enabled=True, auto_promote_top_k=3))
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="default-model")],
+            tool_search=SimpleNamespace(enabled=True, auto_promote_top_k=3),
+        )
         captured: dict[str, object] = {}
 
         def fake_build_subagent_runtime_middlewares(**kwargs):
             captured["middlewares"] = kwargs
             return [object()]
 
-        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(
+            executor_module, "create_chat_model", lambda **kwargs: object()
+        )
         monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
         monkeypatch.setitem(
             sys.modules,
@@ -815,7 +937,12 @@ class TestAgentConstruction:
         )
 
         deferred_setup = DeferredToolSetup(object(), frozenset({"mcp_calc"}), "hash123")
-        executor = SubagentExecutor(config=base_config, tools=[], app_config=app_config, parent_model="parent-model")
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
 
         executor._create_agent(tools=[], deferred_setup=deferred_setup)
 
@@ -862,7 +989,9 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_marks_structured_llm_error_fallback_as_failed(
+        self, classes, base_config, mock_agent, msg
+    ):
         """A handled provider error is still a failed delegated task.
 
         ``LLMErrorHandlingMiddleware`` intentionally returns an ``AIMessage``
@@ -886,7 +1015,9 @@ class TestAsyncExecutionPath:
         final_state = {"messages": [msg.human("Do something"), fallback_message]}
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Do something")
 
@@ -896,16 +1027,22 @@ class TestAsyncExecutionPath:
         assert result.stop_reason is None
 
     @pytest.mark.anyio
-    async def test_aexecute_does_not_infer_llm_failure_from_message_text(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_does_not_infer_llm_failure_from_message_text(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Error-looking prose without the middleware marker is valid output."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
         final_text = "LLM request failed is the message shown by the previous system."
-        final_state = {"messages": [msg.human("Explain the prior error"), msg.ai(final_text)]}
+        final_state = {
+            "messages": [msg.human("Explain the prior error"), msg.ai(final_text)]
+        }
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Explain the prior error")
 
@@ -914,7 +1051,9 @@ class TestAsyncExecutionPath:
         assert result.error is None
 
     @pytest.mark.anyio
-    async def test_aexecute_ignores_stale_parent_history_fallback_marker(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_ignores_stale_parent_history_fallback_marker(
+        self, classes, base_config, mock_agent, msg
+    ):
         """A stale fallback marker replayed from parent history is not terminal.
 
         Subagents share the parent's ``thread_id`` and LangGraph replays the
@@ -938,10 +1077,18 @@ class TestAsyncExecutionPath:
                 "error_detail": "Error code: 400 - InvalidParameter",
             },
         )
-        final_state = {"messages": [stale_fallback, msg.human("Do something"), msg.ai("real result")]}
+        final_state = {
+            "messages": [
+                stale_fallback,
+                msg.human("Do something"),
+                msg.ai("real result"),
+            ]
+        }
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Do something")
 
@@ -950,7 +1097,9 @@ class TestAsyncExecutionPath:
         assert result.error is None
 
     @pytest.mark.anyio
-    async def test_aexecute_exposes_collected_usage_before_subagent_finishes(self, classes, base_config, mock_agent, msg, monkeypatch):
+    async def test_aexecute_exposes_collected_usage_before_subagent_finishes(
+        self, classes, base_config, mock_agent, msg, monkeypatch
+    ):
         """Polling callers can read a cumulative token snapshot while running."""
         from deerflow.subagents import executor as executor_module
 
@@ -985,7 +1134,9 @@ class TestAsyncExecutionPath:
 
         monkeypatch.setattr(executor_module, "SubagentTokenCollector", Collector)
         mock_agent.astream = streaming_agent
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         result_holder = SubagentResult(
             task_id="task-1",
             trace_id="trace-1",
@@ -993,7 +1144,9 @@ class TestAsyncExecutionPath:
         )
 
         with patch.object(executor, "_create_agent", return_value=mock_agent):
-            running = asyncio.create_task(executor._aexecute("Task", result_holder=result_holder))
+            running = asyncio.create_task(
+                executor._aexecute("Task", result_holder=result_holder)
+            )
             await yielded.wait()
             await asyncio.sleep(0)
             await asyncio.sleep(0)
@@ -1011,7 +1164,9 @@ class TestAsyncExecutionPath:
             await running
 
     @pytest.mark.anyio
-    async def test_aexecute_collects_ai_messages(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_collects_ai_messages(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test that AI messages are collected during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1039,7 +1194,9 @@ class TestAsyncExecutionPath:
         assert result.ai_messages[1]["id"] == "msg-2"
 
     @pytest.mark.anyio
-    async def test_aexecute_handles_duplicate_messages(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_handles_duplicate_messages(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test that duplicate AI messages are not added."""
         SubagentExecutor = classes["SubagentExecutor"]
 
@@ -1063,7 +1220,9 @@ class TestAsyncExecutionPath:
         assert len(result.ai_messages) == 1
 
     @pytest.mark.anyio
-    async def test_aexecute_dedup_scales_over_repeated_chunks(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_dedup_scales_over_repeated_chunks(
+        self, classes, base_config, mock_agent, msg
+    ):
         """``stream_mode="values"`` re-yields the same trailing message across many
         snapshots before the next one appears. Dedup must collapse the repeats and
         still capture each distinct message exactly once, in arrival order."""
@@ -1083,14 +1242,18 @@ class TestAsyncExecutionPath:
         ]
         mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
         assert [m["id"] for m in result.ai_messages] == ["msg-1", "msg-2", "msg-3"]
 
     @pytest.mark.anyio
-    async def test_aexecute_dedup_idless_messages_fall_back_to_content(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_dedup_idless_messages_fall_back_to_content(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Messages without an id can't be keyed by the seen-id set, so dedup must
         fall back to a full content compare: identical content collapses, distinct
         content is kept."""
@@ -1098,19 +1261,27 @@ class TestAsyncExecutionPath:
 
         chunks = [
             {"messages": [msg.human("Task"), msg.ai("same")]},  # id-less
-            {"messages": [msg.human("Task"), msg.ai("same")]},  # id-less, identical content -> dropped
-            {"messages": [msg.human("Task"), msg.ai("different")]},  # id-less, distinct -> kept
+            {
+                "messages": [msg.human("Task"), msg.ai("same")]
+            },  # id-less, identical content -> dropped
+            {
+                "messages": [msg.human("Task"), msg.ai("different")]
+            },  # id-less, distinct -> kept
         ]
         mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
         assert [m["content"] for m in result.ai_messages] == ["same", "different"]
 
     @pytest.mark.anyio
-    async def test_aexecute_captures_all_tool_outputs_from_one_super_step(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_captures_all_tool_outputs_from_one_super_step(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Regression for #3779: when the model emits several tool calls in one
         turn, LangGraph's ToolNode appends all their ToolMessages in a single
         ``values`` super-step. Capturing only ``messages[-1]`` dropped every tool
@@ -1131,14 +1302,24 @@ class TestAsyncExecutionPath:
         ]
         mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
-        assert [m["id"] for m in result.ai_messages] == ["ai-1", "tool-1", "tool-2", "tool-3", "ai-2"]
+        assert [m["id"] for m in result.ai_messages] == [
+            "ai-1",
+            "tool-1",
+            "tool-2",
+            "tool-3",
+            "ai-2",
+        ]
 
     @pytest.mark.anyio
-    async def test_aexecute_step_capture_survives_history_contraction(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_step_capture_survives_history_contraction(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Regression for #3875 Phase 3: DeerFlowSummarizationMiddleware rewrites the
         messages channel mid-run via ``RemoveMessage(id=REMOVE_ALL_MESSAGES)``,
         so a later ``values`` snapshot hands the executor a SHORTER message list
@@ -1177,7 +1358,9 @@ class TestAsyncExecutionPath:
         ]
         mock_agent.astream = lambda *args, **kwargs: async_iterator(chunks)
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
 
@@ -1192,7 +1375,9 @@ class TestAsyncExecutionPath:
         ]
 
     @pytest.mark.anyio
-    async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_handles_list_content(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test handling of list-type content in AIMessage."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1220,7 +1405,9 @@ class TestAsyncExecutionPath:
         assert "Part 2" in result.result
 
     @pytest.mark.anyio
-    async def test_aexecute_handles_agent_exception(self, classes, base_config, mock_agent):
+    async def test_aexecute_handles_agent_exception(
+        self, classes, base_config, mock_agent
+    ):
         """Test that exceptions during execution are caught and returned as FAILED."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1241,7 +1428,9 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_recursion_error_with_partial_surfaces_completed_turn_capped(
+        self, classes, base_config, mock_agent, msg
+    ):
         """#3875 Phase 2: ``GraphRecursionError`` (``recursion_limit`` ==
         ``max_turns``) with usable partial work surfaces as ``completed`` +
         ``stop_reason=turn_capped`` — the partial work survives on ``result``
@@ -1284,7 +1473,9 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_prefers_guard_stop_reason_over_turn_capped(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_recursion_error_prefers_guard_stop_reason_over_turn_capped(
+        self, classes, base_config, mock_agent, msg
+    ):
         """If a guard (token budget / loop) already hard-stopped this run and
         set its stop reason, and ``GraphRecursionError`` then trips on the next
         super-step before the forced final answer lands, the exception handler
@@ -1303,13 +1494,19 @@ class TestAsyncExecutionPath:
 
         async def mock_astream(*args, **kwargs):
             yield partial_state
-            raise GraphRecursionError("Recursion limit reached after the token budget fired")
+            raise GraphRecursionError(
+                "Recursion limit reached after the token budget fired"
+            )
 
         mock_agent.astream = mock_astream
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         # A guard fired earlier this run and stamped token_capped.
-        executor._stop_reason_middlewares = [SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")]
+        executor._stop_reason_middlewares = [
+            SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")
+        ]
 
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
@@ -1320,7 +1517,9 @@ class TestAsyncExecutionPath:
         assert result.result == "Found 3 of 5 sources; still working"
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_before_first_chunk_surfaces_failed_turn_capped(self, classes, base_config, mock_agent):
+    async def test_aexecute_recursion_error_before_first_chunk_surfaces_failed_turn_capped(
+        self, classes, base_config, mock_agent
+    ):
         """If ``GraphRecursionError`` fires before any chunk is yielded there is
         no usable partial work to recover; the result is ``failed`` +
         ``stop_reason=turn_capped`` so the budget-cap signal survives even when
@@ -1351,7 +1550,9 @@ class TestAsyncExecutionPath:
         assert result.completed_at is not None
 
     @pytest.mark.anyio
-    async def test_aexecute_recursion_error_with_llm_error_fallback_surfaces_failed(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_recursion_error_with_llm_error_fallback_surfaces_failed(
+        self, classes, base_config, mock_agent, msg
+    ):
         """A structured LLM error fallback that coincides with hitting
         ``max_turns`` must still classify as ``failed``, not ``completed``.
 
@@ -1386,11 +1587,15 @@ class TestAsyncExecutionPath:
 
         async def mock_astream(*args, **kwargs):
             yield fallback_state
-            raise GraphRecursionError("Recursion limit reached right after the LLM error fallback")
+            raise GraphRecursionError(
+                "Recursion limit reached right after the LLM error fallback"
+            )
 
         mock_agent.astream = mock_astream
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
 
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
@@ -1401,7 +1606,9 @@ class TestAsyncExecutionPath:
         assert result.stop_reason == "turn_capped"
 
     @pytest.mark.anyio
-    async def test_aexecute_token_capped_surfaces_completed_token_capped(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_token_capped_surfaces_completed_token_capped(
+        self, classes, base_config, mock_agent, msg
+    ):
         """#3875 Phase 2: the token-budget hard-stop does not raise — it strips
         tool_calls so the run completes with a final answer. When the captured
         ``TokenBudgetMiddleware`` reports ``token_capped`` via
@@ -1411,14 +1618,20 @@ class TestAsyncExecutionPath:
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
-        final_state = {"messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]}
+        final_state = {
+            "messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]
+        }
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         # Simulate the hard-stop having fired: the captured guard reports
         # token_capped for this run. _create_agent is mocked below so the real
         # capture path is bypassed and this list is what _aexecute reads.
-        executor._stop_reason_middlewares = [SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")]
+        executor._stop_reason_middlewares = [
+            SimpleNamespace(consume_stop_reason=lambda _run_id: "token_capped")
+        ]
 
         with patch.object(executor, "_create_agent", return_value=mock_agent):
             result = await executor._aexecute("Task")
@@ -1428,7 +1641,9 @@ class TestAsyncExecutionPath:
         assert result.stop_reason == "token_capped"
 
     @pytest.mark.anyio
-    async def test_aexecute_loop_capped_surfaces_when_loop_guard_fires(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_loop_capped_surfaces_when_loop_guard_fires(
+        self, classes, base_config, mock_agent, msg
+    ):
         """#3875 Phase 2 (ggnnggez review): the executor collects EVERY guard
         middleware with ``consume_stop_reason``, not just the first. When the
         token-budget guard reports no cap but the loop-detection guard reports
@@ -1439,10 +1654,14 @@ class TestAsyncExecutionPath:
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
-        final_state = {"messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]}
+        final_state = {
+            "messages": [msg.human("Task"), msg.ai("partial final answer", "msg-1")]
+        }
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
 
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[], thread_id="test-thread"
+        )
         executor._stop_reason_middlewares = [
             SimpleNamespace(consume_stop_reason=lambda _run_id: None),
             SimpleNamespace(consume_stop_reason=lambda _run_id: "loop_capped"),
@@ -1476,7 +1695,9 @@ class TestAsyncExecutionPath:
         assert result.result == "No response generated"
 
     @pytest.mark.anyio
-    async def test_aexecute_no_ai_message_in_state(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_no_ai_message_in_state(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test fallback when no AIMessage found in final state."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1527,7 +1748,15 @@ class TestAsyncExecutionPath:
         monkeypatch.setattr(
             sys.modules["deerflow.skills.storage"],
             "get_or_new_user_skill_storage",
-            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="regression-skill", skill_file=skill_dir / "SKILL.md", allowed_tools=None)]),
+            lambda user_id, *, app_config=None: SimpleNamespace(
+                load_skills=lambda *, enabled_only: [
+                    SimpleNamespace(
+                        name="regression-skill",
+                        skill_file=skill_dir / "SKILL.md",
+                        allowed_tools=None,
+                    )
+                ]
+            ),
         )
 
         captured_states: list[dict] = []
@@ -1553,9 +1782,13 @@ class TestAsyncExecutionPath:
         initial_messages = captured_states[0]["messages"]
 
         system_messages = [m for m in initial_messages if isinstance(m, SystemMessage)]
-        assert len(system_messages) <= 1, f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
+        assert len(system_messages) <= 1, (
+            f"Expected at most 1 SystemMessage but got {len(system_messages)}: {system_messages}"
+        )
         if system_messages:
-            assert initial_messages[0] is system_messages[0], "SystemMessage must be the first message in the conversation"
+            assert initial_messages[0] is system_messages[0], (
+                "SystemMessage must be the first message in the conversation"
+            )
             # The consolidated SystemMessage carries the base prompt and skill
             # discovery metadata, while the body stays unloaded until activation.
             assert base_config.system_prompt in system_messages[0].content
@@ -1565,35 +1798,69 @@ class TestAsyncExecutionPath:
 
 class TestSkillAllowedTools:
     @pytest.mark.anyio
-    async def test_passive_skill_allowed_tools_do_not_filter_agent_tools(self, classes, base_config, mock_agent, msg):
+    async def test_passive_skill_allowed_tools_do_not_filter_agent_tools(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Enabled skills are discoverable, not policy-active until loaded."""
         SubagentExecutor = classes["SubagentExecutor"]
 
         final_state = {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
         mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
-        tools = [NamedTool("bash"), NamedTool("read_file"), NamedTool("write_file"), NamedTool("review_skill_package")]
-        executor = SubagentExecutor(config=base_config, tools=tools, thread_id="test-thread")
+        tools = [
+            NamedTool("bash"),
+            NamedTool("read_file"),
+            NamedTool("write_file"),
+            NamedTool("review_skill_package"),
+        ]
+        executor = SubagentExecutor(
+            config=base_config, tools=tools, thread_id="test-thread"
+        )
 
         async def load_skills():
             return [_skill("skill-reviewer", ["review_skill_package"])]
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+        with (
+            patch.object(executor, "_load_skills", load_skills),
+            patch.object(
+                executor, "_create_agent", return_value=mock_agent
+            ) as create_agent_mock,
+        ):
             await executor._aexecute("Task")
 
         create_agent_mock.assert_called_once()
-        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == ["bash", "read_file", "write_file", "review_skill_package", "describe_skill"]
-        assert [tool.name for tool in executor.tools] == ["bash", "read_file", "write_file", "review_skill_package"]
+        assert [tool.name for tool in create_agent_mock.call_args.args[0]] == [
+            "bash",
+            "read_file",
+            "write_file",
+            "review_skill_package",
+            "describe_skill",
+        ]
+        assert [tool.name for tool in executor.tools] == [
+            "bash",
+            "read_file",
+            "write_file",
+            "review_skill_package",
+        ]
         assert executor._available_skill_names == {"skill-reviewer"}
 
     @pytest.mark.anyio
-    async def test_skill_load_failure_fails_without_creating_agent(self, classes, base_config, mock_agent):
+    async def test_skill_load_failure_fails_without_creating_agent(
+        self, classes, base_config, mock_agent
+    ):
         SubagentExecutor = classes["SubagentExecutor"]
-        executor = SubagentExecutor(config=base_config, tools=[NamedTool("bash")], thread_id="test-thread")
+        executor = SubagentExecutor(
+            config=base_config, tools=[NamedTool("bash")], thread_id="test-thread"
+        )
 
         async def load_skills():
             raise RuntimeError("skill storage unavailable")
 
-        with patch.object(executor, "_load_skills", load_skills), patch.object(executor, "_create_agent", return_value=mock_agent) as create_agent_mock:
+        with (
+            patch.object(executor, "_load_skills", load_skills),
+            patch.object(
+                executor, "_create_agent", return_value=mock_agent
+            ) as create_agent_mock,
+        ):
             result = await executor._aexecute("Task")
 
         assert result.status == classes["SubagentStatus"].FAILED
@@ -1609,7 +1876,9 @@ class TestSkillAllowedTools:
 class TestSyncExecutionPath:
     """Test execute() synchronous execution path with asyncio.run()."""
 
-    def test_execute_runs_async_in_event_loop(self, classes, base_config, mock_agent, msg):
+    def test_execute_runs_async_in_event_loop(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test that execute() runs _aexecute() in a new event loop via asyncio.run()."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1676,7 +1945,9 @@ class TestSyncExecutionPath:
         assert result.result == "Thread pool result"
 
     @pytest.mark.anyio
-    async def test_execute_in_running_event_loop_calls_isolated_loop_directly(self, classes, base_config, mock_agent, msg):
+    async def test_execute_in_running_event_loop_calls_isolated_loop_directly(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test that execute() calls the isolated-loop helper directly in a running loop."""
         from deerflow.runtime.user_context import (
             get_effective_user_id,
@@ -1720,7 +1991,11 @@ class TestSyncExecutionPath:
         token = set_current_user(SimpleNamespace(id="alice"))
         try:
             with patch.object(executor, "_create_agent", return_value=mock_agent):
-                with patch.object(executor, "_execute_in_isolated_loop", side_effect=tracked_isolated_execute) as isolated:
+                with patch.object(
+                    executor,
+                    "_execute_in_isolated_loop",
+                    side_effect=tracked_isolated_execute,
+                ) as isolated:
                     result = executor.execute("Task")
         finally:
             reset_current_user(token)
@@ -1734,7 +2009,9 @@ class TestSyncExecutionPath:
         assert result.result == "Async loop result"
 
     @pytest.mark.anyio
-    async def test_execute_in_running_event_loop_reuses_persistent_isolated_loop(self, classes, base_config, mock_agent, msg):
+    async def test_execute_in_running_event_loop_reuses_persistent_isolated_loop(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Regression: repeated isolated executions should reuse one long-lived loop."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -1972,7 +2249,9 @@ class TestThreadSafety:
             assert result.status == SubagentStatus.COMPLETED
             assert "Result" in result.result
 
-    def test_terminal_status_is_published_after_payload_fields(self, executor_module, monkeypatch):
+    def test_terminal_status_is_published_after_payload_fields(
+        self, executor_module, monkeypatch
+    ):
         """Readers must not observe terminal status before terminal payload is complete."""
         SubagentResult = executor_module.SubagentResult
         SubagentStatus = executor_module.SubagentStatus
@@ -2019,7 +2298,9 @@ class TestThreadSafety:
         writer = threading.Thread(target=set_terminal)
         writer.start()
 
-        assert now_entered.wait(timeout=3), "try_set_terminal did not reach completed_at assignment"
+        assert now_entered.wait(timeout=3), (
+            "try_set_terminal did not reach completed_at assignment"
+        )
         assert result.completed_at is None
         assert result.status == SubagentStatus.RUNNING
         assert result.token_usage_records == token_usage_records
@@ -2155,7 +2436,9 @@ class TestCleanupBackgroundTask:
         # Should not raise
         executor_module.cleanup_background_task("nonexistent-task")
 
-    def test_cleanup_removes_task_with_completed_at_even_if_running(self, executor_module, classes):
+    def test_cleanup_removes_task_with_completed_at_even_if_running(
+        self, executor_module, classes
+    ):
         """Test that cleanup removes task if completed_at is set, even if status is RUNNING.
 
         This is a safety net: if completed_at is set, the task is considered done
@@ -2195,7 +2478,9 @@ class TestCooperativeCancellation:
         return _patch_default_get_app_config(importlib.reload(executor))
 
     @pytest.mark.anyio
-    async def test_aexecute_cancelled_before_streaming(self, classes, base_config, mock_agent, msg):
+    async def test_aexecute_cancelled_before_streaming(
+        self, classes, base_config, mock_agent, msg
+    ):
         """Test that _aexecute returns CANCELLED when cancel_event is set before streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentResult = classes["SubagentResult"]
@@ -2247,7 +2532,9 @@ class TestCooperativeCancellation:
             yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
             # Simulate cancellation during streaming
             cancel_event.set()
-            yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+            yield {
+                "messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]
+            }
 
         mock_agent = MagicMock()
         mock_agent.astream = mock_astream
@@ -2297,7 +2584,9 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
-    def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
+    def test_execute_async_runs_without_calling_execute(
+        self, executor_module, classes, base_config
+    ):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
         import concurrent.futures
 
@@ -2332,9 +2621,17 @@ class TestCooperativeCancellation:
         )
 
         with (
-            patch.object(executor_module._scheduler_pool, "submit", side_effect=run_inline),
+            patch.object(
+                executor_module._scheduler_pool, "submit", side_effect=run_inline
+            ),
             patch.object(executor, "_aexecute", side_effect=fake_aexecute),
-            patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
+            patch.object(
+                executor,
+                "execute",
+                side_effect=AssertionError(
+                    "execute() should not be called by execute_async"
+                ),
+            ),
         ):
             task_id = executor.execute_async("Task")
 
@@ -2344,7 +2641,9 @@ class TestCooperativeCancellation:
         assert result.result == "done: Task"
         assert result.error is None
 
-    def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
+    def test_execute_async_propagates_user_context_to_isolated_loop(
+        self, executor_module, classes, base_config
+    ):
         """Regression: background subagent execution must keep request user context."""
         import concurrent.futures
 
@@ -2377,7 +2676,13 @@ class TestCooperativeCancellation:
             with (
                 patch.object(executor_module, "_scheduler_pool", scheduler),
                 patch.object(executor, "_aexecute", side_effect=fake_aexecute),
-                patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
+                patch.object(
+                    executor,
+                    "execute",
+                    side_effect=AssertionError(
+                        "execute() should not be called by execute_async"
+                    ),
+                ),
             ):
                 task_id = executor.execute_async("Task")
                 executor_module._scheduler_pool.shutdown(wait=True)
@@ -2391,7 +2696,9 @@ class TestCooperativeCancellation:
         assert result.result == "alice"
         assert result.error is None
 
-    def test_execute_async_drops_parent_callbacks_at_isolated_loop_boundary(self, executor_module, classes, base_config):
+    def test_execute_async_drops_parent_callbacks_at_isolated_loop_boundary(
+        self, executor_module, classes, base_config
+    ):
         """Parent graph callbacks are loop-bound and must not enter the child loop."""
         import concurrent.futures
 
@@ -2450,7 +2757,9 @@ class TestCooperativeCancellation:
             "checkpoint_ns": "parent:task",
         }
 
-    def test_isolated_context_filters_callback_manager_without_mutating_parent(self, executor_module):
+    def test_isolated_context_filters_callback_manager_without_mutating_parent(
+        self, executor_module
+    ):
         from langchain_core.callbacks.manager import AsyncCallbackManager
         from langchain_core.runnables.config import var_child_runnable_config
 
@@ -2473,7 +2782,9 @@ class TestCooperativeCancellation:
         assert manager.handlers == [loop_bound, stream_handler]
         assert manager.inheritable_handlers == [loop_bound, stream_handler]
 
-    def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
+    def test_timeout_does_not_overwrite_cancelled(
+        self, executor_module, classes, base_config, msg
+    ):
         """Test that the real timeout handler does not overwrite CANCELLED status.
 
         This exercises the actual execute_async → run_task → FuturesTimeoutError
@@ -2521,7 +2832,10 @@ class TestCooperativeCancellation:
 
             return original_scheduler_submit(wrapper)
 
-        with patch.object(executor, "_aexecute", side_effect=blocking_aexecute), patch.object(executor_module._scheduler_pool, "submit", tracked_submit):
+        with (
+            patch.object(executor, "_aexecute", side_effect=blocking_aexecute),
+            patch.object(executor_module._scheduler_pool, "submit", tracked_submit),
+        ):
             task_id = executor.execute_async("Task")
 
             # Wait until _aexecute() is entered on the persistent loop.
@@ -2530,7 +2844,9 @@ class TestCooperativeCancellation:
             # Set CANCELLED on the result before the timeout handler runs.
             # The 50ms timeout will fire while execute() is blocked.
             with executor_module._background_tasks_lock:
-                executor_module._background_tasks[task_id].status = SubagentStatus.CANCELLED
+                executor_module._background_tasks[
+                    task_id
+                ].status = SubagentStatus.CANCELLED
                 executor_module._background_tasks[task_id].error = "Cancelled by user"
                 executor_module._background_tasks[task_id].completed_at = datetime.now()
 
@@ -2546,7 +2862,9 @@ class TestCooperativeCancellation:
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
 
-    def test_late_completion_after_timeout_does_not_overwrite_timed_out(self, executor_module, classes, msg):
+    def test_late_completion_after_timeout_does_not_overwrite_timed_out(
+        self, executor_module, classes, msg
+    ):
         """Late completion from the execution worker must not overwrite TIMED_OUT."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
@@ -2564,7 +2882,9 @@ class TestCooperativeCancellation:
         execution_done = threading.Event()
 
         async def mock_astream(*args, **kwargs):
-            yield {"messages": [msg.human("Task"), msg.ai("late completion", "msg-late")]}
+            yield {
+                "messages": [msg.human("Task"), msg.ai("late completion", "msg-late")]
+            }
             first_chunk_seen.set()
             deadline = asyncio.get_running_loop().time() + 5
             while not finish_stream.is_set():
@@ -2589,12 +2909,19 @@ class TestCooperativeCancellation:
             finally:
                 execution_done.set()
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent), patch.object(executor, "_aexecute", tracked_aexecute):
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            patch.object(executor, "_aexecute", tracked_aexecute),
+        ):
             task_id = executor.execute_async("Task")
-            assert first_chunk_seen.wait(timeout=3), "stream did not yield initial chunk"
+            assert first_chunk_seen.wait(timeout=3), (
+                "stream did not yield initial chunk"
+            )
 
             result = executor_module._background_tasks[task_id]
-            assert result.cancel_event.wait(timeout=3), "timeout handler did not request cancellation"
+            assert result.cancel_event.wait(timeout=3), (
+                "timeout handler did not request cancellation"
+            )
             assert result.status.value == SubagentStatus.TIMED_OUT.value
             timed_out_error = result.error
             timed_out_completed_at = result.completed_at
@@ -2704,7 +3031,9 @@ class TestSubagentCheckpointLineage:
             return ({"messages": [classes["HumanMessage"](content=task)]}, [], None)
 
         monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: fake_agent)
+        monkeypatch.setattr(
+            executor, "_create_agent", lambda *args, **kwargs: fake_agent
+        )
 
         await executor._aexecute("do something")
 
@@ -2716,7 +3045,9 @@ class TestSubagentCheckpointLineage:
             "checkpoint_id",
             "checkpoint_map",
         }
-        assert checkpoint_coordinates.isdisjoint(configurable), f"subagent invocation must inherit checkpoint coordinates from the parent context, got {configurable!r}"
+        assert checkpoint_coordinates.isdisjoint(configurable), (
+            f"subagent invocation must inherit checkpoint coordinates from the parent context, got {configurable!r}"
+        )
         assert fake_agent.captured_context is not None
         assert fake_agent.captured_context["thread_id"] == "parent-thread-1"
 
@@ -2806,7 +3137,9 @@ class TestSubagentCheckpointLineage:
             return ({"messages": [classes["HumanMessage"](content=task)]}, [], None)
 
         monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child_graph)
+        monkeypatch.setattr(
+            executor, "_create_agent", lambda *args, **kwargs: child_graph
+        )
 
         async def delegate(_state):
             task_id = executor.execute_async("run the child graph")
@@ -2873,13 +3206,26 @@ class TestSubagentTracingWiring:
         """
         from deerflow.config.tracing_config import reset_tracing_config
 
-        for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL"):
+        for name in (
+            "LANGFUSE_TRACING",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_BASE_URL",
+        ):
             monkeypatch.delenv(name, raising=False)
         reset_tracing_config()
         yield
         reset_tracing_config()
 
-    def _make_executor(self, classes, *, user_id=None, name="general-purpose", parent_model="test-model", deerflow_trace_id=None):
+    def _make_executor(
+        self,
+        classes,
+        *,
+        user_id=None,
+        name="general-purpose",
+        parent_model="test-model",
+        deerflow_trace_id=None,
+    ):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentConfig = classes["SubagentConfig"]
         config = SubagentConfig(
@@ -2912,21 +3258,29 @@ class TestSubagentTracingWiring:
         SubagentStatus = classes["SubagentStatus"]
 
         sentinel_handler = object()
-        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [sentinel_handler])
+        monkeypatch.setattr(
+            executor_module, "build_tracing_callbacks", lambda: [sentinel_handler]
+        )
 
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         result = await executor._aexecute("do something")
 
         assert fake_agent.captured_config is not None
         callbacks = fake_agent.captured_config.get("callbacks") or []
-        assert sentinel_handler in callbacks, "tracing handler must reach run_config['callbacks']"
+        assert sentinel_handler in callbacks, (
+            "tracing handler must reach run_config['callbacks']"
+        )
         # SubagentTokenCollector must survive the append (graph-root tracing
         # cannot displace the token-accounting callback).
-        assert len(callbacks) >= 2, "existing callbacks must be preserved when tracing is injected"
+        assert len(callbacks) >= 2, (
+            "existing callbacks must be preserved when tracing is injected"
+        )
         assert result.status.value == SubagentStatus.COMPLETED.value
 
     @pytest.mark.anyio
@@ -2952,25 +3306,42 @@ class TestSubagentTracingWiring:
             pass
 
         sentinel = _Sentinel()
-        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [sentinel])
+        monkeypatch.setattr(
+            executor_module, "build_tracing_callbacks", lambda: [sentinel]
+        )
 
-        executor = self._make_executor(classes, user_id="alice", name="general_purpose", deerflow_trace_id="gateway-trace-sub")
+        executor = self._make_executor(
+            classes,
+            user_id="alice",
+            name="general_purpose",
+            deerflow_trace_id="gateway-trace-sub",
+        )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
 
         metadata = (fake_agent.captured_config or {}).get("metadata") or {}
-        assert metadata.get("langfuse_session_id") == "thread-trace-1", "subagent trace must inherit parent thread_id as session_id"
-        assert metadata.get("langfuse_user_id") == "alice", "subagent trace must carry the user_id captured at task_tool layer"
+        assert metadata.get("langfuse_session_id") == "thread-trace-1", (
+            "subagent trace must inherit parent thread_id as session_id"
+        )
+        assert metadata.get("langfuse_user_id") == "alice", (
+            "subagent trace must carry the user_id captured at task_tool layer"
+        )
         # Underscores are normalized to hyphens so the trace name matches the
         # lead-agent naming shape.
         assert metadata.get("langfuse_trace_name") == "subagent:general-purpose"
         assert metadata.get("deerflow_trace_id") == "gateway-trace-sub"
-        assert fake_agent.captured_context.get("deerflow_trace_id") == "gateway-trace-sub"
+        assert (
+            fake_agent.captured_context.get("deerflow_trace_id") == "gateway-trace-sub"
+        )
         tags = metadata.get("langfuse_tags") or []
-        assert any(t.startswith("model:") for t in tags), "model tag must be emitted for cost attribution"
+        assert any(t.startswith("model:") for t in tags), (
+            "model tag must be emitted for cost attribution"
+        )
 
     @pytest.mark.anyio
     async def test_aexecute_skips_langfuse_metadata_when_disabled(
@@ -2987,14 +3358,23 @@ class TestSubagentTracingWiring:
 
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
 
         metadata = (fake_agent.captured_config or {}).get("metadata") or {}
-        for key in ("langfuse_session_id", "langfuse_user_id", "langfuse_trace_name", "langfuse_tags"):
-            assert key not in metadata, f"{key} must be absent when Langfuse is disabled"
+        for key in (
+            "langfuse_session_id",
+            "langfuse_user_id",
+            "langfuse_trace_name",
+            "langfuse_tags",
+        ):
+            assert key not in metadata, (
+                f"{key} must be absent when Langfuse is disabled"
+            )
 
     @pytest.mark.anyio
     async def test_user_id_defaults_when_not_supplied(
@@ -3013,11 +3393,15 @@ class TestSubagentTracingWiring:
         from deerflow.config.tracing_config import reset_tracing_config
 
         reset_tracing_config()
-        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+        monkeypatch.setattr(
+            executor_module, "build_tracing_callbacks", lambda: [object()]
+        )
 
         executor = self._make_executor(classes, user_id=None)
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3042,7 +3426,9 @@ class TestSubagentTracingWiring:
         from deerflow.config.tracing_config import reset_tracing_config
 
         reset_tracing_config()
-        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+        monkeypatch.setattr(
+            executor_module, "build_tracing_callbacks", lambda: [object()]
+        )
 
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentConfig = classes["SubagentConfig"]
@@ -3060,7 +3446,9 @@ class TestSubagentTracingWiring:
             trace_id="trace-2",
         )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3085,11 +3473,15 @@ class TestSubagentTracingWiring:
         from deerflow.config.tracing_config import reset_tracing_config
 
         reset_tracing_config()
-        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [object()])
+        monkeypatch.setattr(
+            executor_module, "build_tracing_callbacks", lambda: [object()]
+        )
 
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3173,7 +3565,9 @@ class TestSubagentGuardrailAttribution:
             run_id="run-42",
         )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3215,7 +3609,9 @@ class TestSubagentGuardrailAttribution:
             channel_user_id="ou_group_sender_1",
         )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3237,7 +3633,9 @@ class TestSubagentGuardrailAttribution:
         """
         executor = self._make_executor(classes)
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3276,7 +3674,9 @@ class TestSubagentGuardrailAttribution:
             is_internal=True,
         )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3307,7 +3707,9 @@ class TestSubagentGuardrailAttribution:
             is_internal=False,
         )
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")
@@ -3342,7 +3744,9 @@ class TestSubagentGuardrailAttribution:
         source_attributes["dept"] = "changed-before-run"
         assert executor.authz_attributes == {"dept": "eng"}
         fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(
+            executor, "_build_initial_state", self._noop_build_initial_state
+        )
         monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
 
         await executor._aexecute("do something")

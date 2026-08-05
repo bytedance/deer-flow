@@ -1,7 +1,9 @@
 """Tests for Session thread resolution (id-or-title) and lifecycle."""
 
+from unittest.mock import patch, sentinel
+
 from deerflow.tui.cli import LaunchPlan
-from deerflow.tui.session import Session
+from deerflow.tui.session import Session, open_session
 
 
 class _Client:
@@ -53,7 +55,25 @@ def test_close_stops_the_background_loop():
     from deerflow.tui.persistence import ThreadMetaWriter, _LoopThread
 
     loop = _LoopThread()
-    session = Session(client=_Client(THREADS), writer=ThreadMetaWriter(loop, None), _loop=loop)
+    session = Session(
+        client=_Client(THREADS), writer=ThreadMetaWriter(loop, None), _loop=loop
+    )
     session.close()
     assert session._loop is None
     session.close()  # idempotent
+
+
+def test_open_session_enables_subagent_delegation():
+    with (
+        patch("deerflow.client.DeerFlowClient") as client_cls,
+        patch(
+            "deerflow.runtime.checkpointer.provider.get_checkpointer",
+            return_value=sentinel.checkpointer,
+        ),
+    ):
+        session = open_session(persistence=False)
+
+    client_cls.assert_called_once_with(
+        checkpointer=sentinel.checkpointer, subagent_enabled=True
+    )
+    assert session.client is client_cls.return_value

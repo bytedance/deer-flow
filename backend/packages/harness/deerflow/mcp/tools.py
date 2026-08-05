@@ -14,7 +14,10 @@ from urllib.parse import unquote, urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    resolve_effective_mcp_routing,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -52,7 +55,9 @@ _MCP_TMP_SUBDIR = ".mcp/tmp"
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
 # user-data tree, so an over-eager match is harmless (left untouched).
-_LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+")
+_LOCAL_PATH_IN_TEXT_RE = re.compile(
+    r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+"
+)
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -123,7 +128,9 @@ def _local_uri_to_virtual_path(
         return None
 
     try:
-        user_data_root = get_paths().sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
+        user_data_root = (
+            get_paths().sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
+        )
     except OSError:
         return None
 
@@ -166,7 +173,9 @@ def _changed_workspace_files(root: Path, before: _FILE_SNAPSHOT) -> list[Path]:
     return [path for path, signature in after.items() if before.get(path) != signature]
 
 
-def _prepare_stdio_workspace(paths: Paths, *, thread_id: str, user_id: str) -> tuple[Path, Path, _FILE_SNAPSHOT]:
+def _prepare_stdio_workspace(
+    paths: Paths, *, thread_id: str, user_id: str
+) -> tuple[Path, Path, _FILE_SNAPSHOT]:
     """Prepare the thread workspace for a pinned stdio MCP subprocess.
 
     Bundles all the synchronous filesystem work (dir creation, temp-dir prep,
@@ -201,7 +210,9 @@ def _result_has_text_content(call_tool_result: Any) -> bool:
     for item in content:
         if isinstance(item, TextContent):
             return True
-        if isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents):
+        if isinstance(item, EmbeddedResource) and isinstance(
+            item.resource, TextResourceContents
+        ):
             return True
     return False
 
@@ -233,10 +244,15 @@ def _rewrite_unique_bare_filenames(
             continue
         candidates.setdefault(path.name, []).append(virtual_path)
 
-    unique = {name: paths[0] for name, paths in candidates.items() if len(set(paths)) == 1}
+    unique = {
+        name: paths[0] for name, paths in candidates.items() if len(set(paths)) == 1
+    }
     if not unique:
         if candidates:
-            logger.debug("MCP bare filename rewrite skipped: no unique candidate in %s", sorted(candidates))
+            logger.debug(
+                "MCP bare filename rewrite skipped: no unique candidate in %s",
+                sorted(candidates),
+            )
         else:
             logger.debug("MCP bare filename rewrite skipped: no snapshot candidates")
         return text
@@ -276,6 +292,9 @@ def _rewrite_local_paths_in_text(
 
     def _replace(match: re.Match[str]) -> str:
         token = match.group(0)
+        prefix = text[: match.start()].lower()
+        if prefix.endswith(("http:", "https:")):
+            return token
         # A path can end a sentence ("saved as temp/a.png."); strip trailing
         # punctuation and restore it after the (possibly rewritten) path.
         stripped = token.rstrip(_TEXT_PATH_TRAILING_CHARS)
@@ -345,9 +364,19 @@ def _convert_call_tool_result(
     tree are left untouched.
     """
     from langchain_core.messages import ToolMessage
-    from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
+    from langchain_core.messages.content import (
+        create_file_block,
+        create_image_block,
+        create_text_block,
+    )
     from langchain_core.tools import ToolException
-    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+    from mcp.types import (
+        EmbeddedResource,
+        ImageContent,
+        ResourceLink,
+        TextContent,
+        TextResourceContents,
+    )
 
     # Pass ToolMessage through directly (interceptor short-circuit).
     if isinstance(call_tool_result, ToolMessage):
@@ -366,7 +395,9 @@ def _convert_call_tool_result(
     def _resolve_link_url(uri: str) -> str:
         if thread_id is None or user_id is None:
             return uri
-        rewritten = _local_uri_to_virtual_path(uri, thread_id=thread_id, user_id=user_id, source_base_dir=source_base_dir)
+        rewritten = _local_uri_to_virtual_path(
+            uri, thread_id=thread_id, user_id=user_id, source_base_dir=source_base_dir
+        )
         return rewritten if rewritten is not None else uri
 
     def _resolve_text(text: str) -> str:
@@ -389,7 +420,9 @@ def _convert_call_tool_result(
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
-            lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+            lc_content.append(
+                create_image_block(base64=item.data, mime_type=item.mimeType)
+            )
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
@@ -406,16 +439,24 @@ def _convert_call_tool_result(
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
                 if mime and mime.startswith("image/"):
-                    lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
+                    lc_content.append(
+                        create_image_block(base64=res.blob, mime_type=mime)
+                    )
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    lc_content.append(
+                        create_file_block(base64=res.blob, mime_type=mime)
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
             lc_content.append(create_text_block(text=str(item)))
 
     if call_tool_result.isError:
-        error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
+        error_parts = [
+            item["text"]
+            for item in lc_content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
         raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
 
     artifact = None
@@ -474,7 +515,9 @@ def _make_session_pool_tool(
             # Bundle the synchronous filesystem prep (dir creation, temp-dir
             # setup, pre-call snapshot) and run it off the event loop — the
             # snapshot walks the whole workspace and would otherwise block.
-            source_base_dir, tmp_dir, before_files = await asyncio.to_thread(_prepare_stdio_workspace, paths, thread_id=thread_id, user_id=user_id)
+            source_base_dir, tmp_dir, before_files = await asyncio.to_thread(
+                _prepare_stdio_workspace, paths, thread_id=thread_id, user_id=user_id
+            )
             # Stdio MCP servers resolve relative output links against their
             # process cwd. Keep that cwd inside the thread's mounted user-data
             # tree so files produced by tools like Playwright land where the
@@ -512,7 +555,10 @@ def _make_session_pool_tool(
                     if isinstance(request.headers, Mapping):
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
-                        logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
+                        logger.warning(
+                            "Ignoring MCP interceptor headers with unsupported type: %s",
+                            type(request.headers).__name__,
+                        )
                 return await session.call_tool(
                     request.name,
                     request.args,
@@ -523,7 +569,9 @@ def _make_session_pool_tool(
             for interceptor in reversed(tool_interceptors):
                 outer = handler
 
-                async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
+                async def wrapped(
+                    req: Any, _i: Any = interceptor, _h: Any = outer
+                ) -> Any:
                     return await _i(req, _h)
 
                 handler = wrapped
@@ -548,8 +596,14 @@ def _make_session_pool_tool(
         # inside _convert_call_tool_result touch the filesystem, so run them off
         # the event loop.
         changed_files: list[Path] | None = None
-        if is_stdio and before_files is not None and _result_has_text_content(call_tool_result):
-            changed_files = await asyncio.to_thread(_changed_workspace_files, source_base_dir, before_files)
+        if (
+            is_stdio
+            and before_files is not None
+            and _result_has_text_content(call_tool_result)
+        ):
+            changed_files = await asyncio.to_thread(
+                _changed_workspace_files, source_base_dir, before_files
+            )
         return await asyncio.to_thread(
             _convert_call_tool_result,
             call_tool_result,
@@ -583,7 +637,9 @@ async def get_mcp_tools() -> list[BaseTool]:
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
     except ImportError:
-        logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
+        logger.warning(
+            "langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters"
+        )
         return []
 
     # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
@@ -618,12 +674,16 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Load custom interceptors declared in extensions_config.json
         # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
-        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
+        raw_interceptor_paths = (extensions_config.model_extra or {}).get(
+            "mcpInterceptors"
+        )
         if isinstance(raw_interceptor_paths, str):
             raw_interceptor_paths = [raw_interceptor_paths]
         elif not isinstance(raw_interceptor_paths, list):
             if raw_interceptor_paths is not None:
-                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
+                logger.warning(
+                    f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping"
+                )
             raw_interceptor_paths = []
         for interceptor_path in raw_interceptor_paths:
             try:
@@ -633,7 +693,9 @@ async def get_mcp_tools() -> list[BaseTool]:
                     tool_interceptors.append(interceptor)
                     logger.info(f"Loaded MCP interceptor: {interceptor_path}")
                 elif interceptor is not None:
-                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
+                    logger.warning(
+                        f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping"
+                    )
             except Exception as e:
                 logger.warning(
                     f"Failed to load MCP interceptor {interceptor_path}: {e}",
@@ -658,7 +720,9 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Get tools from each server independently so one broken MCP server does
         # not prevent healthy servers from contributing their tools.
-        tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
+        tools_by_server = await asyncio.gather(
+            *(load_server_tools(name) for name in servers_config)
+        )
         tools = [tool for server_tools in tools_by_server for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
@@ -674,7 +738,9 @@ async def get_mcp_tools() -> list[BaseTool]:
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact; the prefix guard preserves the previous
         # behavior of leaving unprefixed tools unwrapped.
-        for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+        for source_name, server_tools in zip(
+            servers_config.keys(), tools_by_server, strict=True
+        ):
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             for tool in server_tools:
@@ -688,15 +754,31 @@ async def get_mcp_tools() -> list[BaseTool]:
                     continue
                 tag_mcp_tool(tool)
                 prefix = f"{source_name}_"
-                original_name = tool.name[len(prefix) :] if tool.name.startswith(prefix) else tool.name
+                original_name = (
+                    tool.name[len(prefix) :]
+                    if tool.name.startswith(prefix)
+                    else tool.name
+                )
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)
                 if tool.name.startswith(f"{source_name}_") and transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
-                    wrapped_tools.append(_make_session_pool_tool(tool, source_name, servers_config[source_name], tool_interceptors, tool_call_timeout=_timeout))
+                    wrapped_tools.append(
+                        _make_session_pool_tool(
+                            tool,
+                            source_name,
+                            servers_config[source_name],
+                            tool_interceptors,
+                            tool_call_timeout=_timeout,
+                        )
+                    )
                 else:
-                    if transport != "stdio" and server_cfg and server_cfg.tool_call_timeout is not None:
+                    if (
+                        transport != "stdio"
+                        and server_cfg
+                        and server_cfg.tool_call_timeout is not None
+                    ):
                         logger.warning(
                             "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
                             source_name,
@@ -706,7 +788,10 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:
-            if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
+            if (
+                getattr(tool, "func", None) is None
+                and getattr(tool, "coroutine", None) is not None
+            ):
                 tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
         return wrapped_tools

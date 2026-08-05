@@ -47,7 +47,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
+_previous_shutdown_isolated_subagent_loop = globals().get(
+    "_shutdown_isolated_subagent_loop"
+)
 if callable(_previous_shutdown_isolated_subagent_loop):
     atexit.unregister(_previous_shutdown_isolated_subagent_loop)
     _previous_shutdown_isolated_subagent_loop()
@@ -106,14 +108,18 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
-    _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _state_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
 
-    def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
+    def update_token_usage_records(
+        self, records: list[dict[str, int | str | None]]
+    ) -> None:
         """Publish the latest cumulative collector snapshot while still running."""
         with self._state_lock:
             if not self.status.is_terminal:
@@ -178,7 +184,9 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
         return "No response generated"
 
     messages = final_state.get("messages", [])
-    logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
+    logger.info(
+        f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}"
+    )
 
     last_ai_message = None
     for msg in reversed(messages):
@@ -192,8 +200,14 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
 
     if messages:
         last_message = messages[-1]
-        logger.warning(f"[trace={trace_id}] Subagent {name} no AIMessage found, using last message: {type(last_message)}")
-        raw_content = last_message.content if hasattr(last_message, "content") else str(last_message)
+        logger.warning(
+            f"[trace={trace_id}] Subagent {name} no AIMessage found, using last message: {type(last_message)}"
+        )
+        raw_content = (
+            last_message.content
+            if hasattr(last_message, "content")
+            else str(last_message)
+        )
         text = message_content_to_text(raw_content)
         return text if text else "No response generated"
 
@@ -257,7 +271,9 @@ _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
 
 # Thread pool for background task scheduling and orchestration
-_scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
+_scheduler_pool = ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="subagent-scheduler-"
+)
 
 # Persistent event loop for isolated subagent executions triggered from an
 # already-running parent loop. Reusing one long-lived loop avoids creating a
@@ -283,7 +299,10 @@ def _run_isolated_subagent_loop(
 
 def _shutdown_isolated_subagent_loop() -> None:
     """Stop and close the persistent isolated subagent loop."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global \
+        _isolated_subagent_loop, \
+        _isolated_subagent_loop_thread, \
+        _isolated_subagent_loop_started
 
     with _isolated_subagent_loop_lock:
         loop = _isolated_subagent_loop
@@ -298,7 +317,11 @@ def _shutdown_isolated_subagent_loop() -> None:
     if loop.is_running():
         loop.call_soon_threadsafe(loop.stop)
 
-    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+    if (
+        thread is not None
+        and thread.is_alive()
+        and thread is not threading.current_thread()
+    ):
         thread.join(timeout=1)
 
     thread_stopped = thread is None or not thread.is_alive()
@@ -320,10 +343,21 @@ atexit.register(_shutdown_isolated_subagent_loop)
 
 def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     """Return the persistent event loop used by isolated subagent executions."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global \
+        _isolated_subagent_loop, \
+        _isolated_subagent_loop_thread, \
+        _isolated_subagent_loop_started
     with _isolated_subagent_loop_lock:
-        thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
-        loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
+        thread_is_alive = (
+            _isolated_subagent_loop_thread is not None
+            and _isolated_subagent_loop_thread.is_alive()
+        )
+        loop_is_usable = (
+            _isolated_subagent_loop is not None
+            and not _isolated_subagent_loop.is_closed()
+            and _isolated_subagent_loop.is_running()
+            and thread_is_alive
+        )
 
         if not loop_is_usable:
             loop = asyncio.new_event_loop()
@@ -382,10 +416,22 @@ def _copy_isolated_subagent_context() -> Context:
     callbacks = inherited_config.get("callbacks")
     if isinstance(callbacks, BaseCallbackManager):
         isolated_callbacks = callbacks.copy()
-        isolated_callbacks.handlers = [handler for handler in callbacks.handlers if not getattr(handler, "deerflow_loop_bound", False)]
-        isolated_callbacks.inheritable_handlers = [handler for handler in callbacks.inheritable_handlers if not getattr(handler, "deerflow_loop_bound", False)]
+        isolated_callbacks.handlers = [
+            handler
+            for handler in callbacks.handlers
+            if not getattr(handler, "deerflow_loop_bound", False)
+        ]
+        isolated_callbacks.inheritable_handlers = [
+            handler
+            for handler in callbacks.inheritable_handlers
+            if not getattr(handler, "deerflow_loop_bound", False)
+        ]
     elif isinstance(callbacks, (list, tuple)):
-        isolated_callbacks = [handler for handler in callbacks if not getattr(handler, "deerflow_loop_bound", False)]
+        isolated_callbacks = [
+            handler
+            for handler in callbacks
+            if not getattr(handler, "deerflow_loop_bound", False)
+        ]
     elif getattr(callbacks, "deerflow_loop_bound", False):
         isolated_callbacks = None
     else:
@@ -483,8 +529,14 @@ class SubagentExecutor:
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
         # executors without a config file present.
-        if config.model != "inherit" or parent_model is not None or app_config is not None:
-            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        if (
+            config.model != "inherit"
+            or parent_model is not None
+            or app_config is not None
+        ):
+            self.model_name: str | None = resolve_subagent_model_name(
+                config, parent_model, app_config=app_config
+            )
         else:
             self.model_name = None
         self.sandbox_state = sandbox_state
@@ -528,9 +580,16 @@ class SubagentExecutor:
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
 
-        logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
+        logger.info(
+            f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools"
+        )
 
-    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+    def _create_agent(
+        self,
+        tools: list[BaseTool] | None = None,
+        *,
+        deferred_setup: "DeferredToolSetup | None" = None,
+    ):
         """Create the agent instance.
 
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
@@ -539,10 +598,19 @@ class SubagentExecutor:
         """
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
-            self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+            self.model_name = resolve_subagent_model_name(
+                self.config, self.parent_model, app_config=app_config
+            )
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=False,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
-        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+        from deerflow.agents.middlewares.tool_error_handling_middleware import (
+            build_subagent_runtime_middlewares,
+        )
 
         # Reuse shared middleware composition with lead agent. ``agent_name``
         # lets the builder resolve the per-agent token_budget override.
@@ -564,6 +632,10 @@ class SubagentExecutor:
             "available_skills": self._available_skill_names,
             "user_id": self.user_id or DEFAULT_USER_ID,
         }
+        if self.thread_data is not None and (
+            workspace_path := self.thread_data.get("workspace_path")
+        ):
+            middleware_kwargs["workspace_path_override"] = workspace_path
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
@@ -576,7 +648,9 @@ class SubagentExecutor:
         # (``hasattr``) so this file needs no import of the middleware classes;
         # a list (not ``next(...)``) so every guard is checked and a later one
         # is picked up automatically.
-        self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
+        self._stop_reason_middlewares = [
+            m for m in middlewares if hasattr(m, "consume_stop_reason")
+        ]
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -610,13 +684,17 @@ class SubagentExecutor:
     async def _load_skills(self) -> list[Skill]:
         """Load enabled skill metadata based on config.skills."""
         if self.config.skills is not None and len(self.config.skills) == 0:
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading"
+            )
             return []
 
         try:
             from deerflow.skills.storage import get_or_new_user_skill_storage
 
-            storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
+            storage_kwargs = (
+                {"app_config": self.app_config} if self.app_config is not None else {}
+            )
             storage = await asyncio.to_thread(
                 get_or_new_user_skill_storage,
                 self.user_id or DEFAULT_USER_ID,
@@ -624,13 +702,19 @@ class SubagentExecutor:
             )
             # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
             all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk"
+            )
         except Exception:
-            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
+            logger.exception(
+                f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}"
+            )
             raise
 
         if not all_skills:
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found"
+            )
             return []
 
         # Filter by config.skills whitelist
@@ -639,7 +723,9 @@ class SubagentExecutor:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
 
-    async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
+    async def _build_initial_state(
+        self, task: str
+    ) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
 
         Args:
@@ -655,7 +741,11 @@ class SubagentExecutor:
         # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
-        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
+        from deerflow.tools.builtins.tool_search import (
+            assemble_deferred_tools,
+            get_deferred_tools_prompt_section,
+            get_mcp_routing_hints_prompt_section,
+        )
 
         # Skills are discoverable metadata until explicitly slash-activated or
         # loaded through read_file. Their allowed-tools declarations are applied
@@ -665,7 +755,10 @@ class SubagentExecutor:
 
         resolved_app_config = self.app_config or get_app_config()
 
-        from deerflow.skills.describe import build_skill_search_setup, get_skill_index_prompt_section
+        from deerflow.skills.describe import (
+            build_skill_search_setup,
+            get_skill_index_prompt_section,
+        )
 
         skill_setup = build_skill_search_setup(
             skills,
@@ -695,8 +788,12 @@ class SubagentExecutor:
             context=authz_context,
             app_config=resolved_app_config,
         )
-        configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
-        late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
+        configured_tools = [
+            tool for tool in authorized_tools if id(tool) in configured_tool_ids
+        ]
+        late_tools = [
+            tool for tool in authorized_tools if id(tool) not in configured_tool_ids
+        ]
 
         # Assemble deferred tool_search after the subagent's name allow/deny and
         # authorization filters, mirroring the lead path so subagents stop
@@ -740,10 +837,14 @@ class SubagentExecutor:
                 system_parts.append(skills_section)
         # Name the deferred MCP tools in the prompt; their schemas stay withheld
         # until tool_search promotes them. Empty set -> "" -> appends nothing.
-        deferred_section = get_deferred_tools_prompt_section(deferred_names=deferred_setup.deferred_names)
+        deferred_section = get_deferred_tools_prompt_section(
+            deferred_names=deferred_setup.deferred_names
+        )
         if deferred_section:
             system_parts.append(deferred_section)
-        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
+        mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(
+            authorized_tools, deferred_names=deferred_setup.deferred_names
+        )
         if mcp_routing_hints_section:
             system_parts.append(mcp_routing_hints_section)
 
@@ -766,7 +867,9 @@ class SubagentExecutor:
 
         return state, final_tools, deferred_setup
 
-    async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    async def _aexecute(
+        self, task: str, result_holder: SubagentResult | None = None
+    ) -> SubagentResult:
         """Execute a task asynchronously.
 
         Args:
@@ -797,7 +900,9 @@ class SubagentExecutor:
         # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
         # rescanning the append-only ``ai_messages`` list (O(n) per chunk -> O(n^2)
         # over a run, which reaches max_turns=150 for deep-research subagents).
-        seen_message_ids: set[str] = {mid for msg in ai_messages if (mid := msg.get("id"))}
+        seen_message_ids: set[str] = {
+            mid for msg in ai_messages if (mid := msg.get("id"))
+        }
         # Cursor into the append-only message history so each ``values``-mode
         # chunk only re-scans the newly-appended tail (see capture_new_step_messages).
         processed_message_count = 0
@@ -848,7 +953,8 @@ class SubagentExecutor:
                 user_id=self.user_id,
                 assistant_id=assistant_id,
                 model_name=self.model_name,
-                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                environment=os.environ.get("DEER_FLOW_ENV")
+                or os.environ.get("ENVIRONMENT"),
                 deerflow_trace_id=self.deerflow_trace_id,
             )
 
@@ -876,7 +982,9 @@ class SubagentExecutor:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
 
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}"
+            )
 
             # Use stream instead of invoke to get real-time updates
             # This allows us to collect AI messages as they are generated
@@ -884,7 +992,9 @@ class SubagentExecutor:
 
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
-                logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
+                logger.info(
+                    f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming"
+                )
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -892,13 +1002,17 @@ class SubagentExecutor:
                 )
                 return result
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+            async for chunk in agent.astream(
+                state, config=run_config, context=context, stream_mode="values"
+            ):  # type: ignore[arg-type]
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,
                 # so long-running tool calls within a single iteration will not be
                 # interrupted until the next chunk is yielded.
                 if result.cancel_event.is_set():
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                    logger.info(
+                        f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent"
+                    )
                     result.try_set_terminal(
                         SubagentStatus.CANCELLED,
                         error="Cancelled by user",
@@ -916,11 +1030,17 @@ class SubagentExecutor:
                 # last output (#3779). Dedup/serialization live in capture_step_message.
                 messages = chunk.get("messages", [])
                 previous_count = len(ai_messages)
-                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                processed_message_count = capture_new_step_messages(
+                    messages, ai_messages, seen_message_ids, processed_message_count
+                )
                 if len(ai_messages) > previous_count:
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+                    logger.info(
+                        f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}"
+                    )
 
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution"
+            )
             token_usage_records = collector.snapshot_records()
             llm_error = _extract_llm_error_fallback(final_state)
             if llm_error is not None:
@@ -930,7 +1050,9 @@ class SubagentExecutor:
                     token_usage_records=token_usage_records,
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state, trace_id=self.trace_id, name=self.config.name
+                )
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that
@@ -965,7 +1087,9 @@ class SubagentExecutor:
             # lookup as the normal-completion path above) keeps the two paths
             # consistent and pops the reason so it is not orphaned in the dict.
             max_turns = self.config.max_turns
-            logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result")
+            logger.warning(
+                f"[trace={self.trace_id}] Subagent {self.config.name} reached max_turns={max_turns} (GraphRecursionError); recovering partial result"
+            )
             records = collector.snapshot_records() if collector is not None else None
             stop_reason = self._consume_guard_stop_reason() or "turn_capped"
 
@@ -1008,16 +1132,22 @@ class SubagentExecutor:
                     )
 
         except Exception as e:
-            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+            logger.exception(
+                f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed"
+            )
             result.try_set_terminal(
                 SubagentStatus.FAILED,
                 error=str(e),
-                token_usage_records=collector.snapshot_records() if collector is not None else None,
+                token_usage_records=collector.snapshot_records()
+                if collector is not None
+                else None,
             )
 
         return result
 
-    def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    def _execute_in_isolated_loop(
+        self, task: str, result_holder: SubagentResult | None = None
+    ) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
 
         This method is used by the sync ``execute()`` path when the caller is
@@ -1053,7 +1183,9 @@ class SubagentExecutor:
                 )
             raise
 
-    def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    def execute(
+        self, task: str, result_holder: SubagentResult | None = None
+    ) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
 
         This method runs the async execution in a new event loop, allowing
@@ -1078,13 +1210,17 @@ class SubagentExecutor:
                 loop = None
 
             if loop is not None and loop.is_running():
-                logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated loop")
+                logger.debug(
+                    f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated loop"
+                )
                 return self._execute_in_isolated_loop(task, result_holder)
 
             # Standard path: no running event loop, use asyncio.run
             return asyncio.run(self._aexecute(task, result_holder))
         except Exception as e:
-            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
+            logger.exception(
+                f"[trace={self.trace_id}] Subagent {self.config.name} execution failed"
+            )
             # Create a result with error if we don't have one
             if result_holder is not None:
                 result = result_holder
@@ -1118,7 +1254,9 @@ class SubagentExecutor:
             status=SubagentStatus.PENDING,
         )
 
-        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
+        logger.info(
+            f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s"
+        )
 
         with _background_tasks_lock:
             _background_tasks[task_id] = result
@@ -1143,7 +1281,9 @@ class SubagentExecutor:
                     # Wait for execution with timeout
                     execution_future.result(timeout=self.config.timeout_seconds)
                 except FuturesTimeoutError:
-                    logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
+                    logger.error(
+                        f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s"
+                    )
                     # Signal cooperative cancellation and cancel the future
                     result_holder.cancel_event.set()
                     result_holder.try_set_terminal(
@@ -1152,7 +1292,9 @@ class SubagentExecutor:
                     )
                     execution_future.cancel()
             except Exception as e:
-                logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+                logger.exception(
+                    f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed"
+                )
                 with _background_tasks_lock:
                     task_result = _background_tasks[task_id]
                 task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
@@ -1233,5 +1375,7 @@ def cleanup_background_task(task_id: str) -> None:
             logger.debug(
                 "Skipping cleanup for non-terminal background task %s (status=%s)",
                 task_id,
-                result.status.value if hasattr(result.status, "value") else result.status,
+                result.status.value
+                if hasattr(result.status, "value")
+                else result.status,
             )
