@@ -531,13 +531,34 @@ export function mergeMessages(
   );
   const beforeWindow: Message[] = [];
 
+  // Split off what the feed places before the loaded window BEFORE the anchor
+  // walk rather than inside it. A summarized checkpoint can share no identity
+  // at all with the loaded page — compaction keeps only this run's recent tail,
+  // while the page on screen was fetched turns earlier — and the anchor loop
+  // then never runs. That is exactly when a rescued early turn most needs its
+  // seq: user submits, waits without reloading, compaction fires, and the
+  // message is appended to the tail instead (#4666).
+  const liveInWindow: Message[] = [];
+  for (const message of live) {
+    const seq = messageSeq(message);
+    if (
+      seq !== undefined &&
+      canonicalMinSeq !== undefined &&
+      seq < canonicalMinSeq
+    ) {
+      beforeWindow.push(message);
+    } else {
+      liveInWindow.push(message);
+    }
+  }
+
   // A summarized checkpoint is not necessarily a contiguous history suffix:
   // middleware may retain protected prompt/input messages at the front and a
   // recent tail at the back. Treat every shared identity as an ordering anchor,
   // replacing the canonical copy in place. New live messages are woven before
   // the next shared anchor (or after the last one), so a protected early input
   // can never be moved to the tail by global last-copy deduplication.
-  for (const message of live) {
+  for (const message of liveInWindow) {
     const identity = messageIdentity(message);
     const canonicalMessage = identity
       ? canonicalByIdentity.get(identity)
@@ -557,25 +578,10 @@ export function mergeMessages(
     // history page no longer reached back to it (#4666): a collapsed unloaded
     // gap is recoverable by paging, a discarded message is not.
     if (pending.length > 0) {
-      const woven: Message[] = [];
-      for (const pendingMessage of pending) {
-        const seq = messageSeq(pendingMessage);
-        if (
-          seq !== undefined &&
-          canonicalMinSeq !== undefined &&
-          seq < canonicalMinSeq
-        ) {
-          beforeWindow.push(pendingMessage);
-        } else {
-          woven.push(pendingMessage);
-        }
-      }
-      if (woven.length > 0) {
-        beforeAnchor.set(identity, [
-          ...(beforeAnchor.get(identity) ?? []),
-          ...woven,
-        ]);
-      }
+      beforeAnchor.set(identity, [
+        ...(beforeAnchor.get(identity) ?? []),
+        ...pending,
+      ]);
     }
     pending = [];
     lastAnchorIdentity = identity;
@@ -593,7 +599,7 @@ export function mergeMessages(
 
   let canonicalAndLive: Message[];
   if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...live];
+    canonicalAndLive = [...canonical, ...liveInWindow];
   } else {
     canonicalAndLive = [];
     for (const message of canonical) {

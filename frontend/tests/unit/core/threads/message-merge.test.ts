@@ -2205,3 +2205,45 @@ test("buildVisibleHistoryMessages carries each row's seq onto the message", () =
       ?.deerflow_seq,
   ).toBe(7);
 });
+
+test("a checkpoint message earlier than the loaded window is placed by its seq even when the two sides share no anchor (#4666)", () => {
+  // What a user hits by opening an old, already-summarized conversation and
+  // sending a new message. The loaded page is the newest rows from BEFORE that
+  // turn; the compacted checkpoint holds only the rescued first user message
+  // plus steps of the new run, which are not in the feed yet. The two sides
+  // therefore share no identity at all and the anchor walk never runs — so the
+  // rescued turn was appended after the whole window (measured at row 50 of 50
+  // on a reproducing run) even though its seq was known the entire time.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const rescuedFirstTurn = withSeq(
+    { id: "u1__user", type: "human", content: "MARK-FIRST-QUESTION" } as Message,
+    2,
+  );
+  const loadedWindow = [
+    withSeq({ id: "step-172", type: "ai", content: "…step 172" } as Message, 172),
+    withSeq({ id: "step-174", type: "ai", content: "…step 174" } as Message, 174),
+  ];
+  // Steps of the run the user just started: still streaming, so no seq yet, and
+  // no identity in common with the page on screen.
+  const newRunSteps = [
+    { id: "step-new-1", type: "ai", content: "…new step 1" } as Message,
+    { id: "step-new-2", type: "ai", content: "…new step 2" } as Message,
+  ];
+
+  expect(
+    mergeMessages(loadedWindow, [rescuedFirstTurn, ...newRunSteps], []).map(
+      (m) => m.content,
+    ),
+  ).toEqual([
+    "MARK-FIRST-QUESTION",
+    "…step 172",
+    "…step 174",
+    "…new step 1",
+    "…new step 2",
+  ]);
+});
