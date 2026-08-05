@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 
 
@@ -117,6 +118,76 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     cleanup_upload_staging_files.assert_called_once_with()
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
+
+
+async def _run_lifespan_with_memory_manager_resolution(*, enabled: bool, failure: Exception | None) -> MagicMock:
+    """Drive startup with a controlled memory-manager construction result."""
+    from app.gateway.app import lifespan
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=enabled,
+            shutdown_flush_timeout_seconds=5.0,
+        ),
+    )
+    manager = MagicMock()
+    manager.warm.return_value = None
+    manager.shutdown_flush.return_value = True
+    get_manager = MagicMock(side_effect=failure) if failure is not None else MagicMock(return_value=manager)
+    service = MagicMock()
+    service.get_status.return_value = {}
+    start_channel_service = AsyncMock(return_value=service)
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", start_channel_service),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.agents.memory.get_memory_manager", get_manager),
+    ):
+        if failure is not None and enabled:
+            with pytest.raises(RuntimeError, match="Failed to initialize configured memory manager during Gateway startup: invalid memory configuration"):
+                async with lifespan(app):
+                    pass
+        else:
+            async with lifespan(app):
+                pass
+
+    if enabled:
+        get_manager.assert_called_once_with()
+    else:
+        get_manager.assert_not_called()
+    return start_channel_service
+
+
+def test_lifespan_rejects_invalid_enabled_memory_manager_before_serving() -> None:
+    """A backend configuration error must fail startup, not the completed run."""
+    start_channel_service = asyncio.run(
+        _run_lifespan_with_memory_manager_resolution(
+            enabled=True,
+            failure=ValueError("invalid memory configuration"),
+        )
+    )
+
+    start_channel_service.assert_not_awaited()
+
+
+def test_lifespan_does_not_resolve_disabled_memory_manager() -> None:
+    """Disabling memory must also disable backend construction and validation."""
+    start_channel_service = asyncio.run(
+        _run_lifespan_with_memory_manager_resolution(
+            enabled=False,
+            failure=ValueError("disabled backend must not be validated"),
+        )
+    )
+
+    start_channel_service.assert_awaited_once()
 
 
 async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool | Exception) -> MagicMock:
@@ -222,7 +293,7 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
         log_level="INFO",
         memory=SimpleNamespace(
             token_counting="char",
-            enabled=False,
+            enabled=True,
             shutdown_flush_timeout_seconds=5.0,
         ),
     )

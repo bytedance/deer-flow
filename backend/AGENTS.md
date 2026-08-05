@@ -1045,9 +1045,12 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   fields such as `auth_mode`, `account`, old pool settings, or old retrieval and
   failure-policy values. A minimal config containing only shared URL/key fields
   and no `owner_user_id` fails with migration guidance instead of silently
-  defaulting to trusted mode. Persistent manager-construction failures remain
-  retryable, while their full tracebacks are process-rate-limited to one per
-  minute. Neither path implements DeerMem fact CRUD/import/export or imports the
+  defaulting to trusted mode. The Gateway constructs any enabled memory manager
+  before readiness and aborts startup on construction/configuration failure, so
+  recall and capture cannot observe different initialization outcomes during a
+  run. Disabled memory skips backend construction. Runtime resolution paths
+  still rate-limit repeated initialization tracebacks to one per minute.
+  Neither path implements DeerMem fact CRUD/import/export or imports the
   embedded OpenViking runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.

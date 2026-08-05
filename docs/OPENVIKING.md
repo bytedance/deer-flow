@@ -162,10 +162,13 @@ commits explicitly.
 
 ## Failure behavior
 
-- Invalid configuration and missing credentials fail at manager construction.
-- Manager construction is still retried on later model calls so transient
-  failures can recover, but repeated initialization tracebacks are limited to
-  one per minute per process.
+- When memory is enabled, the Gateway resolves the configured manager before
+  reporting readiness. Invalid configuration, missing credentials, and other
+  manager-construction failures therefore abort startup with the original
+  migration guidance instead of disabling recall and failing after a completed
+  agent turn. A disabled memory backend is not constructed or validated.
+- Non-Gateway and runtime re-resolution paths still limit repeated
+  initialization tracebacks to one per minute per process.
 - `startup_policy: fail_fast` makes the backend's startup probe raise for an
   unhealthy or unauthorized connection. The Gateway currently logs failed
   memory warm-up and continues serving; `warn` also returns a degraded result

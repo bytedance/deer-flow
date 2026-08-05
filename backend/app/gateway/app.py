@@ -207,6 +207,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
         raise RuntimeError(error_msg) from e
+
+    # Resolve the selected backend before the Gateway reports readiness. This
+    # is configuration validation, not optional cache warm-up: if construction
+    # fails and startup continues, reads may degrade while the unguarded
+    # after-agent write fails an otherwise completed run. Keep construction off
+    # the event loop, and leave operational probes to the existing best-effort
+    # warm-up path below.
+    memory_manager = None
+    if startup_config.memory.enabled:
+        try:
+            from deerflow.agents.memory import get_memory_manager
+
+            memory_manager = await asyncio.to_thread(get_memory_manager)
+        except Exception as e:
+            error_msg = f"Failed to initialize configured memory manager during Gateway startup: {e}"
+            logger.exception(error_msg)
+            raise RuntimeError(error_msg) from e
+    else:
+        logger.info("Memory is disabled; skipping memory-manager initialization")
+
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
 
@@ -231,14 +251,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # the requested scope when the full warm-up has not completed yet.
     retrieval_warm_task: asyncio.Task[None] | None = None
     try:
-        from deerflow.agents.memory import get_memory_manager
-
-        if startup_config.memory.enabled:
-            manager = await asyncio.to_thread(get_memory_manager)
-            warm_retrieval = getattr(manager, "warm_retrieval", None)
+        if memory_manager is not None:
+            warm_retrieval = getattr(memory_manager, "warm_retrieval", None)
             if callable(warm_retrieval):
                 retrieval_warm_task = asyncio.create_task(
-                    _warm_memory_retrieval(manager),
+                    _warm_memory_retrieval(memory_manager),
                     name="memory-retrieval-warm-up",
                 )
         else:
@@ -255,24 +272,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # issue #3429). A backend with nothing to warm (e.g. noop) returns None from
     # the base default -- log "skipping" instead of the misleading "warmed
     # successfully" so the log reflects what actually happened.
-    try:
-        from deerflow.agents.memory import get_memory_manager
-
-        manager = await asyncio.to_thread(get_memory_manager)
-        warmed = await asyncio.wait_for(
-            asyncio.to_thread(manager.warm),
-            timeout=5,
-        )
-        if warmed is None:
-            logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(manager).__name__)
-        elif warmed:
-            logger.info("tiktoken encoding cache warmed successfully")
-        else:
-            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
-    except TimeoutError:
-        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
-    except Exception:
-        logger.warning("tiktoken warm-up skipped", exc_info=True)
+    if memory_manager is not None:
+        try:
+            warmed = await asyncio.wait_for(
+                asyncio.to_thread(memory_manager.warm),
+                timeout=5,
+            )
+            if warmed is None:
+                logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(memory_manager).__name__)
+            elif warmed:
+                logger.info("tiktoken encoding cache warmed successfully")
+            else:
+                logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
+        except TimeoutError:
+            logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
+        except Exception:
+            logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)

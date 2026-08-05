@@ -1042,7 +1042,9 @@ OpenViking server package is not installed in DeerFlow. Existing trusted-mode
 configurations remain available temporarily through a deprecated compatibility
 path only when they contain an explicit legacy-only setting. Ambiguous configs
 without `owner_user_id` now fail with migration guidance instead of silently
-defaulting to trusted mode. See
+defaulting to trusted mode. The Gateway resolves an enabled memory manager
+before reporting readiness, so invalid backend configuration fails startup
+instead of failing an agent run after its response has completed. See
 [OpenViking memory backend](docs/OPENVIKING.md) for configuration and legacy
 migration guidance.
 
