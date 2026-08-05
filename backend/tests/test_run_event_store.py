@@ -969,3 +969,78 @@ class TestGetMessageSeqs:
             }
         finally:
             await close_engine()
+
+
+class TestStampMessagesWithSeq:
+    """Attach the feed seq to an arbitrary list of checkpoint messages.
+
+    The streaming path stamps `values` frames as they are published, but a
+    client that merely opens a conversation never sees a frame: it reads the
+    checkpoint over REST. Without a seq there, a summarization-rescued early
+    turn has no absolute position and lands wherever the nearest anchor puts
+    it (#4666), which is behind the newest question rather than at the head.
+    """
+
+    @pytest.mark.anyio
+    async def test_stamps_a_persisted_message(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1__user", "content": "MARK-FIRST"},
+        )
+
+        stamped = await stamp_messages_with_seq(store, "t1", [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}])
+
+        assert stamped[0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.anyio
+    async def test_a_message_absent_from_the_feed_is_left_alone(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        messages = [{"type": "ai", "id": "not-persisted", "content": "…"}]
+
+        stamped = await stamp_messages_with_seq(store, "t1", messages)
+
+        assert "deerflow_seq" not in (stamped[0].get("additional_kwargs") or {})
+
+    @pytest.mark.anyio
+    async def test_the_input_list_is_not_mutated(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hi"},
+        )
+        original = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        await stamp_messages_with_seq(store, "t1", original)
+
+        assert original[0].get("additional_kwargs") is None
+
+    @pytest.mark.anyio
+    async def test_a_missing_store_returns_the_messages_unchanged(self):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        messages = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        assert await stamp_messages_with_seq(None, "t1", messages) == messages
+
+    @pytest.mark.anyio
+    async def test_a_failing_store_degrades_instead_of_raising(self, store):
+        """Placement is an enhancement; a broken lookup must not fail the read."""
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        class _Broken:
+            async def get_message_seqs(self, *_args, **_kwargs):
+                raise RuntimeError("feed unavailable")
+
+        messages = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        assert await stamp_messages_with_seq(_Broken(), "t1", messages) == messages

@@ -541,7 +541,23 @@ raising. `worker.py::_MessageSeqStamper` attaches the result as
 subgraph frames are not stamped, and nothing is written back to the checkpoint.
 The stamper is built once per run so goal continuations reuse its cache; only a
 frame introducing unresolved identities costs a query, which in practice is the
-compaction frame alone (measured: 1 lookup across 25 frames). `deerflow_seq` is
+compaction frame alone (measured: 1 lookup across 25 frames).
+
+Streaming is not the only way a client obtains the checkpoint, and it is not even
+the common one: opening a conversation reads it over REST, and a client that never
+joins a live run would otherwise get no placement information at all. `GET
+/threads/{id}/state` and `POST /threads/{id}/history` therefore stamp their
+serialized messages through `runtime/events/message_seq.py::stamp_messages_with_seq`,
+the request-scoped counterpart of the stamper — everything a checkpoint still holds
+is already persisted, so one batched lookup resolves the whole list and there is
+nothing to retry later. Both reads resolve the store through
+`threads.py::_optional_run_event_store` rather than `get_run_event_store`, because
+seq is placement metadata: a deployment without a feed must still be able to read a
+thread. Leaving these two endpoints unstamped is what kept #4666 reproducing after
+the streaming fix — the merge fell back to the nearest shared anchor, which after
+summarization sits deep inside the loaded page, and the rescued first user turn
+rendered behind the newest question (measured: row 320 of 389 on a reproducing
+thread). `deerflow_seq` is
 server-owned and joins `_SERVER_OWNED_MESSAGE_METADATA_KEYS` in
 `services.py::normalize_input`, because a replayed message carrying it back would
 write a thread-scoped seq into the checkpoint that a fork re-seeds and reassigns
