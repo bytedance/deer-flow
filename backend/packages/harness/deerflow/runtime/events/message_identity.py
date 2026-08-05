@@ -18,7 +18,7 @@ Two normalizations matter:
 from collections.abc import Mapping
 from typing import Any
 
-from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
+from deerflow.utils.messages import strip_injected_user_message_id_suffix
 
 __all__ = ["MESSAGE_SEQ_KEY", "message_identity"]
 

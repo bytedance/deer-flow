@@ -9,6 +9,28 @@ from langchain_core.messages import HumanMessage
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 
+#: Suffix ``DynamicContextMiddleware``'s ID-swap gives the real user message; the
+#: reminder SystemMessage takes the original id so ``add_messages`` can replace it
+#: in place.  It lives here rather than beside the middleware because the message
+#: identity rule in ``deerflow.runtime.events.message_identity`` needs it too, and
+#: importing the middleware from there closes a cycle
+#: (middleware -> deerflow.runtime -> worker -> events -> middleware).
+INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+
+def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
+    """Return the id *message_id* had before the reminder ID-swap.
+
+    Replaying a persisted user turn must feed the graph the id the client
+    originally sent: a ``{id}__user`` message is skipped as an injection target,
+    so replaying one into a state that has no reminder yet silently drops the
+    date and memory block for that turn.
+    """
+
+    if isinstance(message_id, str) and message_id.endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
+        return message_id[: -len(INJECTED_USER_MESSAGE_ID_SUFFIX)] or message_id
+    return message_id
+
 
 def message_content_to_text(content: Any) -> str:
     """Extract text from LangChain message content shapes."""
