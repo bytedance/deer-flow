@@ -393,7 +393,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings.
-2. **ToolOutputBudgetMiddleware** - Caps tool output size (per app config) before it re-enters the model context
+2. **ToolOutputBudgetMiddleware** - Caps tool output size (per app config) before it re-enters the model context. Oversized results are externalized to `tool_output.storage_subdir` (default `.tool-results`, shared constant `TOOL_RESULTS_DIRNAME`) under the thread outputs dir with a typed synopsis + `read_file` reference left in context; those files are process feedback, so the workspace-changes scanner excludes that directory and run delivery verification never counts them as produced artifacts
 3. **ToolResultSanitizationMiddleware** - Neutralizes framework/injection tags (e.g. `<system-reminder>`) and boundary markers in *remote-content* tool results (`web_fetch`/`web_search`/`image_search`/`web_capture`) so attacker-controlled fetched pages cannot forge trusted framework context. Mirrors `InputSanitizationMiddleware`'s user-input guardrail for the other untrusted-content entry point; sits inner of `ToolOutputBudgetMiddleware` (neutralizes the raw output, then the budget truncates). Local tool output (bash/read_file) is left untouched. Scope is a name-based allowlist, so MCP remote-content tools registered under other names (e.g. `fetch_url`) are not yet covered — a metadata-tagging follow-up is tracked in the middleware source
 4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
 5. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only); upload existence checks use the same runtime-resolved user bucket as thread-data creation
@@ -587,7 +587,13 @@ captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `asyncio.to_thread` and writes a `workspace_changes` event with category
 `workspace` when changes exist. Uploads are intentionally excluded. Text diffs
 are size-limited; binary, large, and sensitive-looking paths are persisted as
-metadata only.
+metadata only. Internal process-feedback directories never count as changes:
+the scanner's `EXCLUDED_DIR_NAMES` drops `BROWSER_FRAMES_DIRNAME` (transient
+browser screenshots) and `TOOL_RESULTS_DIRNAME` (the tool-output budget
+middleware's default externalization subdir, `constants.py` is the shared
+source of truth for both writers and the scanner), and the worker threads the
+configured `tool_output.storage_subdir` through the snapshot capture as an
+extra excluded dir name so custom storage locations stay excluded too.
 
 **Run delivery receipts**: `RunJournal` records each non-empty artifact update
 once per tool `Command` for the terminal `run.delivery` event. When a command
@@ -607,9 +613,14 @@ terminal run status. A receipt failure is retried on a short bounded schedule
 while the owning worker still knows the real outcome and holds the lease. The
 worker derives delivery requirements from the run's workspace snapshots rather
 than a client request option: every regular file created or modified under
-`/mnt/user-data/outputs` is a candidate produced artifact. At least one candidate
-must be covered by a path attributed by the journal to `present_files`;
-presenting only an unrelated pre-existing path does not satisfy delivery.
+`/mnt/user-data/outputs` is a candidate produced artifact. Internal
+process-feedback files are not candidates: the snapshot capture excludes the
+scanner's `EXCLUDED_DIR_NAMES` (including the default tool-output
+externalization subdir) plus the configured `tool_output.storage_subdir`, so a
+run that only externalized oversized tool outputs does not fail delivery. At
+least one candidate must be covered by a path attributed by the journal to
+`present_files`; presenting only an unrelated pre-existing path does not
+satisfy delivery.
 Receipts for such runs add `produced_paths`, `presented_paths`, `matched_paths`,
 `verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
 matching presentation becomes a run error; a successful presentation is also
@@ -1315,7 +1326,7 @@ Config is env-driven like the others — `MonocleTracingConfig`, built in `get_t
 - `memory` - Memory system (enabled, storage_path, debounce_seconds, shutdown_flush_timeout_seconds, model_name, max_facts, fact_confidence_threshold, injection_enabled, max_injection_tokens, staleness_review_enabled, staleness_age_days, staleness_min_candidates, staleness_max_removals_per_cycle, staleness_protected_categories, staleness_max_lifetime_multiplier, staleness_max_extension_days)
 
 **`extensions_config.json`**:
-- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools.
+- `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely. `tool_call_timeout` bounds individual stdio tool calls.
 - `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority because an active skill's runtime policy still filters model-visible schemas, `tool_search` results, and execution.
 - `skills` - Map of skill name → state (enabled)
 - `middlewares` - Zero-argument `AgentMiddleware` class paths for lead and subagent runtime extension. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
