@@ -1168,10 +1168,11 @@ def test_oidc_callback_access_and_csrf_cookie_stay_session_only():
 def test_initialize_concurrent_requests_create_single_admin() -> None:
     """Two racing /initialize requests must yield exactly one admin.
 
-    The count-then-create sequence is serialized by
-    ``_INITIALIZE_ADMIN_GUARD``. Without it, two concurrent requests could
-    both observe "no admin exists" and create separate admin accounts
-    (TOCTOU) — the email uniqueness constraint only blocks same-email races.
+    End-to-end invariant: whichever mechanism arbitrates — the in-process
+    ``_INITIALIZE_ADMIN_GUARD`` within one worker, or the
+    ``uq_users_admin_role`` partial unique index across workers — exactly
+    one request wins with 201, the other gets 409, and exactly one admin
+    row exists afterwards.
     """
     import asyncio
     from types import SimpleNamespace
@@ -1235,3 +1236,84 @@ def test_admin_role_unique_index_backstops_second_admin() -> None:
             return "rejected"
 
     assert asyncio.run(_scenario()) == "rejected"
+
+
+def test_admin_role_taken_raises_distinct_error() -> None:
+    """A second admin insert must surface as AdminRoleTakenError, not the
+    misleading "Email already registered" (regression caught in review: the
+    partial unique index fires on the OIDC provisioning path too)."""
+    import asyncio
+
+    from app.gateway import deps
+    from app.gateway.auth.repositories.base import AdminRoleTakenError
+
+    async def _scenario() -> str:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="admin-slot@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        try:
+            await provider.create_oauth_user(
+                email="second-admin@example.com",
+                oauth_provider="oidc-test",
+                oauth_id="sub-2",
+                system_role="admin",
+            )
+            return "second-created"
+        except AdminRoleTakenError:
+            return "admin-role-taken"
+        except ValueError:
+            return "email-collision"
+
+    assert asyncio.run(_scenario()) == "admin-role-taken"
+
+
+def test_oidc_provisioning_falls_back_to_regular_user_when_admin_slot_taken(caplog) -> None:
+    """OIDC first sign-in for an email listed in admin_emails must not be
+    locked out with a 409 when the single admin slot is already held — it
+    falls back to a regular user and logs a warning."""
+    import asyncio
+
+    from app.gateway import deps
+    from app.gateway.auth.oidc import OIDCIdentity
+    from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+    from deerflow.config.auth_config import OIDCProviderConfig
+
+    provider_config = OIDCProviderConfig(
+        display_name="test-idp",
+        issuer="https://idp.example.com",
+        client_id="cid",
+        auto_create_users=True,
+        admin_emails=["boss@example.com", "second-boss@example.com"],
+    )
+
+    async def _scenario() -> dict:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="boss@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        return await get_or_provision_oidc_user(
+            provider_id="oidc-test",
+            provider_config=provider_config,
+            identity=OIDCIdentity(
+                provider="oidc-test",
+                subject="sub-boss-2",
+                email="second-boss@example.com",
+                email_verified=True,
+                name=None,
+                claims={},
+            ),
+            local_provider=provider,
+        )
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth.user_provisioning"):
+        result = asyncio.run(_scenario())
+    assert result["created"] is True
+    assert result["user"].system_role == "user"
+    assert any("admin role is already taken" in record.getMessage() for record in caplog.records)
