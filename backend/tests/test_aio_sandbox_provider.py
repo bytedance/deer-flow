@@ -189,11 +189,16 @@ def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config"),
         True,
     )
+    assert container_paths[f"{lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR}/locks"] == (
+        str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks"),
+        False,
+    )
     assert container_paths[lark_cli.LARK_CLI_SANDBOX_DATA_DIR] == (
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"),
         False,
     )
     assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks").stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data").stat().st_mode) == 0o700
     assert container_paths["/mnt/integrations/lark-cli/runtime"] == (
         str(runtime_dir),
@@ -254,12 +259,14 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     assert "/mnt/skills/custom" in container_paths
     assert "/mnt/skills/integrations" in container_paths
     assert lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR in container_paths
+    assert lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR in container_paths
     assert lark_cli.LARK_CLI_SANDBOX_DATA_DIR in container_paths
     assert lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR in container_paths
 
     payload = remote_backend._provisioner_extra_mounts_payload(mounts)
     payload_paths = [str(item["container_path"]) for item in payload]
     assert len(payload_paths) == len(set(payload_paths))
+    assert lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR in payload_paths
 
     provisioner_module.DEER_FLOW_HOST_BASE_DIR = str(home)
     validated = provisioner_module._validated_extra_mounts([provisioner_module.ExtraMount(**item) for item in payload])
@@ -271,6 +278,7 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
         "/mnt/skills/custom",
         "/mnt/skills/integrations",
         lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR,
+        lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR,
         lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
         lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
     }
