@@ -2125,7 +2125,11 @@ test("a compacted checkpoint's protected user message survives a history page wi
     type: "human",
     content: "MARK-FIRST-QUESTION",
   } as Message;
-  const recentStep = { id: "step-40", type: "ai", content: "step 40" } as Message;
+  const recentStep = {
+    id: "step-40",
+    type: "ai",
+    content: "step 40",
+  } as Message;
   const laterUserMessage = {
     id: "u2",
     type: "human",
@@ -2156,7 +2160,11 @@ test("a checkpoint message earlier than the loaded window is placed by its seq (
     }) as Message;
 
   const firstUserMessage = withSeq(
-    { id: "u1__user", type: "human", content: "MARK-FIRST-QUESTION" } as Message,
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
     2,
   );
   const windowStep = withSeq(
@@ -2180,13 +2188,10 @@ test("a checkpoint message earlier than the loaded window is placed by its seq (
   const compactedCheckpoint = [firstUserMessage, anchorStep];
 
   expect(
-    mergeMessages(canonicalWindow, compactedCheckpoint, []).map((m) => m.content),
-  ).toEqual([
-    "MARK-FIRST-QUESTION",
-    "…step 29",
-    "SECOND-QUESTION",
-    "…step 58",
-  ]);
+    mergeMessages(canonicalWindow, compactedCheckpoint, []).map(
+      (m) => m.content,
+    ),
+  ).toEqual(["MARK-FIRST-QUESTION", "…step 29", "SECOND-QUESTION", "…step 58"]);
 });
 
 test("buildVisibleHistoryMessages carries each row's seq onto the message", () => {
@@ -2221,12 +2226,22 @@ test("a checkpoint message earlier than the loaded window is placed by its seq e
     }) as Message;
 
   const rescuedFirstTurn = withSeq(
-    { id: "u1__user", type: "human", content: "MARK-FIRST-QUESTION" } as Message,
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
     2,
   );
   const loadedWindow = [
-    withSeq({ id: "step-172", type: "ai", content: "…step 172" } as Message, 172),
-    withSeq({ id: "step-174", type: "ai", content: "…step 174" } as Message, 174),
+    withSeq(
+      { id: "step-172", type: "ai", content: "…step 172" } as Message,
+      172,
+    ),
+    withSeq(
+      { id: "step-174", type: "ai", content: "…step 174" } as Message,
+      174,
+    ),
   ];
   // Steps of the run the user just started: still streaming, so no seq yet, and
   // no identity in common with the page on screen.
