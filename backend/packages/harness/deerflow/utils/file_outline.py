@@ -124,27 +124,14 @@ def extract_outline(md_path: Path) -> list[dict]:
     return outline
 
 
-def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
-    """Return the document outline and fallback preview for *file_path*.
-
-    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.
-
-    Returns:
-        (outline, preview) where:
-        - outline: list of ``{title, line}`` dicts (plus optional sentinel).
-          Empty when no headings are found or no .md exists.
-        - preview: first few non-empty lines of the .md, used as a content
-          anchor when outline is empty so the agent has some context.
-          Empty when outline is non-empty (no fallback needed).
-    """
-    md_path = file_path.with_suffix(".md")
+def extract_outline_from_markdown(md_path: Path) -> tuple[list[dict], list[str]]:
+    """Return the document outline and fallback preview for an exact Markdown path."""
     if not md_path.is_file():
         return [], []
 
     outline = extract_outline(md_path)
     if outline:
-        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+        logger.debug("Extracted %d outline entries from %s", len(outline), md_path.name)
         return outline, []
 
     # outline is empty — read the first few non-empty lines as a content preview
@@ -160,3 +147,8 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     except Exception:
         logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
     return [], preview
+
+
+def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+    """Return outline data from the legacy same-stem Markdown companion."""
+    return extract_outline_from_markdown(file_path.with_suffix(".md"))

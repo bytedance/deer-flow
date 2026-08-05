@@ -19,7 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.utils.file_outline import extract_outline_for_file, extract_outline_from_markdown
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -160,6 +160,46 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _normalize_markdown_companion(
+        file_metadata: dict,
+        uploads_dir: Path | None,
+        source_filename: str,
+    ) -> tuple[bool, str | None]:
+        """Return explicit-key presence and a safe Markdown companion basename."""
+        if "markdown_file" not in file_metadata:
+            return False, None
+
+        raw = file_metadata.get("markdown_file")
+        if raw is None:
+            return True, None
+
+        reason: str | None = None
+        if not isinstance(raw, str) or not raw:
+            reason = "value must be a non-empty string or null"
+        elif "/" in raw or "\\" in raw or Path(raw).name != raw:
+            reason = "value must be a basename"
+        elif is_upload_staging_file(raw):
+            reason = "staging files are not valid companions"
+        elif Path(raw).suffix.lower() != ".md":
+            reason = "value must have a .md suffix"
+        elif uploads_dir is not None:
+            try:
+                candidate = uploads_dir / raw
+                if candidate.is_symlink() or not candidate.is_file():
+                    reason = "file is missing or not a regular file"
+            except (OSError, ValueError):
+                reason = "file cannot be inspected safely"
+
+        if reason is not None:
+            logger.warning(
+                "Ignoring Markdown companion metadata for upload %s: %s",
+                source_filename,
+                reason,
+            )
+            return True, None
+        return True, raw
+
     def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
@@ -188,14 +228,20 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
-            files.append(
-                {
-                    "filename": filename,
-                    "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                }
+            file_info = {
+                "filename": filename,
+                "size": int(f.get("size") or 0),
+                "path": f"/mnt/user-data/uploads/{filename}",
+                "extension": Path(filename).suffix,
+            }
+            has_explicit_companion, markdown_file = self._normalize_markdown_companion(
+                f,
+                uploads_dir,
+                filename,
             )
+            if has_explicit_companion:
+                file_info["markdown_file"] = markdown_file
+            files.append(file_info)
         return files if files else None
 
     @override
@@ -247,7 +293,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if uploads_dir:
             for file in context_files:
                 phys_path = uploads_dir / file["filename"]
-                outline, preview = extract_outline_for_file(phys_path)
+                if "markdown_file" not in file:
+                    outline, preview = extract_outline_for_file(phys_path)
+                elif file["markdown_file"] is None:
+                    outline, preview = [], []
+                else:
+                    outline, preview = extract_outline_from_markdown(uploads_dir / file["markdown_file"])
                 file["outline"] = outline
                 file["outline_preview"] = preview
 

@@ -9,7 +9,7 @@ Covers:
 
 import re
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -163,6 +163,95 @@ class TestFilesFromKwargs:
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
         assert mw._files_from_kwargs(msg) is None
+
+    def test_preserves_valid_explicit_markdown_companion(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a_1.md").write_text("# PDF OUTLINE", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[
+                {
+                    "filename": "a.pdf",
+                    "size": 3,
+                    "path": "/mnt/user-data/uploads/a.pdf",
+                    "markdown_file": "a_1.md",
+                }
+            ],
+        )
+
+        result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result is not None
+        assert result[0]["markdown_file"] == "a_1.md"
+
+    def test_preserves_explicit_null_markdown_companion(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        msg = _human(
+            "summarize",
+            files=[{"filename": "a.pdf", "size": 3, "markdown_file": None}],
+        )
+
+        result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result is not None
+        assert "markdown_file" in result[0]
+        assert result[0]["markdown_file"] is None
+
+    def test_normalizes_invalid_explicit_markdown_companions_to_null(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+
+        for invalid_value in (
+            "../outside.md",
+            "..\\outside.md",
+            "notes.txt",
+            ".upload-active.part",
+            "missing.md",
+            42,
+        ):
+            msg = _human(
+                "summarize",
+                files=[
+                    {
+                        "filename": "a.pdf",
+                        "size": 3,
+                        "markdown_file": invalid_value,
+                    }
+                ],
+            )
+
+            result = mw._files_from_kwargs(msg, uploads_dir)
+
+            assert result is not None
+            assert "markdown_file" in result[0]
+            assert result[0]["markdown_file"] is None
+
+    def test_rejects_a_symlink_markdown_companion(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a.md").write_text("# linked", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[
+                {
+                    "filename": "a.pdf",
+                    "size": 3,
+                    "markdown_file": "a.md",
+                }
+            ],
+        )
+
+        with patch.object(Path, "is_symlink", return_value=True):
+            result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result is not None
+        assert result[0]["markdown_file"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +731,72 @@ class TestBeforeAgent:
         assert "ITEM 1. BUSINESS" in content
         assert "ITEM 2. RISK" in content
         assert "read_file" in content
+
+    def test_explicit_companion_prevents_same_stem_outline_crosstalk(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a.md").write_text("# WRONG DOCX OUTLINE", encoding="utf-8")
+        (uploads_dir / "a_1.md").write_text("# CORRECT PDF OUTLINE", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[
+                {
+                    "filename": "a.pdf",
+                    "size": 3,
+                    "markdown_file": "a_1.md",
+                }
+            ],
+        )
+
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "CORRECT PDF OUTLINE" in content
+        assert "WRONG DOCX OUTLINE" not in content
+        assert "a_1.md" not in content
+
+    def test_explicit_null_does_not_guess_a_same_stem_companion(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a.md").write_text("# UNRELATED OUTLINE", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[{"filename": "a.pdf", "size": 3, "markdown_file": None}],
+        )
+
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "UNRELATED OUTLINE" not in content
+        assert "Document outline" not in content
+
+    def test_unsafe_explicit_companion_does_not_fallback_or_escape(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a.md").write_text("# UNRELATED SIBLING", encoding="utf-8")
+        (uploads_dir.parent / "outside.md").write_text("# OUTSIDE", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[
+                {
+                    "filename": "a.pdf",
+                    "size": 3,
+                    "markdown_file": "../outside.md",
+                }
+            ],
+        )
+
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "UNRELATED SIBLING" not in content
+        assert "OUTSIDE" not in content
 
     def test_no_outline_when_no_md_file(self, tmp_path):
         """Files without a sibling .md have no outline section."""
