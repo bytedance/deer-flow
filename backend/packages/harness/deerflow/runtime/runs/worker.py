@@ -211,6 +211,7 @@ async def _produced_output_paths(
     *,
     thread_id: str,
     user_id: str | None,
+    storage_subdir: str | None = None,
 ) -> list[str]:
     """Detect regular output files created or modified by this run."""
     if before is None:
@@ -224,7 +225,10 @@ async def _produced_output_paths(
     # Externalized tool outputs are process feedback the model reads back
     # with read_file, not artifacts the run has to present; counting them
     # would fail delivery verification on any run that externalizes one.
-    tool_results_prefix = f"/mnt/user-data/outputs/{ToolOutputConfig().storage_subdir}/"
+    # The subdir comes from app config so this filter cannot drift from the
+    # middleware writer when a deployment customizes it.
+    subdir = storage_subdir if storage_subdir is not None else ToolOutputConfig().storage_subdir
+    tool_results_prefix = f"/mnt/user-data/outputs/{subdir}/"
     return [path for path in changed if not path.startswith(tool_results_prefix)]
 
 
@@ -975,6 +979,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
+                storage_subdir=(ctx.app_config.tool_output.storage_subdir if ctx.app_config is not None else None),
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1081,6 +1086,7 @@ async def run_agent(
                         pre_run_workspace_snapshot,
                         thread_id=thread_id,
                         user_id=workspace_changes_user_id,
+                        storage_subdir=(ctx.app_config.tool_output.storage_subdir if ctx.app_config is not None else None),
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             receipt_persisted = await _persist_delivery_receipt(
