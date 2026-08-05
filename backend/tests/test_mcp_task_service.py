@@ -383,12 +383,13 @@ async def test_run_once_uses_exponential_backoff_and_caps_transient_errors():
         max_poll_backoff_seconds=30,
     )
 
-    await service.run_once(now=datetime.now(UTC))
+    started_at = datetime.now(UTC)
+    await service.run_once(now=started_at)
+    finished_at = datetime.now(UTC)
 
     released = {task_id: update for task_id, update in repo.released}
-    assert released["task-1"]["next_poll_at"] - datetime.now(UTC) <= timedelta(seconds=5)
-    assert released["task-2"]["next_poll_at"] - datetime.now(UTC) <= timedelta(seconds=30)
-    assert released["task-2"]["next_poll_at"] - datetime.now(UTC) >= timedelta(seconds=29)
+    assert started_at + timedelta(seconds=5) <= released["task-1"]["next_poll_at"] <= finished_at + timedelta(seconds=5)
+    assert started_at + timedelta(seconds=30) <= released["task-2"]["next_poll_at"] <= finished_at + timedelta(seconds=30)
 
 
 @pytest.mark.asyncio
