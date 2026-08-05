@@ -44,6 +44,23 @@ class _TurnAwareMemoryManager:
         return "Relevant memory"
 
 
+class _SessionSnapshotMemoryManager:
+    context_refresh_policy = "session"
+
+    def get_context(self, **_kwargs: Any) -> str:
+        return ""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_memory_manager(monkeypatch):
+    """Keep middleware tests independent from process-global memory config."""
+
+    import deerflow.agents.memory as memory_package
+
+    manager = _SessionSnapshotMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+
+
 def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
@@ -591,6 +608,170 @@ def test_disabled_memory_does_not_resolve_turn_aware_manager(monkeypatch):
     assert handled == [request]
     assert update is not None
     assert len(update["messages"]) == 2
+
+
+def test_manager_construction_failure_fails_open_for_initial_injection(monkeypatch):
+    import deerflow.agents.memory as memory_package
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware()
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        update = middleware.before_agent(
+            {"messages": [HumanMessage(content="query", id="msg-1")]},
+            _fake_runtime(user_id="alice"),
+        )
+
+    assert update is not None
+    assert len(update["messages"]) == 2
+    assert all(message.name != "dynamic_memory_context" for message in update["messages"])
+
+
+def test_manager_construction_failure_fails_open_for_sync_model_hook(monkeypatch):
+    import deerflow.agents.memory as memory_package
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware()
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.Mock(return_value=mock.MagicMock())
+
+    middleware.wrap_model_call(request, handler)
+
+    handler.assert_called_once_with(request)
+
+
+@pytest.mark.asyncio
+async def test_manager_construction_failure_fails_open_for_async_model_hook(
+    monkeypatch,
+):
+    import deerflow.agents.memory as memory_package
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware()
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.AsyncMock(return_value=mock.MagicMock())
+
+    await middleware.awrap_model_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+
+
+def test_manager_construction_failure_respects_fail_closed(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    from deerflow.agents.memory import MemoryManagerError
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                backend_config={"failure_policy": {"read": "fail_closed"}},
+            )
+        )
+    )
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.Mock()
+
+    with pytest.raises(MemoryManagerError, match="could not be initialized"):
+        middleware.wrap_model_call(request, handler)
+
+    handler.assert_not_called()
+
+
+def test_manager_construction_failure_respects_fail_closed_for_initial_injection(
+    monkeypatch,
+):
+    import deerflow.agents.memory as memory_package
+    from deerflow.agents.memory import MemoryManagerError
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                backend_config={"failure_policy": {"read": "fail_closed"}},
+            )
+        )
+    )
+
+    with pytest.raises(MemoryManagerError, match="could not be initialized"):
+        middleware.before_agent(
+            {"messages": [HumanMessage(content="query", id="msg-1")]},
+            _fake_runtime(user_id="alice"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_manager_construction_failure_respects_fail_closed_for_async_model_hook(
+    monkeypatch,
+):
+    import deerflow.agents.memory as memory_package
+    from deerflow.agents.memory import MemoryManagerError
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        mock.Mock(side_effect=ValueError("invalid memory backend config")),
+    )
+    middleware = _make_middleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                backend_config={"failure_policy": {"read": "fail_closed"}},
+            )
+        )
+    )
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="query", id="msg-1")],
+        state={},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.AsyncMock()
+
+    with pytest.raises(MemoryManagerError, match="could not be initialized"):
+        await middleware.awrap_model_call(request, handler)
+
+    handler.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

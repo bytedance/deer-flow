@@ -20,6 +20,9 @@ from deerflow.agents.memory.backends.openviking.adapter import (
 from deerflow.agents.memory.backends.openviking.lifecycle import (
     SessionLifecycleStore,
 )
+from deerflow.agents.memory.backends.openviking.openviking_manager import (
+    LegacyOpenVikingMemoryManager,
+)
 from deerflow.agents.memory.backends.openviking.session import (
     _canonical_peer_id,
     _session_id,
@@ -387,7 +390,48 @@ def test_legacy_selector_recognizes_custom_http_only_fields(
 def test_legacy_selector_recognizes_nested_legacy_policy_fields() -> None:
     assert is_legacy_openviking_config({"retrieval": {"injection_query": "profile"}})
     assert is_legacy_openviking_config({"failure_policy": {"write": "log_and_drop"}})
-    assert not is_legacy_openviking_config({"failure_policy": {"write": "fail_open"}})
+    assert is_legacy_openviking_config({"failure_policy": {"write": "fail_open"}})
+
+
+def test_legacy_selector_preserves_minimal_existing_configs() -> None:
+    assert is_legacy_openviking_config(
+        {
+            "base_url": "http://127.0.0.1:1933",
+            "api_key_env": "OPENVIKING_API_KEY",
+        }
+    )
+
+
+def test_minimal_existing_config_still_constructs_legacy_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "legacy-key")
+
+    manager = OpenVikingMemoryManager.from_config(
+        {
+            "base_url": "http://127.0.0.1:1933",
+            "api_key_env": "OPENVIKING_API_KEY",
+        }
+    )
+
+    assert isinstance(manager, LegacyOpenVikingMemoryManager)
+    manager.close()
+
+
+def test_legacy_selector_uses_owner_binding_as_schema_boundary() -> None:
+    assert not is_legacy_openviking_config(
+        {
+            "base_url": "http://127.0.0.1:1933",
+            "api_key_env": "OPENVIKING_API_KEY",
+            "owner_user_id": "default",
+        }
+    )
+    assert is_legacy_openviking_config(
+        {
+            "base_url": "http://127.0.0.1:1933",
+            "api_key_env": "OPENVIKING_API_KEY",
+        }
+    )
 
 
 def test_manager_shares_one_official_client_and_uses_query_aware_policy(
@@ -593,6 +637,36 @@ def test_concurrent_recall_keeps_actor_peer_scopes_isolated(
             ),
         ),
     }
+
+
+def test_memory_operations_override_and_restore_ambient_actor_peer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    token = _ACTOR_PEER.set("ambient-peer")
+    try:
+        manager.get_context(
+            "alice",
+            agent_name="research",
+            thread_id="thread-1",
+            query="style",
+        )
+        manager.add_nowait(
+            "thread-1",
+            [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")],
+            agent_name="research",
+            user_id="alice",
+        )
+
+        assert _ACTOR_PEER.get() == "ambient-peer"
+    finally:
+        _ACTOR_PEER.reset(token)
+
+    assert manager._retriever.calls == [("style", "research", 4, None)]
+    assert manager._recorder.calls[0][3] == "research"
+    assert manager._recorder.flush_actor_peers == ["research"]
 
 
 def test_warm_honors_warn_and_fail_fast_policies(
@@ -824,7 +898,9 @@ def test_idle_worker_commits_once_after_inactivity(
     session_id = _session_id("alice", "deerflow", "thread-1")
 
     deadline = time.monotonic() + 2
-    while not manager._recorder.flushes and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if manager._recorder.flushes and manager._load_cursor(session_id)["idle_due_at"] is None:
+            break
         time.sleep(0.01)
 
     assert manager._recorder.flushes == [session_id]
@@ -873,7 +949,9 @@ def test_idle_commit_is_restored_after_restart(
     restarted = _manager(tmp_path, monkeypatch, commit=commit)
 
     deadline = time.monotonic() + 2
-    while not restarted._recorder.flushes and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        if restarted._recorder.flushes and restarted._load_cursor(session_id)["idle_due_at"] is None:
+            break
         time.sleep(0.01)
     assert restarted._recorder.flushes == [session_id]
     assert restarted._recorder.flush_actor_peers == ["deerflow"]

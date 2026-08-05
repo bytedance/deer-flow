@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class OpenVikingMemoryManager(OpenVikingAdapterMemoryManager):
-    """Select the official adapter path unless an old config requests legacy auth."""
+    """Select the credential-bound adapter or preserve an existing legacy config."""
 
     @classmethod
     def from_config(
@@ -27,7 +27,7 @@ class OpenVikingMemoryManager(OpenVikingAdapterMemoryManager):
     ) -> MemoryManager:
         if is_legacy_openviking_config(backend_config):
             logger.warning(
-                "OpenViking custom-HTTP trusted/dev configuration is deprecated. Migrate to a credential-bound USER API key and remove legacy auth, connection-pool, and injection-query fields.",
+                "OpenViking custom-HTTP configuration is deprecated. Migrate to a credential-bound USER API key, add owner_user_id, and remove legacy auth, connection-pool, and injection-query fields.",
             )
             return LegacyOpenVikingMemoryManager.from_config(
                 backend_config,

@@ -54,9 +54,12 @@ this integration.
 ## Authentication and isolation
 
 Use an ordinary OpenViking **USER API key** for memory reads and writes. The key
-is already bound by OpenViking to one account and user. The official path does
-not send trusted `account` or `user` impersonation headers and does not use a
-root key.
+is already bound by OpenViking to one account and user. The maintained path
+does not depend on or support root-key trusted-mode impersonation. In
+OpenViking `api_key` mode, the server derives account and user identity from the
+USER credential and ignores any account or user assertion headers inherited by
+the SDK. DeerFlow selects the actor peer inside a request-local scope for every
+recall, capture, and flush operation.
 
 `owner_user_id` binds that credential to exactly one DeerFlow user. If a request
 arrives for another DeerFlow user, the backend fails closed before contacting
@@ -66,6 +69,12 @@ invalid request does not spend model compute and then fail during capture. This
 first setup is intended for a personal deployment or one pre-provisioned user
 credential. Automatic provisioning and encrypted per-user credential storage
 for hosted multi-user deployments require a separate integration phase.
+
+The OpenViking SDK may still read optional defaults from `OPENVIKING_*`
+environment variables or `ovcli.conf`. DeerFlow's explicit URL and API key take
+precedence, and request-local actor selection overrides an ambient actor peer
+during memory operations. Operators should nevertheless avoid unrelated
+identity defaults in the DeerFlow process environment and CLI configuration.
 
 OpenViking peers represent top-level DeerFlow agents within the credential-bound
 user. Normal internal subagents do not create separate peers because they do not
@@ -189,9 +198,11 @@ cross-worker claiming before the integration can claim at-least-once delivery.
 
 ## Existing trusted configuration
 
-Configurations containing an old custom-HTTP-only field, such as
-`auth_mode`, `account`, connection-pool settings, or `retrieval.injection_query`,
-continue to use the previous implementation and log a migration warning. This
+Existing configurations without `owner_user_id` continue to use the previous
+implementation and log a migration warning. This includes minimal old
+configurations that contain only `base_url` and `api_key_env`, whose omitted
+`auth_mode` previously defaulted to trusted mode. The old schema did not accept
+`owner_user_id`, so this field is also the unambiguous migration boundary. This
 compatibility path preserves existing deployments but is not used for new
-setups. Remove the legacy fields, provide a USER API key, and add
-`owner_user_id` to select the official adapter path.
+setups. Remove legacy auth and connection fields, provide a USER API key, and
+add `owner_user_id` to select the maintained adapter.

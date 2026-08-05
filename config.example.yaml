@@ -1724,11 +1724,11 @@ memory:
   #     max_injection_chars: 12000
   #     content_mode: auto
   #
-  # Use an ordinary OpenViking USER API key. The official path never sends
-  # trusted account/user impersonation headers. For a host-installed server used
-  # by Docker DeerFlow, set base_url to http://host.docker.internal:1933 and
-  # allow_insecure_http: true. A user-managed service on the same Compose network
-  # can use the internal http://openviking:1933 address.
+  # Use an ordinary OpenViking USER API key. In API-key mode the server derives
+  # account/user identity from that credential, not from SDK assertion headers.
+  # For a host-installed server used by Docker DeerFlow, set base_url to
+  # http://host.docker.internal:1933 and allow_insecure_http: true. A user-managed
+  # service on the same Compose network can use http://openviking:1933.
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast

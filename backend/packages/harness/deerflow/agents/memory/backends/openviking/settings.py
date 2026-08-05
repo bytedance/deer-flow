@@ -56,7 +56,7 @@ class OpenVikingAdapterConfig:
         result = cls(
             base_url=str(cfg.pop("base_url", "http://127.0.0.1:1933")).rstrip("/"),
             storage_path=str(cfg.pop("storage_path", "")),
-            owner_user_id=str(cfg.pop("owner_user_id", "default")).strip(),
+            owner_user_id=str(cfg.pop("owner_user_id", "")).strip(),
             api_key=api_key,
             api_key_env=api_key_env,
             default_peer_id=str(cfg.pop("default_peer_id", "deerflow")).strip(),
@@ -137,30 +137,14 @@ class OpenVikingAdapterConfig:
 
 
 def is_legacy_openviking_config(backend_config: dict[str, Any] | None) -> bool:
-    """Return whether a config contains a deprecated custom-HTTP-only field."""
+    """Return whether a config selects the deprecated custom HTTP backend.
 
-    cfg = backend_config or {}
-    legacy_fields = {
-        "auth_mode",
-        "account",
-        "connect_timeout_seconds",
-        "read_timeout_seconds",
-        "write_timeout_seconds",
-        "pool_timeout_seconds",
-        "max_connections",
-        "max_keepalive_connections",
-        "max_retries",
-        "allow_insecure_dev",
-    }
-    if any(field in cfg for field in legacy_fields):
-        return True
-    retrieval = cfg.get("retrieval")
-    if isinstance(retrieval, dict) and "injection_query" in retrieval:
-        return True
-    failure_policy = cfg.get("failure_policy")
-    if isinstance(failure_policy, dict):
-        return failure_policy.get("read") == "raise" or failure_policy.get("write") in {"raise", "log_and_drop"}
-    return False
+    ``owner_user_id`` is required by the credential-bound adapter and was not a
+    valid field in the old schema, so it is an unambiguous migration boundary.
+    Existing configs that relied on legacy defaults do not contain it.
+    """
+
+    return "owner_user_id" not in (backend_config or {})
 
 
 def is_safe_peer_id(value: str) -> bool:

@@ -233,6 +233,37 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         raise MemoryManagerError(f"Query-aware memory retrieval exceeded the {_INJECT_TIMEOUT_SECONDS:.1f}s model-call budget") from exc
 
+    def _memory_context_refresh_policy(self) -> str | None:
+        """Resolve the active memory policy without turning optional recall into downtime."""
+
+        memory_config = self._memory_config()
+        if not memory_config.enabled or not memory_config.injection_enabled:
+            return None
+
+        from deerflow.agents.memory import (
+            MemoryAuthorizationError,
+            MemoryManagerError,
+            get_memory_manager,
+        )
+
+        try:
+            return get_memory_manager().context_refresh_policy
+        except MemoryAuthorizationError:
+            # Identity-boundary failures are never availability failures.
+            raise
+        except Exception as exc:
+            logger.exception("Failed to initialize the memory manager for context injection")
+            if self._read_failure_is_closed():
+                if isinstance(exc, MemoryManagerError):
+                    raise
+                raise MemoryManagerError("Memory manager could not be initialized for context injection") from exc
+            return None
+
+    async def _amemory_context_refresh_policy(self) -> str | None:
+        """Async counterpart that keeps backend construction off the event loop."""
+
+        return await asyncio.to_thread(self._memory_context_refresh_policy)
+
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
@@ -243,10 +274,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        memory_config = self._memory_config()
-        from deerflow.agents.memory import get_memory_manager
-
-        uses_session_snapshot = memory_config.enabled and memory_config.injection_enabled and get_memory_manager().context_refresh_policy == "session"
+        uses_session_snapshot = self._memory_context_refresh_policy() == "session"
         memory_context = (
             _get_memory_context(
                 self._agent_name,
@@ -562,12 +590,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        from deerflow.agents.memory import get_memory_manager
-
         plan = self._turn_context_plan(request)
         if plan is None:
             return handler(request)
-        if get_memory_manager().context_refresh_policy != "turn":
+        if self._memory_context_refresh_policy() != "turn":
             return handler(request)
         target, query, cache_key, run_context = plan
         cached, content = self._cached_turn_context(run_context, cache_key)
@@ -594,13 +620,10 @@ class DynamicContextMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        from deerflow.agents.memory import get_memory_manager
-
         plan = self._turn_context_plan(request)
         if plan is None:
             return await handler(request)
-        manager = await asyncio.to_thread(get_memory_manager)
-        if manager.context_refresh_policy != "turn":
+        if await self._amemory_context_refresh_policy() != "turn":
             return await handler(request)
         target, query, cache_key, run_context = plan
         cached, content = self._cached_turn_context(run_context, cache_key)
