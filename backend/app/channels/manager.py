@@ -849,7 +849,7 @@ def _resolve_attachments(thread_id: str, artifacts: list[str], *, user_id: str |
     return attachments
 
 
-def _prepare_artifact_delivery(
+async def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
@@ -861,7 +861,7 @@ def _prepare_artifact_delivery(
     if not artifacts:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts, user_id=user_id)
+    attachments = await asyncio.to_thread(_resolve_attachments, thread_id, artifacts, user_id=user_id)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
@@ -2169,7 +2169,7 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -2286,7 +2286,7 @@ class ChannelManager:
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
 
             if not response_text:
                 if attachments:

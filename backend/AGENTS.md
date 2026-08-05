@@ -271,6 +271,8 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   skips redundant sandbox sync when thread data is already mounted);
   `test_channel_outbound_files.py` (locks Feishu, Telegram, and WeCom outbound
   attachment open/read/hash work off the event loop);
+  `test_channel_artifact_resolution.py` (locks IM response artifact path
+  resolution and metadata reads off the event loop);
   `test_openviking_memory_backend.py` (locks the OpenViking backend's async
   add/context/search entrypoints offloading synchronous HTTP and watermark
   filesystem IO); and
