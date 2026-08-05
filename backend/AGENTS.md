@@ -1465,6 +1465,12 @@ Multi-file upload with automatic document conversion:
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
 - Agent receives uploaded file list via `UploadsMiddleware`
+- Current-turn web upload metadata preserves the nullable `markdown_file`
+  provenance returned by the upload API. `UploadsMiddleware` validates an
+  explicit companion basename and reads that exact file; explicit null or
+  invalid metadata disables sibling guessing, while an absent key retains the
+  legacy `<stem>.md` fallback for old messages. Raw companion metadata is never
+  rendered into `<current_uploads>`.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
