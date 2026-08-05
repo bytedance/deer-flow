@@ -247,6 +247,7 @@ Use the table below as a practical starting point when choosing how to run DeerF
 ```bash
 make docker-init    # Pull sandbox image (only once or when image updates)
 make docker-start   # Start services (auto-detects sandbox mode from config.yaml)
+make docker-logs    # View logs
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
@@ -372,7 +373,7 @@ collision-resistant directory-safe user IDs before accessing DeerFlow storage.
 The default DeerFlow service topology remains the Gateway-embedded runtime
 described above.
 
-Gateway runs automatically enforce native delivery for artifacts created or modified under `/mnt/user-data/outputs`: `present_files` must present at least one output produced by the current run, and the terminal `run.delivery` receipt must be durably recorded. Runs that do not produce output artifacts keep ordinary conversational behavior.
+Gateway runs automatically enforce native delivery for artifacts created or modified under `/mnt/user-data/outputs`: `present_files` must present at least one output produced by the current run, and the terminal `run.delivery` receipt must be durably recorded. Virtual artifact paths are resolved within the same authenticated user and thread scope that produced the output before the output-directory boundary is validated. Runs that do not produce output artifacts keep ordinary conversational behavior.
 
 DeerFlow's built-in custom events are available through both LangGraph streaming interfaces: native clients can continue subscribing to `stream_mode="custom"`, while callback-based integrations can consume the same payloads as `on_custom_event` records from `astream_events(version="v2")`. The callback event name matches the payload's `type` field.
 
@@ -810,6 +811,18 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
+For packaged and configurable middleware integrations, use the top-level `plugins:` list
+in `config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
+`deerflow-extension-api` contract package, and can contribute isolated middleware to
+semantic lead/subagent model or tool positions without patching DeerFlow's builders.
+Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
+`required: true` makes load failure abort startup; otherwise failures are reported and
+skipped. Plugins load once when the Gateway app is constructed, so changes require a
+restart. Because this imports Python code, `plugins:` is intentionally unavailable through
+the API-writable `extensions_config.json`. In Docker deployments, install the plugin in the
+Gateway image rather than only in the host environment. See `config.example.yaml` for
+configuration.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
@@ -1144,6 +1157,7 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 uv pip install 'deerflow-harness[tui]'        # optional 'textual' dependency
 
 deerflow                                      # launch the terminal UI (TTY required)
+deerflow --tui-transparent                    # use the terminal's default background
 deerflow --continue                           # resume the most recent thread
 deerflow --resume THREAD                      # resume a thread by id
 deerflow --print "summarize this repo"        # headless one-shot answer to stdout

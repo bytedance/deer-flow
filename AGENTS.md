@@ -57,6 +57,7 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
@@ -69,6 +70,11 @@ deer-flow/
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
+
+Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
+(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
+kept out of the API-writable `extensions_config.json`). See the Extension System section in
+[backend/AGENTS.md](backend/AGENTS.md).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -105,6 +111,9 @@ make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
+
+Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
+checkout before invoking Compose, matching the start and stop commands.
 
 Run `make help` for the full list.
 

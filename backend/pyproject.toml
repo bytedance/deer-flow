@@ -77,7 +77,8 @@ index-url = "https://pypi.org/simple"
 override-dependencies = ["websockets==16.0"]
 
 [tool.uv.workspace]
-members = ["packages/harness"]
+members = ["packages/harness", "packages/extension-api"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+deerflow-extension-api = { workspace = true }

@@ -21,6 +21,7 @@ Launch modes:
 |---|---|
 | `deerflow` | Launch the TUI when stdin/stdout are TTYs |
 | `deerflow --tui` | Force the TUI (clear diagnostic if `textual` is missing) |
+| `deerflow --tui-transparent` | Use the terminal's default background when launching the TUI |
 | `deerflow --cli` | Force headless/classic mode for one invocation |
 | `deerflow chat` | Same TUI conversation surface |
 | `deerflow --continue` | Resume the most recent thread |
@@ -30,9 +31,17 @@ Launch modes:
 | `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
+| `DEER_FLOW_TUI_TRANSPARENT=1 deerflow` | Persist terminal-background rendering via environment |
 
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
+
+Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
+The transparent mode uses Textual's `ansi_default` background for the main
+screen, header, transcript, status, palette, composer, and modal surfaces while
+keeping truecolor foregrounds and selection highlights. Combine
+`--tui-transparent` with `--tui` when the UI also needs to be forced without a
+detected TTY.
 
 Headless runs use a recursion limit of `100` by default. Pass a positive
 `--recursion-limit` when a longer agent loop is expected. This is a LangGraph
