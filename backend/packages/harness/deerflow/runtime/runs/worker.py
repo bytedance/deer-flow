@@ -206,6 +206,17 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _configured_tool_output_subdir(app_config: AppConfig | None) -> str | None:
+    """The tool-output subdir from the run's app config, when it carries one.
+
+    Tests pass stand-in objects through the run context, so read the field
+    defensively instead of assuming the full AppConfig shape.
+    """
+    if app_config is None:
+        return None
+    return getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
+
+
 async def _produced_output_paths(
     before: WorkspaceSnapshot | None,
     *,
@@ -979,7 +990,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
-                storage_subdir=(ctx.app_config.tool_output.storage_subdir if ctx.app_config is not None else None),
+                storage_subdir=_configured_tool_output_subdir(ctx.app_config),
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1086,7 +1097,7 @@ async def run_agent(
                         pre_run_workspace_snapshot,
                         thread_id=thread_id,
                         user_id=workspace_changes_user_id,
-                        storage_subdir=(ctx.app_config.tool_output.storage_subdir if ctx.app_config is not None else None),
+                        storage_subdir=_configured_tool_output_subdir(ctx.app_config),
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             receipt_persisted = await _persist_delivery_receipt(
