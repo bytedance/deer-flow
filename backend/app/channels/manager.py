@@ -18,6 +18,7 @@ from urllib.parse import quote
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
@@ -125,6 +126,7 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
+    "buzz": {"supports_streaming": True},
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
@@ -515,12 +517,93 @@ def _extract_stream_message_id(payload: Any, metadata: Any) -> str | None:
     return None
 
 
+def _stream_payload_type(payload: Mapping[str, Any]) -> str:
+    """Resolve the message ``type`` of one ``messages-tuple`` payload.
+
+    Two payload shapes reach this function and they name the message type in
+    different places:
+
+    * The shape DeerFlow's own gateway emits (``runtime/serialization.py``
+      calls ``model_dump()``): ``type`` is the LangChain literal directly --
+      ``"ai"`` / ``"AIMessageChunk"`` / ``"human"`` / ``"tool"`` / ``"system"``.
+    * LangChain's ``to_json()`` constructor shape, which
+      ``_extract_stream_message_id`` and the content extraction below already
+      accommodate: the wrapper's own ``type`` is the literal string
+      ``"constructor"`` and the real class name is the last element of the
+      ``id`` path (``["langchain", "schema", "messages", "AIMessageChunk"]``),
+      with the constructor kwargs under ``kwargs``.
+
+    Reading only the top level would classify every constructor-shaped payload
+    as ``"constructor"``, which an allowlist rejects (safe) but which would
+    also mean hidden context and assistant output are treated identically --
+    so the class name is resolved properly instead of guessed.
+    """
+    raw_type = payload.get("type")
+    if isinstance(raw_type, str) and raw_type and raw_type != "constructor":
+        return raw_type
+    kwargs = payload.get("kwargs")
+    if isinstance(kwargs, Mapping):
+        nested = kwargs.get("type")
+        if isinstance(nested, str) and nested:
+            return nested
+    lc_path = payload.get("id")
+    if isinstance(lc_path, (list, tuple)) and lc_path:
+        tail = lc_path[-1]
+        if isinstance(tail, str) and tail:
+            return tail
+    return raw_type if isinstance(raw_type, str) else ""
+
+
+def _is_assistant_stream_type(payload_type: str) -> bool:
+    """Is this message type assistant output, i.e. displayable in an IM channel?
+
+    An ALLOWLIST, deliberately.  The previous denylist ("reject anything whose
+    type contains 'tool'") published every other message type, and DeerFlow
+    writes hidden model context into the ``messages`` channel as ordinary
+    messages: ``DynamicContextMiddleware`` injects the ``<memory>`` block as a
+    hidden ``HumanMessage`` (``type == "human"``) and rewrites the user's own
+    turn into a new ``HumanMessage``, and ``DurableContextMiddleware`` injects a
+    hidden ``<durable_context_data>`` ``HumanMessage``.  LangGraph fans state
+    writes out on the ``messages-tuple`` stream, so all of those reached the
+    channel as if they were the assistant's reply -- proved live on a Buzz
+    relay, where each streaming update is an immutable public Nostr event and a
+    later corrective edit cannot unpublish the leaked one.
+
+    The accepted spellings are the ones assistant output actually carries:
+    LangChain serializes ``AIMessage.type`` as ``"ai"`` and
+    ``AIMessageChunk.type`` as ``"AIMessageChunk"``; ``"assistant"`` is the
+    OpenAI-style spelling a foreign runtime may use.  Matching is by prefix
+    rather than substring because a substring test is not safe here -- ordinary
+    English words contain "ai" ("chain", "domain"), so ``"ai" in type`` would
+    admit a future/foreign type name by accident, which is exactly the class of
+    mistake this allowlist exists to prevent.  No LangChain message type other
+    than the AI ones begins with "ai" or "assistant".
+    """
+    normalized = payload_type.strip().lower()
+    return normalized.startswith(("ai", "assistant"))
+
+
 def _accumulate_stream_text(
     buffers: dict[str, str],
     current_message_id: str | None,
     event_data: Any,
 ) -> tuple[str | None, str | None]:
-    """Convert a ``messages-tuple`` event into the latest displayable AI text."""
+    """Convert a ``messages-tuple`` event into the latest displayable AI text.
+
+    Only assistant output is displayable.  Hidden human/system context (memory
+    facts, durable context, the middleware-rewritten echo of the user's own
+    message) and tool traffic must never be published to an IM channel; see
+    :func:`_is_assistant_stream_type`.
+
+    A bare ``str`` payload -- previously accepted here and buffered under the
+    current message id -- carries no type information at all, so it cannot be
+    attributed to the assistant.  Nothing in DeerFlow produces it (the gateway
+    always serializes a ``messages-tuple`` chunk as ``[message_dict, metadata]``
+    via ``runtime/serialization.py::serialize_messages_tuple``), and a runtime
+    that did emit raw text deltas would emit hidden context the same way, with
+    no way to tell them apart.  Under an allowlist an unattributable payload is
+    dropped rather than published.
+    """
     payload = event_data
     metadata: Any = None
     if isinstance(event_data, (list, tuple)):
@@ -529,16 +612,10 @@ def _accumulate_stream_text(
         if len(event_data) > 1:
             metadata = event_data[1]
 
-    if isinstance(payload, str):
-        message_id = current_message_id or "__default__"
-        buffers[message_id] = _merge_stream_text(buffers.get(message_id, ""), payload)
-        return buffers[message_id], message_id
-
     if not isinstance(payload, Mapping):
         return None, current_message_id
 
-    payload_type = str(payload.get("type", "")).lower()
-    if "tool" in payload_type:
+    if not _is_assistant_stream_type(_stream_payload_type(payload)):
         return None, current_message_id
 
     text = _extract_text_content(payload.get("content"))

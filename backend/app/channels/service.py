@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 # Channel name → import path for lazy loading
 _CHANNEL_REGISTRY: dict[str, str] = {
+    "buzz": "app.channels.buzz:BuzzChannel",
     "dingtalk": "app.channels.dingtalk:DingTalkChannel",
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
@@ -35,6 +36,7 @@ _CHANNEL_REGISTRY: dict[str, str] = {
 
 # Keys that indicate a user has configured credentials for a channel.
 _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
+    "buzz": ["private_key"],
     "dingtalk": ["client_id", "client_secret"],
     "discord": ["bot_token"],
     "feishu": ["app_id", "app_secret"],

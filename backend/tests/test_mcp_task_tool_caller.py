@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -116,6 +117,38 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect() ->
         )
 
     pool.close_session.assert_awaited_once_with("reports", "user-1:thread-1")
+
+
+@pytest.mark.asyncio
+async def test_stdio_task_session_initialization_respects_configured_timeout() -> None:
+    config = _config()
+    config.mcp_servers["reports"].session_init_timeout = 0.01
+
+    async def slow_get_session(*_args):
+        await asyncio.sleep(60)
+
+    pool = MagicMock()
+    pool.get_session = AsyncMock(side_effect=slow_get_session)
+    pool.close_session = AsyncMock()
+    caller = McpTaskToolCaller(config)
+
+    with (
+        patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+        patch(
+            "deerflow.mcp.task_tool_caller._prepare_stdio_connection",
+            return_value={"transport": "stdio", "command": "report-mcp"},
+        ),
+        pytest.raises(TimeoutError),
+    ):
+        await caller.call_tool(
+            server_name="reports",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+        )
+
+    pool.close_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

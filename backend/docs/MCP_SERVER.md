@@ -96,9 +96,14 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
-## Per-Tool Timeout (Stdio MCP Servers)
+## Server Timeouts (Stdio MCP Servers)
 
-For `stdio` MCP servers, set `tool_call_timeout` to limit each individual MCP tool call in seconds:
+Two independent timeouts bound stdio MCP servers. `session_init_timeout` covers
+server bring-up — tool discovery (subprocess spawn + `initialize` +
+`tools/list`) and persistent-session initialization — and defaults to 60s so a
+hung server (e.g. `npx` blocked on a package download, or a server that never
+answers `initialize`) cannot block agent construction indefinitely. Set it to
+`null` to disable:
 
 ```json
 {
@@ -111,13 +116,17 @@ For `stdio` MCP servers, set `tool_call_timeout` to limit each individual MCP to
          "env": {
             "GITHUB_TOKEN": "$GITHUB_TOKEN"
          },
+         "session_init_timeout": 60,
          "tool_call_timeout": 60
       }
    }
 }
 ```
 
-`tool_call_timeout` only applies to `stdio` servers. `http` and `sse` servers use transport-level timeouts, and DeerFlow logs a warning if `tool_call_timeout` is configured for those transports.
+`tool_call_timeout` limits each individual tool call in seconds and applies only
+to `stdio` servers; `http` and `sse` servers use transport-level timeouts, and
+DeerFlow logs a warning if `tool_call_timeout` is configured for those
+transports.
 
 ## Filesystem MCP Servers
 

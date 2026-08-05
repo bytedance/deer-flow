@@ -91,7 +91,22 @@ class McpTaskToolCaller:
                 thread_id=thread_id,
             )
             pool = get_session_pool()
-            session = await pool.get_session(server_name, scope_key, connection)
+            session_init_timeout = server_config.session_init_timeout
+            if session_init_timeout is not None:
+                try:
+                    session = await asyncio.wait_for(
+                        pool.get_session(server_name, scope_key, connection),
+                        timeout=session_init_timeout,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "MCP task session initialization for server '%s' timed out after %.1fs",
+                        server_name,
+                        session_init_timeout,
+                    )
+                    raise
+            else:
+                session = await pool.get_session(server_name, scope_key, connection)
             try:
                 return await self._invoke(
                     session=session,

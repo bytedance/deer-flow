@@ -28,6 +28,7 @@ dependencies = [
 postgres = ["deerflow-harness[postgres]"]
 redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
+buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
 browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
@@ -69,9 +70,13 @@ index-url = "https://pypi.org/simple"
 # breaking change is requiring Python >=3.10 (we require >=3.12), the sdk
 # only imports `websockets.asyncio.client`/`websockets.exceptions` (both
 # 16-compatible), and DeerFlow never uses the sdk's WebSocket transport
-# (httpx/SSE only). Pin the exact pre-upgrade 16.0 for the IM channel
-# integrations (dingtalk-stream, python-telegram-bot, etc.) that ran on it
-# before. Remove once langgraph-sdk relaxes the pin upstream. Note: enabling
+# (httpx/SSE only). DeerFlow does have one direct consumer of its own: the Buzz
+# channel (`app/channels/buzz.py`) imports the top-level `websockets` package and
+# calls `websockets.connect()`, which in 16.0 is the same asyncio client the sdk
+# uses, re-exported at the package root -- so it is covered by the same
+# compatibility argument. Pin the exact pre-upgrade 16.0 for that plus the IM
+# channel integrations (dingtalk-stream, python-telegram-bot, etc.) that ran on
+# it before. Remove once langgraph-sdk relaxes the pin upstream. Note: enabling
 # the `openai[realtime]` or `slack-sdk[optional]` extras would conflict (they
 # also cap websockets<16).
 override-dependencies = ["websockets==16.0"]

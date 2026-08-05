@@ -36,6 +36,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.constants import TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -205,17 +206,36 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
+    """Directory names workspace snapshots must skip for this deployment.
+
+    The tool-output budget middleware externalizes oversized tool outputs into
+    a storage subdir under outputs (default ``.tool-results``). Those files are
+    process feedback referenced from the budget preview via ``read_file``, not
+    deliverables: counting them as produced artifacts would fail run delivery
+    verification for any run that externalized a tool output without also
+    presenting a real artifact. The default name is excluded by the scanner
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
+    """
+    storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
+    return frozenset({storage_subdir})
+
+
 async def _produced_output_paths(
     before: WorkspaceSnapshot | None,
     *,
     thread_id: str,
     user_id: str | None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> list[str]:
     """Detect regular output files created or modified by this run."""
     if before is None:
         return []
     try:
-        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
         return get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
@@ -547,6 +567,7 @@ async def run_agent(
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
+    workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
@@ -700,10 +721,15 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            # Resolved once per run so the pre-run snapshot, the post-run
+            # delivery scan, and the workspace-changes scan all agree on the
+            # same exclusion set.
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -1007,6 +1033,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1092,6 +1119,7 @@ async def run_agent(
                     run_id,
                     pre_run_workspace_snapshot,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
@@ -1113,6 +1141,7 @@ async def run_agent(
                         pre_run_workspace_snapshot,
                         thread_id=thread_id,
                         user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             receipt_persisted = await _persist_delivery_receipt(
