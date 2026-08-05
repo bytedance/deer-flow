@@ -1157,6 +1157,7 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 uv pip install 'deerflow-harness[tui]'        # optional 'textual' dependency
 
 deerflow                                      # launch the terminal UI (TTY required)
+deerflow --tui-transparent                    # use the terminal's default background
 deerflow --continue                           # resume the most recent thread
 deerflow --resume THREAD                      # resume a thread by id
 deerflow --print "summarize this repo"        # headless one-shot answer to stdout
