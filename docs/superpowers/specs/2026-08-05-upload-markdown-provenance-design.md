@@ -177,6 +177,10 @@ before production changes and must fail because provenance is currently lost.
   Markdown path while retaining the legacy source-file wrapper.
 - `backend/tests/test_uploads_middleware_core_logic.py`: reproduce the grounding
   collision and validate compatibility and unsafe-input behavior.
+- `backend/docs/FILE_UPLOAD.md`: document the current-turn companion metadata
+  contract and legacy fallback.
+- `backend/AGENTS.md`: keep the maintained middleware architecture summary in
+  sync with the explicit provenance rule.
 
 ## Compatibility and Rollout
 
