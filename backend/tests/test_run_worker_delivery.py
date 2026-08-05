@@ -662,3 +662,51 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_produced_output_paths_excludes_externalized_tool_results(monkeypatch):
+    from deerflow.runtime.runs.worker import _produced_output_paths
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.capture_workspace_snapshot",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.get_changed_output_paths",
+        lambda _before, _after: [
+            "/mnt/user-data/outputs/.tool-results/read_file-abc123.log",
+            "/mnt/user-data/outputs/report.md",
+        ],
+    )
+
+    produced = await _produced_output_paths(object(), thread_id="thread-1", user_id=None)
+
+    assert produced == ["/mnt/user-data/outputs/report.md"]
+
+
+@pytest.mark.anyio
+async def test_produced_output_paths_honors_custom_storage_subdir(monkeypatch):
+    from deerflow.runtime.runs.worker import _produced_output_paths
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.capture_workspace_snapshot",
+        AsyncMock(return_value=object()),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.get_changed_output_paths",
+        lambda _before, _after: [
+            "/mnt/user-data/outputs/.scratch/read_file-abc123.log",
+            "/mnt/user-data/outputs/.tool-results/read_file-def456.log",
+            "/mnt/user-data/outputs/report.md",
+        ],
+    )
+
+    produced = await _produced_output_paths(object(), thread_id="thread-1", user_id=None, storage_subdir=".scratch")
+
+    # The middleware writes under the custom dir, so only that one is excluded;
+    # a stale .tool-results path is not special under this config.
+    assert produced == [
+        "/mnt/user-data/outputs/.tool-results/read_file-def456.log",
+        "/mnt/user-data/outputs/report.md",
+    ]
