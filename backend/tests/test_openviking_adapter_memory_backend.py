@@ -14,21 +14,28 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
-from deerflow.agents.memory.backends.openviking.official_config import (
-    OfficialOpenVikingConfig,
+from deerflow.agents.memory.backends.openviking.adapter import (
+    OpenVikingAdapterMemoryManager,
+)
+from deerflow.agents.memory.backends.openviking.lifecycle import (
+    SessionLifecycleStore,
+)
+from deerflow.agents.memory.backends.openviking.session import (
+    _canonical_peer_id,
+    _session_id,
+)
+from deerflow.agents.memory.backends.openviking.settings import (
+    OpenVikingAdapterConfig,
     is_legacy_openviking_config,
     is_safe_peer_id,
-)
-from deerflow.agents.memory.backends.openviking.official_manager import (
-    OfficialOpenVikingMemoryManager,
-    _canonical_peer_id,
 )
 from deerflow.agents.memory.manager import MemoryAuthorizationError, MemoryManagerError
 
 
 class _CommitPolicy:
-    def __init__(self, *, mode: str):
+    def __init__(self, *, mode: str, pending_token_threshold: int = 8_000):
         self.mode = mode
+        self.pending_token_threshold = pending_token_threshold
 
 
 class _PartialWriteError(RuntimeError):
@@ -77,6 +84,7 @@ class _Recorder:
         self.flushes: list[str] = []
         self.flush_actor_peers: list[str | None] = []
         self.failures: list[BaseException] = []
+        self.pending_tokens: dict[str, int] = {}
         self.closed = False
 
     @property
@@ -89,6 +97,9 @@ class _Recorder:
         self.calls.append((session_id, list(messages), peer_id, _ACTOR_PEER.get()))
         if self.failures:
             raise self.failures.pop(0)
+        self.pending_tokens[session_id] = self.pending_tokens.get(session_id, 0) + len(messages) * 1_000
+        if self.commit_policy.mode == "always" or (self.commit_policy.mode == "pending_tokens" and self.pending_tokens[session_id] >= self.commit_policy.pending_token_threshold):
+            self.flush(session_id)
         return object()
 
     def flush(self, session_id: str) -> None:
@@ -96,6 +107,7 @@ class _Recorder:
         self.flush_actor_peers.append(_ACTOR_PEER.get())
         if self.failures:
             raise self.failures.pop(0)
+        self.pending_tokens[session_id] = 0
 
     def close(self) -> None:
         self.closed = True
@@ -109,18 +121,35 @@ class _Retriever:
         self.kwargs = kwargs
         self.limit = kwargs["limit"]
         self.filter = None
+        self.session_id = kwargs.get("session_id")
+        self.target_uri = kwargs.get("target_uri", "")
+        self.search_mode = kwargs.get("search_mode", "search")
         self.calls: list[tuple[str, str | None, int, Any]] = []
+        self.session_ids: list[str | None] = []
+        self.target_uris: list[str | list[str]] = []
+        self.search_modes: list[str] = []
         self.closed = False
 
     def __copy__(self):
         copied = type(self)(client=self.client, **self.kwargs)
         copied.calls = self.calls
+        copied.session_ids = self.session_ids
+        copied.target_uris = self.target_uris
+        copied.search_modes = self.search_modes
         copied.limit = self.limit
         copied.filter = copy.deepcopy(self.filter)
+        copied.session_id = self.session_id
+        copied.target_uri = copy.deepcopy(self.target_uri)
+        copied.search_mode = self.search_mode
+        if "invoke" in self.__dict__:
+            copied.invoke = self.__dict__["invoke"]
         return copied
 
     def invoke(self, query: str) -> list[Document]:
         self.calls.append((query, _ACTOR_PEER.get(), self.limit, self.filter))
+        self.session_ids.append(self.session_id)
+        self.target_uris.append(copy.deepcopy(self.target_uri))
+        self.search_modes.append(self.search_mode)
         return [
             Document(
                 page_content="Prefers concise answers.",
@@ -150,7 +179,7 @@ def _use_actor_peer(peer_id: str | None):
 
 @pytest.fixture
 def official_integration(monkeypatch: pytest.MonkeyPatch):
-    import deerflow.agents.memory.backends.openviking.official_manager as module
+    import deerflow.agents.memory.backends.openviking.adapter as module
 
     monkeypatch.setattr(
         module,
@@ -166,7 +195,7 @@ def official_integration(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_official_loader_uses_standalone_package() -> None:
-    from deerflow.agents.memory.backends.openviking.official_manager import (
+    from deerflow.agents.memory.backends.openviking.adapter import (
         _load_official_integration,
     )
 
@@ -185,7 +214,7 @@ def test_published_adapter_manager_delegates_client_lifecycle(
 
     manager = OpenVikingMemoryManager.from_config(_config(tmp_path, base_url="http://127.0.0.1:9"))
 
-    assert isinstance(manager, OfficialOpenVikingMemoryManager)
+    assert isinstance(manager, OpenVikingAdapterMemoryManager)
     manager.close()
     assert manager._resources_closed is True
 
@@ -206,24 +235,30 @@ def _manager(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     **overrides: Any,
-) -> OfficialOpenVikingMemoryManager:
+) -> OpenVikingAdapterMemoryManager:
     monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
-    manager = OpenVikingMemoryManager.from_config(_config(tmp_path, **overrides))
-    assert isinstance(manager, OfficialOpenVikingMemoryManager)
+    config = _config(tmp_path, **overrides)
+    if "commit" not in overrides:
+        config["commit"] = {"idle_flush_seconds": 0}
+    manager = OpenVikingMemoryManager.from_config(config)
+    assert isinstance(manager, OpenVikingAdapterMemoryManager)
     return manager
 
 
 def test_official_config_requires_user_key_and_rejects_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENVIKING_API_KEY", raising=False)
     with pytest.raises(ValueError, match="USER API key"):
-        OfficialOpenVikingConfig.from_backend_config(_config(tmp_path))
+        OpenVikingAdapterConfig.from_backend_config(_config(tmp_path))
 
     monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
-    parsed = OfficialOpenVikingConfig.from_backend_config(_config(tmp_path))
+    parsed = OpenVikingAdapterConfig.from_backend_config(_config(tmp_path))
     assert parsed.owner_user_id == "alice"
+    assert parsed.commit_mode == "pending_tokens"
+    assert parsed.pending_token_threshold == 8_000
+    assert parsed.idle_flush_seconds == 1_800
     assert "secret" not in repr(parsed)
-    with pytest.raises(ValueError, match="Unknown official"):
-        OfficialOpenVikingConfig.from_backend_config(_config(tmp_path, typo=True))
+    with pytest.raises(ValueError, match="Unknown OpenViking"):
+        OpenVikingAdapterConfig.from_backend_config(_config(tmp_path, typo=True))
 
 
 def test_official_config_does_not_treat_false_string_as_insecure_http_opt_in(
@@ -233,7 +268,7 @@ def test_official_config_does_not_treat_false_string_as_insecure_http_opt_in(
     monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
 
     with pytest.raises(ValueError, match="plain HTTP"):
-        OfficialOpenVikingConfig.from_backend_config(
+        OpenVikingAdapterConfig.from_backend_config(
             _config(
                 tmp_path,
                 base_url="http://memory.internal:1933",
@@ -258,7 +293,7 @@ def test_official_config_rejects_non_finite_numbers(
     monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
 
     with pytest.raises(ValueError, match=message):
-        OfficialOpenVikingConfig.from_backend_config(_config(tmp_path, **overrides))
+        OpenVikingAdapterConfig.from_backend_config(_config(tmp_path, **overrides))
 
 
 @pytest.mark.parametrize("peer_id", ["UPPER", "contains space", "_reserved", "a" * 65])
@@ -270,7 +305,7 @@ def test_official_config_rejects_invalid_default_peer_id(
     monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
 
     with pytest.raises(ValueError, match="default_peer_id"):
-        OfficialOpenVikingConfig.from_backend_config(_config(tmp_path, default_peer_id=peer_id))
+        OpenVikingAdapterConfig.from_backend_config(_config(tmp_path, default_peer_id=peer_id))
 
 
 def test_official_config_rejects_generated_peer_namespace_as_default(
@@ -283,7 +318,7 @@ def test_official_config_rejects_generated_peer_namespace_as_default(
         ValueError,
         match="default_peer_id must not start with the reserved prefix 'df-agent-'",
     ):
-        OfficialOpenVikingConfig.from_backend_config(
+        OpenVikingAdapterConfig.from_backend_config(
             _config(tmp_path, default_peer_id="df-agent-custom"),
         )
 
@@ -294,11 +329,43 @@ def test_official_config_accepts_custom_default_peer_id(
 ) -> None:
     monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
 
-    config = OfficialOpenVikingConfig.from_backend_config(
+    config = OpenVikingAdapterConfig.from_backend_config(
         _config(tmp_path, default_peer_id="assistant"),
     )
 
     assert config.default_peer_id == "assistant"
+
+
+def test_commit_config_is_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
+
+    parsed = OpenVikingAdapterConfig.from_backend_config(
+        _config(
+            tmp_path,
+            commit={
+                "mode": "pending_tokens",
+                "pending_token_threshold": 12_000,
+                "idle_flush_seconds": 90,
+            },
+        )
+    )
+    assert parsed.commit_mode == "pending_tokens"
+    assert parsed.pending_token_threshold == 12_000
+    assert parsed.idle_flush_seconds == 90
+
+    for commit, message in (
+        ({"mode": "sometimes"}, "commit.mode"),
+        ({"pending_token_threshold": 0}, "pending_token_threshold"),
+        ({"idle_flush_seconds": float("nan")}, "idle_flush_seconds"),
+        ({"unknown": True}, "commit.unknown"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            OpenVikingAdapterConfig.from_backend_config(
+                _config(tmp_path, commit=commit),
+            )
 
 
 @pytest.mark.parametrize(
@@ -333,7 +400,8 @@ def test_manager_shares_one_official_client_and_uses_query_aware_policy(
     assert manager.context_refresh_policy == "turn"
     assert manager._recorder.client is manager._client
     assert manager._retriever.client is manager._client
-    assert manager._recorder.commit_policy.mode == "always"
+    assert manager._recorder.commit_policy.mode == "pending_tokens"
+    assert manager._recorder.commit_policy.pending_token_threshold == 8_000
     assert manager._retriever.kwargs["context_types"] == ("memory",)
     assert manager._client.kwargs == {
         "url": "http://openviking:1933",
@@ -424,6 +492,15 @@ def test_recall_is_query_aware_peer_scoped_and_user_isolated(
 
     assert context == "- [preferences] Prefers concise answers."
     assert manager._retriever.calls == [("How should you answer?", "research", 4, None)]
+    assert manager._retriever.session_ids == [_session_id("alice", "research", "thread-1")]
+    assert manager._retriever.target_uris == [
+        [
+            "viking://user/memories",
+            "viking://user/peers/research/memories",
+        ]
+    ]
+    assert manager._retriever.session_id is None
+    assert manager._retriever.target_uri == ""
     with pytest.raises(MemoryAuthorizationError, match="Refusing to share"):
         manager.get_context("bob", query="private query")
 
@@ -452,6 +529,12 @@ def test_search_uses_openviking_filter_dsl_for_memory_category(
             {"op": "must", "field": "category", "conds": ["preferences"]},
         )
     ]
+    assert manager._retriever.target_uris == [
+        [
+            "viking://user/memories",
+            "viking://user/peers/research/memories",
+        ]
+    ]
 
 
 def test_concurrent_recall_keeps_actor_peer_scopes_isolated(
@@ -461,21 +544,28 @@ def test_concurrent_recall_keeps_actor_peer_scopes_isolated(
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
     barrier = threading.Barrier(2)
-    observed: list[tuple[str, str | None]] = []
+    observed: list[tuple[str, str | None, str | None, tuple[str, ...]]] = []
 
-    def invoke(query: str) -> list[Document]:
+    def invoke(retriever: _Retriever, query: str) -> list[Document]:
         barrier.wait()
-        observed.append((query, _ACTOR_PEER.get()))
+        observed.append(
+            (
+                query,
+                _ACTOR_PEER.get(),
+                retriever.session_id,
+                tuple(retriever.target_uri),
+            )
+        )
         return []
 
-    manager._retriever.invoke = invoke
+    monkeypatch.setattr(_Retriever, "invoke", invoke)
     threads = [
         threading.Thread(
             target=manager.get_context,
             args=("alice",),
-            kwargs={"agent_name": peer, "query": peer},
+            kwargs={"agent_name": peer, "thread_id": thread_id, "query": peer},
         )
-        for peer in ("research", "review")
+        for peer, thread_id in (("research", "thread-a"), ("review", "thread-b"))
     ]
     for thread in threads:
         thread.start()
@@ -484,8 +574,24 @@ def test_concurrent_recall_keeps_actor_peer_scopes_isolated(
         assert not thread.is_alive()
 
     assert set(observed) == {
-        ("research", "research"),
-        ("review", "review"),
+        (
+            "research",
+            "research",
+            _session_id("alice", "research", "thread-a"),
+            (
+                "viking://user/memories",
+                "viking://user/peers/research/memories",
+            ),
+        ),
+        (
+            "review",
+            "review",
+            _session_id("alice", "review", "thread-b"),
+            (
+                "viking://user/memories",
+                "viking://user/peers/review/memories",
+            ),
+        ),
     }
 
 
@@ -602,16 +708,17 @@ def test_pending_commit_is_retried_without_resubmitting_messages(
     manager._recorder.failures.append(_PartialWriteError(2, commit_pending=True))
 
     manager.add("thread-1", messages, user_id="alice")
-    assert len(manager._pending_commit_sessions) == 1
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    assert manager._load_cursor(session_id)["commit_pending"] is True
     manager.add("thread-1", messages, user_id="alice")
 
     assert len(manager._recorder.calls) == 1
     assert len(manager._recorder.flushes) == 1
     assert manager._recorder.flush_actor_peers == ["deerflow"]
-    assert manager._pending_commit_sessions == {}
+    assert manager._load_cursor(session_id)["commit_pending"] is False
 
 
-def test_successful_sessions_do_not_accumulate_shutdown_tracking_state(
+def test_successful_sessions_do_not_become_shutdown_commit_candidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     official_integration: None,
@@ -625,7 +732,237 @@ def test_successful_sessions_do_not_accumulate_shutdown_tracking_state(
             user_id="alice",
         )
 
-    assert manager._pending_commit_sessions == {}
+    assert manager._shutdown_commit_candidates(time.time()) == ()
+
+
+def test_threshold_policy_commits_without_rotating_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={
+            "mode": "pending_tokens",
+            "pending_token_threshold": 2_000,
+            "idle_flush_seconds": 0,
+        },
+    )
+    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
+
+    manager.add("thread-1", messages, user_id="alice")
+
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    assert [call[0] for call in manager._recorder.calls] == [session_id]
+    assert manager._recorder.flushes == [session_id]
+
+
+def test_compaction_capture_forces_flush_without_duplicate_append(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 0},
+    )
+    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
+
+    manager.add("thread-1", messages, user_id="alice")
+    manager.add_nowait("thread-1", messages, user_id="alice")
+
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    assert len(manager._recorder.calls) == 1
+    assert manager._recorder.flushes == [session_id]
+
+
+def test_idle_deadline_is_reset_by_later_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 60},
+    )
+    first = [HumanMessage("hello", id="h1")]
+    second = [*first, AIMessage("hi", id="a1")]
+
+    manager.add("thread-1", first, user_id="alice")
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    first_deadline = manager._load_cursor(session_id)["idle_due_at"]
+    manager.add("thread-1", second, user_id="alice")
+    second_deadline = manager._load_cursor(session_id)["idle_due_at"]
+
+    assert second_deadline >= first_deadline
+    assert (
+        manager._process_idle_deadline(
+            session_id,
+            "deerflow",
+            first_deadline,
+            now=first_deadline,
+        )
+        is False
+    )
+    assert manager._recorder.flushes == []
+
+
+def test_idle_worker_commits_once_after_inactivity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 0.05},
+    )
+    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
+    session_id = _session_id("alice", "deerflow", "thread-1")
+
+    deadline = time.monotonic() + 2
+    while not manager._recorder.flushes and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert manager._recorder.flushes == [session_id]
+    assert manager._load_cursor(session_id)["idle_due_at"] is None
+    time.sleep(0.1)
+    assert manager._recorder.flushes == [session_id]
+    manager.close()
+
+
+def test_compaction_flush_failure_is_retried_without_duplicate_append(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 0},
+    )
+    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
+    manager.add("thread-1", messages, user_id="alice")
+    manager._recorder.failures.append(RuntimeError("commit failed"))
+
+    manager.add_nowait("thread-1", messages, user_id="alice")
+    manager.add("thread-1", messages, user_id="alice")
+
+    assert len(manager._recorder.calls) == 1
+    assert len(manager._recorder.flushes) == 2
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    assert manager._load_cursor(session_id)["commit_pending"] is False
+
+
+def test_idle_commit_is_restored_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    commit = {"mode": "pending_tokens", "idle_flush_seconds": 60}
+    first = _manager(tmp_path, monkeypatch, commit=commit)
+    first.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    state = first._load_cursor(session_id)
+    first._save_cursor(session_id, {**state, "idle_due_at": time.time() - 1})
+    first.close()
+
+    restarted = _manager(tmp_path, monkeypatch, commit=commit)
+
+    deadline = time.monotonic() + 2
+    while not restarted._recorder.flushes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert restarted._recorder.flushes == [session_id]
+    assert restarted._recorder.flush_actor_peers == ["deerflow"]
+    assert restarted._load_cursor(session_id)["idle_due_at"] is None
+    restarted.close()
+
+
+def test_shutdown_does_not_commit_future_idle_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 60},
+    )
+    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
+
+    assert manager.shutdown_flush(1) is True
+    assert manager._recorder.flushes == []
+    manager.close()
+
+
+def test_shutdown_flushes_idle_deadline_that_is_already_due(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 60},
+    )
+    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    manager._stop_idle_worker()
+    state = manager._load_cursor(session_id)
+    manager._save_cursor(session_id, {**state, "idle_due_at": time.time() - 1})
+
+    assert manager.shutdown_flush(1) is True
+    assert manager._recorder.flushes == [session_id]
+    assert manager._load_cursor(session_id)["idle_due_at"] is None
+    manager.close()
+
+
+def test_shutdown_worker_completes_when_a_candidate_cursor_becomes_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    monkeypatch.setattr(
+        type(manager),
+        "_shutdown_commit_candidates",
+        lambda self, now: ((session_id, "deerflow"),),
+    )
+    monkeypatch.setattr(
+        type(manager),
+        "_load_cursor",
+        lambda self, candidate: (_ for _ in ()).throw(MemoryManagerError(f"unreadable {candidate}")),
+    )
+
+    assert manager.shutdown_flush(1) is False
+    assert manager._shutdown_flush_done.is_set()
+    manager.close()
+    assert manager._recorder.closed is True
+
+
+def test_close_stops_idle_worker_without_committing_future_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 60},
+    )
+    manager.add("thread-1", [HumanMessage("hello", id="h1")], user_id="alice")
+
+    manager.close()
+    worker = manager._session_lifecycle.worker_thread
+    assert worker is not None
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert manager._recorder.flushes == []
 
 
 def test_pending_commit_survives_manager_restart_without_resubmitting_messages(
@@ -839,12 +1176,16 @@ def test_close_does_not_close_client_under_active_write_after_shutdown_timeout(
     assert manager._client.closed is True
 
 
-def test_cursor_contains_only_hashes_not_message_content(
+def test_cursor_contains_no_message_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     official_integration: None,
 ) -> None:
-    manager = _manager(tmp_path, monkeypatch)
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        commit={"mode": "pending_tokens", "idle_flush_seconds": 60},
+    )
     manager.add(
         "thread-1",
         [HumanMessage("top secret message", id="h1")],
@@ -855,4 +1196,51 @@ def test_cursor_contains_only_hashes_not_message_content(
     text = cursor.read_text(encoding="utf-8")
     state = json.loads(text)
     assert "top secret message" not in text
-    assert state["schema_version"] == 1
+    assert state["schema_version"] == 2
+    assert state["peer_id"] == "deerflow"
+    assert state["idle_due_at"] is not None
+    manager.close()
+
+
+def test_corrupt_cursor_fails_closed_before_remote_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    manager._ensure_lifecycle_restored()
+    session_id = _session_id("alice", "deerflow", "thread-1")
+    cursor = tmp_path / "openviking" / "official_sessions" / f"{session_id}.json"
+    cursor.parent.mkdir(parents=True, exist_ok=True)
+    cursor.write_text("{not valid json", encoding="utf-8")
+
+    with pytest.raises(MemoryManagerError, match="refusing unsafe replay"):
+        manager.add(
+            "thread-1",
+            [HumanMessage("must not be replayed", id="h1")],
+            user_id="alice",
+        )
+
+    assert manager._recorder.calls == []
+    manager.close()
+
+
+def test_idle_scheduler_survives_one_callback_failure(tmp_path: Path) -> None:
+    completed = threading.Event()
+    calls: list[str] = []
+
+    def callback(session_id: str, peer_id: str, due_at: float) -> None:
+        del peer_id, due_at
+        calls.append(session_id)
+        if session_id == "broken":
+            raise RuntimeError("boom")
+        completed.set()
+
+    store = SessionLifecycleStore(tmp_path, callback)
+    now = time.time()
+    store.schedule("broken", "peer", now)
+    store.schedule("healthy", "peer", now + 0.05)
+
+    assert completed.wait(1)
+    assert calls == ["broken", "healthy"]
+    store.stop()

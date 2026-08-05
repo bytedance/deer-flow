@@ -1,17 +1,13 @@
-"""OpenViking memory backend built on the official LangChain adapters."""
+"""OpenViking memory backend built on the maintained LangChain adapters."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
-import json
 import logging
-import os
 import threading
 import time
 import weakref
-from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -23,23 +19,28 @@ from deerflow.agents.memory.manager import (
     MemoryManager,
     MemoryManagerError,
 )
-from deerflow.config.agents_config import AGENT_NAME_PATTERN
-from deerflow.utils.messages import message_to_text
 
-from .official_config import (
-    GENERATED_PEER_PREFIX,
-    OfficialOpenVikingConfig,
-    is_safe_peer_id,
+from .lifecycle import SessionLifecycleStateError, SessionLifecycleStore
+from .session import (
+    _advanced_cursor,
+    _canonical_peer_id,
+    _captureable_messages,
+    _cursor_lifecycle,
+    _matching_prefix_count,
+    _memory_target_uris,
+    _message_signature,
+    _session_id,
+    _string_list,
+    _timestamp,
 )
+from .settings import OpenVikingAdapterConfig
 
 logger = logging.getLogger(__name__)
 
-_SESSION_NAMESPACE = "deerflow-openviking-official-v1"
-_DEFAULT_AGENT_SCOPE = "__default__"
-_CURSOR_SCHEMA_VERSION = 1
+_COMMIT_RETRY_SECONDS = 60.0
 
 
-class OfficialOpenVikingMemoryManager(MemoryManager):
+class OpenVikingAdapterMemoryManager(MemoryManager):
     """Query-aware automatic memory using OpenViking-maintained adapters.
 
     DeerFlow owns lifecycle policy and transcript suffix selection. Message
@@ -50,7 +51,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     supports_search: ClassVar[bool] = True
     context_refresh_policy: ClassVar[Literal["session", "turn"]] = "turn"
 
-    _config: OfficialOpenVikingConfig = PrivateAttr()
+    _config: OpenVikingAdapterConfig = PrivateAttr()
     _client: Any = PrivateAttr()
     _recorder: Any = PrivateAttr()
     _retriever: Any = PrivateAttr()
@@ -60,8 +61,10 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     _should_keep_hidden_message: Any = PrivateAttr(default=None)
     _session_locks: weakref.WeakValueDictionary[str, threading.RLock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
     _session_locks_guard: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _pending_commit_sessions: dict[str, str] = PrivateAttr(default_factory=dict)
-    _pending_commit_sessions_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _session_lifecycle: SessionLifecycleStore = PrivateAttr()
+    _lifecycle_restore_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _lifecycle_restored: bool = PrivateAttr(default=False)
+    _lifecycle_restore_thread: threading.Thread | None = PrivateAttr(default=None)
     _lifecycle: threading.Condition = PrivateAttr(default_factory=threading.Condition)
     _active_operations: int = PrivateAttr(default=0)
     _closed: bool = PrivateAttr(default=False)
@@ -73,9 +76,12 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
     _close_requested: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context: Any) -> None:
-        self._config = OfficialOpenVikingConfig.from_backend_config(self.backend_config)
+        self._config = OpenVikingAdapterConfig.from_backend_config(self.backend_config)
         integration = _load_official_integration()
-        self._commit_policy = integration["OpenVikingCommitPolicy"](mode="always")
+        self._commit_policy = integration["OpenVikingCommitPolicy"](
+            mode=self._config.commit_mode,
+            pending_token_threshold=self._config.pending_token_threshold,
+        )
         self._recorder = integration["OpenVikingSessionRecorder"](
             url=self._config.base_url,
             api_key=self._config.api_key,
@@ -88,7 +94,6 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         self._client = self._recorder.client
         self._retriever = integration["OpenVikingRetriever"](
             client=self._client,
-            target_uri="viking://user/memories",
             search_mode=self._config.search_mode,
             limit=self._config.search_top_k,
             score_threshold=self._config.score_threshold,
@@ -98,6 +103,18 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         )
         self._use_actor_peer = integration["use_actor_peer"]
         self._partial_write_error = integration["OpenVikingPartialWriteError"]
+        self._session_lifecycle = SessionLifecycleStore(
+            # Preserve the original cursor directory so upgrading this draft
+            # cannot replay already-submitted transcript prefixes.
+            Path(self._config.storage_path or ".") / "openviking" / "official_sessions",
+            self._process_idle_deadline,
+        )
+        self._lifecycle_restore_thread = threading.Thread(
+            target=self._ensure_lifecycle_restored,
+            name="openviking-memory-lifecycle-restore",
+            daemon=True,
+        )
+        self._lifecycle_restore_thread.start()
 
     @classmethod
     def from_config(
@@ -106,7 +123,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         *,
         mode: Literal["middleware", "tool"] = "middleware",
         **host_hooks: Any,
-    ) -> OfficialOpenVikingMemoryManager:
+    ) -> OpenVikingAdapterMemoryManager:
         if mode != "middleware":
             raise ValueError("The OpenViking automatic-memory backend supports memory.mode='middleware' only; use OpenViking MCP for explicit model tools")
         instance = cls(backend_config=backend_config or {}, mode=mode)
@@ -129,6 +146,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             messages,
             agent_name=agent_name,
             user_id=user_id,
+            force_commit=False,
         )
 
     def add_nowait(
@@ -144,6 +162,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             messages,
             agent_name=agent_name,
             user_id=user_id,
+            force_commit=True,
         )
 
     async def aadd(
@@ -175,16 +194,23 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         thread_id: str | None = None,
         query: str | None = None,
     ) -> str:
-        del thread_id
         if not query or not query.strip():
             return ""
         if not self._begin_operation():
             return ""
         try:
             peer_id = self._resolve_scope(user_id, agent_name)
+            retriever = copy.copy(self._retriever)
+            retriever.target_uri = _memory_target_uris(peer_id)
+            if thread_id:
+                retriever.session_id = _session_id(
+                    self._config.owner_user_id,
+                    peer_id,
+                    thread_id,
+                )
             try:
                 with self._actor_peer_scope(peer_id):
-                    documents = self._retriever.invoke(query.strip())
+                    documents = retriever.invoke(query.strip())
             except Exception as exc:
                 return self._handle_read_error(
                     exc,
@@ -230,6 +256,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         try:
             peer_id = self._resolve_scope(user_id, agent_name)
             retriever = copy.copy(self._retriever)
+            retriever.target_uri = _memory_target_uris(peer_id)
             retriever.limit = max(1, min(int(top_k), 100))
             if category:
                 retriever.filter = {
@@ -290,8 +317,9 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             self._end_operation()
 
     def shutdown_flush(self, timeout: float) -> bool:
-        """Stop new work and retry known pending commits within a hard budget."""
+        """Drain accepted work and flush only commits already due or requested."""
         deadline = time.monotonic() + max(0.0, timeout)
+        self._stop_idle_worker()
         with self._lifecycle:
             self._closed = True
             while self._active_operations:
@@ -302,8 +330,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
 
         with self._shutdown_flush_lock:
             if self._shutdown_flush_thread is None:
-                with self._pending_commit_sessions_lock:
-                    pending_sessions = tuple(self._pending_commit_sessions.items())
+                pending_sessions = self._shutdown_commit_candidates(time.time())
                 self._shutdown_flush_thread = threading.Thread(
                     target=self._flush_pending_commits_for_shutdown,
                     args=(pending_sessions,),
@@ -326,6 +353,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             self._close_requested = True
         with self._lifecycle:
             self._closed = True
+        self._stop_idle_worker()
         self._close_if_ready()
 
     def _flush_pending_commits_for_shutdown(
@@ -333,30 +361,57 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         pending_sessions: tuple[tuple[str, str], ...],
     ) -> None:
         success = True
-        for session_id, peer_id in pending_sessions:
-            state = self._load_cursor(session_id)
-            if not state.get("commit_pending"):
-                continue
-            try:
-                with self._actor_peer_scope(peer_id):
-                    self._recorder.flush(session_id)
-                self._save_cursor(
-                    session_id,
-                    {**state, "commit_pending": False},
-                )
-                self._discard_commit_pending(session_id)
-            except Exception:
-                success = False
-                logger.warning(
-                    "OpenViking pending commit could not be flushed during shutdown (session=%s)",
-                    session_id,
-                    exc_info=True,
-                )
-
-        with self._shutdown_flush_lock:
-            self._shutdown_flush_result = success
-            self._shutdown_flush_done.set()
-        self._close_if_ready()
+        try:
+            for session_id, peer_id in pending_sessions:
+                try:
+                    with self._session_lock(session_id):
+                        state = self._load_cursor(session_id)
+                        idle_due_at = _timestamp(state.get("idle_due_at"))
+                        if not state.get("commit_pending") and not (idle_due_at is not None and idle_due_at <= time.time()):
+                            continue
+                        try:
+                            with self._actor_peer_scope(peer_id):
+                                self._recorder.flush(session_id)
+                            self._save_cursor(
+                                session_id,
+                                _cursor_lifecycle(
+                                    state,
+                                    peer_id=peer_id,
+                                    idle_due_at=None,
+                                    commit_pending=False,
+                                ),
+                            )
+                            self._unschedule_idle(session_id)
+                        except Exception:
+                            success = False
+                            retry_at = time.time() + _COMMIT_RETRY_SECONDS
+                            self._save_cursor(
+                                session_id,
+                                _cursor_lifecycle(
+                                    state,
+                                    peer_id=peer_id,
+                                    idle_due_at=retry_at,
+                                    commit_pending=True,
+                                ),
+                            )
+                            logger.warning(
+                                "OpenViking pending commit could not be flushed during shutdown (session=%s)",
+                                session_id,
+                                exc_info=True,
+                            )
+                except Exception:
+                    success = False
+                    logger.exception(
+                        "OpenViking shutdown could not process lifecycle state (session=%s)",
+                        session_id,
+                    )
+        finally:
+            # A malformed cursor or local IO failure must not strand Gateway
+            # shutdown waiting for a completion signal that never arrives.
+            with self._shutdown_flush_lock:
+                self._shutdown_flush_result = success
+                self._shutdown_flush_done.set()
+            self._close_if_ready()
 
     def _close_if_ready(self) -> None:
         """Close only after active calls and a deferred shutdown retry finish."""
@@ -389,6 +444,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         *,
         agent_name: str | None,
         user_id: str | None,
+        force_commit: bool,
     ) -> None:
         if not self._begin_operation():
             logger.warning("OpenViking write ignored after backend shutdown")
@@ -410,6 +466,7 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
                         messages,
                         self._should_keep_hidden_message,
                     ),
+                    force_commit=force_commit,
                 )
         finally:
             self._end_operation()
@@ -419,25 +476,21 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         session_id: str,
         peer_id: str,
         messages: list[Any],
+        *,
+        force_commit: bool,
     ) -> None:
         state = self._load_cursor(session_id)
         signatures = [_message_signature(message) for message in messages]
 
         if state.get("commit_pending"):
-            self._mark_commit_pending(session_id, peer_id)
-            try:
-                with self._actor_peer_scope(peer_id):
-                    self._recorder.flush(session_id)
-            except Exception as exc:
-                self._handle_write_error(
-                    exc,
-                    "OpenViking pending commit retry failed; preserving capture cursor",
-                    session_id,
-                )
+            if not self._flush_locked(
+                session_id,
+                peer_id,
+                state,
+                message="OpenViking pending commit retry failed; preserving capture cursor",
+            ):
                 return
-            state = {**state, "commit_pending": False}
-            self._save_cursor(session_id, state)
-            self._discard_commit_pending(session_id)
+            state = self._load_cursor(session_id)
 
         start = _matching_prefix_count(state, signatures)
         append_only = start is not None
@@ -458,7 +511,20 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
                 max_seen=self._config.max_seen_message_ids,
                 commit_pending=False,
             )
+            rebased = _cursor_lifecycle(
+                rebased,
+                peer_id=peer_id,
+                idle_due_at=_timestamp(state.get("idle_due_at")),
+                commit_pending=False,
+            )
             self._save_cursor(session_id, rebased)
+            if force_commit:
+                self._flush_locked(
+                    session_id,
+                    peer_id,
+                    rebased,
+                    message="OpenViking compaction flush failed; retry intent was preserved",
+                )
             return
 
         try:
@@ -490,9 +556,16 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
                     max_seen=self._config.max_seen_message_ids,
                     commit_pending=commit_pending,
                 )
+                due_at = time.time() + _COMMIT_RETRY_SECONDS if commit_pending else self._next_idle_deadline()
+                state = _cursor_lifecycle(
+                    state,
+                    peer_id=peer_id,
+                    idle_due_at=due_at,
+                    commit_pending=commit_pending,
+                )
                 self._save_cursor(session_id, state)
-                if commit_pending:
-                    self._mark_commit_pending(session_id, peer_id)
+                if due_at is not None:
+                    self._schedule_idle(session_id, peer_id, due_at)
             self._handle_write_error(
                 exc,
                 "OpenViking partially recorded a conversation; confirmed progress was preserved",
@@ -508,8 +581,8 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
             return
 
         del result
-        self._save_cursor(
-            session_id,
+        due_at = self._next_idle_deadline()
+        state = _cursor_lifecycle(
             _advanced_cursor(
                 state,
                 signatures,
@@ -517,8 +590,160 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
                 max_seen=self._config.max_seen_message_ids,
                 commit_pending=False,
             ),
+            peer_id=peer_id,
+            idle_due_at=due_at,
+            commit_pending=False,
         )
-        self._discard_commit_pending(session_id)
+        self._save_cursor(session_id, state)
+        if due_at is not None:
+            self._schedule_idle(session_id, peer_id, due_at)
+        else:
+            self._unschedule_idle(session_id)
+        if force_commit:
+            self._flush_locked(
+                session_id,
+                peer_id,
+                state,
+                message="OpenViking compaction flush failed; retry intent was preserved",
+            )
+
+    def _flush_locked(
+        self,
+        session_id: str,
+        peer_id: str,
+        state: dict[str, Any],
+        *,
+        message: str,
+        background: bool = False,
+    ) -> bool:
+        """Flush one session while its capture lock is held."""
+
+        try:
+            with self._actor_peer_scope(peer_id):
+                self._recorder.flush(session_id)
+        except Exception as exc:
+            retry_at = time.time() + _COMMIT_RETRY_SECONDS
+            self._save_cursor(
+                session_id,
+                _cursor_lifecycle(
+                    state,
+                    peer_id=peer_id,
+                    idle_due_at=retry_at,
+                    commit_pending=True,
+                ),
+            )
+            self._schedule_idle(session_id, peer_id, retry_at)
+            if background:
+                logger.warning("%s (session=%s)", message, session_id, exc_info=True)
+            else:
+                self._handle_write_error(exc, message, session_id)
+            return False
+
+        self._save_cursor(
+            session_id,
+            _cursor_lifecycle(
+                state,
+                peer_id=peer_id,
+                idle_due_at=None,
+                commit_pending=False,
+            ),
+        )
+        self._unschedule_idle(session_id)
+        return True
+
+    def _next_idle_deadline(self) -> float | None:
+        if self._config.commit_mode == "always" or self._config.idle_flush_seconds <= 0:
+            return None
+        return time.time() + self._config.idle_flush_seconds
+
+    def _schedule_idle(
+        self,
+        session_id: str,
+        peer_id: str,
+        due_at: float,
+    ) -> None:
+        self._session_lifecycle.schedule(session_id, peer_id, due_at)
+
+    def _unschedule_idle(self, session_id: str) -> None:
+        self._session_lifecycle.unschedule(session_id)
+
+    def _stop_idle_worker(self) -> None:
+        self._session_lifecycle.stop()
+
+    def _process_idle_deadline(
+        self,
+        session_id: str,
+        peer_id: str,
+        expected_due_at: float,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        """Flush an unchanged, due deadline; stale worker observations are ignored."""
+
+        if not self._begin_operation():
+            return False
+        try:
+            with self._session_lock(session_id):
+                state = self._load_cursor(session_id)
+                stored_peer = state.get("peer_id")
+                stored_due_at = _timestamp(state.get("idle_due_at"))
+                if stored_peer != peer_id or stored_due_at is None:
+                    return False
+                current_time = time.time() if now is None else now
+                if stored_due_at != expected_due_at or stored_due_at > current_time:
+                    self._schedule_idle(session_id, peer_id, stored_due_at)
+                    return False
+                return self._flush_locked(
+                    session_id,
+                    peer_id,
+                    state,
+                    message="OpenViking idle commit failed; retry intent was preserved",
+                    background=True,
+                )
+        finally:
+            self._end_operation()
+
+    def _restore_lifecycle_state(self) -> None:
+        """Restore durable retry and idle deadlines after a process restart."""
+
+        now = time.time()
+        for session_id, state in self._iter_cursor_states():
+            peer_id = state.get("peer_id")
+            if not isinstance(peer_id, str) or not peer_id:
+                continue
+            due_at = _timestamp(state.get("idle_due_at"))
+            if state.get("commit_pending"):
+                self._schedule_idle(session_id, peer_id, due_at or now)
+            elif due_at is not None and self._config.idle_flush_seconds > 0:
+                self._schedule_idle(session_id, peer_id, due_at)
+
+    def _ensure_lifecycle_restored(self) -> None:
+        if self._lifecycle_restored:
+            return
+        with self._lifecycle_restore_lock:
+            if self._lifecycle_restored:
+                return
+            # Mark first because restoring an overdue deadline may start the
+            # idle worker immediately, and that worker also begins an operation.
+            self._lifecycle_restored = True
+            self._restore_lifecycle_state()
+
+    def _shutdown_commit_candidates(
+        self,
+        now: float,
+    ) -> tuple[tuple[str, str], ...]:
+        candidates: dict[str, str] = {}
+        for session_id, state in self._iter_cursor_states():
+            peer_id = state.get("peer_id")
+            if not isinstance(peer_id, str) or not peer_id:
+                continue
+            due_at = _timestamp(state.get("idle_due_at"))
+            if state.get("commit_pending") or (due_at is not None and due_at <= now):
+                candidates[session_id] = peer_id
+        return tuple(candidates.items())
+
+    def _iter_cursor_states(self) -> list[tuple[str, dict[str, Any]]]:
+        return self._session_lifecycle.iter_states()
 
     def _resolve_scope(self, user_id: str | None, agent_name: str | None) -> str:
         resolved_user = str(user_id or "default")
@@ -533,15 +758,8 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         with self._session_locks_guard:
             return self._session_locks.setdefault(session_id, threading.RLock())
 
-    def _mark_commit_pending(self, session_id: str, peer_id: str) -> None:
-        with self._pending_commit_sessions_lock:
-            self._pending_commit_sessions[session_id] = peer_id
-
-    def _discard_commit_pending(self, session_id: str) -> None:
-        with self._pending_commit_sessions_lock:
-            self._pending_commit_sessions.pop(session_id, None)
-
     def _begin_operation(self) -> bool:
+        self._ensure_lifecycle_restored()
         with self._lifecycle:
             if self._closed:
                 return False
@@ -558,44 +776,16 @@ class OfficialOpenVikingMemoryManager(MemoryManager):
         if should_try_close:
             self._close_if_ready()
 
-    def _cursor_path(self, session_id: str) -> Path:
-        root = Path(self._config.storage_path or ".") / "openviking" / "official_sessions"
-        return root / f"{session_id}.json"
-
     def _load_cursor(self, session_id: str) -> dict[str, Any]:
-        path = self._cursor_path(session_id)
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
-        except (OSError, ValueError):
-            logger.warning(
-                "Ignoring unreadable OpenViking capture cursor: %s",
-                path,
-                exc_info=True,
-            )
-            return {}
-        return value if isinstance(value, dict) else {}
+            return self._session_lifecycle.load(session_id)
+        except SessionLifecycleStateError as exc:
+            # Treat cursor corruption as a data-integrity failure. Replaying an
+            # unknown transcript prefix would duplicate already accepted data.
+            raise MemoryManagerError(f"OpenViking lifecycle cursor is unreadable; refusing unsafe replay (session={session_id})") from exc
 
     def _save_cursor(self, session_id: str, state: dict[str, Any]) -> None:
-        path = self._cursor_path(session_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        try:
-            temp_path.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(temp_path, path)
-        finally:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug(
-                    "Failed to remove OpenViking cursor temp file: %s",
-                    temp_path,
-                    exc_info=True,
-                )
+        self._session_lifecycle.save(session_id, state)
 
     def _handle_read_error(self, exc: Exception, *, message: str, fallback: Any) -> Any:
         if self._config.read_failure_policy == "fail_closed":
@@ -636,152 +826,6 @@ def _load_official_integration() -> dict[str, Any]:
         "OpenVikingSessionRecorder": OpenVikingSessionRecorder,
         "use_actor_peer": use_actor_peer,
     }
-
-
-def _canonical_peer_id(agent_name: str | None, default_peer_id: str) -> str:
-    if agent_name is None:
-        return default_peer_id
-
-    raw_name = str(agent_name).strip()
-    if not AGENT_NAME_PATTERN.fullmatch(raw_name):
-        raise ValueError(f"Invalid DeerFlow agent name: {raw_name!r}")
-
-    value = raw_name.lower()
-    if value == _DEFAULT_AGENT_SCOPE:
-        raise ValueError(f"Invalid OpenViking peer scope: {value!r}")
-    if is_safe_peer_id(value) and value != default_peer_id and not value.startswith(GENERATED_PEER_PREFIX):
-        # Preserve the existing mapping for every already-compatible name so
-        # existing OpenViking Sessions remain reachable. The configured default
-        # and generated namespace are reserved to keep all branches disjoint.
-        return value
-
-    # DeerFlow permits leading hyphens and names longer than OpenViking's
-    # 64-character peer limit. Reserved names follow the same stable mapping;
-    # the digest prevents truncation/sanitization collisions.
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
-    return f"{GENERATED_PEER_PREFIX}{digest}"
-
-
-def _session_id(owner_user_id: str, peer_id: str, thread_id: str) -> str:
-    digest = hashlib.sha256(f"{_SESSION_NAMESPACE}\0{owner_user_id}\0{peer_id}\0{thread_id}".encode()).hexdigest()
-    return f"df_{digest[:48]}"
-
-
-def _captureable_messages(
-    messages: list[Any],
-    should_keep_hidden_message: Any,
-) -> list[Any]:
-    selected: list[Any] = []
-    for message in messages:
-        additional_kwargs = message.get("additional_kwargs", {}) if isinstance(message, dict) else getattr(message, "additional_kwargs", {})
-        if not isinstance(additional_kwargs, dict):
-            additional_kwargs = {}
-        if additional_kwargs.get("hide_from_ui") and not (should_keep_hidden_message and should_keep_hidden_message(additional_kwargs)):
-            continue
-        selected.append(message)
-    return selected
-
-
-def _message_signature(message: Any) -> str:
-    """Hash only stable transcript semantics, excluding volatile model metadata."""
-    if isinstance(message, Mapping):
-        message_id = message.get("id")
-        role = message.get("role") or message.get("type")
-        tool_calls = message.get("tool_calls") or []
-        tool_result = {
-            "tool_call_id": message.get("tool_call_id") or message.get("tool_id"),
-            "name": message.get("name") or message.get("tool_name"),
-            "output": message.get("tool_output") or message.get("output"),
-            "status": message.get("status") or message.get("tool_status"),
-        }
-    else:
-        message_id = getattr(message, "id", None)
-        role = getattr(message, "type", None)
-        tool_calls = getattr(message, "tool_calls", None) or []
-        if not tool_calls:
-            additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
-            if isinstance(additional_kwargs, Mapping):
-                tool_calls = additional_kwargs.get("tool_calls") or []
-        tool_result = {
-            "tool_call_id": getattr(message, "tool_call_id", None),
-            "name": getattr(message, "name", None),
-            "status": getattr(message, "status", None),
-        }
-    value = {
-        "id": str(message_id) if message_id else None,
-        "role": role,
-        "content": message_to_text(message),
-        "tool_calls": tool_calls,
-        "tool_result": tool_result,
-    }
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _sequence_digest(signatures: list[str]) -> str:
-    digest = hashlib.sha256()
-    for signature in signatures:
-        encoded = signature.encode()
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return digest.hexdigest()
-
-
-def _matching_prefix_count(
-    state: dict[str, Any],
-    signatures: list[str],
-) -> int | None:
-    count = state.get("submitted_prefix_count")
-    digest = state.get("submitted_prefix_digest")
-    if isinstance(count, int) and 0 <= count <= len(signatures) and isinstance(digest, str):
-        if _sequence_digest(signatures[:count]) == digest:
-            return count
-        return None
-    submitted = _string_list(state.get("submitted_signatures"))
-    if submitted and len(submitted) <= len(signatures):
-        width = len(submitted)
-        for start in range(len(signatures) - width, -1, -1):
-            if signatures[start : start + width] == submitted:
-                return start + width
-    return 0 if not state else None
-
-
-def _advanced_cursor(
-    previous: dict[str, Any],
-    prefix_signatures: list[str] | None,
-    newly_submitted: Any,
-    *,
-    max_seen: int,
-    commit_pending: bool,
-) -> dict[str, Any]:
-    recent = [
-        *_string_list(previous.get("submitted_signatures")),
-        *list(newly_submitted),
-    ][-max_seen:]
-    state: dict[str, Any] = {
-        "schema_version": _CURSOR_SCHEMA_VERSION,
-        "submitted_signatures": recent,
-        "commit_pending": commit_pending,
-    }
-    if prefix_signatures is not None:
-        state["submitted_prefix_count"] = len(prefix_signatures)
-        state["submitted_prefix_digest"] = _sequence_digest(prefix_signatures)
-    else:
-        state["submitted_prefix_count"] = previous.get("submitted_prefix_count")
-        state["submitted_prefix_digest"] = previous.get("submitted_prefix_digest")
-    return state
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
 
 
 def _format_documents(documents: list[Any], *, max_chars: int) -> str:

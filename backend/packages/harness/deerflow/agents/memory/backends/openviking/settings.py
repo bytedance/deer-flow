@@ -1,4 +1,4 @@
-"""Configuration for the official OpenViking LangChain adapter path."""
+"""Validated settings for the OpenViking LangChain adapter."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ GENERATED_PEER_PREFIX = "df-agent-"
 
 
 @dataclass(frozen=True, slots=True)
-class OfficialOpenVikingConfig:
+class OpenVikingAdapterConfig:
     """Validated credential-bound OpenViking connection and memory policy."""
 
     base_url: str
@@ -32,6 +32,9 @@ class OfficialOpenVikingConfig:
     startup_policy: Literal["fail_fast", "warn"]
     read_failure_policy: Literal["fail_open", "fail_closed"]
     write_failure_policy: Literal["fail_open", "fail_closed"]
+    commit_mode: Literal["never", "always", "pending_tokens"]
+    pending_token_threshold: int
+    idle_flush_seconds: float
     allow_insecure_http: bool
     max_seen_message_ids: int
 
@@ -39,10 +42,11 @@ class OfficialOpenVikingConfig:
     def from_backend_config(
         cls,
         backend_config: dict[str, Any] | None,
-    ) -> OfficialOpenVikingConfig:
+    ) -> OpenVikingAdapterConfig:
         cfg = dict(backend_config or {})
         retrieval = _mapping(cfg.pop("retrieval", {}), "retrieval")
         failure_policy = _mapping(cfg.pop("failure_policy", {}), "failure_policy")
+        commit = _mapping(cfg.pop("commit", {}), "commit")
 
         api_key_env = str(cfg.pop("api_key_env", "OPENVIKING_API_KEY")).strip()
         if not api_key_env:
@@ -65,6 +69,9 @@ class OfficialOpenVikingConfig:
             startup_policy=str(cfg.pop("startup_policy", "fail_fast")).lower(),  # type: ignore[arg-type]
             read_failure_policy=str(failure_policy.pop("read", "fail_open")).lower(),  # type: ignore[arg-type]
             write_failure_policy=str(failure_policy.pop("write", "fail_open")).lower(),  # type: ignore[arg-type]
+            commit_mode=str(commit.pop("mode", "pending_tokens")).lower(),  # type: ignore[arg-type]
+            pending_token_threshold=int(commit.pop("pending_token_threshold", 8_000)),
+            idle_flush_seconds=float(commit.pop("idle_flush_seconds", 1_800.0)),
             allow_insecure_http=_boolean(
                 cfg.pop("allow_insecure_http", False),
                 "allow_insecure_http",
@@ -77,10 +84,11 @@ class OfficialOpenVikingConfig:
                 *cfg,
                 *(f"retrieval.{key}" for key in retrieval),
                 *(f"failure_policy.{key}" for key in failure_policy),
+                *(f"commit.{key}" for key in commit),
             ]
         )
         if unknown:
-            raise ValueError("Unknown official OpenViking backend_config fields: " + ", ".join(unknown))
+            raise ValueError("Unknown OpenViking backend_config fields: " + ", ".join(unknown))
         result._validate()
         return result
 
@@ -118,6 +126,12 @@ class OfficialOpenVikingConfig:
             raise ValueError("OpenViking failure_policy.read must be 'fail_open' or 'fail_closed'")
         if self.write_failure_policy not in {"fail_open", "fail_closed"}:
             raise ValueError("OpenViking failure_policy.write must be 'fail_open' or 'fail_closed'")
+        if self.commit_mode not in {"never", "always", "pending_tokens"}:
+            raise ValueError("OpenViking commit.mode must be 'never', 'always', or 'pending_tokens'")
+        if not 1 <= self.pending_token_threshold <= 10_000_000:
+            raise ValueError("OpenViking commit.pending_token_threshold must be between 1 and 10000000")
+        if not isfinite(self.idle_flush_seconds) or not 0 <= self.idle_flush_seconds <= 604_800:
+            raise ValueError("OpenViking commit.idle_flush_seconds must be a finite value between 0 and 604800")
         if not 16 <= self.max_seen_message_ids <= 10_000:
             raise ValueError("OpenViking max_seen_message_ids must be between 16 and 10000")
 

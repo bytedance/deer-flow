@@ -7,7 +7,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import (
@@ -702,6 +702,16 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
+def _memory_read_fails_closed(config: Any) -> bool:
+    if config is None:
+        return False
+    backend_config = getattr(config, "backend_config", {})
+    if not isinstance(backend_config, dict):
+        return False
+    failure_policy = backend_config.get("failure_policy", {})
+    return isinstance(failure_policy, dict) and str(failure_policy.get("read", "")).strip().lower() == "fail_closed"
+
+
 def _get_memory_context(
     agent_name: str | None = None,
     *,
@@ -746,7 +756,6 @@ def _get_memory_context(
             memory_content = manager.get_context(
                 user_id=resolved_user_id,
                 agent_name=agent_name,
-                thread_id=thread_id,
             )
         else:
             memory_content = manager.get_context(
@@ -767,10 +776,9 @@ def _get_memory_context(
         logger.exception("Failed to load memory context")
         from deerflow.agents.memory import MemoryAuthorizationError, MemoryManagerError
 
-        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
         if isinstance(exc, MemoryAuthorizationError):
             raise
-        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+        if isinstance(exc, MemoryManagerError) and _memory_read_fails_closed(config):
             raise
         return ""
 
@@ -802,12 +810,11 @@ async def _aget_memory_context(
         manager = await asyncio.to_thread(get_memory_manager)
         resolved_user_id = user_id or resolve_runtime_user_id(None)
         if query is None:
-            # Preserve compatibility with third-party managers that override
-            # ``aget_context`` with the pre-query signature.
+            # Preserve compatibility with third-party managers that retain the
+            # original signature, before thread/query keywords were introduced.
             memory_content = await manager.aget_context(
                 user_id=resolved_user_id,
                 agent_name=agent_name,
-                thread_id=thread_id,
             )
         else:
             memory_content = await manager.aget_context(
@@ -823,10 +830,9 @@ async def _aget_memory_context(
         logger.exception("Failed to load memory context")
         from deerflow.agents.memory import MemoryAuthorizationError, MemoryManagerError
 
-        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
         if isinstance(exc, MemoryAuthorizationError):
             raise
-        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+        if isinstance(exc, MemoryManagerError) and _memory_read_fails_closed(config):
             raise
         return ""
 

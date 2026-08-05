@@ -20,18 +20,26 @@ mapping in DeerFlow's existing memory seam.
 
 ## Capabilities
 
-- Query-aware recall from the latest real user message.
+- Query-aware recall from the latest real user message, scoped to the current
+  DeerFlow thread when `retrieval.search_mode: search` is used.
+- Each recall searches both the credential owner's self-memory root and the
+  current agent peer's memory root. It does not search other peers, shared
+  resources, or skills through this automatic-memory path.
 - Request-local memory injection. Recalled text is not saved into LangGraph
   checkpoints or captured back into OpenViking.
-- Capture after a completed turn and immediately before summarization removes
-  messages.
+- Append accepted messages after a completed turn. Immediately before
+  summarization removes older messages, append any missing suffix and explicitly
+  flush that conversation segment.
 - Official OpenViking message filtering, conversion, 100-message batching,
   partial-write progress, commit retry, and retrieval.
 - One shared credential-bound SDK client for recorder and retriever operations.
-- A bounded local cursor containing hashes only. It prevents repeated full
-  transcript snapshots from duplicating accepted messages and rebases after
-  history compaction.
-- Stable mapping from a DeerFlow thread to an OpenViking Session.
+- A bounded local cursor containing message hashes and lifecycle metadata, but
+  no message content. It prevents repeated full transcript snapshots from
+  duplicating accepted messages, rebases after history compaction, and restores
+  pending idle or failed commits after a process restart.
+- Stable mapping from one DeerFlow thread to one OpenViking Session. Threshold,
+  idle, and compaction commits create archives inside that same Session; they do
+  not rotate the Session ID.
 - Request-scoped actor peers. The default DeerFlow agent uses
   `default_peer_id`; compatible top-level agent names keep their lowercase
   identity, while DeerFlow-valid names outside OpenViking's peer syntax use a
@@ -106,6 +114,10 @@ memory:
     failure_policy:
       read: fail_open
       write: fail_open
+    commit:
+      mode: pending_tokens
+      pending_token_threshold: 8000
+      idle_flush_seconds: 1800
     retrieval:
       search_mode: search
       top_k: 8
@@ -132,6 +144,13 @@ make dev
 There is no separate OpenViking setup wizard yet. Configuration remains in
 `config.yaml` and `.env`, matching other memory backends.
 
+`commit.mode` controls the official recorder's post-append policy. `always`
+commits every accepted capture, `pending_tokens` commits at the configured
+token threshold, and `never` disables only that post-append auto-commit.
+Pre-compaction flushes still run in every mode, and `idle_flush_seconds > 0`
+remains an independent lifecycle boundary. Set it to `0` to disable idle
+commits explicitly.
+
 ## Failure behavior
 
 - Invalid configuration and missing credentials fail at manager construction.
@@ -148,17 +167,25 @@ There is no separate OpenViking setup wizard yet. Configuration remains in
   host operation.
 - Confirmed partial progress advances the cursor before the error is handled,
   so a retry starts from the unconfirmed suffix.
-- A failed post-write commit is marked pending. The next capture or graceful
-  shutdown retries the commit without resubmitting accepted messages.
-- Graceful shutdown stops new memory work, waits for active operations, retries
-  known pending commits within the host budget, and closes the shared client.
+- A successful completed turn appends only its unseen suffix. The official
+  `pending_tokens` policy commits when the configured threshold is reached.
+  The adapter also records a durable idle deadline and commits after that
+  session remains inactive for `idle_flush_seconds`.
+- A failed threshold, idle, or compaction commit is marked pending. The next
+  capture, idle retry, process restart, or graceful shutdown retries it without
+  resubmitting accepted messages.
+- Graceful shutdown stops the idle worker, waits for active operations, retries
+  failed commits and idle deadlines that are already due, and closes the shared
+  client. It deliberately does not commit every future deadline merely because
+  the service is being restarted or deployed.
 
-The cursor protects one running DeerFlow process from duplicate snapshot writes.
-Its `storage_path` must be on persistent storage that survives DeerFlow
-restarts. Losing the cursor can make the next capture submit the retained
-transcript again. It is not a distributed outbox. Multiple Gateway replicas
-sharing one credential and thread still require server-side idempotency keys
-before the integration can claim at-least-once delivery.
+The cursor protects one running DeerFlow process from duplicate snapshot writes
+and restores idle deadlines when that process restarts. Its `storage_path` must
+be on persistent storage that survives DeerFlow restarts. Losing the cursor can
+make the next capture submit the retained transcript again and loses pending
+lifecycle intent. It is not a distributed outbox. Multiple Gateway replicas
+sharing one credential and thread still require server-side idempotency keys and
+cross-worker claiming before the integration can claim at-least-once delivery.
 
 ## Existing trusted configuration
 

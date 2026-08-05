@@ -1019,9 +1019,10 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   does not import or construct an OpenViking HTTP client. Select it with
   `memory.manager_class: openviking` and keep
   `memory.mode: middleware`. DeerFlow owns recall/capture timing, authenticated
-  user and agent mapping, pre-compaction capture, shutdown draining, and a
-  bounded hash-only cursor below
-  `{storage_path}/openviking/official_sessions/`. OpenViking owns message
+  user and agent mapping, pre-compaction flush, threshold and idle commit
+  policy, shutdown draining, and a bounded cursor containing hashes plus
+  lifecycle metadata below `{storage_path}/openviking/official_sessions/`.
+  OpenViking owns message
   conversion, 100-message batching, partial-write reporting, Session commits,
   retrieval, and HTTP transport. One ordinary OpenViking USER credential is
   bound to the configured `owner_user_id`; requests for another DeerFlow user
@@ -1030,11 +1031,16 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   their lowercase request-scoped peer ID; DeerFlow-valid names outside
   OpenViking's syntax use a stable collision-resistant fallback. The generated
   `df-agent-` namespace and configured default peer are reserved so named agents
-  cannot alias another memory partition. Query-aware
-  recall is injected only into the current model request and both sync and async
+  cannot alias another memory partition. Query-aware recall is scoped to the
+  current thread on `search` mode, injected only into the current model request,
+  and both sync and async
   model hooks enforce the same five-second wall-clock budget while SDK and
   cursor IO run off the event loop. The cursor `storage_path` must remain
-  persistent across restarts; losing it can replay the retained transcript.
+  persistent across restarts; it restores failed and idle commit intent, while
+  losing it can replay the retained transcript. Graceful shutdown retries failed
+  and already-due commits but does not turn every deployment into a semantic
+  conversation boundary. This lifecycle cursor is single-worker state, not a
+  distributed outbox.
   Configuration containing the old explicit `auth_mode` continues through the
   deprecated custom-HTTP adapter with a migration warning. Neither path
   implements DeerMem fact CRUD/import/export or imports the embedded OpenViking

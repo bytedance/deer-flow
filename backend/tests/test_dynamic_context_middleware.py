@@ -4,6 +4,7 @@ Verifies that memory and current date are injected as a <system-reminder> into
 the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
+import asyncio
 import hashlib
 import threading
 import time
@@ -438,6 +439,91 @@ def test_turn_aware_sync_recall_respects_injection_timeout(monkeypatch):
 
     middleware.wrap_model_call(request, lambda value: mock.MagicMock())
     assert manager.calls == 1
+
+
+def test_turn_aware_sync_timeout_respects_fail_closed(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    import deerflow.agents.middlewares.dynamic_context_middleware as middleware_module
+    from deerflow.agents.memory import MemoryManagerError
+
+    release = threading.Event()
+
+    class BlockingMemoryManager:
+        context_refresh_policy = "turn"
+
+        def get_context(self, **kwargs: Any) -> str:
+            del kwargs
+            release.wait(1)
+            return "late memory"
+
+    monkeypatch.setattr(
+        memory_package,
+        "get_memory_manager",
+        lambda: BlockingMemoryManager(),
+    )
+    monkeypatch.setattr(middleware_module, "_INJECT_TIMEOUT_SECONDS", 0.01)
+    middleware = _make_middleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                backend_config={"failure_policy": {"read": "FAIL_CLOSED"}},
+            )
+        )
+    )
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="Latest question", id="msg-2")],
+        state={"thread_id": "thread-1"},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.MagicMock()
+
+    try:
+        with pytest.raises(MemoryManagerError, match="model-call budget"):
+            middleware.wrap_model_call(request, handler)
+    finally:
+        release.set()
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_turn_aware_async_timeout_respects_fail_closed(monkeypatch):
+    import deerflow.agents.memory as memory_package
+    import deerflow.agents.middlewares.dynamic_context_middleware as middleware_module
+    from deerflow.agents.memory import MemoryManagerError
+
+    class BlockingMemoryManager:
+        context_refresh_policy = "turn"
+
+        async def aget_context(self, **kwargs: Any) -> str:
+            del kwargs
+            await asyncio.Event().wait()
+            return "unreachable"
+
+    manager = BlockingMemoryManager()
+    monkeypatch.setattr(memory_package, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(middleware_module, "_INJECT_TIMEOUT_SECONDS", 0.01)
+    middleware = _make_middleware(
+        app_config=SimpleNamespace(
+            memory=SimpleNamespace(
+                enabled=True,
+                injection_enabled=True,
+                backend_config={"failure_policy": {"read": "fail_closed"}},
+            )
+        )
+    )
+    request = ModelRequest(
+        model=mock.MagicMock(),
+        messages=[HumanMessage(content="Latest question", id="msg-2")],
+        state={"thread_id": "thread-1"},
+        runtime=_fake_runtime(user_id="alice"),
+    )
+    handler = mock.AsyncMock()
+
+    with pytest.raises(MemoryManagerError, match="model-call budget"):
+        await middleware.awrap_model_call(request, handler)
+    handler.assert_not_awaited()
 
 
 def test_turn_aware_sync_recall_propagates_authorization_error(monkeypatch):

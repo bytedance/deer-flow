@@ -7,14 +7,14 @@ from typing import Any, Literal
 
 from deerflow.agents.memory.manager import MemoryManager
 
-from .official_config import is_legacy_openviking_config
-from .official_manager import OfficialOpenVikingMemoryManager
+from .adapter import OpenVikingAdapterMemoryManager
 from .openviking_manager import LegacyOpenVikingMemoryManager
+from .settings import is_legacy_openviking_config
 
 logger = logging.getLogger(__name__)
 
 
-class OpenVikingMemoryManager(OfficialOpenVikingMemoryManager):
+class OpenVikingMemoryManager(OpenVikingAdapterMemoryManager):
     """Select the official adapter path unless an old config requests legacy auth."""
 
     @classmethod
@@ -43,6 +43,6 @@ class OpenVikingMemoryManager(OfficialOpenVikingMemoryManager):
 
 __all__ = [
     "LegacyOpenVikingMemoryManager",
-    "OfficialOpenVikingMemoryManager",
+    "OpenVikingAdapterMemoryManager",
     "OpenVikingMemoryManager",
 ]

@@ -1713,6 +1713,10 @@ memory:
   #   failure_policy:
   #     read: fail_open
   #     write: fail_open
+  #   commit:
+  #     mode: pending_tokens # append each turn; archive at thresholds/boundaries
+  #     pending_token_threshold: 8000
+  #     idle_flush_seconds: 1800 # 0 disables adapter-owned idle commits
   #   retrieval:
   #     search_mode: search
   #     top_k: 8

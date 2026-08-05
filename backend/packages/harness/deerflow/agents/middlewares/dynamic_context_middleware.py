@@ -1,10 +1,11 @@
 """Middleware to inject dynamic context (memory, current date) as a system-reminder.
 
 The system prompt is kept fully static for maximum prefix-cache reuse across users
-and sessions.  The current date is always injected.  Per-user memory is also injected
-when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
-per conversation as a dedicated <system-reminder> SystemMessage inserted before the
-first user message (frozen-snapshot pattern).
+and sessions. The current date is always injected. When ``memory.injection_enabled``
+is true, session-refresh backends reuse one checkpointed memory reminder, while
+turn-refresh backends retrieve against the latest real user request and add an
+ephemeral reminder only to that model call. The latter is kept out of checkpoints
+and capture input.
 
 When a conversation spans midnight the middleware detects the date change and injects
 a lightweight date-update reminder as a separate SystemMessage before the current turn.
@@ -211,6 +212,27 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
+    def _memory_config(self):
+        if self._app_config is not None:
+            return self._app_config.memory
+        from deerflow.config.memory_config import get_memory_config
+
+        return get_memory_config()
+
+    def _read_failure_is_closed(self) -> bool:
+        backend_config = getattr(self._memory_config(), "backend_config", {})
+        if not isinstance(backend_config, dict):
+            return False
+        failure_policy = backend_config.get("failure_policy", {})
+        return isinstance(failure_policy, dict) and str(failure_policy.get("read", "")).strip().lower() == "fail_closed"
+
+    def _raise_on_closed_read_timeout(self, exc: TimeoutError) -> None:
+        if not self._read_failure_is_closed():
+            return
+        from deerflow.agents.memory import MemoryManagerError
+
+        raise MemoryManagerError(f"Query-aware memory retrieval exceeded the {_INJECT_TIMEOUT_SECONDS:.1f}s model-call budget") from exc
+
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
@@ -221,12 +243,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        if self._app_config is None:
-            from deerflow.config.memory_config import get_memory_config
-
-            memory_config = get_memory_config()
-        else:
-            memory_config = self._app_config.memory
+        memory_config = self._memory_config()
         from deerflow.agents.memory import get_memory_manager
 
         uses_session_snapshot = memory_config.enabled and memory_config.injection_enabled and get_memory_manager().context_refresh_policy == "session"
@@ -430,12 +447,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         self,
         request: ModelRequest,
     ) -> tuple[HumanMessage, str, str, dict[str, Any] | None] | None:
-        if self._app_config is None:
-            from deerflow.config.memory_config import get_memory_config
-
-            config = get_memory_config()
-        else:
-            config = self._app_config.memory
+        config = self._memory_config()
         if not config.enabled or not config.injection_enabled:
             return None
 
@@ -565,7 +577,8 @@ class DynamicContextMiddleware(AgentMiddleware):
                     lambda: self._load_turn_context(request, query),
                     _INJECT_TIMEOUT_SECONDS,
                 )
-            except TimeoutError:
+            except TimeoutError as exc:
+                self._raise_on_closed_read_timeout(exc)
                 logger.warning(
                     "DynamicContextMiddleware: query-aware memory retrieval timed out (%.1fs); continuing without memory for this turn",
                     _INJECT_TIMEOUT_SECONDS,
@@ -597,7 +610,8 @@ class DynamicContextMiddleware(AgentMiddleware):
                     self._aload_turn_context(request, query),
                     timeout=_INJECT_TIMEOUT_SECONDS,
                 )
-            except TimeoutError:
+            except TimeoutError as exc:
+                self._raise_on_closed_read_timeout(exc)
                 logger.warning(
                     "DynamicContextMiddleware: query-aware memory retrieval timed out (%.1fs); continuing without memory for this turn",
                     _INJECT_TIMEOUT_SECONDS,

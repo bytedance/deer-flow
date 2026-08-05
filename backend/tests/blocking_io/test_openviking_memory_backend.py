@@ -13,10 +13,10 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
-from deerflow.agents.memory.backends.openviking.models import OpenVikingCommitResult, OpenVikingSearchHit
-from deerflow.agents.memory.backends.openviking.official_manager import (
-    OfficialOpenVikingMemoryManager,
+from deerflow.agents.memory.backends.openviking.adapter import (
+    OpenVikingAdapterMemoryManager,
 )
+from deerflow.agents.memory.backends.openviking.models import OpenVikingCommitResult, OpenVikingSearchHit
 from deerflow.agents.memory.backends.openviking.openviking_manager import (
     LegacyOpenVikingMemoryManager,
 )
@@ -162,8 +162,9 @@ class _OfficialProbeRetriever:
 
 
 class _OfficialProbeCommitPolicy:
-    def __init__(self, *, mode: str):
+    def __init__(self, *, mode: str, pending_token_threshold: int = 8_000):
         self.mode = mode
+        self.pending_token_threshold = pending_token_threshold
 
 
 class _OfficialProbePartialWriteError(RuntimeError):
@@ -175,7 +176,7 @@ async def test_async_official_openviking_operations_do_not_block_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import deerflow.agents.memory.backends.openviking.official_manager as module
+    import deerflow.agents.memory.backends.openviking.adapter as module
 
     probe_path = tmp_path / "official-probe.txt"
 
@@ -212,7 +213,7 @@ async def test_async_official_openviking_operations_do_not_block_event_loop(
             "startup_policy": "warn",
         }
     )
-    assert isinstance(manager, OfficialOpenVikingMemoryManager)
+    assert isinstance(manager, OpenVikingAdapterMemoryManager)
 
     messages: list[Any] = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
     await manager.aadd("thread-1", messages, user_id="alice")

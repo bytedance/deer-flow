@@ -470,10 +470,10 @@ class MemoryManager(BaseModel):
         query: str | None = None,
     ) -> str:
         if query is None:
-            # Do not pass the new keyword to existing third-party backends that
-            # retain the original signature. Only explicitly turn-aware
-            # implementations are required to accept it.
-            return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+            # Do not pass either new keyword to third-party backends that
+            # retain DeerFlow's original get_context signature. Only explicitly
+            # turn-aware implementations are required to accept thread/query.
+            return self.get_context(user_id, agent_name=agent_name)
         return self.get_context(
             user_id,
             agent_name=agent_name,

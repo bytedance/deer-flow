@@ -339,7 +339,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -366,7 +366,7 @@ def test_get_memory_context_propagates_fail_closed_manager_error(monkeypatch):
         memory=SimpleNamespace(
             enabled=True,
             injection_enabled=True,
-            backend_config={"failure_policy": {"read": "fail_closed"}},
+            backend_config={"failure_policy": {"read": "FAIL_CLOSED"}},
         ),
     )
     manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
@@ -464,6 +464,7 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
         "agent-a",
         app_config=explicit_config,
         user_id="runtime-user",
+        thread_id="thread-1",
     )
 
     assert "<memory>" in context
@@ -480,11 +481,10 @@ async def test_aget_memory_context_preserves_legacy_backend_signature(monkeypatc
     )
     captured: dict[str, object] = {}
 
-    async def legacy_aget_context(user_id, *, agent_name=None, thread_id=None):
+    async def legacy_aget_context(user_id, *, agent_name=None):
         captured.update(
             user_id=user_id,
             agent_name=agent_name,
-            thread_id=thread_id,
         )
         return "remember this"
 
@@ -502,7 +502,6 @@ async def test_aget_memory_context_preserves_legacy_backend_signature(monkeypatc
     assert captured == {
         "user_id": "runtime-user",
         "agent_name": "agent-a",
-        "thread_id": "thread-1",
     }
 
 
