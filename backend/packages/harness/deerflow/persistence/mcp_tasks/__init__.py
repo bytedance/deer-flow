@@ -1,4 +1,4 @@
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
-from deerflow.persistence.mcp_tasks.sql import McpTaskRepository
+from deerflow.persistence.mcp_tasks.sql import DuplicateMcpRemoteTaskError, McpTaskRepository
 
-__all__ = ["McpTaskRepository", "McpTaskRow"]
+__all__ = ["DuplicateMcpRemoteTaskError", "McpTaskRepository", "McpTaskRow"]

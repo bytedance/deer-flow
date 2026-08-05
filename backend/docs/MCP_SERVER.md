@@ -132,6 +132,83 @@ paths such as `/mnt/user-data/...` to paths accepted by
 `@modelcontextprotocol/server-filesystem`. Use DeerFlow's built-in file tools
 for DeerFlow workspace files.
 
+## Durable Background Tasks with Ordinary MCP Tools
+
+An MCP server can expose a fast `submit` tool plus `status` and `cancel` tools
+for long-running work. DeerFlow keeps the remote task ID in SQL and polls it
+outside the Agent run, so the model does not have to remember or repeatedly
+send that ID.
+
+Enable the restart-required runtime in `config.yaml`:
+
+```yaml
+mcp_tasks:
+  enabled: true
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_polls: 8
+```
+
+Then bind exact remote tool names in `extensions_config.json`. These names are
+the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
+
+```json
+{
+  "mcpServers": {
+    "report-service": {
+      "enabled": true,
+      "type": "http",
+      "url": "https://reports.example.com/mcp",
+      "task_toolsets": [
+        {
+          "name": "report-generation",
+          "submit_tool": "submit_report",
+          "status_tool": "get_report_status",
+          "cancel_tool": "cancel_report"
+        }
+      ]
+    }
+  }
+}
+```
+
+The three remote tools must use MCP `structuredContent`; ordinary text blocks
+are never parsed as a task protocol:
+
+- `submit_report(<business arguments>)` returns
+  `{"task_id":"remote-123","status":"running"}` quickly.
+- `get_report_status({"task_id":"remote-123"})` returns a status from
+  `running`, `input_required`, `completed`, `failed`, or `cancelled`. It may
+  also return `result`, `result_artifact` (`uri` plus `mime_type`), `error`,
+  `error_code`, `input_required`, and a positive `poll_after_seconds`.
+- `cancel_report({"task_id":"remote-123"})` is idempotent and returns the
+  actual terminal status: `cancelled`, `completed`, or `failed`.
+
+`error_code: "task_not_found"` is a permanent failure. Network and transport
+errors remain retryable with capped exponential backoff; the query API reports
+`tracking_degraded` after repeated failures. Oversized JSON results are not
+cut into invalid JSON: DeerFlow stores a text preview, marks
+`result_truncated`, and preserves any external `result_artifact` reference.
+
+Only submit remains in the Agent's normal tool list. Status and cancel are
+runtime-internal. Query the current thread through:
+
+- `GET /api/threads/{thread_id}/mcp-tasks`
+- `GET /api/threads/{thread_id}/mcp-tasks/{task_id}`
+
+Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
+instead of falling back to a synchronous submit when persistence or the task
+runtime is disabled. Restart recovery also requires the remote service to keep
+the task alive and recognize its ID after DeerFlow reconnects. A stdio server
+must therefore persist its own tasks; multi-instance deployments should
+normally use an independently running HTTP/SSE service.
+
+Server-level OAuth works during background polling and refreshes normally.
+Request-scoped secrets from a particular Agent run are not durable task
+credentials and are unavailable to later background polls; use server-level
+authentication for a task toolset. Restart DeerFlow after changing
+`task_toolsets` or `mcp_tasks` settings.
+
 ## OAuth Support (HTTP/SSE MCP Servers)
 
 For `http` and `sse` MCP servers, DeerFlow supports OAuth token acquisition and automatic token refresh.

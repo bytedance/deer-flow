@@ -20,6 +20,7 @@ POLLABLE_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
     {
         TaskStatus.SUBMITTED,
         TaskStatus.WORKING,
+        TaskStatus.INPUT_REQUIRED,
     }
 )
 TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
@@ -43,6 +44,9 @@ class TaskSnapshot:
 
     status: TaskStatus
     result: Any | None = None
+    result_preview: str | None = None
+    result_truncated: bool = False
+    result_artifact: dict[str, str] | None = None
     error: str | None = None
     input_required: dict[str, Any] | None = None
     poll_after_seconds: float | None = None

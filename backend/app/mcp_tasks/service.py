@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import socket
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskReference, TaskSnapshot, TaskSubmitRequest
+from deerflow.mcp.tasks import (
+    McpTaskDriverRegistry,
+    McpTaskProtocolError,
+    TaskReference,
+    TaskSnapshot,
+    TaskStatus,
+    TaskSubmitRequest,
+)
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +34,22 @@ class McpTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_polls: int,
+        max_poll_backoff_seconds: int = 300,
+        input_required_poll_interval_seconds: int = 60,
+        tracking_degraded_after_errors: int = 3,
+        max_result_bytes: int = 65_536,
+        result_preview_max_chars: int = 2_000,
     ) -> None:
         self._repository = repository
         self._drivers = drivers
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_polls = max_concurrent_polls
+        self._max_poll_backoff_seconds = max_poll_backoff_seconds
+        self._input_required_poll_interval_seconds = input_required_poll_interval_seconds
+        self._tracking_degraded_after_errors = tracking_degraded_after_errors
+        self._max_result_bytes = max_result_bytes
+        self._result_preview_max_chars = result_preview_max_chars
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -38,6 +57,10 @@ class McpTaskService:
     @property
     def drivers(self) -> McpTaskDriverRegistry:
         return self._drivers
+
+    @property
+    def tracking_degraded_after_errors(self) -> int:
+        return self._tracking_degraded_after_errors
 
     async def submit(
         self,
@@ -55,8 +78,6 @@ class McpTaskService:
         local_task_id = request.local_task_id or f"mcp-task-{uuid.uuid4().hex}"
         driver_request = replace(request, local_task_id=local_task_id)
         submission = await driver.submit(driver_request)
-        snapshot = submission.snapshot
-        next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
         driver_data = {**request.driver_data, **submission.driver_data}
         task_reference = TaskReference(
             local_task_id=local_task_id,
@@ -67,6 +88,8 @@ class McpTaskService:
             driver_data=driver_data,
         )
         try:
+            snapshot = self._normalize_snapshot(submission.snapshot)
+            next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
             return await self._repository.create(
                 task_id=local_task_id,
                 user_id=request.user_id,
@@ -79,11 +102,18 @@ class McpTaskService:
                 task_name=request.task_name,
                 status=snapshot.status.value,
                 result=snapshot.result,
+                result_preview=snapshot.result_preview,
+                result_truncated=snapshot.result_truncated,
+                result_artifact=snapshot.result_artifact,
                 error=snapshot.error,
                 input_required=snapshot.input_required,
                 next_poll_at=next_poll_at,
                 driver_data=driver_data,
             )
+        except DuplicateMcpRemoteTaskError:
+            # This handle already has a durable owner. Cancelling it as
+            # compensation would terminate the pre-existing tracked task.
+            raise
         except Exception:
             try:
                 await driver.cancel(task_reference)
@@ -129,7 +159,20 @@ class McpTaskService:
             return
 
         try:
-            snapshot = await driver.get_status(TaskReference.from_record(record))
+            snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
+        except McpTaskProtocolError as exc:
+            logger.error(
+                "MCP task status contract failed permanently (task_id=%s, driver=%s): %s",
+                record.get("id"),
+                driver_name,
+                exc,
+            )
+            await self._apply_snapshot(
+                record,
+                TaskSnapshot(status=TaskStatus.FAILED, error=str(exc)),
+                polled_at=datetime.now(UTC),
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - driver boundary; retry on the next poll
             polled_at = datetime.now(UTC)
             logger.warning(
@@ -142,11 +185,23 @@ class McpTaskService:
             return
 
         polled_at = datetime.now(UTC)
+        await self._apply_snapshot(record, snapshot, polled_at=polled_at)
+
+    async def _apply_snapshot(
+        self,
+        record: dict,
+        snapshot: TaskSnapshot,
+        *,
+        polled_at: datetime,
+    ) -> None:
         applied = await self._repository.apply_snapshot(
             record["id"],
             lease_owner=self._lease_owner,
             status=snapshot.status.value,
             result=snapshot.result,
+            result_preview=snapshot.result_preview,
+            result_truncated=snapshot.result_truncated,
+            result_artifact=snapshot.result_artifact,
             error=snapshot.error,
             input_required=snapshot.input_required,
             next_poll_at=self._next_poll_at(snapshot, now=polled_at),
@@ -162,14 +217,48 @@ class McpTaskService:
         if not snapshot.is_pollable:
             return None
         interval = snapshot.poll_after_seconds or self._poll_interval_seconds
+        if snapshot.status == TaskStatus.INPUT_REQUIRED:
+            interval = max(interval, self._input_required_poll_interval_seconds)
         return now + timedelta(seconds=interval)
 
     async def _release_after_error(self, record: dict, *, now: datetime, error: str) -> None:
+        consecutive_errors = max(0, int(record.get("consecutive_poll_error_count") or 0))
+        retry_seconds = min(
+            self._poll_interval_seconds * (2 ** min(consecutive_errors, 16)),
+            self._max_poll_backoff_seconds,
+        )
         await self._repository.release_claim(
             record["id"],
             lease_owner=self._lease_owner,
-            next_poll_at=now + timedelta(seconds=self._poll_interval_seconds),
+            next_poll_at=now + timedelta(seconds=retry_seconds),
             error=error[:_MAX_POLL_ERROR_CHARS],
+        )
+
+    def _normalize_snapshot(self, snapshot: TaskSnapshot) -> TaskSnapshot:
+        """Bound persisted result size without ever storing truncated JSON."""
+        if snapshot.result is None:
+            return snapshot
+        try:
+            encoded = json.dumps(
+                snapshot.result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise McpTaskProtocolError(f"MCP task result is not valid JSON: {exc}") from exc
+        if len(encoded) <= self._max_result_bytes:
+            return snapshot
+
+        if isinstance(snapshot.result, str):
+            preview_source = snapshot.result
+        else:
+            preview_source = encoded.decode("utf-8", errors="replace")
+        return replace(
+            snapshot,
+            result=None,
+            result_preview=preview_source[: self._result_preview_max_chars],
+            result_truncated=True,
         )
 
     async def start(self) -> None:

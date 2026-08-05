@@ -12,6 +12,8 @@ from deerflow.mcp.tasks import (
     TaskSubmission,
     TaskSubmitRequest,
 )
+from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
 
 
 class FakeRepository:
@@ -52,6 +54,12 @@ class FailingCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
         raise RuntimeError("database unavailable")
+
+
+class DuplicateCreateRepository(FakeRepository):
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        raise DuplicateMcpRemoteTaskError("already tracked")
 
 
 class FakeDriver:
@@ -209,6 +217,43 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
 
 
 @pytest.mark.asyncio
+async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_task():
+    repo = DuplicateCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(DuplicateMcpRemoteTaskError, match="already tracked"):
+        await service.submit(
+            driver_name="fake",
+            request=TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-2",
+                run_id="run-2",
+                tool_call_id="call-2",
+                server_name="reports",
+                task_name="Generate report",
+                arguments={},
+            ),
+        )
+
+    assert driver.cancel_calls == []
+
+
+@pytest.mark.asyncio
 async def test_submit_preserves_persistence_error_when_compensation_cancel_fails(caplog):
     repo = FailingCreateRepository()
     driver = FakeDriver(
@@ -291,7 +336,7 @@ async def test_run_once_schedules_driver_error_retry_from_poll_completion_time()
 
 
 @pytest.mark.asyncio
-async def test_run_once_stops_polling_terminal_and_input_required_snapshots():
+async def test_run_once_stops_terminal_tasks_but_keeps_input_required_on_a_slow_poll():
     rows = [_claimed_row(), {**_claimed_row(), "id": "task-2", "remote_task_id": "remote-2"}]
     repo = FakeRepository(rows)
     driver = FakeDriver(
@@ -317,7 +362,124 @@ async def test_run_once_stops_polling_terminal_and_input_required_snapshots():
     assert updates["task-1"]["next_poll_at"] is None
     assert updates["task-2"]["status"] == "input_required"
     assert updates["task-2"]["input_required"] == {"prompt": "Approve?"}
-    assert updates["task-2"]["next_poll_at"] is None
+    assert updates["task-2"]["next_poll_at"] >= updates["task-2"]["polled_at"] + timedelta(seconds=60)
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_exponential_backoff_and_caps_transient_errors():
+    rows = [
+        {**_claimed_row(), "id": "task-1", "consecutive_poll_error_count": 0},
+        {**_claimed_row(), "id": "task-2", "consecutive_poll_error_count": 4},
+    ]
+    repo = FakeRepository(rows)
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(error=RuntimeError("network down")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        max_poll_backoff_seconds=30,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    released = {task_id: update for task_id, update in repo.released}
+    assert released["task-1"]["next_poll_at"] - datetime.now(UTC) <= timedelta(seconds=5)
+    assert released["task-2"]["next_poll_at"] - datetime.now(UTC) <= timedelta(seconds=30)
+    assert released["task-2"]["next_poll_at"] - datetime.now(UTC) >= timedelta(seconds=29)
+
+
+@pytest.mark.asyncio
+async def test_protocol_error_terminalizes_instead_of_retrying_forever():
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(error=McpTaskProtocolError("missing structuredContent")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released == []
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert applied["error"] == "missing structuredContent"
+    assert applied["next_poll_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_oversized_result_stores_preview_without_invalid_truncated_json():
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(
+            [
+                TaskSnapshot(
+                    status=TaskStatus.COMPLETED,
+                    result={"report": "x" * 200},
+                    result_artifact={"uri": "s3://reports/1.json", "mime_type": "application/json"},
+                )
+            ]
+        ),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        max_result_bytes=64,
+        result_preview_max_chars=24,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    _, applied = repo.applied[0]
+    assert applied["result"] is None
+    assert len(applied["result_preview"]) == 24
+    assert applied["result_truncated"] is True
+    assert applied["result_artifact"] == {
+        "uri": "s3://reports/1.json",
+        "mime_type": "application/json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_json_numeric_result_is_a_permanent_protocol_failure():
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(
+            [
+                TaskSnapshot(
+                    status=TaskStatus.COMPLETED,
+                    result={"score": float("nan")},
+                )
+            ]
+        ),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released == []
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert "not valid JSON" in applied["error"]
 
 
 @pytest.mark.asyncio

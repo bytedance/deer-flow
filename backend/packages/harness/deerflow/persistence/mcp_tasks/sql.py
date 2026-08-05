@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
@@ -22,6 +23,19 @@ _TIMESTAMP_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+class DuplicateMcpRemoteTaskError(RuntimeError):
+    """The current user already tracks this server's remote task handle."""
+
+
+def _is_remote_task_unique_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    if getattr(diagnostic, "constraint_name", None) == "uq_mcp_tasks_user_server_remote":
+        return True
+    message = str(original)
+    return "uq_mcp_tasks_user_server_remote" in message or "mcp_tasks.user_id, mcp_tasks.server_name, mcp_tasks.remote_task_id" in message
 
 
 class McpTaskRepository:
@@ -52,6 +66,9 @@ class McpTaskRepository:
         task_name: str,
         status: str,
         result: Any | None,
+        result_preview: str | None,
+        result_truncated: bool,
+        result_artifact: dict[str, str] | None,
         error: str | None,
         input_required: dict[str, Any] | None,
         next_poll_at: datetime | None,
@@ -71,6 +88,9 @@ class McpTaskRepository:
             task_name=task_name,
             status=status,
             result=result,
+            result_preview=result_preview,
+            result_truncated=result_truncated,
+            result_artifact=result_artifact,
             error=error,
             input_required=input_required,
             driver_data=dict(driver_data or {}),
@@ -82,7 +102,13 @@ class McpTaskRepository:
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if _is_remote_task_unique_conflict(exc):
+                    raise DuplicateMcpRemoteTaskError(f"Remote MCP task {remote_task_id!r} is already tracked for server {server_name!r} by this user") from exc
+                raise
             await session.refresh(row)
             return self._row_to_dict(row)
 
@@ -154,6 +180,9 @@ class McpTaskRepository:
         lease_owner: str,
         status: str,
         result: Any | None,
+        result_preview: str | None,
+        result_truncated: bool,
+        result_artifact: dict[str, str] | None,
         error: str | None,
         input_required: dict[str, Any] | None,
         next_poll_at: datetime | None,
@@ -162,6 +191,9 @@ class McpTaskRepository:
         values: dict[str, Any] = {
             "status": status,
             "result": result,
+            "result_preview": result_preview,
+            "result_truncated": result_truncated,
+            "result_artifact": result_artifact,
             "error": error,
             "input_required": input_required,
             "next_poll_at": next_poll_at,

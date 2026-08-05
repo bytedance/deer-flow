@@ -162,6 +162,41 @@ async def test_close_scope():
 
 
 @pytest.mark.asyncio
+async def test_close_session_only_evicts_the_exact_server_scope_pair():
+    pool = MCPSessionPool()
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: list[CmFactory] = []
+
+    def make_cm(*_args, **_kwargs):
+        cm = CmFactory()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await pool.get_session("s1", "t1", {"transport": "stdio", "command": "x", "args": []})
+        await pool.get_session("s2", "t1", {"transport": "stdio", "command": "x", "args": []})
+        await pool.get_session("s1", "t2", {"transport": "stdio", "command": "x", "args": []})
+
+    await pool.close_session("s1", "t1")
+
+    assert cms[0].closed is True
+    assert cms[1].closed is False
+    assert cms[2].closed is False
+    assert set(pool._entries) == {("s2", "t1"), ("s1", "t2")}
+
+
+@pytest.mark.asyncio
 async def test_close_all():
     """close_all shuts down every session."""
     pool = MCPSessionPool()

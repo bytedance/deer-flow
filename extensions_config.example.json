@@ -54,6 +54,20 @@
           }
         }
       }
+    },
+    "long-running-reports": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://reports.example.com/mcp",
+      "description": "Example ordinary MCP background-task contract",
+      "task_toolsets": [
+        {
+          "name": "report-generation",
+          "submit_tool": "submit_report",
+          "status_tool": "get_report_status",
+          "cancel_tool": "cancel_report"
+        }
+      ]
     }
   },
   "skills": {}

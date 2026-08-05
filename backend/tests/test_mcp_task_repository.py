@@ -5,7 +5,7 @@ import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.mcp_tasks import McpTaskRepository
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError, McpTaskRepository
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -21,24 +21,63 @@ async def _make_repo(tmp_path) -> McpTaskRepository:
     return McpTaskRepository(session_factory)
 
 
-async def _create_working_task(repo: McpTaskRepository, *, task_id: str, now: datetime) -> dict:
+async def _create_working_task(
+    repo: McpTaskRepository,
+    *,
+    task_id: str,
+    now: datetime,
+    user_id: str = "user-1",
+    remote_task_id: str | None = None,
+) -> dict:
     return await repo.create(
         task_id=task_id,
-        user_id="user-1",
+        user_id=user_id,
         thread_id="thread-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
         driver_name="fake",
-        remote_task_id=f"remote-{task_id}",
+        remote_task_id=remote_task_id or f"remote-{task_id}",
         task_name="Generate report",
         status="working",
         result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
         error=None,
         input_required=None,
         next_poll_at=now - timedelta(seconds=1),
         driver_data={"status_tool": "status"},
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_task_id_is_unique_per_user_and_server(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-remote-1",
+        now=now,
+        remote_task_id="shared-remote-id",
+    )
+
+    with pytest.raises(DuplicateMcpRemoteTaskError, match="already tracked"):
+        await _create_working_task(
+            repo,
+            task_id="task-remote-2",
+            now=now,
+            remote_task_id="shared-remote-id",
+        )
+
+    other_user = await _create_working_task(
+        repo,
+        task_id="task-remote-3",
+        now=now,
+        user_id="user-2",
+        remote_task_id="shared-remote-id",
+    )
+    assert other_user["remote_task_id"] == "shared-remote-id"
 
 
 @pytest.mark.asyncio
@@ -90,6 +129,9 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
         lease_owner="worker-old",
         status="failed",
         result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
         error="stale result",
         input_required=None,
         next_poll_at=None,
@@ -102,6 +144,9 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
         lease_owner="worker-new",
         status="completed",
         result={"report": "ready"},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact={"uri": "s3://reports/2.json", "mime_type": "application/json"},
         error=None,
         input_required=None,
         next_poll_at=None,
@@ -113,6 +158,10 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
     assert stored is not None
     assert stored["status"] == "completed"
     assert stored["result"] == {"report": "ready"}
+    assert stored["result_artifact"] == {
+        "uri": "s3://reports/2.json",
+        "mime_type": "application/json",
+    }
     assert stored["notification_status"] == "pending"
     assert stored["lease_owner"] is None
 
@@ -144,6 +193,9 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
         lease_owner="worker-1",
         status="completed",
         result={"report": "stale"},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
         error=None,
         input_required=None,
         next_poll_at=None,
@@ -158,7 +210,7 @@ async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tm
 
 
 @pytest.mark.asyncio
-async def test_input_required_is_persisted_and_paused_until_future_resume(tmp_path):
+async def test_input_required_is_persisted_and_remains_scheduled_for_slow_polling(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
     await _create_working_task(repo, task_id="task-3", now=now)
@@ -174,9 +226,12 @@ async def test_input_required_is_persisted_and_paused_until_future_resume(tmp_pa
         lease_owner="worker-1",
         status="input_required",
         result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
         error=None,
         input_required={"prompt": "Approve deployment?"},
-        next_poll_at=None,
+        next_poll_at=now + timedelta(seconds=60),
         polled_at=now,
     )
     assert applied is True
@@ -185,7 +240,7 @@ async def test_input_required_is_persisted_and_paused_until_future_resume(tmp_pa
     assert stored is not None
     assert stored["input_required"] == {"prompt": "Approve deployment?"}
     assert stored["notification_status"] == "pending"
-    assert stored["next_poll_at"] is None
+    assert datetime.fromisoformat(stored["next_poll_at"]) == now + timedelta(seconds=60)
 
 
 @pytest.mark.asyncio
@@ -241,6 +296,9 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
         lease_owner="worker-1",
         status="working",
         result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
         error=None,
         input_required=None,
         next_poll_at=now + timedelta(seconds=5),
