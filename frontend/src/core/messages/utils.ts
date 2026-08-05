@@ -748,6 +748,7 @@ export interface FileInMessage {
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
   status?: "uploading" | "uploaded";
+  markdown_file?: string | null; // explicit converted companion provenance
 }
 
 /**
