@@ -253,8 +253,11 @@ mkdir -p logs
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
 # 1. Gateway API
+# Local development binds to 127.0.0.1 only (nginx reverse-proxies on the same
+# host). Set GATEWAY_BIND_HOST=0.0.0.0 to expose beyond loopback intentionally.
+GATEWAY_BIND_HOST="${GATEWAY_BIND_HOST:-127.0.0.1}"
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host $GATEWAY_BIND_HOST --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
 # 2. Frontend

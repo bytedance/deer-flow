@@ -717,6 +717,8 @@ DeerFlow has key high-privilege capabilities including **system command executio
 - **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
 - **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
 
+> **Note on default bind addresses**: Local development (`scripts/serve.sh`), the gateway config default, and the plain `uvicorn` invocation all bind to `127.0.0.1` by default. **Docker deployments (`docker-compose.yaml`, `backend/Dockerfile`) bind the gateway to `0.0.0.0` inside the container** because the nginx reverse proxy and other containers must reach it over the container network. When you publish container ports (`ports:` in docker-compose) or deploy on a host with a public/LAN interface, the gateway becomes reachable beyond loopback — apply the security measures below.
+
 ### Security Recommendations
 
 **Note: We strongly recommend deploying DeerFlow in a local trusted network environment.** If you need cross-device or cross-network deployment, you must implement strict security measures, such as:
