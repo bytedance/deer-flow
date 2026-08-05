@@ -2,10 +2,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
-from deerflow.persistence.mcp_tasks import McpTaskRepository
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError, McpTaskRepository
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -21,16 +22,23 @@ async def _make_repo(tmp_path) -> McpTaskRepository:
     return McpTaskRepository(session_factory)
 
 
-async def _create_working_task(repo: McpTaskRepository, *, task_id: str, now: datetime) -> dict:
+async def _create_working_task(
+    repo: McpTaskRepository,
+    *,
+    task_id: str,
+    now: datetime,
+    user_id: str = "user-1",
+    remote_task_id: str | None = None,
+) -> dict:
     return await repo.create(
         task_id=task_id,
-        user_id="user-1",
+        user_id=user_id,
         thread_id="thread-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
         driver_name="fake",
-        remote_task_id=f"remote-{task_id}",
+        remote_task_id=remote_task_id or f"remote-{task_id}",
         task_name="Generate report",
         status="working",
         result=None,
@@ -39,6 +47,50 @@ async def _create_working_task(repo: McpTaskRepository, *, task_id: str, now: da
         next_poll_at=now - timedelta(seconds=1),
         driver_data={"status_tool": "status"},
     )
+
+
+@pytest.mark.asyncio
+async def test_remote_task_id_is_unique_per_user_and_server(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(
+        repo,
+        task_id="task-remote-1",
+        now=now,
+        remote_task_id="shared-remote-id",
+    )
+
+    with pytest.raises(DuplicateMcpRemoteTaskError, match="already tracked"):
+        await _create_working_task(
+            repo,
+            task_id="task-remote-2",
+            now=now,
+            remote_task_id="shared-remote-id",
+        )
+
+    other_user = await _create_working_task(
+        repo,
+        task_id="task-remote-3",
+        now=now,
+        user_id="user-2",
+        remote_task_id="shared-remote-id",
+    )
+    assert other_user["remote_task_id"] == "shared-remote-id"
+
+
+@pytest.mark.asyncio
+async def test_other_integrity_errors_are_not_duplicate_remote_tasks(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="shared-local-id", now=now)
+
+    with pytest.raises(IntegrityError):
+        await _create_working_task(
+            repo,
+            task_id="shared-local-id",
+            now=now,
+            remote_task_id="different-remote-id",
+        )
 
 
 @pytest.mark.asyncio

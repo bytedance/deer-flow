@@ -12,6 +12,7 @@ from deerflow.mcp.tasks import (
     TaskSubmission,
     TaskSubmitRequest,
 )
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
 
 
 class FakeRepository:
@@ -52,6 +53,12 @@ class FailingCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
         raise RuntimeError("database unavailable")
+
+
+class DuplicateCreateRepository(FakeRepository):
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        raise DuplicateMcpRemoteTaskError("already tracked")
 
 
 class FakeDriver:
@@ -206,6 +213,43 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
         "status_tool": "status",
         "cancel_tool": "cancel",
     }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_task():
+    repo = DuplicateCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(DuplicateMcpRemoteTaskError, match="already tracked"):
+        await service.submit(
+            driver_name="fake",
+            request=TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-2",
+                run_id="run-2",
+                tool_call_id="call-2",
+                server_name="reports",
+                task_name="Generate report",
+                arguments={},
+            ),
+        )
+
+    assert driver.cancel_calls == []
 
 
 @pytest.mark.asyncio

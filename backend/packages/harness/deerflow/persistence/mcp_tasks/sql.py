@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
@@ -22,6 +23,19 @@ _TIMESTAMP_FIELDS = (
     "created_at",
     "updated_at",
 )
+
+
+class DuplicateMcpRemoteTaskError(RuntimeError):
+    """The current user already tracks this server's remote task handle."""
+
+
+def _is_remote_task_unique_conflict(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    if getattr(diagnostic, "constraint_name", None) == "uq_mcp_tasks_user_server_remote":
+        return True
+    message = str(original)
+    return "uq_mcp_tasks_user_server_remote" in message or "mcp_tasks.user_id, mcp_tasks.server_name, mcp_tasks.remote_task_id" in message
 
 
 class McpTaskRepository:
@@ -82,7 +96,13 @@ class McpTaskRepository:
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if _is_remote_task_unique_conflict(exc):
+                    raise DuplicateMcpRemoteTaskError(f"Remote MCP task {remote_task_id!r} is already tracked for server {server_name!r} by this user") from exc
+                raise
             await session.refresh(row)
             return self._row_to_dict(row)
 

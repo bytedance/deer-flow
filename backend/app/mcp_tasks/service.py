@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskReference, TaskSnapshot, TaskSubmitRequest
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,10 @@ class McpTaskService:
                 next_poll_at=next_poll_at,
                 driver_data=driver_data,
             )
+        except DuplicateMcpRemoteTaskError:
+            # This handle already has a durable owner. Cancelling it as
+            # compensation would terminate the pre-existing tracked task.
+            raise
         except Exception:
             try:
                 await driver.cancel(task_reference)
