@@ -1,9 +1,9 @@
 """Middleware that emits streaming tool output chunks via LangGraph custom events.
 
 When enabled via ``tool_streaming.enabled``, this middleware wraps async tool
-execution to emit ``tool_output_chunk`` events through LangGraph's
-``stream_mode="custom"`` channel.  The frontend renders these chunks
-incrementally instead of waiting for the full tool result.
+execution to emit ``tool_output_chunk`` lifecycle events through LangGraph's
+``stream_mode="custom"`` channel. The frontend renders execution status while
+the canonical ToolMessage remains the source of the complete result.
 
 Sync tools (``wrap_tool_call``) are passed through unchanged — streaming is
 only meaningful for async paths where the event loop can interleave chunk
@@ -134,10 +134,10 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
       - **start**: emitted before the handler is called (``is_partial=True``,
         ``is_final=False``, empty ``chunk``).  Signals the frontend to show a
         loading indicator for this tool.
-      - **intermediate** (optional): emitted by tools that call
-        ``langgraph.config.get_stream_writer()`` during execution.  The
-        middleware does not produce these — they flow through the custom channel
-        natively.
+      - **intermediate** (protocol extension point): tools may call
+        ``langgraph.config.get_stream_writer()`` during execution. The
+        middleware does not produce these, and built-in tools currently emit
+        lifecycle events only.
       - **final**: emitted after the handler returns, carrying a short preview
         of the tool output as a completion signal (``is_partial=False``,
         ``is_final=True``).  The full output arrives via the canonical

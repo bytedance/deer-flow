@@ -126,8 +126,8 @@ def test_normalize_stream_modes_rejects_unsupported_modes(raw):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("messages-tuple", ["messages"]),
-        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages"]),
+        ("messages-tuple", ["messages", "custom"]),
+        (["values", "messages-tuple", "messages-tuple", "values"], ["values", "messages", "custom"]),
         (["updates", "custom"], ["updates", "custom"]),
     ],
 )

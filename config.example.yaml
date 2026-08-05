@@ -1111,10 +1111,10 @@ loop_detection:
 # ============================================================================
 # Tool Output Streaming (issue #4150)
 # ============================================================================
-# When enabled, the ToolStreamingMiddleware emits real-time `tool_output_chunk`
-# custom stream events during tool execution (start / chunk / final lifecycle).
-# These events propagate to the frontend SSE stream and also flow through
-# subagents via the custom-event bridge in SubagentExecutor.
+# When enabled, ToolStreamingMiddleware emits `tool_output_chunk` lifecycle
+# events during tool execution (start / error / final). Built-in tools do not
+# currently emit intermediate output chunks. These events propagate to the
+# frontend SSE stream and through subagents via SubagentExecutor.
 #
 # Defaults to disabled (opt-in). Tool execution results still arrive through
 # the canonical ToolMessage regardless of this setting.

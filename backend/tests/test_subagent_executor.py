@@ -2550,6 +2550,25 @@ class TestCooperativeCancellation:
         assert result.result == "alice"
         assert result.error is None
 
+    def test_tool_output_chunks_drain_with_terminal_status(self, classes):
+        """The final custom chunk and terminal state are observed together."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        result = SubagentResult(
+            task_id="stream-task",
+            trace_id="trace",
+            status=SubagentStatus.RUNNING,
+        )
+        final_chunk = {"type": "tool_output_chunk", "is_final": True}
+
+        result.append_tool_output_chunk(final_chunk)
+        assert result.try_set_terminal(SubagentStatus.COMPLETED, result="done")
+
+        chunks, status = result.drain_tool_output_chunks()
+        assert chunks == [final_chunk]
+        assert status is SubagentStatus.COMPLETED
+        assert result.drain_tool_output_chunks() == ([], SubagentStatus.COMPLETED)
+
     def test_timeout_does_not_overwrite_cancelled(self, executor_module, classes, base_config, msg):
         """Test that the real timeout handler does not overwrite CANCELLED status.
 

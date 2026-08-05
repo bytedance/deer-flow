@@ -120,6 +120,18 @@ class SubagentResult:
             if not self.status.is_terminal:
                 self.token_usage_records = list(records)
 
+    def append_tool_output_chunk(self, chunk: dict[str, Any]) -> None:
+        """Append a custom stream chunk under the terminal-state lock."""
+        with self._state_lock:
+            self.tool_output_chunks.append(chunk)
+
+    def drain_tool_output_chunks(self) -> tuple[list[dict[str, Any]], SubagentStatus]:
+        """Atomically drain pending chunks and snapshot the current status."""
+        with self._state_lock:
+            chunks = self.tool_output_chunks
+            self.tool_output_chunks = []
+            return chunks, self.status
+
     def try_set_terminal(
         self,
         status: SubagentStatus,
@@ -855,7 +867,7 @@ class SubagentExecutor:
                 if isinstance(item, tuple) and len(item) == 2:
                     mode, chunk = item
                     if mode == "custom":
-                        result.tool_output_chunks.append(chunk)
+                        result.append_tool_output_chunk(chunk)
                         continue
                 else:
                     chunk = item

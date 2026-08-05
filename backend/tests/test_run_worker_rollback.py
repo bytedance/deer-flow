@@ -543,9 +543,10 @@ async def test_run_agent_keeps_file_chunks_unbatched_without_values_mode():
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
+            del graph_input, config, subgraphs
+            assert stream_mode == ["messages", "custom"]
             for chunk in chunks:
-                yield (chunk, {})
+                yield ("messages", (chunk, {}))
 
     await run_agent(
         bridge,
