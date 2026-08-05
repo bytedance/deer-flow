@@ -23,10 +23,13 @@ import asyncio
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
+from deerflow.config.paths import Paths
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
 pytestmark = pytest.mark.asyncio
 
@@ -71,3 +74,35 @@ async def test_install_skill_archive_does_not_block_event_loop(tmp_path: Path, m
     installed_md = tmp_path / "skills" / "custom" / "loop-skill" / "SKILL.md"
     assert await asyncio.to_thread(installed_md.exists)
     assert await asyncio.to_thread((tmp_path / "skills" / "custom" / "loop-skill" / "references" / "usage.md").exists)
+
+
+async def test_user_scoped_install_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+    archive = tmp_path / "loop-skill.skill"
+    await asyncio.to_thread(_build_archive, archive)
+
+    async def _allow_scan(content: str, *, executable: bool = False, location: str = "SKILL.md", app_config=None, static_findings=None):
+        return SimpleNamespace(decision="allow", reason="anchor stub")
+
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
+
+    skills_root = tmp_path / "skills"
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    paths = await asyncio.to_thread(Paths, base_dir=tmp_path)
+    with patch("deerflow.config.paths.get_paths", return_value=paths):
+        storage = await asyncio.to_thread(
+            UserScopedSkillStorage,
+            "alice",
+            host_path=str(skills_root),
+            app_config=config,
+        )
+        result = await storage.ainstall_skill_from_archive(archive)
+
+    assert result["success"] is True
+    installed_md = tmp_path / "users" / "alice" / "skills" / "custom" / "loop-skill" / "SKILL.md"
+    assert await asyncio.to_thread(installed_md.is_file)
