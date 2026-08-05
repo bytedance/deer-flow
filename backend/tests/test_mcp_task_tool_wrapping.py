@@ -13,11 +13,16 @@ class _SubmitArgs(BaseModel):
     topic: str
 
 
-def _tool(name: str) -> StructuredTool:
+def _tool(name: str, *, description: str | None = None) -> StructuredTool:
     async def call(topic: str):
         return topic
 
-    return StructuredTool(name=name, description=name, args_schema=_SubmitArgs, coroutine=call)
+    return StructuredTool(
+        name=name,
+        description=description if description is not None else name,
+        args_schema=_SubmitArgs,
+        coroutine=call,
+    )
 
 
 def _server_config() -> McpServerConfig:
@@ -79,6 +84,28 @@ def test_configured_status_and_cancel_tools_are_hidden_from_the_agent() -> None:
     )
 
     assert [tool.name for tool in configured] == ["reports_submit_report", "reports_search"]
+
+
+def test_submit_wrapper_preserves_server_description_and_appends_background_contract() -> None:
+    tools = [
+        _tool(
+            "submit_report",
+            description="Generate a quarterly financial report for the requested topic.",
+        ),
+        _tool("get_report_status"),
+        _tool("cancel_report"),
+    ]
+
+    configured = _configure_task_tools_for_server(
+        tools,
+        server_name="reports",
+        server_config=_server_config(),
+        tool_name_prefix=False,
+    )
+
+    assert configured[0].description == (
+        "Generate a quarterly financial report for the requested topic.\n\nSubmitted as durable background task 'report-generation'; returns a DeerFlow task ID immediately and status polling is handled automatically."
+    )
 
 
 def test_configured_task_toolsets_fail_when_a_raw_tool_is_missing() -> None:

@@ -636,6 +636,8 @@ def _make_background_submit_tool(
     status_tool: str,
     cancel_tool: str,
 ) -> BaseTool:
+    background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
+
     async def submit_in_background(
         runtime: Runtime | None = None,
         **arguments: Any,
@@ -672,7 +674,7 @@ def _make_background_submit_tool(
 
     return StructuredTool(
         name=tool.name,
-        description=(f"Start {task_name!r} as a durable background task. Returns a DeerFlow task ID immediately; status polling is handled automatically."),
+        description=(f"{tool.description}\n\n{background_contract}" if tool.description else background_contract),
         args_schema=tool.args_schema,
         coroutine=submit_in_background,
         metadata=tool.metadata,
