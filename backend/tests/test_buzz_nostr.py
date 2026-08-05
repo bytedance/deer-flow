@@ -36,6 +36,25 @@ def test_parse_pubkey_accepts_hex_and_npub():
     assert buzz_nostr.parse_pubkey(PK3_NPUB) == PK3_HEX
 
 
+@pytest.mark.parametrize(
+    ("parser", "malformed"),
+    [
+        (
+            buzz_nostr.parse_private_key,
+            "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp3fuyy7t",
+        ),
+        (
+            buzz_nostr.parse_pubkey,
+            "npub1lycg5qvjtrp3qjf5f7zl382j9x6nrjz9sdhenvyxq8c3808qxmu3875l8g",
+        ),
+    ],
+)
+def test_bech32_keys_reject_nonzero_padding(parser, malformed):
+    """A valid checksum must not make non-canonical payload padding valid."""
+    with pytest.raises(ValueError, match="padding"):
+        parser(malformed)
+
+
 def test_event_id_matches_nip01_reference_vector():
     eid = buzz_nostr.event_id(PK3_HEX, 1700000000, 9, [["h", CHANNEL]], "hello buzz")
     assert eid == "6aa2ef0a72e39e52ac7c3680e6a76ed75c90340e684148da6221086b443d2089"
