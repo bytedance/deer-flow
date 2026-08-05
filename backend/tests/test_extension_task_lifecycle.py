@@ -301,3 +301,84 @@ async def test_lead_stop_interrupt_is_deferred_until_final_cleanup():
 
     assert record.finalizing is False
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_contributor_raising_cancellederror_cannot_interrupt_run_cleanup():
+    # Fail-open is decided by origin, not base class: a contributor that lets a
+    # CancelledError escape must not skip its successors, and must not reach the
+    # worker's deferred-interrupt path, which would end an otherwise successful
+    # run as cancelled.
+    class _Rogue:
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            raise asyncio.CancelledError()
+
+    survivor = _RunRecorder()
+    manager = RunManager()
+    record = await manager.create("thread-rogue-stop")
+    bridge = _bridge()
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(
+            checkpointer=InMemorySaver(),
+            extensions=_extensions(_Rogue(), survivor),
+        ),
+        agent_factory=lambda *, config: _OkAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success
+    assert survivor.events[-1] == ("stop", record.run_id, "completed")
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.asyncio
+async def test_lead_stop_cancellation_is_deferred_rather_than_swallowed():
+    # CancelledError derives from BaseException, so the non-fatal `except
+    # Exception` guard around the stop notification must not absorb it. The
+    # stimulus has to be a genuine cancellation of the run task — a contributor
+    # raising CancelledError is contained as an extension failure instead.
+    entered = asyncio.Event()
+
+    class _SlowRecorder(_RunRecorder):
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            await super().on_task_stop(
+                app_store,
+                task_store,
+                info,
+                outcome,
+            )
+            entered.set()
+            await asyncio.sleep(10)
+
+    manager = RunManager()
+    record = await manager.create("thread-cancel-stop")
+    bridge = _bridge()
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=InMemorySaver(),
+                extensions=_extensions(_SlowRecorder()),
+            ),
+            agent_factory=lambda *, config: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)

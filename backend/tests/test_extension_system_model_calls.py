@@ -101,6 +101,61 @@ async def test_bad_observer_is_fail_open_and_does_not_hide_later_observers():
 
 
 @pytest.mark.asyncio
+async def test_observer_raising_cancellederror_is_fail_open_like_any_other_failure(
+    _notification_loop_state,
+):
+    # An observer that implements its own timeout with cancellation can let a
+    # CancelledError escape. Fail-open is about the origin of the failure, not
+    # its base class: a contributor must never skip its successors or reach the
+    # host, and CancelledError does not derive from Exception.
+    class _Rogue:
+        async def on_system_model_call(self, app_store, task_store, kind, request, result):
+            raise asyncio.CancelledError()
+
+    survivor = _Observer()
+    await notify_system_model_call(
+        _extensions(_Rogue(), survivor),
+        ExtensionData("task"),
+        SystemOperationKind.GOAL,
+        SystemModelRequest(),
+        SystemModelResult(response="ok"),
+    )
+
+    assert [call[0] for call in survivor.calls] == [SystemOperationKind.GOAL]
+
+
+@pytest.mark.asyncio
+async def test_genuine_host_cancellation_during_notification_still_propagates(
+    _notification_loop_state,
+):
+    # The guard above must not swallow a real cancellation of the host task.
+    entered = asyncio.Event()
+    survivor = _Observer()
+
+    class _Slow:
+        async def on_system_model_call(self, app_store, task_store, kind, request, result):
+            entered.set()
+            await asyncio.sleep(10)
+
+    async def _body():
+        await notify_system_model_call(
+            _extensions(_Slow(), survivor),
+            ExtensionData("task"),
+            SystemOperationKind.GOAL,
+            SystemModelRequest(),
+            SystemModelResult(response="ok"),
+        )
+
+    task = asyncio.create_task(_body())
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert survivor.calls == []
+
+
+@pytest.mark.asyncio
 async def test_observe_uses_explicit_snapshot_and_store_on_both_paths():
     observer = _Observer()
     extensions = _extensions(observer)
@@ -137,6 +192,52 @@ async def test_observe_uses_explicit_snapshot_and_store_on_both_paths():
             task_store=store,
         )
     assert isinstance(observer.calls[1][2].error, ValueError)
+
+
+@pytest.mark.asyncio
+async def test_observe_reports_cancellation_without_awaiting_inside_the_cancelled_task(
+    _notification_loop_state,
+):
+    # Interrupt/rollback admission cancels the in-flight run task, so a system
+    # model call being cancelled is routine, not exotic. Awaiting observers here
+    # is unreliable (a repeated cancel interrupts that await too), so the
+    # cancellation terminal path is submitted to the notify loop instead.
+    observer = _Observer()
+    store = ExtensionData("live-task")
+    set_extension_notify_loop(asyncio.get_running_loop())
+    entered = asyncio.Event()
+
+    async def _never_returns():
+        entered.set()
+        await asyncio.sleep(10)
+
+    async def _body():
+        await observe_system_model_call(
+            _extensions(observer),
+            SystemOperationKind.SUMMARIZATION,
+            messages="prompt",
+            model_name="sum-model",
+            invoke_config=None,
+            invoke=_never_returns,
+            task_store=store,
+        )
+
+    task = asyncio.create_task(_body())
+    await entered.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    deadline = time.monotonic() + 2
+    while not observer.calls and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+
+    assert [call[0] for call in observer.calls] == [SystemOperationKind.SUMMARIZATION]
+    assert isinstance(observer.calls[0][2].error, asyncio.CancelledError)
+    assert observer.calls[0][2].response is None
+    assert observer.calls[0][2].duration_ms is not None
+    assert observer.stores == [store]
 
 
 @pytest.mark.asyncio

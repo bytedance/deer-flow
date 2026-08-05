@@ -46,6 +46,21 @@ def subagent_task_outcome(*, cancelled: bool, succeeded: bool) -> TaskOutcome:
     return TaskOutcome.FAILED
 
 
+def _host_is_cancelling() -> bool:
+    """Whether the host task itself is being cancelled.
+
+    Fail-open has to be decided by the *origin* of a failure, not by its base
+    class. ``CancelledError`` reaches a contributor's ``except`` for two very
+    different reasons: the host task was cancelled (must propagate), or the
+    contributor raised it on its own — an extension implementing an internal
+    timeout with cancellation, for instance (must stay contained). Only the
+    first increments the task's cancellation counter, so it is what tells the
+    two apart.
+    """
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 async def _notify_each(
     contributors: tuple[tuple[str, Any], ...],
     hook: str,
@@ -77,6 +92,18 @@ async def _notify_each(
                 )
                 continue
             await asyncio.wait_for(call, remaining)
+        except asyncio.CancelledError:
+            if _host_is_cancelling():
+                raise
+            # The contributor raised it, so containing it keeps one broken
+            # extension from skipping its successors — and, at the task-stop
+            # site, from turning a run's cleanup into a deferred interrupt.
+            logger.exception(
+                "Extension %s: %s raised CancelledError for task %s",
+                source,
+                hook,
+                task_id,
+            )
         except Exception:
             logger.exception(
                 "Extension %s: %s failed for task %s",
@@ -281,6 +308,30 @@ async def observe_system_model_call(
     started = time.monotonic()
     try:
         response = await invoke()
+    except asyncio.CancelledError as exc:
+        # Cancellation is a terminal path as well: interrupt/rollback admission
+        # and shutdown both cancel the run task, so a user sending a follow-up
+        # mid-run routinely ends a goal or summarization call here, with the
+        # provider tokens already spent. Awaiting observers would be unreliable
+        # — a repeated cancel interrupts that await before any of them runs — so
+        # this reports through the same non-blocking submission the synchronous
+        # memory bridge uses, then propagates the cancellation untouched. A
+        # deployment with no registered notify loop drops it, exactly as that
+        # bridge does.
+        dispatch_system_model_observation(
+            notify_system_model_call(
+                extensions,
+                store,
+                kind,
+                request,
+                SystemModelResult(
+                    error=exc,
+                    duration_ms=(time.monotonic() - started) * 1000,
+                ),
+            ),
+            kind.value,
+        )
+        raise
     except Exception as exc:
         await notify_system_model_call(
             extensions,

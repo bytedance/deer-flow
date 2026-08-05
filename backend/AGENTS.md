@@ -494,12 +494,26 @@ same start/stop pair. Outcomes are conservative (`completed`, `aborted`, or `fai
 contributors run in registration order within one bounded budget, and notification failures
 are logged and fail open.
 
+Fail-open is decided by the *origin* of a failure, not by its base class, because
+`CancelledError` reaches a contributor's `except` for two unrelated reasons. Only a genuine
+cancellation of the host task increments `asyncio.Task.cancelling()`, so `_notify_each`
+propagates on that and contains everything else: a contributor that lets a `CancelledError`
+escape — an extension implementing an internal timeout with cancellation, say — must not
+skip its successors, and must not reach the worker's deferred-interrupt path, which would
+end an otherwise successful run as cancelled. `KeyboardInterrupt` / `SystemExit` still
+propagate.
+
 System-model-call observers cover DeerFlow-owned model invocations that do not pass
 through middleware model-call wrappers: goal evaluation, memory extraction, title
 generation, and summarization. They receive a request/result snapshot, duration, and the
-active task store when one exists; detached system work receives an isolated store. Both
-success and failure paths are reported without changing the provider exception seen by
-the host. `SystemModelRequest.messages` normalizes to a tuple at construction: goal and
+active task store when one exists; detached system work receives an isolated store. All
+three terminal paths are reported without changing the exception the host observes:
+success and failure are awaited inline, while cancellation — routine, since
+interrupt/rollback admission and shutdown both cancel the run task, with the provider
+tokens already spent — is submitted to the notify loop instead of awaited, because a
+repeated cancel would interrupt that await before any observer ran. A deployment with no
+registered notify loop drops the cancellation observation, exactly as the synchronous
+memory bridge does. `SystemModelRequest.messages` normalizes to a tuple at construction: goal and
 memory pass a message list while title and summarization pass one prompt string, and a
 bare `str` is already a `Sequence`, so without normalization an observer iterating it
 would walk characters. Normalizing also copies a live list, which is what makes the frozen
@@ -508,6 +522,17 @@ hooks and async system observations are dispatched to that loop even when the ca
 subagent's isolated loop, while synchronous system callbacks submit fire-and-forget work
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
 resets the loop only after in-flight run/subagent drain ordering is complete.
+
+The memory kind reaches those observers through a different shape, and the difference is
+deliberate rather than an oversight to be "aligned" away. DeerMem must stay vendorable and
+cannot import the extension API, so it reports through the `MemoryCallbacks.on_memory_llm_result`
+host hook, which the DeerFlow-side callbacks translate into an observation and submit
+without awaiting. It also guards its provider call with `BaseException` rather than
+`Exception`, which is safe precisely because that whole path runs on a worker thread — the
+debounce timer, or the executor `update_memory` offloads to — where cancelling the awaiting
+side never interrupts the running thread, so `CancelledError` cannot arrive there at all.
+The host hook wrapper around the callback stays at `Exception`: only the hook's own failures
+are non-fatal, and an observability path must not swallow `SystemExit` / `KeyboardInterrupt`.
 
 Gateway `create_app()` loads plugins once, stores the immutable registry on `app.state`
 and in the process-wide singleton, and installs one canonical live diagnostics list.

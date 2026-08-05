@@ -1498,6 +1498,13 @@ class MemoryUpdater:
             started = time.monotonic()
             try:
                 response = model.invoke(prompt, config=invoke_config)
+            # Deliberately broader than `Exception` so no terminal path of the
+            # provider call goes unobserved. This is NOT about asyncio
+            # cancellation: this whole method runs on a worker thread (the
+            # debounce timer, or the executor `update_memory` offloads to), and
+            # cancelling the awaiting side never interrupts a running thread, so
+            # `CancelledError` cannot arrive here. Reporting costs nothing on
+            # this path either way — the hook below is a non-blocking submit.
             except BaseException as exc:
                 self._notify_llm_result(
                     invoke_config,
@@ -1579,7 +1586,10 @@ class MemoryUpdater:
                 duration_ms=(time.monotonic() - started) * 1000,
                 model_name=model_name,
             )
-        except BaseException:
+        except Exception:
+            # Only the hook's own failures are non-fatal. `SystemExit` /
+            # `KeyboardInterrupt` mean the process is going down and must not be
+            # swallowed by an observability path.
             logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(

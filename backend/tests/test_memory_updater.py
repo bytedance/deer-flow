@@ -3,6 +3,8 @@ import copy
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
@@ -982,6 +984,25 @@ class TestUpdateMemoryStructuredResponse:
             callbacks=_BrokenCallbacks(),
         )
         assert fail_open_updater.update_memory([msg, ai_msg]) is True
+
+    def test_result_callback_does_not_swallow_interpreter_shutdown(self):
+        # Fail-open covers the hook's own failures, not a process teardown
+        # signal: swallowing SystemExit here would let an observability path
+        # keep a shutting-down interpreter alive.
+        class _ExitingCallbacks:
+            def on_memory_llm_call(self, invoke_config, **kwargs):
+                return None
+
+            def on_memory_llm_result(self, invoke_config, **kwargs):
+                raise SystemExit("interpreter is going down")
+
+        model = self._make_mock_model('{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}')
+        updater = _make_updater(llm=model, callbacks=_ExitingCallbacks())
+        msg = MagicMock(type="human", content="Hello")
+        ai_msg = MagicMock(type="ai", content="Hi", tool_calls=[])
+
+        with pytest.raises(SystemExit):
+            updater.update_memory([msg, ai_msg])
 
     def test_list_content_response_parses(self):
         """LLM response as list-of-blocks should be extracted, not repr'd."""
