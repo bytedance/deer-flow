@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 32
+config_version: 33
 
 # ============================================================================
 # Logging
@@ -2162,6 +2162,9 @@ run_ownership:
 #
 #   wecom:
 #     enabled: false
+#
+#   buzz:
+#     enabled: false
 
 # ============================================================================
 # IM Channels Configuration
@@ -2279,6 +2282,20 @@ run_ownership:
 #     mention_only: false             # If true, only respond when the bot is mentioned
 #     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
 #     thread_mode: false               # If true, group a channel conversation into a thread
+#
+#   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.
+#   # DeerFlow joins as a member identity; generate a keypair and register it as
+#   # a relay member, then @mention or DM DeerFlow in Buzz. Requires the `buzz`
+#   # dependency extra (uv sync --extra buzz).
+#   buzz:
+#     enabled: false
+#     relay_url: wss://buzz.example.com
+#     private_key: $BUZZ_PRIVATE_KEY        # hex or nsec1…
+#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs.
+#                                           # DENY-BY-DEFAULT (unlike other channels): empty
+#                                           # means nobody, and DeerFlow logs a startup warning.
+#     require_mention: true                 # @mention needed in channels
+#     mention_free_channels: []             # channel UUIDs that respond to every message
 
 # ============================================================================
 # Guardrails Configuration
