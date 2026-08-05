@@ -28,6 +28,7 @@ Launch modes:
 | `deerflow --resume THREAD` | Resume a thread by id |
 | `deerflow --print "question"` | Headless one-shot answer to stdout |
 | `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s |
+| `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
 | `DEER_FLOW_TUI_TRANSPARENT=1 deerflow` | Persist terminal-background rendering via environment |
@@ -41,6 +42,13 @@ screen, header, transcript, status, palette, composer, and modal surfaces while
 keeping truecolor foregrounds and selection highlights. Combine
 `--tui-transparent` with `--tui` when the UI also needs to be forced without a
 detected TTY.
+
+Headless runs use a recursion limit of `100` by default. Pass a positive
+`--recursion-limit` when a longer agent loop is expected. This is a LangGraph
+super-step budget, so it can include model and tool-execution steps rather than
+mapping one-to-one to conversational turns. The `max_recursion_limit` setting
+is a Gateway safety ceiling for client-supplied values; it is not the default
+for trusted embedded CLI runs.
 
 ## Surface
 

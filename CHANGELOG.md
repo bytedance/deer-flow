@@ -112,6 +112,8 @@ This section accumulates work toward the **2.1.0** milestone
 - **runtime:** Dual-mode checkpoint storage with LangGraph `DeltaChannel` cuts
   thread storage from O(N²) to near-linear for long research/coding runs.
   ([#4292])
+- **runtime:** Delta-mode checkpoint history cache (memory/redis) with O(1)
+  incremental composition, configured via `database.checkpoint_cache`.
 - **agent:** Config-declared lead-agent middlewares let deployments add custom
   `AgentMiddleware` classes without patching the runtime chain. ([#3964])
 - **agents:** Per-agent model and generation settings (`temperature`,
@@ -268,6 +270,7 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
   of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a

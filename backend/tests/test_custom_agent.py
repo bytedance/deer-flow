@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -513,6 +514,20 @@ class TestMemoryFilePath:
 # ===========================================================================
 
 
+# Model names the agents API tests may send in a create/update payload. The
+# router validates `model` against the app config, so the fixture pins a stub
+# config exposing exactly these instead of leaving the assertion at the mercy
+# of whatever `config.yaml` happens to sit in the repo root: CI has none (the
+# validation is skipped and the request passes), a real dev checkout does (an
+# unlisted model name yields 422 and the test fails).
+_KNOWN_TEST_MODELS = frozenset({"deepseek-v3"})
+
+
+def _stub_app_config():
+    """App config that knows only ``_KNOWN_TEST_MODELS``."""
+    return SimpleNamespace(get_model_config=lambda name: SimpleNamespace(name=name) if name in _KNOWN_TEST_MODELS else None)
+
+
 def _make_test_app(tmp_path: Path):
     """Create a FastAPI app with the agents router, patching paths to tmp_path."""
     from fastapi import FastAPI
@@ -532,7 +547,11 @@ def agent_client(tmp_path):
     paths_instance = _make_paths(tmp_path)
     previous_config = AgentsApiConfig(**get_agents_api_config().model_dump())
 
-    with patch("deerflow.config.agents_config.get_paths", return_value=paths_instance), patch.object(agents_router, "get_paths", return_value=paths_instance):
+    with (
+        patch("deerflow.config.agents_config.get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_paths", return_value=paths_instance),
+        patch.object(agents_router, "get_app_config", _stub_app_config),
+    ):
         set_agents_api_config(AgentsApiConfig(enabled=True))
         try:
             app = _make_test_app(tmp_path)
