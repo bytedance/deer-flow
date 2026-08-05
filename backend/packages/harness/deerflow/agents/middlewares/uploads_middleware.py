@@ -19,7 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file, extract_outline_from_markdown
+from deerflow.utils.file_outline import extract_outline_for_file, extract_outline_from_uploaded_markdown
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -179,11 +179,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             reason = "value must be a non-empty string or null"
         elif "/" in raw or "\\" in raw or Path(raw).name != raw:
             reason = "value must be a basename"
+        elif ":" in raw:
+            reason = "value must not contain alternate stream syntax"
         elif is_upload_staging_file(raw):
             reason = "staging files are not valid companions"
         elif Path(raw).suffix.lower() != ".md":
             reason = "value must have a .md suffix"
         elif uploads_dir is not None:
+            # Preliminary state normalization only. before_agent performs the
+            # authoritative no-follow validation on the handle it parses.
             try:
                 candidate = uploads_dir / raw
                 if candidate.is_symlink() or not candidate.is_file():
@@ -298,7 +302,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 elif file["markdown_file"] is None:
                     outline, preview = [], []
                 else:
-                    outline, preview = extract_outline_from_markdown(uploads_dir / file["markdown_file"])
+                    outline, preview = extract_outline_from_uploaded_markdown(uploads_dir, file["markdown_file"])
                 file["outline"] = outline
                 file["outline_preview"] = preview
 

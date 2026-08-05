@@ -7,14 +7,18 @@ Covers:
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
+import ctypes
+import os
 import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
+from deerflow.utils.file_outline import extract_outline_from_markdown, extract_outline_from_uploaded_markdown
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 THREAD_ID = "thread-abc123"
@@ -60,6 +64,26 @@ def _current_uploads_block(content) -> str:
     match = re.search(r"<current_uploads>[\s\S]*?</current_uploads>", text)
     assert match is not None
     return match.group(0)
+
+
+def test_markdown_preview_does_not_reopen_the_path(tmp_path):
+    markdown_path = tmp_path / "preview.md"
+    markdown_path.write_text("First line\n\nSecond line\n", encoding="utf-8")
+    path_open = Path.open
+    open_count = 0
+
+    def counting_open(path, *args, **kwargs):
+        nonlocal open_count
+        if path == markdown_path:
+            open_count += 1
+        return path_open(path, *args, **kwargs)
+
+    with patch.object(Path, "open", counting_open):
+        outline, preview = extract_outline_from_markdown(markdown_path)
+
+    assert outline == []
+    assert preview == ["First line", "Second line"]
+    assert open_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +276,37 @@ class TestFilesFromKwargs:
 
         assert result is not None
         assert result[0]["markdown_file"] is None
+
+    def test_normalizes_windows_ads_companion_to_null(self, tmp_path):
+        if os.name != "nt":
+            pytest.skip("NTFS alternate data streams are Windows-specific")
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "carrier.bin").write_bytes(b"carrier")
+        (uploads_dir / "carrier.bin:payload.md").write_text("# ADS OUTLINE", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[{"filename": "a.pdf", "size": 3, "markdown_file": "carrier.bin:payload.md"}],
+        )
+
+        result = mw._files_from_kwargs(msg, uploads_dir)
+
+        assert result is not None
+        assert result[0]["markdown_file"] is None
+
+
+def test_secure_uploaded_markdown_rejects_windows_ads(tmp_path):
+    if os.name != "nt":
+        pytest.skip("NTFS alternate data streams are Windows-specific")
+
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir()
+    (uploads_dir / "carrier.bin").write_bytes(b"carrier")
+    (uploads_dir / "carrier.bin:payload.md").write_text("# ADS OUTLINE", encoding="utf-8")
+
+    assert extract_outline_from_uploaded_markdown(uploads_dir, "carrier.bin:payload.md") == ([], [])
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +811,107 @@ class TestBeforeAgent:
         assert "CORRECT PDF OUTLINE" in content
         assert "WRONG DOCX OUTLINE" not in content
         assert "a_1.md" not in content
+
+    def test_rejects_companion_replaced_after_metadata_validation(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        companion = uploads_dir / "a_1.md"
+        outside = uploads_dir.parent / "outside.md"
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a.md").write_text("# WRONG SIBLING", encoding="utf-8")
+        companion.write_text("# ORIGINAL COMPANION", encoding="utf-8")
+        outside.write_text("# OUTSIDE CONTENT", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[
+                {
+                    "filename": "a.pdf",
+                    "size": 3,
+                    "markdown_file": "a_1.md",
+                }
+            ],
+        )
+        normalize = mw._normalize_markdown_companion
+
+        def replace_after_validation(*args, **kwargs):
+            result = normalize(*args, **kwargs)
+            companion.unlink()
+            os.link(outside, companion)
+            return result
+
+        with patch.object(mw, "_normalize_markdown_companion", side_effect=replace_after_validation):
+            result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "<current_uploads>" in content
+        assert "- a.pdf" in content
+        assert "OUTSIDE CONTENT" not in content
+        assert "WRONG SIBLING" not in content
+        assert "ORIGINAL COMPANION" not in content
+
+    def test_windows_directory_handle_blocks_replacement_before_companion_open(self, tmp_path):
+        if os.name != "nt":
+            pytest.skip("Windows directory handle sharing is Windows-specific")
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        moved_uploads_dir = uploads_dir.with_name("uploads-before-swap")
+        (uploads_dir / "a.pdf").write_bytes(b"pdf")
+        (uploads_dir / "a_1.md").write_text("# ORIGINAL COMPANION", encoding="utf-8")
+        msg = _human(
+            "summarize",
+            files=[{"filename": "a.pdf", "size": 3, "markdown_file": "a_1.md"}],
+        )
+        win_dll = ctypes.WinDLL
+        create_file_calls = 0
+        swap_attempted = False
+
+        class CreateFileProxy:
+            def __init__(self, function):
+                object.__setattr__(self, "function", function)
+
+            def __setattr__(self, name, value):
+                if name in {"argtypes", "restype"}:
+                    setattr(self.function, name, value)
+                else:
+                    object.__setattr__(self, name, value)
+
+            def __call__(self, *args):
+                nonlocal create_file_calls, swap_attempted
+                create_file_calls += 1
+                if create_file_calls == 2:
+                    swap_attempted = True
+                    try:
+                        uploads_dir.rename(moved_uploads_dir)
+                    except PermissionError:
+                        pass
+                    else:
+                        uploads_dir.mkdir()
+                        (uploads_dir / "a_1.md").write_text("# SWAPPED DIRECTORY CONTENT", encoding="utf-8")
+                return self.function(*args)
+
+        class Kernel32Proxy:
+            def __init__(self, library):
+                self.library = library
+                self.CreateFileW = CreateFileProxy(library.CreateFileW)
+
+            def __getattr__(self, name):
+                return getattr(self.library, name)
+
+        def intercept_kernel32(name, *args, **kwargs):
+            library = win_dll(name, *args, **kwargs)
+            return Kernel32Proxy(library) if name == "kernel32" else library
+
+        with patch.object(ctypes, "WinDLL", side_effect=intercept_kernel32):
+            result = mw.before_agent(self._state(msg), _runtime())
+
+        assert swap_attempted
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "<current_uploads>" in content
+        assert "- a.pdf" in content
+        assert "SWAPPED DIRECTORY CONTENT" not in content
 
     def test_explicit_null_does_not_guess_a_same_stem_companion(self, tmp_path):
         mw = _middleware(tmp_path)
