@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,14 @@ class McpServerConfig(BaseModel):
     tool_call_timeout: float | None = Field(
         default=None,
         description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+    )
+    session_init_timeout: float | None = Field(
+        default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        description=(
+            "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
+            "and persistent stdio session initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung "
+            "server cannot block agent construction indefinitely. None means no timeout."
+        ),
     )
     model_config = ConfigDict(extra="allow")
 

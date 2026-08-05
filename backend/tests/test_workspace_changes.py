@@ -261,6 +261,48 @@ def test_scan_workspace_roots_skips_browser_frames(tmp_path):
     assert "/mnt/user-data/outputs/.browser-frames/browser-navigate-1.png" not in snapshot.files
 
 
+def test_scan_workspace_roots_skips_externalized_tool_results(tmp_path):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    (outputs / "report.md").write_text("keep", encoding="utf-8")
+    tool_results = outputs / ".tool-results"
+    tool_results.mkdir()
+    (tool_results / "bash-abcdef123456.log").write_text("oversized tool output", encoding="utf-8")
+
+    snapshot = scan_workspace_roots(roots)
+
+    assert "/mnt/user-data/outputs/report.md" in snapshot.files
+    assert "/mnt/user-data/outputs/.tool-results/bash-abcdef123456.log" not in snapshot.files
+
+
+def test_scan_workspace_roots_skips_extra_excluded_dir_names(tmp_path):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    (outputs / "report.md").write_text("keep", encoding="utf-8")
+    custom = outputs / "custom-tool-results"
+    custom.mkdir()
+    (custom / "bash-abcdef123456.log").write_text("oversized tool output", encoding="utf-8")
+
+    snapshot = scan_workspace_roots(roots, extra_excluded_dir_names=frozenset({"custom-tool-results"}))
+
+    assert "/mnt/user-data/outputs/report.md" in snapshot.files
+    assert "/mnt/user-data/outputs/custom-tool-results/bash-abcdef123456.log" not in snapshot.files
+
+
+def test_get_changed_output_paths_ignores_externalized_tool_results(tmp_path):
+    roots = _roots(tmp_path)
+    outputs = roots[1].host_path
+    before = scan_workspace_roots(roots)
+
+    tool_results = outputs / ".tool-results"
+    tool_results.mkdir()
+    (tool_results / "web_fetch-abcdef123456.log").write_text("x" * 20000, encoding="utf-8")
+    (outputs / "report.md").write_text("deliverable", encoding="utf-8")
+    after = scan_workspace_roots(roots)
+
+    assert get_changed_output_paths(before, after) == ["/mnt/user-data/outputs/report.md"]
+
+
 def test_scan_workspace_roots_can_skip_text_loading(tmp_path):
     roots = _roots(tmp_path)
     workspace = roots[0].host_path

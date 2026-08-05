@@ -397,6 +397,7 @@ class TestChannelBase:
         assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
 
     def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.buzz import BuzzChannel
         from app.channels.dingtalk import DingTalkChannel
         from app.channels.discord import DiscordChannel
         from app.channels.feishu import FeishuChannel
@@ -409,6 +410,7 @@ class TestChannelBase:
 
         bus = MessageBus()
         defaults = {
+            "buzz": BuzzChannel(bus=bus, config={"relay_url": "wss://buzz.example.com"}).supports_streaming,
             "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
@@ -9649,3 +9651,254 @@ def test_merge_stream_text_newline_split():
 def test_merge_stream_text_normal_append():
     _merge = _get_merge_stream_text()
     assert _merge("Hello ", "world") == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# LIVE-TEST FINDING 1 (critical, data disclosure): _accumulate_stream_text
+# decided what streamed payloads become displayable assistant text by REJECTING
+# only payloads whose ``type`` contained "tool".  DeerFlow injects hidden
+# context -- memory facts (DynamicContextMiddleware) and durable context
+# (DurableContextMiddleware) -- as hidden HumanMessages whose ``type`` is
+# "human", and DynamicContextMiddleware also rewrites the user's own turn into
+# a fresh HumanMessage.  All of those are written to the messages channel, so
+# LangGraph fans them out on the ``messages-tuple`` stream and the old denylist
+# accumulated them and published them to the IM channel as the assistant's
+# reply.  Proved live on a Buzz relay: the connector published
+# "<memory>\nFacts:\n- [context | 0.70] ...\n</memory> ▉" and, in another run,
+# a verbatim echo of the user's own inbound message.
+#
+# The filter is now an ALLOWLIST of assistant message types.  These tests pin
+# both directions: hidden context never accumulates, and assistant streaming --
+# including multi-chunk merging across one message id -- is untouched.
+# ---------------------------------------------------------------------------
+
+
+def _get_accumulate_stream_text():
+    from app.channels.manager import _accumulate_stream_text
+
+    return _accumulate_stream_text
+
+
+_MEMORY_LEAK_TEXT = "<memory>\nFacts:\n- [context | 0.70] User interacts with the assistant through the DeerFlow chat channel.\n</memory>"
+
+
+def test_accumulate_stream_text_rejects_hidden_memory_human_message():
+    """The exact live leak: a hidden HumanMessage carrying a <memory> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "id": "run-1__memory",
+                "type": "human",
+                "content": _MEMORY_LEAK_TEXT,
+                "additional_kwargs": {"hide_from_ui": True},
+            },
+            {"langgraph_node": "model_request"},
+        ],
+    )
+    assert text is None
+    assert message_id is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_durable_context_human_message():
+    """DurableContextMiddleware's hidden <durable_context_data> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {"id": "dc-1", "type": "human", "content": "<durable_context_data>\n## Conversation summary so far\nsecret\n</durable_context_data>"},
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_echo_of_plain_human_message():
+    """DynamicContextMiddleware re-writes the user's own turn as a new
+    HumanMessage; echoing it back to the channel as the assistant's reply is
+    the second half of the same live leak."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_system_message():
+    """The <system-reminder> SystemMessage is hidden context too."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "s-1", "type": "system", "content": "<system-reminder>Today is 2026-08-01</system-reminder>"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_still_rejects_tool_payloads():
+    """Pre-existing behavior: tool calls and tool results are never displayable."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, [{"id": "t-1", "type": "tool", "content": "bash output"}, {}]) == (None, None)
+    assert _accumulate(buffers, None, [{"id": "t-2", "type": "ToolMessageChunk", "content": "more output"}, {}]) == (None, None)
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_hidden_context_wrapped_in_kwargs_shape():
+    """The LangChain ``to_json`` shape the function already reads content from:
+    the wrapper's own ``type`` is "constructor", so the real message type has to
+    be resolved from ``kwargs``/``id`` or hidden context walks straight through."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "HumanMessage"],
+                "kwargs": {"id": "m-1", "content": _MEMORY_LEAK_TEXT},
+            },
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_accepts_assistant_chunk_in_kwargs_shape():
+    """...and the same shape must still stream an AIMessageChunk."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessageChunk"],
+                "kwargs": {"id": "ai-9", "content": "Hello"},
+            },
+            {},
+        ],
+    )
+    assert text == "Hello"
+    assert message_id == "ai-9"
+
+
+def test_accumulate_stream_text_rejects_untyped_bare_string_payload():
+    """A bare ``str`` payload carries no type information at all, so it cannot be
+    attributed to the assistant.  Under an allowlist an unattributable payload
+    must not be published -- hidden context arriving that way would be
+    indistinguishable from assistant output."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, "Hello") == (None, None)
+    assert _accumulate(buffers, "ai-1", ["raw text", {}]) == (None, "ai-1")
+    assert buffers == {}
+
+
+@pytest.mark.parametrize("payload_type", ["ai", "AIMessageChunk", "AIMessage", "assistant"])
+def test_accumulate_stream_text_accepts_every_assistant_type_spelling(payload_type):
+    """The literal ``type`` values assistant output actually carries: LangChain
+    serializes AIMessage as "ai" and AIMessageChunk as "AIMessageChunk"; the
+    OpenAI-style "assistant" spelling is accepted for foreign runtimes."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(buffers, None, [{"id": "ai-1", "content": "Hi", "type": payload_type}, {"langgraph_node": "agent"}])
+    assert text == "Hi"
+    assert message_id == "ai-1"
+
+
+def test_accumulate_stream_text_merges_multi_chunk_assistant_stream_across_one_message_id():
+    """The function's entire purpose.  Pinned hard so the allowlist can never
+    silently kill streaming for Feishu / Telegram / WeCom / Buzz."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    current: str | None = None
+    seen = []
+    for delta in ("Hello", " ", "world", "!"):
+        text, current = _accumulate(buffers, current, [{"id": "ai-1", "content": delta, "type": "AIMessageChunk"}, {"langgraph_node": "agent"}])
+        seen.append(text)
+    assert seen == ["Hello", "Hello ", "Hello world", "Hello world!"]
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "Hello world!"}
+
+
+def test_accumulate_stream_text_keeps_separate_buffers_per_message_id():
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _accumulate(buffers, None, [{"id": "ai-1", "content": "first", "type": "AIMessageChunk"}, {}])
+    _accumulate(buffers, "ai-1", [{"id": "ai-2", "content": "second", "type": "AIMessageChunk"}, {}])
+    text, current = _accumulate(buffers, "ai-2", [{"id": "ai-1", "content": "-more", "type": "AIMessageChunk"}, {}])
+    assert text == "first-more"
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "first-more", "ai-2": "second"}
+
+
+def test_accumulate_stream_text_hidden_context_between_assistant_chunks_never_enters_the_buffer():
+    """Interleaving is the realistic live shape: the middleware writes its hidden
+    HumanMessage in the middle of a turn.  It must neither be published nor
+    corrupt the assistant buffer it sits between."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _, current = _accumulate(buffers, None, [{"id": "ai-1", "content": "Deploy ", "type": "AIMessageChunk"}, {}])
+    leaked, current_after = _accumulate(buffers, current, [{"id": "mem-1", "type": "human", "content": _MEMORY_LEAK_TEXT}, {}])
+    assert leaked is None
+    assert current_after == "ai-1"  # the assistant message id is preserved
+    text, _ = _accumulate(buffers, current_after, [{"id": "ai-1", "content": "succeeded.", "type": "AIMessageChunk"}, {}])
+    assert text == "Deploy succeeded."
+    assert buffers == {"ai-1": "Deploy succeeded."}
+
+
+def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
+    """End-to-end through _handle_streaming_chat: the hidden <memory> HumanMessage
+    the live relay actually received must reach no outbound message at all."""
+    from app.channels.manager import ChannelManager
+
+    monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+    async def go():
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store)
+        outbound_received: list[OutboundMessage] = []
+
+        async def capture_outbound(msg):
+            outbound_received.append(msg)
+
+        bus.subscribe_outbound(capture_outbound)
+
+        stream_events = [
+            _make_stream_part("messages-tuple", [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "u-1__memory", "type": "human", "content": _MEMORY_LEAK_TEXT, "additional_kwargs": {"hide_from_ui": True}}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "ai-1", "content": "All green.", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}]),
+            _make_stream_part(
+                "values",
+                {"messages": [{"type": "human", "content": "what is my deploy status?"}, {"type": "ai", "content": "All green."}], "artifacts": []},
+            ),
+        ]
+
+        mock_client = _make_mock_langgraph_client()
+        mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+        manager._client = mock_client
+        await manager.start()
+
+        await bus.publish_inbound(InboundMessage(channel_name="buzz", chat_id="chan-1", user_id="pk-1", text="what is my deploy status?", thread_ts=None))
+        await _wait_for(lambda: any(m.is_final for m in outbound_received))
+        await manager.stop()
+
+        assert outbound_received, "expected at least the final outbound"
+        for published in outbound_received:
+            assert "<memory>" not in published.text
+            assert "what is my deploy status?" not in published.text
+        assert [m.text for m in outbound_received] == ["All green. ▉", "All green."]
+
+    _run(go())

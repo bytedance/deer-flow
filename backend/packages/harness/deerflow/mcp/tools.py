@@ -16,6 +16,7 @@ from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
@@ -425,12 +426,30 @@ def _convert_call_tool_result(
     return lc_content, artifact
 
 
+def _resolve_session_init_timeout(server_cfg: Any) -> float | None:
+    """Return the effective session-init timeout for *server_cfg*.
+
+    ``None`` (an explicit opt-out) stays ``None``. Any other non-numeric value
+    falls back to the default rather than being passed to ``asyncio.wait_for``
+    (which would raise on it) or silently disabling the bound: pydantic
+    guarantees a float for real configs, but configs built with mocks in tests
+    can supply anything, and the fallback keeps the hang-protection in place.
+    """
+    value = server_cfg.session_init_timeout if server_cfg is not None else DEFAULT_MCP_SESSION_INIT_TIMEOUT
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_MCP_SESSION_INIT_TIMEOUT
+    return float(value)
+
+
 def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
     connection: dict[str, Any],
     tool_interceptors: list[Any] | None = None,
     tool_call_timeout: float | None = None,
+    session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
@@ -495,7 +514,29 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
-        session = await pool.get_session(server_name, scope_key, session_connection)
+        if session_init_timeout is not None:
+            # Cancellation here is safe: MCPSessionPool.get_session owns the
+            # teardown of a session stuck mid-creation (it signals close and
+            # waits for the owner task's __aexit__ to run in its own task),
+            # so a hung server cannot leak a session or block the turn.
+            try:
+                session = await asyncio.wait_for(
+                    pool.get_session(server_name, scope_key, session_connection),
+                    timeout=session_init_timeout,
+                )
+            except TimeoutError:
+                # Surface the timeout at the same log level as discovery
+                # timeouts: the tool call still fails with a TimeoutError the
+                # model can react to, but operators need the WARNING to
+                # diagnose tool-call failures caused by hung MCP sessions.
+                logger.warning(
+                    "MCP session initialization for server '%s' timed out after %.1fs",
+                    server_name,
+                    session_init_timeout,
+                )
+                raise
+        else:
+            session = await pool.get_session(server_name, scope_key, session_connection)
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -653,16 +694,50 @@ async def get_mcp_tools() -> list[BaseTool]:
             try:
                 server_cfg = extensions_config.mcp_servers.get(server_name)
                 tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
+                session_init_timeout = _resolve_session_init_timeout(server_cfg)
                 if tool_name_prefix:
-                    return await client.get_tools(server_name=server_name)
-                return await load_mcp_tools(
-                    None,
-                    connection=servers_config[server_name],
-                    callbacks=client.callbacks,
-                    server_name=server_name,
-                    tool_interceptors=client.tool_interceptors,
-                    tool_name_prefix=False,
-                )
+                    discovery = client.get_tools(server_name=server_name)
+                else:
+                    discovery = load_mcp_tools(
+                        None,
+                        connection=servers_config[server_name],
+                        callbacks=client.callbacks,
+                        server_name=server_name,
+                        tool_interceptors=client.tool_interceptors,
+                        tool_name_prefix=False,
+                    )
+                if session_init_timeout is not None:
+                    # Timeout tool discovery (subprocess spawn + initialize +
+                    # tools/list) so a hung stdio server cannot block agent
+                    # construction indefinitely. Per-server because the gather
+                    # below runs each server independently — one slow server
+                    # must not prevent the others from contributing tools.
+                    #
+                    # Cancellation here is safe: discovery runs inside the
+                    # adapter's nested async context managers (load_mcp_tools →
+                    # create_session → _create_stdio_session → stdio_client),
+                    # and wait_for's CancelledError unwinds them. stdio_client's
+                    # finally closes stdin, waits for a graceful exit, then
+                    # escalates to _terminate_process_tree (SIGTERM→SIGKILL on
+                    # POSIX, process-tree termination on Windows), so the npx
+                    # subprocess and any children it spawned are reaped — no
+                    # orphan processes accumulate across repeated timeouts.
+                    try:
+                        return await asyncio.wait_for(discovery, timeout=session_init_timeout)
+                    except TimeoutError:
+                        # Only our own bound is logged as "timed out": the
+                        # branch condition guarantees the value is not None, so
+                        # the %.1f format cannot fail. A TimeoutError raised by
+                        # discovery itself (e.g. an internal SDK timeout on the
+                        # opted-out path) falls through to the generic failure
+                        # handler below instead.
+                        logger.warning(
+                            "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
+                            server_name,
+                            session_init_timeout,
+                        )
+                        return []
+                return await discovery
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
@@ -708,6 +783,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                     tag_mcp_routing(tool, routing)
                 if transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
+                    _init_timeout = _resolve_session_init_timeout(server_cfg)
                     wrapped_tools.append(
                         _make_session_pool_tool(
                             tool,
@@ -715,6 +791,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                             servers_config[source_name],
                             tool_interceptors,
                             tool_call_timeout=_timeout,
+                            session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
                         )
                     )

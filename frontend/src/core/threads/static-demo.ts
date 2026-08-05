@@ -125,6 +125,16 @@ export function resolveStaticDemoArtifact(
   return `/demo/threads/${threadId}/${artifactPath}`;
 }
 
+const DEMO_THREAD_ID_SET = new Set<string>(DEMO_THREAD_IDS);
+
+export function isDemoThreadId(threadId: string): boolean {
+  return DEMO_THREAD_ID_SET.has(threadId);
+}
+
+export function pathOfPublicDemoThread(threadId: string): string {
+  return `/showcase/${encodeURIComponent(threadId)}`;
+}
+
 export type ThreadSearchParams = NonNullable<
   Parameters<ThreadsClient["search"]>[0]
 >;

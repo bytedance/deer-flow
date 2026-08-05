@@ -254,7 +254,7 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-  const browserEnabled = !isNewThread && browserControlEnabled;
+  const browserEnabled = !isNewThread && !isMock && browserControlEnabled;
   const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
@@ -285,12 +285,12 @@ export default function ChatPage() {
                   : "bg-background/80 shadow-xs backdrop-blur",
               )}
             >
-              <SidebarTrigger className="md:hidden" />
+              {!isMock && <SidebarTrigger className="md:hidden" />}
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
                 <ThreadTitle threadId={threadId} thread={thread} />
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {!isNewThread && (
+                {!isNewThread && !isMock && (
                   <ThreadScheduledTasksLink threadId={threadId} />
                 )}
                 {tokenUsageEnabled ? (

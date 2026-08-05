@@ -232,16 +232,26 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Extract concatenated text from a plain-string or content-block-list.
 
         Returns ``(text, extracted_blocks)``. *extracted_blocks* is None when
-        *content* is a string, or the list of text-content-block dicts when a list.
+        *content* is a string, or the list of text-content blocks when a list.
+
+        A list can hold bare ``str`` items next to content-block dicts
+        (``message_content_to_text`` treats both as text, and some IM/SDK
+        clients send exactly that shape), so bare strings are collected too —
+        skipping them would skip sanitization entirely for that message.
         """
         if isinstance(content, str):
             return content, None
         if not isinstance(content, list):
             return "", None
         text_parts: list[str] = []
-        text_blocks: list[dict] = []
+        text_blocks: list[dict | str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            if isinstance(block, str):
+                if not block:  # skip empty items — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(block)
+                text_blocks.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
                 text = block["text"]
                 if not text:  # skip empty blocks — matches message_content_to_text behaviour
                     continue
@@ -253,7 +263,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
     def _rebuild_content(
         original_content: list,
         processed_text: str,
-        text_blocks: list[dict],
+        text_blocks: list,
     ) -> list:
         """Replace text blocks with a single merged text block, preserving interleaved non-text blocks.
 

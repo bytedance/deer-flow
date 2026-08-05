@@ -728,7 +728,7 @@ test.describe("Thread history", () => {
       },
     );
 
-    await page.goto(`/workspace/chats/${DEMO_THREAD_ID}?mock=true`);
+    await page.goto(`/showcase/${DEMO_THREAD_ID}`);
 
     await expect(
       page.getByText("What might be the trends and opportunities in 2026?"),
@@ -737,6 +737,12 @@ test.describe("Thread history", () => {
       page.getByText("I've created a modern, minimalist website"),
     ).toBeVisible();
     expect(backendRunHistoryUrls).toEqual([]);
+  });
+
+  test("public showcase rejects unknown thread IDs", async ({ page }) => {
+    const response = await page.goto("/showcase/not-a-bundled-demo");
+
+    expect(response?.status()).toBe(404);
   });
 
   test("chats list page shows all threads", async ({ page }) => {
