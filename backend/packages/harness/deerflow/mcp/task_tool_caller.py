@@ -115,6 +115,7 @@ class McpTaskToolCaller:
                     tool_name=tool_name,
                     arguments=arguments,
                     timeout_seconds=server_config.tool_call_timeout,
+                    session_init_timeout_seconds=None,
                     persistent_session=True,
                 )
             except Exception:
@@ -123,12 +124,6 @@ class McpTaskToolCaller:
                 await pool.close_session(server_name, scope_key)
                 raise
 
-        if server_config.tool_call_timeout is not None:
-            logger.warning(
-                "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
-                server_name,
-                transport,
-            )
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
         if authorization:
             headers = dict(connection.get("headers") or {})
@@ -140,7 +135,8 @@ class McpTaskToolCaller:
             server_name=server_name,
             tool_name=tool_name,
             arguments=arguments,
-            timeout_seconds=None,
+            timeout_seconds=server_config.tool_call_timeout,
+            session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
         )
 
@@ -153,6 +149,7 @@ class McpTaskToolCaller:
         tool_name: str,
         arguments: dict[str, Any],
         timeout_seconds: float | None,
+        session_init_timeout_seconds: float | None,
         persistent_session: bool,
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
@@ -183,9 +180,27 @@ class McpTaskToolCaller:
             captured: BaseException | None = None
             call_result: Any | None = None
             async with create_session(effective_connection) as remote_session:
-                await remote_session.initialize()
+                initialize = remote_session.initialize()
+                if session_init_timeout_seconds is not None:
+                    await asyncio.wait_for(
+                        initialize,
+                        timeout=session_init_timeout_seconds,
+                    )
+                else:
+                    await initialize
                 try:
-                    call_result = await remote_session.call_tool(request.name, request.args)
+                    call = remote_session.call_tool(
+                        request.name,
+                        request.args,
+                        **call_kwargs,
+                    )
+                    if timeout_seconds:
+                        call_result = await asyncio.wait_for(
+                            call,
+                            timeout=timeout_seconds,
+                        )
+                    else:
+                        call_result = await call
                 except BaseException as exc:  # preserve adapter disconnect semantics
                     captured = exc
             if captured is not None:

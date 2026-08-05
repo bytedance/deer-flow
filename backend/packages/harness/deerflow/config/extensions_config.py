@@ -120,14 +120,15 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
-            "and persistent stdio session initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung "
-            "server cannot block agent construction indefinitely. None means no timeout."
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
         ),
     )
     task_toolsets: list[McpTaskToolsetConfig] = Field(

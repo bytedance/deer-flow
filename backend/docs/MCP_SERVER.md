@@ -96,14 +96,15 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
-## Server Timeouts (Stdio MCP Servers)
+## Server Timeouts
 
-Two independent timeouts bound stdio MCP servers. `session_init_timeout` covers
-server bring-up — tool discovery (subprocess spawn + `initialize` +
-`tools/list`) and persistent-session initialization — and defaults to 60s so a
-hung server (e.g. `npx` blocked on a package download, or a server that never
-answers `initialize`) cannot block agent construction indefinitely. Set it to
-`null` to disable:
+Two independent settings bound stdio MCP servers and durable HTTP/SSE task
+calls. `session_init_timeout` covers server bring-up — tool discovery
+(subprocess spawn + `initialize` + `tools/list`) and persistent-session
+initialization — plus ephemeral HTTP/SSE task-session initialization. It
+defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
+a server that never answers `initialize`) cannot block agent construction or
+the task poller indefinitely. Set it to `null` to disable:
 
 ```json
 {
@@ -123,10 +124,11 @@ answers `initialize`) cannot block agent construction indefinitely. Set it to
 }
 ```
 
-`tool_call_timeout` limits each individual tool call in seconds and applies only
-to `stdio` servers; `http` and `sse` servers use transport-level timeouts, and
-DeerFlow logs a warning if `tool_call_timeout` is configured for those
-transports.
+`tool_call_timeout` limits each individual stdio tool call in seconds. Ordinary
+durable-task submit/status/cancel calls also honor it for `http` and `sse`
+servers, independently of transport idle timeouts, so a live connection that
+never returns the matching MCP response cannot stall the task poller. Other
+`http` and `sse` tools continue to use transport-level timeouts.
 
 ## Filesystem MCP Servers
 
@@ -168,6 +170,8 @@ the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
       "enabled": true,
       "type": "http",
       "url": "https://reports.example.com/mcp",
+      "session_init_timeout": 60,
+      "tool_call_timeout": 60,
       "task_toolsets": [
         {
           "name": "report-generation",
