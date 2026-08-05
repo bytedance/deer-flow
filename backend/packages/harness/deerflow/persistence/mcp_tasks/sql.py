@@ -182,6 +182,7 @@ class McpTaskRepository:
             .where(
                 McpTaskRow.id == task_id,
                 McpTaskRow.lease_owner == lease_owner,
+                McpTaskRow.lease_expires_at >= polled_at,
             )
             .values(**values)
         )

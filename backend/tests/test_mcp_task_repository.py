@@ -128,6 +128,36 @@ async def test_apply_snapshot_requires_current_lease_owner_and_terminalizes_task
 
 
 @pytest.mark.asyncio
+async def test_apply_snapshot_rejects_result_after_same_workers_lease_expires(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-expired", now=now)
+    await repo.claim_due_tasks(
+        now=now,
+        lease_owner="worker-1",
+        lease_seconds=60,
+        limit=10,
+    )
+
+    applied = await repo.apply_snapshot(
+        "task-expired",
+        lease_owner="worker-1",
+        status="completed",
+        result={"report": "stale"},
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now + timedelta(seconds=61),
+    )
+
+    assert applied is False
+    stored = await repo.get("task-expired", user_id="user-1")
+    assert stored is not None
+    assert stored["status"] == "working"
+    assert stored["result"] is None
+
+
+@pytest.mark.asyncio
 async def test_input_required_is_persisted_and_paused_until_future_resume(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)

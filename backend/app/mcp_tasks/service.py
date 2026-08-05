@@ -58,23 +58,43 @@ class McpTaskService:
         snapshot = submission.snapshot
         next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
         driver_data = {**request.driver_data, **submission.driver_data}
-        return await self._repository.create(
-            task_id=local_task_id,
+        task_reference = TaskReference(
+            local_task_id=local_task_id,
             user_id=request.user_id,
             thread_id=request.thread_id,
-            run_id=request.run_id,
-            tool_call_id=request.tool_call_id,
             server_name=request.server_name,
-            driver_name=driver_name,
             remote_task_id=submission.remote_task_id,
-            task_name=request.task_name,
-            status=snapshot.status.value,
-            result=snapshot.result,
-            error=snapshot.error,
-            input_required=snapshot.input_required,
-            next_poll_at=next_poll_at,
             driver_data=driver_data,
         )
+        try:
+            return await self._repository.create(
+                task_id=local_task_id,
+                user_id=request.user_id,
+                thread_id=request.thread_id,
+                run_id=request.run_id,
+                tool_call_id=request.tool_call_id,
+                server_name=request.server_name,
+                driver_name=driver_name,
+                remote_task_id=submission.remote_task_id,
+                task_name=request.task_name,
+                status=snapshot.status.value,
+                result=snapshot.result,
+                error=snapshot.error,
+                input_required=snapshot.input_required,
+                next_poll_at=next_poll_at,
+                driver_data=driver_data,
+            )
+        except Exception:
+            try:
+                await driver.cancel(task_reference)
+            except Exception:  # noqa: BLE001 - preserve the original persistence failure
+                logger.exception(
+                    "Failed to cancel untracked MCP task after persistence failure (task_id=%s, driver=%s, remote_task_id=%s)",
+                    local_task_id,
+                    driver_name,
+                    submission.remote_task_id,
+                )
+            raise
 
     async def run_once(self, *, now: datetime) -> None:
         claimed = await self._repository.claim_due_tasks(
@@ -111,15 +131,17 @@ class McpTaskService:
         try:
             snapshot = await driver.get_status(TaskReference.from_record(record))
         except Exception as exc:  # noqa: BLE001 - driver boundary; retry on the next poll
+            polled_at = datetime.now(UTC)
             logger.warning(
                 "MCP task status poll failed (task_id=%s, driver=%s); retrying",
                 record.get("id"),
                 driver_name,
                 exc_info=True,
             )
-            await self._release_after_error(record, now=now, error=str(exc) or type(exc).__name__)
+            await self._release_after_error(record, now=polled_at, error=str(exc) or type(exc).__name__)
             return
 
+        polled_at = datetime.now(UTC)
         applied = await self._repository.apply_snapshot(
             record["id"],
             lease_owner=self._lease_owner,
@@ -127,12 +149,12 @@ class McpTaskService:
             result=snapshot.result,
             error=snapshot.error,
             input_required=snapshot.input_required,
-            next_poll_at=self._next_poll_at(snapshot, now=now),
-            polled_at=now,
+            next_poll_at=self._next_poll_at(snapshot, now=polled_at),
+            polled_at=polled_at,
         )
         if not applied:
             logger.info(
-                "Discarded MCP task poll result after lease ownership changed (task_id=%s)",
+                "Discarded MCP task poll result after lease ownership changed or expired (task_id=%s)",
                 record.get("id"),
             )
 
