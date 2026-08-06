@@ -8,6 +8,7 @@ from urllib.parse import quote
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 
 UPLOAD_CONVERSIONS_DIRNAME = ".upload-conversions"
+UPLOAD_LOCKS_DIRNAME = ".locks"
 
 
 class UnsafeConversionPathError(ValueError):
@@ -47,6 +48,28 @@ def ensure_conversion_dir(uploads_dir: Path) -> Path:
     if validated is None:
         raise UnsafeConversionPathError("Upload conversion directory disappeared")
     return validated
+
+
+def upload_lock_dir_for_uploads(uploads_dir: Path) -> Path:
+    """Return the stable per-upload lock directory."""
+    return conversion_dir_for_uploads(uploads_dir) / UPLOAD_LOCKS_DIRNAME
+
+
+def ensure_upload_lock_dir(uploads_dir: Path) -> Path:
+    """Create and validate the system-owned upload lock directory."""
+    conversion_dir = ensure_conversion_dir(uploads_dir)
+    lock_dir = conversion_dir / UPLOAD_LOCKS_DIRNAME
+    try:
+        lock_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    try:
+        lock_stat = os.lstat(lock_dir)
+    except FileNotFoundError as exc:
+        raise UnsafeConversionPathError("Upload lock directory disappeared") from exc
+    if stat.S_ISLNK(lock_stat.st_mode) or not stat.S_ISDIR(lock_stat.st_mode):
+        raise UnsafeConversionPathError("Unsafe upload lock directory")
+    return lock_dir
 
 
 def existing_conversion_path_for_upload(upload_path: Path) -> Path | None:

@@ -17,26 +17,15 @@ from typing import BinaryIO
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.uploads.errors import AtomicUploadPublishError, PathTraversalError, UnsafeUploadPathError
 from deerflow.uploads.layout import (
     UPLOAD_CONVERSIONS_DIRNAME,
     artifact_url_for_virtual_path,
     existing_conversion_path_for_upload,
     upload_virtual_path,
 )
+from deerflow.uploads.lease import UploadIdentity, UploadNameLease
 from deerflow.utils.thread_id import validate_thread_id
-
-
-class PathTraversalError(ValueError):
-    """Raised when a path escapes its allowed base directory."""
-
-
-class UnsafeUploadPathError(ValueError):
-    """Raised when an upload destination is not a safe regular file path."""
-
-
-class AtomicUploadPublishError(UnsafeUploadPathError):
-    """Raised when storage cannot honor atomic no-replace publication."""
-
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +40,23 @@ class StagedUpload:
     base_dir: Path
     path: Path
     handle: BinaryIO
+
+
+@dataclass(slots=True)
+class PublishedUpload:
+    """A published upload whose actual filename remains exclusively leased."""
+
+    path: Path
+    identity: UploadIdentity
+    lease: UploadNameLease
+
+    @property
+    def is_active(self) -> bool:
+        return self.lease.is_active
+
+    def release(self) -> None:
+        """Release the publication's name lease."""
+        self.lease.release()
 
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
@@ -91,6 +97,8 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > 255:
         raise ValueError(f"Filename too long: {len(safe)} chars")
+    if is_upload_staging_file(safe):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
     return safe
 
 
@@ -155,9 +163,20 @@ def create_upload_staging_file(base_dir: Path) -> StagedUpload:
 
 def abort_staged_upload(staged: StagedUpload) -> None:
     """Close and remove a staging file, tolerating repeated cleanup."""
-    if not staged.handle.closed:
-        staged.handle.close()
-    staged.path.unlink(missing_ok=True)
+    close_error: BaseException | None = None
+    try:
+        if not staged.handle.closed:
+            staged.handle.close()
+    except BaseException as exc:
+        close_error = exc
+    try:
+        staged.path.unlink(missing_ok=True)
+    except BaseException as unlink_error:
+        if close_error is not None:
+            raise close_error from unlink_error
+        raise
+    if close_error is not None:
+        raise close_error
 
 
 def _validate_staged_upload(staged: StagedUpload) -> None:
@@ -197,57 +216,146 @@ def _filename_candidates(name: str) -> Iterator[str]:
         counter += 1
 
 
-def publish_staged_upload(staged: StagedUpload, preferred_filename: str) -> Path:
-    """Atomically publish a complete staging file without replacing an entry."""
+def _unlink_matching_upload(path: Path, identity: UploadIdentity) -> None:
+    """Remove *path* only while it still names *identity*."""
+    if identity.matches(path):
+        path.unlink(missing_ok=True)
+
+
+def _rollback_link_without_masking(path: Path, identity: UploadIdentity) -> None:
+    try:
+        _unlink_matching_upload(path, identity)
+    except BaseException:
+        logger.warning("Failed to roll back partially published upload: %s", path, exc_info=True)
+
+
+def _release_lease_without_masking(lease: UploadNameLease) -> None:
+    try:
+        lease.release()
+    except BaseException:
+        logger.warning("Failed to release upload name lease: %s", lease.lock_path, exc_info=True)
+
+
+def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) -> PublishedUpload:
+    """Atomically publish a staging file and retain its actual-name lease."""
     safe_name = normalize_filename(preferred_filename)
     if not staged.handle.closed:
         staged.handle.close()
-    try:
-        _validate_staged_upload(staged)
-        for candidate_name in _filename_candidates(safe_name):
-            candidate = staged.base_dir / candidate_name
+    _validate_staged_upload(staged)
+    staged_identity = UploadIdentity.from_path(staged.path)
+    for candidate_name in _filename_candidates(safe_name):
+        lease = UploadNameLease.acquire(staged.base_dir, candidate_name)
+        candidate = staged.base_dir / candidate_name
+        linked = False
+        try:
             try:
                 os.link(staged.path, candidate, follow_symlinks=False)
+                linked = True
             except FileExistsError:
+                lease.release()
                 continue
             except (NotImplementedError, TypeError) as exc:
                 raise AtomicUploadPublishError("Storage does not support atomic no-replace publication") from exc
             except OSError as exc:
                 if exc.errno == errno.EEXIST:
+                    lease.release()
                     continue
                 raise AtomicUploadPublishError(f"Storage does not support atomic no-replace publication: {exc}") from exc
 
+            if not staged_identity.matches(candidate):
+                raise AtomicUploadPublishError("Published upload identity changed during publication")
             try:
                 staged.path.unlink()
-            except OSError:
-                logger.warning("Failed to remove published upload staging link: %s", staged.path, exc_info=True)
-            return candidate
-    except Exception:
-        staged.path.unlink(missing_ok=True)
+            except OSError as exc:
+                _rollback_link_without_masking(candidate, staged_identity)
+                raise AtomicUploadPublishError("Failed to remove upload staging link after publication") from exc
+
+            try:
+                candidate_stat = os.lstat(candidate)
+            except FileNotFoundError as exc:
+                raise AtomicUploadPublishError("Published upload disappeared") from exc
+            if not stat.S_ISREG(candidate_stat.st_mode) or candidate_stat.st_nlink != 1 or not staged_identity.matches(candidate):
+                _rollback_link_without_masking(candidate, staged_identity)
+                raise AtomicUploadPublishError("Published upload did not become an exclusive regular file")
+            return PublishedUpload(path=candidate, identity=staged_identity, lease=lease)
+        except BaseException:
+            if linked:
+                _rollback_link_without_masking(candidate, staged_identity)
+            _release_lease_without_masking(lease)
+            raise
+
+
+def publish_staged_upload(staged: StagedUpload, preferred_filename: str) -> Path:
+    """Atomically publish a complete staging file without replacing an entry."""
+    publication = publish_staged_upload_leased(staged, preferred_filename)
+    try:
+        return publication.path
+    finally:
+        publication.release()
+
+
+def _abort_staged_upload_without_masking(staged: StagedUpload) -> None:
+    try:
+        abort_staged_upload(staged)
+    except BaseException:
+        logger.warning("Failed to clean up upload staging file: %s", staged.path, exc_info=True)
+
+
+def publish_upload_bytes_leased(base_dir: Path, preferred_filename: str, data: bytes) -> PublishedUpload:
+    """Stage bytes, publish them atomically, and retain the actual-name lease."""
+    safe_name = normalize_filename(preferred_filename)
+    staged = create_upload_staging_file(base_dir)
+    try:
+        staged.handle.write(data)
+        return publish_staged_upload_leased(staged, safe_name)
+    except BaseException:
+        _abort_staged_upload_without_masking(staged)
         raise
 
 
 def publish_upload_bytes(base_dir: Path, preferred_filename: str, data: bytes) -> Path:
     """Stage and atomically publish an in-memory upload payload."""
+    publication = publish_upload_bytes_leased(base_dir, preferred_filename, data)
+    try:
+        return publication.path
+    finally:
+        publication.release()
+
+
+def publish_upload_copy_leased(base_dir: Path, preferred_filename: str, source_path: Path) -> PublishedUpload:
+    """Copy a source into staging, publish it, and retain the actual-name lease."""
+    safe_name = normalize_filename(preferred_filename)
     staged = create_upload_staging_file(base_dir)
     try:
-        staged.handle.write(data)
-        return publish_staged_upload(staged, preferred_filename)
-    except Exception:
-        abort_staged_upload(staged)
+        with Path(source_path).open("rb") as source:
+            shutil.copyfileobj(source, staged.handle)
+        return publish_staged_upload_leased(staged, safe_name)
+    except BaseException:
+        _abort_staged_upload_without_masking(staged)
         raise
 
 
 def publish_upload_copy(base_dir: Path, preferred_filename: str, source_path: Path) -> Path:
     """Copy a local source into staging and atomically publish it."""
-    staged = create_upload_staging_file(base_dir)
+    publication = publish_upload_copy_leased(base_dir, preferred_filename, source_path)
     try:
-        with Path(source_path).open("rb") as source:
-            shutil.copyfileobj(source, staged.handle)
-        return publish_staged_upload(staged, preferred_filename)
-    except Exception:
-        abort_staged_upload(staged)
-        raise
+        return publication.path
+    finally:
+        publication.release()
+
+
+def rollback_published_upload(publication: PublishedUpload) -> None:
+    """Remove only the still-leased upload generation represented by *publication*."""
+    if not publication.is_active:
+        raise RuntimeError("Cannot roll back a publication after releasing its lease")
+    if publication.lease.filename != publication.path.name:
+        raise UnsafeUploadPathError("Publication lease does not match its upload path")
+    if not publication.identity.matches(publication.path):
+        return
+    owned_conversion = existing_conversion_path_for_upload(publication.path)
+    publication.path.unlink()
+    if owned_conversion is not None:
+        owned_conversion.unlink(missing_ok=True)
 
 
 def replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Path:
@@ -393,18 +501,22 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         if isinstance(exc.__cause__, FileNotFoundError):
             raise FileNotFoundError(f"File not found: {filename}") from exc
         raise
-    file_path = base_dir / safe_name
+    lease = UploadNameLease.acquire(base_dir, safe_name)
     try:
-        file_stat = os.lstat(file_path)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"File not found: {filename}")
-    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
-        raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
+        file_path = base_dir / safe_name
+        try:
+            file_stat = os.lstat(file_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"File not found: {filename}") from None
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
 
-    owned_conversion = existing_conversion_path_for_upload(file_path)
-    file_path.unlink()
-    if owned_conversion is not None:
-        owned_conversion.unlink(missing_ok=True)
+        owned_conversion = existing_conversion_path_for_upload(file_path)
+        file_path.unlink()
+        if owned_conversion is not None:
+            owned_conversion.unlink(missing_ok=True)
+    finally:
+        lease.release()
 
     return {"success": True, "message": f"Deleted {filename}"}
 

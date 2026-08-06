@@ -1,8 +1,13 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
 import errno
+import multiprocessing
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from queue import Empty
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -16,16 +21,38 @@ from deerflow.uploads.manager import (
     AtomicUploadPublishError,
     PathTraversalError,
     UnsafeUploadPathError,
+    abort_staged_upload,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    create_upload_staging_file,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
+    publish_staged_upload,
     publish_upload_bytes,
+    publish_upload_bytes_leased,
     publish_upload_copy,
+    rollback_published_upload,
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
+
+
+def _delete_upload_in_process(
+    uploads_dir: str,
+    filename: str,
+    started: Any,
+    finished: Any,
+    errors: Any,
+) -> None:
+    try:
+        started.set()
+        delete_file_safe(Path(uploads_dir), filename)
+    except BaseException as exc:  # pragma: no cover - surfaced in the parent
+        errors.put(repr(exc))
+    finally:
+        finished.set()
+
 
 # ---------------------------------------------------------------------------
 # normalize_filename
@@ -119,6 +146,120 @@ class TestValidatePathTraversal:
 
 
 class TestUploadPublication:
+    def test_reserved_staging_name_is_rejected_before_stage_creation(self, tmp_path):
+        with patch("deerflow.uploads.manager.create_upload_staging_file") as create_stage:
+            with pytest.raises(ValueError, match="reserved"):
+                publish_upload_bytes(tmp_path, ".upload-user.part", b"payload")
+
+        create_stage.assert_not_called()
+
+    def test_leased_publication_blocks_delete_until_release(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        started = threading.Event()
+        finished = threading.Event()
+
+        def delete():
+            started.set()
+            delete_file_safe(tmp_path, "report.pdf")
+            finished.set()
+
+        worker = threading.Thread(target=delete)
+        worker.start()
+        try:
+            assert started.wait(1)
+            assert not finished.wait(0.1)
+        finally:
+            publication.release()
+            worker.join(2)
+
+        assert finished.is_set()
+
+    def test_leased_publication_blocks_delete_across_processes(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        context = multiprocessing.get_context("spawn")
+        started = context.Event()
+        finished = context.Event()
+        errors = context.Queue()
+        worker = context.Process(
+            target=_delete_upload_in_process,
+            args=(str(tmp_path), "report.pdf", started, finished, errors),
+        )
+        worker.start()
+        try:
+            assert started.wait(10)
+            assert not finished.wait(0.2)
+        finally:
+            publication.release()
+            worker.join(10)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(2)
+
+        assert worker.exitcode == 0
+        try:
+            child_error = errors.get_nowait()
+        except Empty:
+            child_error = None
+        assert child_error is None
+        assert finished.is_set()
+
+    def test_lease_for_one_filename_does_not_block_another(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                other = pool.submit(publish_upload_bytes, tmp_path, "notes.txt", b"new")
+                assert other.result(timeout=1) == tmp_path / "notes.txt"
+        finally:
+            publication.release()
+
+    def test_rollback_does_not_remove_reused_path(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        try:
+            publication.path.unlink()
+            publication.path.write_bytes(b"new")
+            rollback_published_upload(publication)
+        finally:
+            publication.release()
+
+        assert (tmp_path / "report.pdf").read_bytes() == b"new"
+
+    def test_staging_unlink_failure_is_not_reported_as_success(self, tmp_path):
+        staged = create_upload_staging_file(tmp_path)
+        staged.handle.write(b"payload")
+        real_unlink = Path.unlink
+
+        def fail_only_for_stage(path, *args, **kwargs):
+            if path == staged.path:
+                raise OSError("cannot unlink stage")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", autospec=True, side_effect=fail_only_for_stage):
+            with pytest.raises(AtomicUploadPublishError, match="staging"):
+                publish_staged_upload(staged, "report.pdf")
+
+        assert not (tmp_path / "report.pdf").exists()
+
+    def test_abort_unlinks_stage_when_close_raises(self, tmp_path):
+        staged = create_upload_staging_file(tmp_path)
+
+        class CloseFailingHandle:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            @property
+            def closed(self):
+                return self._wrapped.closed
+
+            def close(self):
+                self._wrapped.close()
+                raise OSError("close failed")
+
+        staged.handle = CloseFailingHandle(staged.handle)
+        with pytest.raises(OSError, match="close failed"):
+            abort_staged_upload(staged)
+
+        assert not staged.path.exists()
+
     def test_compatibility_wrapper_writes_new_file(self, tmp_path):
         dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
 
