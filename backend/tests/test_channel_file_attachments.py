@@ -282,7 +282,7 @@ class TestInboundFileIngestion:
         assert (uploads_dir / "report.pdf").read_bytes() == b"pdf bytes"
         assert "_content" not in msg.files[0]
 
-    def test_rejects_preexisting_symlink_destination(self, tmp_path):
+    def test_renames_around_preexisting_symlink_destination(self, tmp_path):
         from app.channels import manager
 
         uploads_dir = tmp_path / "uploads"
@@ -307,11 +307,19 @@ class TestInboundFileIngestion:
         ):
             result = _run(manager._ingest_inbound_files("thread-1", msg))
 
-        assert result == []
+        assert result == [
+            {
+                "filename": "victim_1.txt",
+                "size": len(b"attacker data"),
+                "path": "/mnt/user-data/uploads/victim_1.txt",
+                "is_image": False,
+            }
+        ]
         assert not outside_file.exists()
         assert (uploads_dir / "victim.txt").is_symlink()
+        assert (uploads_dir / "victim_1.txt").read_bytes() == b"attacker data"
 
-    def test_rejects_dangling_symlink_destination(self, tmp_path):
+    def test_renames_around_dangling_symlink_destination(self, tmp_path):
         from app.channels import manager
 
         uploads_dir = tmp_path / "uploads"
@@ -336,9 +344,17 @@ class TestInboundFileIngestion:
         ):
             result = _run(manager._ingest_inbound_files("thread-1", msg))
 
-        assert result == []
+        assert result == [
+            {
+                "filename": "victim_1.txt",
+                "size": len(b"attacker data"),
+                "path": "/mnt/user-data/uploads/victim_1.txt",
+                "is_image": False,
+            }
+        ]
         assert not missing_target.exists()
         assert (uploads_dir / "victim.txt").is_symlink()
+        assert (uploads_dir / "victim_1.txt").read_bytes() == b"attacker data"
 
     def test_hardlinked_existing_file_is_not_overwritten(self, tmp_path):
         from app.channels import manager
@@ -377,6 +393,33 @@ class TestInboundFileIngestion:
         assert outside_file.read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim_1.txt").read_bytes() == b"new attachment data"
+
+    def test_concurrent_inbound_messages_with_same_name_preserve_all_bytes(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        payloads = [f"payload-{index}".encode() for index in range(8)]
+        messages = [
+            InboundMessage(
+                channel_name="telegram",
+                chat_id="chat-1",
+                user_id="user-1",
+                text="attachment",
+                files=[{"type": "file", "filename": "same.txt", "_content": payload}],
+            )
+            for payload in payloads
+        ]
+
+        async def run_all():
+            return await asyncio.gather(*(manager._ingest_inbound_files("thread-1", message) for message in messages))
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            results = _run(run_all())
+
+        created = [batch[0] for batch in results]
+        assert len({item["filename"] for item in created}) == len(payloads)
+        assert {(uploads_dir / item["filename"]).read_bytes() for item in created} == set(payloads)
 
 
 # ---------------------------------------------------------------------------

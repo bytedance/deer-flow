@@ -1,11 +1,12 @@
 """Regression anchor: DingTalk ``receive_file`` must not block the event loop.
 
 ``_receive_single_file`` prepares the thread directories, resolves the uploads
-dir, scans it for the uniqueness claim, and writes the attachment — all blocking
-filesystem IO that must run inside ``asyncio.to_thread`` (and sandbox sync must
-go through ``acquire_async`` + an offloaded ``update_file``). This anchor drives
-the real ``receive_file`` under the strict Blockbuster gate; if any of that
-regresses back onto the event loop, Blockbuster raises ``BlockingError``.
+dir, stages the attachment, and publishes it without replacing an existing name
+— all blocking filesystem IO that must run inside ``asyncio.to_thread`` (and
+sandbox sync must go through ``acquire_async`` + an offloaded ``update_file``).
+This anchor drives the real ``receive_file`` under the strict Blockbuster gate;
+if any of that regresses back onto the event loop, Blockbuster raises
+``BlockingError``.
 
 The ``Paths`` construction is offloaded only because ``Paths.__init__`` resolves
 paths synchronously; the surface under test (``receive_file``'s persist path) is

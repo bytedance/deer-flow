@@ -17,10 +17,11 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.layout import upload_virtual_path
+from deerflow.uploads.manager import UnsafeUploadPathError, normalize_filename, publish_upload_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,6 @@ class DingTalkChannel(Channel):
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
         self._card_repliers: dict[str, Any] = {}
-        # Serialize inbound-file writes into the uploads directory to avoid
-        # racing writers clobbering one another (mirrors FeishuChannel).
-        self._file_write_lock = threading.Lock()
 
     @property
     def supports_streaming(self) -> bool:
@@ -630,23 +628,11 @@ class DingTalkChannel(Channel):
             safe_filename = fallback_name
 
         def _persist() -> Path:
-            # Directory prep, the uniqueness claim, and the write are blocking
-            # filesystem IO — the whole sequence stays off the event loop. The
-            # claim and the write share one lock because generated names repeat
-            # across messages ("image.png" for every picture message): without a
-            # claim a later attachment silently overwrites an earlier one whose
-            # path was already handed to the agent, and letting the claim and
-            # write interleave would resolve two attachments to the same free name.
+            # Directory prep and collision-safe publication are blocking
+            # filesystem IO, so the whole sequence stays off the event loop.
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
-            with self._file_write_lock:
-                seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
-                unique_name = claim_unique_filename(safe_filename, seen)
-                # write_upload_file_no_symlink refuses a symlinked destination:
-                # uploads dirs can be mounted into local sandboxes, so a sandbox
-                # process could otherwise redirect this privileged write outside
-                # the bucket.
-                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
+            return publish_upload_bytes(uploads_dir, safe_filename, content)
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
@@ -654,7 +640,7 @@ class DingTalkChannel(Channel):
             logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
             return ""
 
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+        virtual_path = upload_virtual_path(resolved_target.name)
 
         try:
             sandbox_provider = get_sandbox_provider()

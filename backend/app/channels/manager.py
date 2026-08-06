@@ -882,22 +882,20 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     if not msg.files:
         return []
 
+    from deerflow.uploads.layout import upload_virtual_path
     from deerflow.uploads.manager import (
         UnsafeUploadPathError,
-        claim_unique_filename,
         ensure_uploads_dir,
         normalize_filename,
-        write_upload_file_no_symlink,
+        publish_upload_bytes,
     )
 
-    def _prepare_uploads_dir() -> tuple[Path, set[str]]:
-        # Worker thread: ensure_uploads_dir's mkdir and the iterdir enumeration are
-        # blocking filesystem IO that must stay off the event loop.
-        target = ensure_uploads_dir(thread_id, user_id=user_id)
-        existing = {entry.name for entry in target.iterdir() if entry.is_file()}
-        return target, existing
+    def _prepare_uploads_dir() -> Path:
+        # Worker thread: directory creation is blocking filesystem IO that must
+        # stay off the event loop.
+        return ensure_uploads_dir(thread_id, user_id=user_id)
 
-    uploads_dir, seen_names = await asyncio.to_thread(_prepare_uploads_dir)
+    uploads_dir = await asyncio.to_thread(_prepare_uploads_dir)
 
     created: list[dict[str, Any]] = []
     file_reader = INBOUND_FILE_READERS.get(msg.channel_name, _read_http_inbound_file)
@@ -940,7 +938,7 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 filename = f"{msg.thread_ts or 'msg'}_{idx}{ext}"
 
             try:
-                safe_name = claim_unique_filename(normalize_filename(filename), seen_names)
+                safe_name = normalize_filename(filename)
             except ValueError:
                 logger.warning(
                     "[Manager] skipping inbound file with unsafe filename: channel=%s, file=%r",
@@ -949,21 +947,21 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 )
                 continue
 
-            dest = uploads_dir / safe_name
             try:
-                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                dest = await asyncio.to_thread(publish_upload_bytes, uploads_dir, safe_name, data)
             except UnsafeUploadPathError:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
             except Exception:
-                logger.exception("[Manager] failed to write inbound file: %s", dest)
+                logger.exception("[Manager] failed to write inbound file: %s", safe_name)
                 continue
 
+            actual_name = dest.name
             created.append(
                 {
-                    "filename": safe_name,
+                    "filename": actual_name,
                     "size": len(data),
-                    "path": f"/mnt/user-data/uploads/{safe_name}",
+                    "path": upload_virtual_path(actual_name),
                     "is_image": ftype == "image",
                 }
             )
