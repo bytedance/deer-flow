@@ -85,6 +85,7 @@ export function sortPinnedThreads<T extends Pick<AgentThread, "metadata">>(
 }
 
 const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
+  buzz: "Buzz",
   dingtalk: "DingTalk",
   discord: "Discord",
   feishu: "Feishu",
