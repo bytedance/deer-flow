@@ -1618,6 +1618,139 @@ class TestDeleteFileSafe:
 
         assert transaction_dir in fsynced_directories
 
+    @pytest.mark.parametrize(
+        ("marker_function_name", "marker_path_function_name", "recover_on_crash"),
+        [
+            (
+                "_mark_staged_deletion_committed",
+                "_staged_deletion_commit_marker",
+                True,
+            ),
+            (
+                "_mark_staged_deletion_restore",
+                "_staged_deletion_restore_marker",
+                False,
+            ),
+        ],
+        ids=["commit", "restore"],
+    )
+    def test_existing_phase_marker_resyncs_file_before_parent_after_file_fsync_failure(
+        self,
+        tmp_path,
+        marker_function_name,
+        marker_path_function_name,
+        recover_on_crash,
+    ):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=recover_on_crash,
+        )
+        transaction_dir = staged_path.parent.parent
+        marker_function = getattr(upload_manager_module, marker_function_name)
+        marker_path = getattr(upload_manager_module, marker_path_function_name)(staged_path)
+        real_fsync = upload_manager_module.os.fsync
+        failed = False
+
+        def fail_marker_file_once(descriptor):
+            nonlocal failed
+            descriptor_stat = os.fstat(descriptor)
+            if stat.S_ISREG(descriptor_stat.st_mode) and not failed:
+                failed = True
+                raise OSError("cannot persist phase marker file")
+            return real_fsync(descriptor)
+
+        try:
+            with patch.object(
+                upload_manager_module.os,
+                "fsync",
+                side_effect=fail_marker_file_once,
+            ):
+                with pytest.raises(OSError, match="cannot persist phase marker file"):
+                    marker_function(staged_path)
+
+            marker_stat = os.lstat(marker_path)
+            transaction_stat = os.lstat(transaction_dir)
+            marker_identity = (marker_stat.st_dev, marker_stat.st_ino)
+            transaction_identity = (transaction_stat.st_dev, transaction_stat.st_ino)
+            events: list[str] = []
+
+            def observe_fsync(descriptor):
+                descriptor_stat = os.fstat(descriptor)
+                descriptor_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+                if stat.S_ISREG(descriptor_stat.st_mode) and descriptor_identity == marker_identity:
+                    events.append("file")
+                elif stat.S_ISDIR(descriptor_stat.st_mode) and descriptor_identity == transaction_identity:
+                    events.append("directory")
+                return real_fsync(descriptor)
+
+            with patch.object(
+                upload_manager_module.os,
+                "fsync",
+                side_effect=observe_fsync,
+            ):
+                marker_function(staged_path)
+        finally:
+            stage_lease.release()
+
+        marker_file_sync = events.index("file")
+        marker_directory_sync = events.index("directory", marker_file_sync)
+        assert marker_file_sync < marker_directory_sync
+
+    def test_existing_phase_marker_refuses_inode_swap_before_file_fsync(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        marker_path = upload_manager_module._staged_deletion_commit_marker(staged_path)
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        original_marker_stat = os.lstat(marker_path)
+        real_open = upload_manager_module.os.open
+        replaced = False
+
+        def replace_marker_before_open(path, flags, *args):
+            nonlocal replaced
+            if Path(path) == marker_path and not (flags & os.O_CREAT) and not replaced:
+                replaced = True
+                marker_path.unlink()
+                marker_path.write_bytes(b"replacement")
+            return real_open(path, flags, *args)
+
+        try:
+            with patch.object(
+                upload_manager_module.os,
+                "open",
+                side_effect=replace_marker_before_open,
+            ):
+                with pytest.raises(UnsafeUploadPathError, match="commit marker"):
+                    upload_manager_module._mark_staged_deletion_committed(staged_path)
+        finally:
+            stage_lease.release()
+
+        replacement_stat = os.lstat(marker_path)
+        assert replaced
+        assert (replacement_stat.st_dev, replacement_stat.st_ino) != (
+            original_marker_stat.st_dev,
+            original_marker_stat.st_ino,
+        )
+
     def test_staged_renames_are_durable_before_remote_mutation(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -1753,6 +1886,81 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"primary"
         assert conversion.read_text(encoding="utf-8") == "generated"
         assert not list(conversion.parent.glob(".upload-delete-*.part"))
+
+    def test_unexpected_inode_restore_recovers_after_visible_peer_fsync_failure(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        stale_identity = UploadIdentity.from_path(primary)
+        primary.unlink()
+        primary.write_bytes(b"replacement")
+        assert not stale_identity.matches(primary)
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+        failed = False
+
+        def fail_visible_peer_once(directory):
+            nonlocal failed
+            if Path(directory) == uploads and not failed:
+                failed = True
+                raise OSError("cannot persist visible replacement")
+            return real_fsync_directory(directory)
+
+        with patch.object(
+            upload_manager_module,
+            "_fsync_directory_durably",
+            side_effect=fail_visible_peer_once,
+        ):
+            with pytest.raises(OSError, match="cannot persist visible replacement"):
+                upload_manager_module._stage_primary_deletion(
+                    uploads,
+                    primary,
+                    stale_identity,
+                    recover_on_crash=False,
+                )
+
+        assert primary.read_bytes() == b"replacement"
+        assert os.lstat(primary).st_nlink == 1
+        assert not list(conversion_dir_for_uploads(uploads).glob(".upload-delete-*.part"))
+
+    def test_startup_cleans_verified_visible_peer_for_unexpected_inode_transaction(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        stale_identity = UploadIdentity.from_path(primary)
+        primary.unlink()
+        primary.write_bytes(b"replacement")
+        assert not stale_identity.matches(primary)
+
+        with patch.object(
+            upload_manager_module,
+            "_restore_unexpected_staged_entry",
+            side_effect=OSError("simulate crash before live recovery"),
+        ):
+            with pytest.raises(OSError, match="simulate crash before live recovery"):
+                upload_manager_module._stage_primary_deletion(
+                    uploads,
+                    primary,
+                    stale_identity,
+                    recover_on_crash=False,
+                )
+
+        transactions = list(conversion_dir_for_uploads(uploads).glob(".upload-delete-*.part"))
+        assert len(transactions) == 1
+        transaction_dir = transactions[0]
+        staged_path = transaction_dir / upload_manager_module._UPLOAD_DELETION_PRIMARY_DIRNAME / primary.name
+        assert staged_path.read_bytes() == b"replacement"
+        os.link(staged_path, primary)
+
+        assert upload_manager_module._recover_stale_deletion_transaction(transaction_dir)
+        assert primary.read_bytes() == b"replacement"
+        assert os.lstat(primary).st_nlink == 1
+        assert not transaction_dir.exists()
 
     def test_primary_tombstone_unlink_is_durable_before_commit_clear(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
