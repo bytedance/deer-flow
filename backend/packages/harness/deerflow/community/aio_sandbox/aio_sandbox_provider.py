@@ -44,6 +44,7 @@ from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.uploads.layout import UPLOAD_CONVERSIONS_DIRNAME, ensure_conversion_dir
 
 from .aio_sandbox import AioSandbox
 from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -847,11 +848,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         paths = get_paths()
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+        ensure_conversion_dir(paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id))
 
         return [
             (paths.host_sandbox_work_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
             (paths.host_sandbox_uploads_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
             (paths.host_sandbox_outputs_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (
+                join_host_path(paths.host_sandbox_user_data_dir(thread_id, user_id=effective_user_id), UPLOAD_CONVERSIONS_DIRNAME),
+                f"{VIRTUAL_PATH_PREFIX}/{UPLOAD_CONVERSIONS_DIRNAME}",
+                True,
+            ),
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).
             (paths.host_acp_workspace_dir(thread_id, user_id=effective_user_id), "/mnt/acp-workspace", True),

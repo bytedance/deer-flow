@@ -6,6 +6,7 @@ from pathlib import Path
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.uploads.layout import UPLOAD_CONVERSIONS_DIRNAME, ensure_conversion_dir
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,8 @@ class LocalSandboxProvider(SandboxProvider):
 
     The provider now produces a fresh ``LocalSandbox`` per ``thread_id`` whose
     ``path_mappings`` include thread-scoped entries for
-    ``/mnt/user-data/{workspace,uploads,outputs}`` and ``/mnt/acp-workspace``,
+    ``/mnt/user-data/{workspace,uploads,outputs}``, the read-only generated
+    ``/mnt/user-data/.upload-conversions`` namespace, and ``/mnt/acp-workspace``,
     mirroring how :class:`AioSandboxProvider` bind-mounts those paths into its
     docker container. The legacy ``acquire()`` / ``acquire(None)`` call still
     returns a generic singleton with id ``"local"`` for callers (and tests)
@@ -292,6 +294,7 @@ class LocalSandboxProvider(SandboxProvider):
         paths = get_paths()
         effective_user_id = LocalSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+        conversion_dir = ensure_conversion_dir(paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id))
 
         mappings = [
             # Aggregate parent mapping so ``ls /mnt/user-data`` and other
@@ -318,6 +321,11 @@ class LocalSandboxProvider(SandboxProvider):
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs",
                 local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
+            ),
+            PathMapping(
+                container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/{UPLOAD_CONVERSIONS_DIRNAME}",
+                local_path=str(conversion_dir),
+                read_only=True,
             ),
             PathMapping(
                 container_path=_ACP_WORKSPACE_VIRTUAL_PREFIX,

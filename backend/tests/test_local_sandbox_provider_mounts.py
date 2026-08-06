@@ -544,6 +544,34 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_thread_mappings_mount_upload_conversions_read_only(self, tmp_path):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path / "home")
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: tmp_path / "skills",
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            )
+        )
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=config),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+        ):
+            mappings = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
+
+        conversion_mapping = next(mapping for mapping in mappings if mapping.container_path == "/mnt/user-data/.upload-conversions")
+        assert conversion_mapping.local_path == str(paths.sandbox_user_data_dir("thread-a", user_id="alice") / ".upload-conversions")
+        assert conversion_mapping.read_only is True
+        assert Path(conversion_mapping.local_path).is_dir()
+
+        sandbox = LocalSandbox("test", mappings)
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/user-data/.upload-conversions/forbidden.md", "content")
+        assert exc_info.value.errno == errno.EROFS
+
     def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths
 

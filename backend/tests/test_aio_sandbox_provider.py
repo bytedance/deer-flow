@@ -159,6 +159,20 @@ def test_get_thread_mounts_includes_user_data_dirs(tmp_path, monkeypatch):
     assert "/mnt/user-data/outputs" in container_paths
 
 
+def test_get_thread_mounts_includes_upload_conversions_read_only(tmp_path, monkeypatch):
+    """Generated upload conversions must be readable but immutable in AIO."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
+
+    mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-4")
+    container_paths = {container_path: (host_path, read_only) for host_path, container_path, read_only in mounts}
+
+    expected_host = tmp_path / "threads" / "thread-4" / "user-data" / ".upload-conversions"
+    assert container_paths["/mnt/user-data/.upload-conversions"] == (str(expected_host), True)
+    assert expected_host.is_dir()
+
+
 def test_get_thread_mounts_uses_explicit_user_id(tmp_path, monkeypatch):
     """Channel runs must mount the same user bucket used for artifact delivery."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -171,6 +185,7 @@ def test_get_thread_mounts_uses_explicit_user_id(tmp_path, monkeypatch):
     assert container_paths["/mnt/user-data/workspace"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "workspace")
     assert container_paths["/mnt/user-data/uploads"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "uploads")
     assert container_paths["/mnt/user-data/outputs"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "outputs")
+    assert container_paths["/mnt/user-data/.upload-conversions"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / ".upload-conversions")
 
 
 def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
@@ -298,6 +313,7 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     assert container_paths["/mnt/user-data/workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\workspace"
     assert container_paths["/mnt/user-data/uploads"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\uploads"
     assert container_paths["/mnt/user-data/outputs"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\outputs"
+    assert container_paths["/mnt/user-data/.upload-conversions"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\.upload-conversions"
     assert container_paths["/mnt/acp-workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\acp-workspace"
 
 

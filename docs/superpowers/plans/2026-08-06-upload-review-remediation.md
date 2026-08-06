@@ -555,7 +555,7 @@ git commit -m "fix: retain upload leases through adapter sync"
 - Modify: `backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py`
 - Modify: `backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py`
 - Test: `backend/tests/test_local_sandbox_provider_mounts.py`
-- Test: `backend/tests/test_aio_sandbox_thread_mounts.py`
+- Test: `backend/tests/test_aio_sandbox_provider.py`
 
 **Interfaces:**
 - Consumes: `UPLOAD_CONVERSIONS_DIRNAME`, `ensure_conversion_dir`, and existing `join_host_path`.
@@ -573,7 +573,7 @@ def test_local_thread_mappings_mount_conversions_read_only(paths_config):
     assert Path(conversion.local_path).is_dir()
 
 
-def test_aio_thread_mounts_include_read_only_conversions(paths_config):
+def test_get_thread_mounts_includes_upload_conversions_read_only(tmp_path, monkeypatch):
     mounts = AioSandboxProvider._get_thread_mounts("thread-1", user_id="user-1")
     assert any(container == "/mnt/user-data/.upload-conversions" and read_only for _, container, read_only in mounts)
 ```
@@ -582,7 +582,7 @@ def test_aio_thread_mounts_include_read_only_conversions(paths_config):
 
 ```bash
 cd backend
-uv run pytest tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_thread_mounts.py -k "conversion" -q
+uv run pytest tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_provider.py -k "conversion" -q
 ```
 
 Expected: neither provider exposes the explicit mapping.
@@ -605,13 +605,13 @@ AIO adds:
 
 ```bash
 cd backend
-uv run pytest tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_thread_mounts.py tests/test_local_sandbox_virtual_path_contract.py -q
+uv run pytest tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_provider.py tests/test_local_sandbox_virtual_path_contract.py -q
 ```
 
 - [ ] **Step 5: Commit sandbox visibility**
 
 ```bash
-git add backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py backend/tests/test_local_sandbox_provider_mounts.py backend/tests/test_aio_sandbox_thread_mounts.py
+git add backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py backend/tests/test_local_sandbox_provider_mounts.py backend/tests/test_aio_sandbox_provider.py
 git commit -m "fix: mount upload conversions read-only"
 ```
 
@@ -642,7 +642,7 @@ use `<truncated-primary>.<full-sha256>.md`. State that `.upload-*.part` is reser
 
 ```bash
 cd backend
-uv run pytest tests/test_uploads_manager.py tests/test_upload_conversion.py tests/test_file_conversion.py tests/test_uploads_router.py tests/test_client.py tests/test_channel_file_attachments.py tests/test_dingtalk_channel.py tests/test_wechat_channel.py tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_thread_mounts.py tests/test_uploads_middleware_core_logic.py tests/test_list_uploaded_files_tool.py tests/blocking_io/test_upload_conversion.py tests/blocking_io/test_uploads_router.py tests/blocking_io/test_channels_ingest.py tests/blocking_io/test_feishu_receive_file.py tests/blocking_io/test_dingtalk_receive_file.py -q
+uv run pytest tests/test_uploads_manager.py tests/test_upload_conversion.py tests/test_file_conversion.py tests/test_uploads_router.py tests/test_client.py tests/test_channel_file_attachments.py tests/test_dingtalk_channel.py tests/test_wechat_channel.py tests/test_local_sandbox_provider_mounts.py tests/test_aio_sandbox_provider.py tests/test_uploads_middleware_core_logic.py tests/test_list_uploaded_files_tool.py tests/blocking_io/test_upload_conversion.py tests/blocking_io/test_uploads_router.py tests/blocking_io/test_channels_ingest.py tests/blocking_io/test_feishu_receive_file.py tests/blocking_io/test_dingtalk_receive_file.py -q
 ```
 
 - [ ] **Step 3: Run formatting, lint, and the full backend suite**
