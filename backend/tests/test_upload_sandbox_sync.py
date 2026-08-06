@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -455,6 +456,45 @@ def test_failed_journal_restore_keeps_cross_process_name_reservation(tmp_path):
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
     assert not finalize_guard.exists()
     assert (uploads / "report_1.pdf").read_bytes() == b"new primary"
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_subsequent_deletion_preparation_cleans_real_guard_only_transaction(tmp_path, use_async):
+    import deerflow.uploads.manager as upload_manager_module
+    import deerflow.uploads.sandbox_sync as sandbox_sync_module
+
+    uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    primary = uploads / "report.pdf"
+    primary.write_bytes(b"old primary")
+    identity = upload_manager_module.UploadIdentity.from_path(primary)
+    staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+        uploads,
+        primary,
+        identity,
+        recover_on_crash=True,
+    )
+    upload_manager_module._mark_staged_deletion_committed(staged_path)
+    transaction_dir = staged_path.parent.parent
+    finalize_guard = transaction_dir / upload_manager_module._UPLOAD_DELETION_FINALIZE_GUARD
+    finalize_guard.write_text("{}", encoding="utf-8")
+    stage_lease.release()
+
+    class MountedProvider:
+        uses_thread_data_mounts = True
+
+    paths = SimpleNamespace(base_dir=tmp_path)
+    with (
+        patch.object(upload_manager_module, "get_paths", return_value=paths),
+        patch.object(sandbox_sync_module, "get_paths", return_value=paths),
+    ):
+        if use_async:
+            assert asyncio.run(prepare_upload_deletion_async(MountedProvider(), "thread-1", user_id="alice")) is None
+        else:
+            assert prepare_upload_deletion(MountedProvider(), "thread-1", user_id="alice") is None
+
+    assert not transaction_dir.exists()
+    assert not primary.exists()
 
 
 @pytest.mark.parametrize("unlink_first", [False, True], ids=["unlink", "directory-fsync"])
@@ -1108,7 +1148,7 @@ def test_prepare_deletion_fails_before_mutation_without_restart_safe_identity():
     assert provider.sandbox.update_calls == []
 
 
-def test_prepare_deletion_reconciles_and_cleans_before_mount_decision():
+def test_prepare_deletion_cleans_guard_only_transactions_after_reconciliation():
     import deerflow.uploads.sandbox_sync as sandbox_sync_module
 
     provider = _ProviderThatBecomesMounted()
@@ -1119,7 +1159,7 @@ def test_prepare_deletion_reconciles_and_cleans_before_mount_decision():
         patch.object(
             sandbox_sync_module,
             "reconcile_pending_remote_deletions",
-            side_effect=lambda **_kwargs: events.append("reconcile") or 1,
+            side_effect=lambda **_kwargs: events.append("reconcile") or 0,
         ),
         patch.object(
             sandbox_sync_module,
@@ -1139,7 +1179,7 @@ def test_prepare_deletion_async_rechecks_mount_mode_after_acquire():
     assert provider.get_calls == 0
 
 
-def test_prepare_deletion_async_reconciles_and_cleans_before_mount_decision():
+def test_prepare_deletion_async_cleans_guard_only_transactions_after_reconciliation():
     import deerflow.uploads.sandbox_sync as sandbox_sync_module
 
     provider = _ProviderThatBecomesMounted()
@@ -1150,7 +1190,7 @@ def test_prepare_deletion_async_reconciles_and_cleans_before_mount_decision():
         patch.object(
             sandbox_sync_module,
             "reconcile_pending_remote_deletions",
-            side_effect=lambda **_kwargs: events.append("reconcile") or 1,
+            side_effect=lambda **_kwargs: events.append("reconcile") or 0,
         ),
         patch.object(
             sandbox_sync_module,

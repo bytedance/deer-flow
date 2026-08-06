@@ -813,8 +813,13 @@ def _restore_staged_deletion(
         else:
             restored_path = original_path
 
+    # The visible peer is the authoritative recovery destination. Persist it
+    # before removing either tombstone or clearing restore intent so a crash
+    # can leave both names, but can never leave neither copy.
+    _fsync_directory_durably(restored_path.parent)
     _restore_staged_conversion(staged_path, restored_path)
     staged_path.unlink()
+    _fsync_directory_durably(staged_path.parent)
     _clear_staged_deletion_restore(staged_path)
     _finish_deletion_transaction(staged_path)
 
@@ -872,11 +877,7 @@ def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    directory_descriptor = os.open(marker.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory_descriptor)
-    finally:
-        os.close(directory_descriptor)
+    _fsync_directory_durably(marker.parent)
 
 
 def _mark_staged_deletion_committed(staged_path: Path) -> None:
@@ -917,7 +918,11 @@ def _unlink_deletion_control_durably(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         return
-    directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    _fsync_directory_durably(path.parent)
+
+
+def _fsync_directory_durably(directory: Path) -> None:
+    directory_descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(directory_descriptor)
     finally:
@@ -947,7 +952,9 @@ def _restore_staged_conversion(staged_path: Path, restored_primary_path: Path) -
             raise UnsafeUploadPathError("Staged upload conversion has an unknown hard-link peer") from exc
         if not stat.S_ISREG(target_stat.st_mode) or (target_stat.st_dev, target_stat.st_ino) != (conversion_stat.st_dev, conversion_stat.st_ino):
             raise UnsafeUploadPathError("Staged upload conversion has an unexpected hard-link peer")
+        _fsync_directory_durably(target.parent)
         staged_conversion.unlink()
+        _fsync_directory_durably(staged_conversion.parent)
         return
     try:
         os.link(staged_conversion, target, follow_symlinks=False)
@@ -958,13 +965,23 @@ def _restore_staged_conversion(staged_path: Path, restored_primary_path: Path) -
             "Discarding staged conversion because the restored target already exists: %s",
             target,
         )
+    else:
+        _fsync_directory_durably(target.parent)
     staged_conversion.unlink()
+    _fsync_directory_durably(staged_conversion.parent)
 
 
 def _discard_staged_deletion(staged_path: Path) -> None:
     """Commit deletion of the exact primary and conversion tombstones."""
+    transaction_dir = _deletion_transaction_dir_for_staged_path(staged_path)
     _staged_conversion_path(staged_path).unlink(missing_ok=True)
+    _fsync_directory_durably(transaction_dir)
     staged_path.unlink(missing_ok=True)
+    # The commit marker lives in the transaction root, but the primary
+    # tombstone lives one directory deeper. Persist that nested unlink before
+    # durably clearing commit, otherwise a crash could resurrect a restore-on-
+    # crash tombstone after remote deletion had already completed.
+    _fsync_directory_durably(staged_path.parent)
     _clear_staged_deletion_restore(staged_path)
     if not _staged_deletion_has_remote_control(staged_path):
         _clear_staged_deletion_commit(staged_path)
@@ -995,7 +1012,9 @@ def _recovery_path_for(original_path: Path) -> Path:
 def _preserve_staged_entry_as_recovery(staged_path: Path, original_path: Path) -> Path:
     """Publish staged bytes under a visible no-replace recovery name."""
     recovery_path = _link_staged_entry_as_recovery(staged_path, original_path)
+    _fsync_directory_durably(recovery_path.parent)
     staged_path.unlink()
+    _fsync_directory_durably(staged_path.parent)
     return recovery_path
 
 
@@ -1183,11 +1202,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         # removing its persistent guard.  Fsync the transaction directory while
         # the guard still reserves the basename: this makes the observed journal
         # absence durable before any process may publish a replacement.
-        directory_descriptor = os.open(transaction_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+        _fsync_directory_durably(transaction_dir)
         _unlink_deletion_control_durably(Path(finalize_guard_entries[0].path))
         finalize_guard_entries = []
     if not recover_on_crash and conversion_entries and conversion_stat.st_nlink != 1:
@@ -1199,7 +1214,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     if not primary_entries:
         if recover_on_crash and not commit_entries and not conversion_entries:
             if restore_entries:
-                Path(restore_entries[0].path).unlink()
+                _unlink_deletion_control_durably(Path(restore_entries[0].path))
             if primary_dir is not None:
                 primary_dir.rmdir()
             transaction_dir.rmdir()
@@ -1209,7 +1224,8 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             return False
         if conversion_entries:
             Path(conversion_entries[0].path).unlink()
-        Path(commit_entries[0].path).unlink()
+            _fsync_directory_durably(transaction_dir)
+        _unlink_deletion_control_durably(Path(commit_entries[0].path))
         if primary_dir is not None:
             primary_dir.rmdir()
         transaction_dir.rmdir()
@@ -1283,8 +1299,10 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
                     owned_conversion = existing_conversion_path_for_upload(original_path)
                     if owned_conversion is not None:
                         owned_conversion.unlink(missing_ok=True)
+                        _fsync_directory_durably(owned_conversion.parent)
             if visible_matches:
                 visible_matches[0].unlink()
+                _fsync_directory_durably(uploads_dir)
             _discard_staged_deletion(staged_path)
             return True
         if staged_stat.st_nlink == 2:
@@ -1310,8 +1328,10 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
                     staged_path,
                 )
                 return False
+            _fsync_directory_durably(visible_matches[0].parent)
             _restore_staged_conversion(staged_path, visible_matches[0])
             staged_path.unlink()
+            _fsync_directory_durably(staged_path.parent)
             _clear_staged_deletion_restore(staged_path)
             _finish_deletion_transaction(staged_path)
             return True
@@ -1343,7 +1363,9 @@ def _restore_unexpected_staged_entry(staged_path: Path, original_path: Path) -> 
         )
         _finish_deletion_transaction(staged_path)
         return
+    _fsync_directory_durably(original_path.parent)
     staged_path.unlink()
+    _fsync_directory_durably(staged_path.parent)
     _finish_deletion_transaction(staged_path)
 
 
@@ -1363,13 +1385,23 @@ def _stage_primary_deletion(
         stage_lease = UploadStageLease.acquire(staging_dir, transaction_dir.name)
         try:
             transaction_dir.mkdir(mode=0o700)
+            _fsync_directory_durably(staging_dir)
         except FileExistsError:
             stage_lease.release()
             continue
+        except BaseException:
+            transaction_dir.rmdir()
+            stage_lease.release()
+            raise
         primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
         try:
             primary_dir.mkdir(mode=0o700)
+            _fsync_directory_durably(transaction_dir)
         except BaseException:
+            try:
+                primary_dir.rmdir()
+            except FileNotFoundError:
+                pass
             transaction_dir.rmdir()
             stage_lease.release()
             raise
@@ -1388,6 +1420,11 @@ def _stage_primary_deletion(
             if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
                 _restore_unexpected_staged_entry(staged_path, primary_path)
                 raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
+            # Persist the rename destination before its source removal. A crash
+            # before remote mutation may leave both names, which recovery can
+            # disambiguate, but must never leave neither authoritative copy.
+            _fsync_directory_durably(primary_dir)
+            _fsync_directory_durably(base_dir)
             if conversion_path is not None:
                 conversion_identity = UploadIdentity.from_path(conversion_path)
                 staged_conversion = _staged_conversion_path(staged_path)
@@ -1395,6 +1432,8 @@ def _stage_primary_deletion(
                 staged_conversion_stat = os.lstat(staged_conversion)
                 if not stat.S_ISREG(staged_conversion_stat.st_mode) or staged_conversion_stat.st_nlink != 1 or (staged_conversion_stat.st_dev, staged_conversion_stat.st_ino) != (conversion_identity.device, conversion_identity.inode):
                     raise UnsafeUploadPathError("Upload conversion changed during deletion staging")
+                _fsync_directory_durably(transaction_dir)
+                _fsync_directory_durably(staging_dir)
             return staged_path, stage_lease
         except BaseException:
             if staged_path.exists():

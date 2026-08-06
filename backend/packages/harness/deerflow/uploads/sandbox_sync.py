@@ -636,8 +636,11 @@ def prepare_upload_deletion(
     user_id: str | None,
 ) -> Callable[[str, Path, Path | None], None] | None:
     """Return a lease-safe remote deletion hook for an explicitly synced sandbox."""
-    if reconcile_pending_remote_deletions(sandbox_provider_factory=lambda: sandbox_provider):
-        cleanup_stale_upload_staging_files()
+    reconcile_pending_remote_deletions(sandbox_provider_factory=lambda: sandbox_provider)
+    # Guard-only transactions are intentionally absent from journal replay.
+    # Always run ordinary cleanup so it can fsync-confirm the journal absence
+    # and release a finalization guard without waiting for a process restart.
+    cleanup_stale_upload_staging_files()
     if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         return None
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
@@ -668,12 +671,11 @@ async def prepare_upload_deletion_async(
     user_id: str | None,
 ) -> Callable[[str, Path, Path | None], None] | None:
     """Async counterpart that keeps remote acquisition off the event loop."""
-    reconciled = await asyncio.to_thread(
+    await asyncio.to_thread(
         reconcile_pending_remote_deletions,
         sandbox_provider_factory=lambda: sandbox_provider,
     )
-    if reconciled:
-        await asyncio.to_thread(cleanup_stale_upload_staging_files)
+    await asyncio.to_thread(cleanup_stale_upload_staging_files)
     if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         return None
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
