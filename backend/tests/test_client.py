@@ -2231,6 +2231,45 @@ class TestUploads:
         ]
         assert removals == []
 
+    def test_upload_files_rolls_back_the_whole_batch_when_later_sync_fails(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        remote_files: dict[str, bytes] = {}
+
+        class Sandbox:
+            def update_file(self, path, content):
+                remote_files[path] = content
+                if path.endswith("second.txt"):
+                    raise RuntimeError("second sync failed after commit")
+
+            def remove_file(self, path):
+                remote_files.pop(path, None)
+
+        sandbox = Sandbox()
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            def acquire(self, thread_id, user_id=None):
+                return "remote"
+
+            def get(self, sandbox_id):
+                return sandbox if sandbox_id == "remote" else None
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=Provider()),
+        ):
+            with pytest.raises(RuntimeError, match="second sync failed"):
+                client.upload_files("thread-1", [first, second])
+
+        assert list(uploads_dir.iterdir()) == []
+        assert remote_files == {}
+
     def test_upload_files_across_calls_never_overwrite(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)

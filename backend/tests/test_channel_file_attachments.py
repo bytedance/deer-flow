@@ -341,6 +341,80 @@ class TestInboundFileIngestion:
         assert updates == [(result[0]["path"], b"pdf bytes")]
         assert removals == []
 
+    def test_builds_inbound_metadata_while_name_lease_is_active(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"type": "file", "filename": "report.pdf", "_content": b"pdf bytes"}],
+        )
+
+        def build_metadata(publication, virtual_path, data, file_type):
+            assert publication.is_active
+            return {
+                "filename": publication.path.name,
+                "size": len(data),
+                "path": virtual_path,
+                "is_image": file_type == "image",
+            }
+
+        with (
+            patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+            patch.object(manager, "_build_inbound_file_metadata", side_effect=build_metadata),
+        ):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result[0]["filename"] == "report.pdf"
+
+    def test_metadata_failure_rolls_back_remote_and_host_publication(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        remote_files: dict[str, bytes] = {}
+
+        class Sandbox:
+            def update_file(self, path, content):
+                remote_files[path] = content
+
+            def remove_file(self, path):
+                remote_files.pop(path, None)
+
+        sandbox = Sandbox()
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            async def acquire_async(self, thread_id, user_id=None):
+                return "remote"
+
+            def get(self, sandbox_id):
+                return sandbox if sandbox_id == "remote" else None
+
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"type": "file", "filename": "report.pdf", "_content": b"pdf bytes"}],
+        )
+
+        with (
+            patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=Provider()),
+            patch.object(manager, "_build_inbound_file_metadata", side_effect=RuntimeError("metadata failed")),
+        ):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert result == []
+        assert list(uploads_dir.iterdir()) == []
+        assert remote_files == {}
+
     def test_cancellation_rolls_back_generic_remote_sync_and_host_publication(self, tmp_path):
         from app.channels import manager
 

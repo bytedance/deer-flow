@@ -1499,7 +1499,7 @@ class DeerFlowClient:
         """
         validate_thread_id(thread_id)
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-        from deerflow.uploads.sandbox_sync import make_upload_paths_available, rollback_sandbox_sync
+        from deerflow.uploads.sandbox_sync import SandboxSyncReceipt, make_upload_paths_available, rollback_sandbox_sync
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         # Validate all files upfront to avoid partial uploads.
@@ -1519,6 +1519,8 @@ class DeerFlowClient:
         sandbox_provider = get_sandbox_provider(app_config=self._app_config)
         effective_user_id = get_effective_user_id()
         uploaded_files: list[dict] = []
+        publications: list[PublishedUpload] = []
+        sandbox_receipts: list[SandboxSyncReceipt] = []
 
         conversion_pool = None
         if has_convertible_file:
@@ -1544,81 +1546,83 @@ class DeerFlowClient:
         try:
             for src_path in resolved_files:
                 publication = publish_upload_copy_leased(uploads_dir, src_path.name, src_path)
-                sandbox_receipt = None
-                try:
-                    dest = publication.path
-                    dest_name = dest.name
+                publications.append(publication)
+                dest = publication.path
+                dest_name = dest.name
 
-                    info: dict[str, Any] = {
-                        "filename": dest_name,
-                        "size": dest.stat().st_size,
-                        "path": str(dest),
-                        "virtual_path": upload_virtual_path(dest_name),
-                        "artifact_url": upload_artifact_url(thread_id, dest_name),
-                    }
-                    if dest_name != src_path.name:
-                        info["original_filename"] = src_path.name
+                info: dict[str, Any] = {
+                    "filename": dest_name,
+                    "size": dest.stat().st_size,
+                    "path": str(dest),
+                    "virtual_path": upload_virtual_path(dest_name),
+                    "artifact_url": upload_artifact_url(thread_id, dest_name),
+                }
+                if dest_name != src_path.name:
+                    info["original_filename"] = src_path.name
 
-                    md_path = None
-                    if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                        try:
-                            if conversion_pool is not None:
-                                md_path = conversion_pool.submit(_convert_in_thread, publication).result()
-                            else:
-                                md_path = asyncio.run(
-                                    convert_uploaded_file_to_markdown(
-                                        dest,
-                                        publication=publication,
-                                    )
+                md_path = None
+                if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                    try:
+                        if conversion_pool is not None:
+                            md_path = conversion_pool.submit(_convert_in_thread, publication).result()
+                        else:
+                            md_path = asyncio.run(
+                                convert_uploaded_file_to_markdown(
+                                    dest,
+                                    publication=publication,
                                 )
-                        except Exception:
-                            logger.warning(
-                                "Failed to convert %s to markdown",
-                                src_path.name,
-                                exc_info=True,
                             )
-                            md_path = None
+                    except Exception:
+                        logger.warning(
+                            "Failed to convert %s to markdown",
+                            src_path.name,
+                            exc_info=True,
+                        )
+                        md_path = None
 
-                        if md_path is not None:
-                            md_virtual_path = conversion_virtual_path(dest_name)
-                            info["markdown_file"] = md_path.name
-                            info["markdown_path"] = str(md_path)
-                            info["markdown_virtual_path"] = md_virtual_path
-                            info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
-
-                    sandbox_paths = [(dest, upload_virtual_path(dest_name))]
                     if md_path is not None:
-                        sandbox_paths.append((md_path, conversion_virtual_path(dest_name)))
-                    sandbox_receipt = make_upload_paths_available(
+                        md_virtual_path = conversion_virtual_path(dest_name)
+                        info["markdown_file"] = md_path.name
+                        info["markdown_path"] = str(md_path)
+                        info["markdown_virtual_path"] = md_virtual_path
+                        info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
+
+                sandbox_paths = [(dest, upload_virtual_path(dest_name))]
+                if md_path is not None:
+                    sandbox_paths.append((md_path, conversion_virtual_path(dest_name)))
+                sandbox_receipts.append(
+                    make_upload_paths_available(
                         sandbox_provider,
                         thread_id,
                         user_id=effective_user_id,
                         paths=sandbox_paths,
                     )
+                )
 
-                    uploaded_files.append(info)
+                uploaded_files.append(info)
+
+            return {
+                "success": True,
+                "files": uploaded_files,
+                "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
+            }
+        except BaseException:
+            for receipt in reversed(sandbox_receipts):
+                try:
+                    rollback_sandbox_sync(receipt)
                 except BaseException:
-                    if sandbox_receipt is not None:
-                        try:
-                            rollback_sandbox_sync(sandbox_receipt)
-                        except BaseException:
-                            logger.warning("Failed to roll back rejected embedded sandbox upload: %s", publication.path, exc_info=True)
-                    try:
-                        rollback_published_upload(publication)
-                    except Exception:
-                        logger.warning("Failed to roll back rejected embedded upload: %s", publication.path, exc_info=True)
-                    raise
-                finally:
-                    publication.release()
+                    logger.warning("Failed to roll back rejected embedded sandbox batch", exc_info=True)
+            for publication in reversed(publications):
+                try:
+                    rollback_published_upload(publication)
+                except BaseException:
+                    logger.warning("Failed to roll back rejected embedded upload: %s", publication.path, exc_info=True)
+            raise
         finally:
+            for publication in reversed(publications):
+                publication.release()
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
-
-        return {
-            "success": True,
-            "files": uploaded_files,
-            "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
-        }
 
     def list_uploads(self, thread_id: str) -> dict:
         """List files in a thread's uploads directory.

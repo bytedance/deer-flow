@@ -90,6 +90,8 @@ def normalize_filename(filename: str) -> str:
     """
     if not filename:
         raise ValueError("Filename is empty")
+    if "\0" in filename:
+        raise ValueError(f"Filename contains NUL byte: {filename!r}")
     safe = Path(filename).name
     if not safe or safe in {".", ".."}:
         raise ValueError(f"Filename is unsafe: {filename!r}")

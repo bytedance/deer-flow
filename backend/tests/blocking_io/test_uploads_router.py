@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,6 +91,29 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert result.success is True
     assert result.files[0].filename == "notes.txt"
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
+
+
+async def test_upload_endpoint_initializes_provider_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _reset_paths(tmp_path, monkeypatch)
+    event_loop_thread = threading.get_ident()
+    provider_threads: list[int] = []
+
+    def get_provider():
+        provider_threads.append(threading.get_ident())
+        return _MountedProvider()
+
+    monkeypatch.setattr(uploads, "get_sandbox_provider", get_provider)
+
+    result = await call_unwrapped(
+        uploads.upload_files,
+        "t-provider-init",
+        request=None,
+        files=[UploadFile(filename="notes.txt", file=BytesIO(b"hello"))],
+        config=SimpleNamespace(),
+    )
+
+    assert result.success is True
+    assert provider_threads and provider_threads[0] != event_loop_thread
 
 
 async def test_upload_endpoint_remote_provider_syncs_without_blocking_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

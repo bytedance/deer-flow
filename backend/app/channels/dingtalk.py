@@ -650,7 +650,7 @@ class DingTalkChannel(Channel):
             virtual_path = upload_virtual_path(publication.path.name)
 
             try:
-                sandbox_provider = get_sandbox_provider()
+                sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
                 await make_upload_paths_available_async(
                     sandbox_provider,
                     thread_id,

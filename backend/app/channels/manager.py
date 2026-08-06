@@ -878,6 +878,16 @@ def _prepare_artifact_delivery(
     return response_text, attachments
 
 
+def _build_inbound_file_metadata(publication, virtual_path: str, data: bytes, file_type: str) -> dict[str, Any]:
+    """Build response metadata while the exact-name publication lease is active."""
+    return {
+        "filename": publication.path.name,
+        "size": len(data),
+        "path": virtual_path,
+        "is_image": file_type == "image",
+    }
+
+
 async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id: str | None = None) -> list[dict[str, Any]]:
     if not msg.files:
         return []
@@ -894,7 +904,10 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
         ensure_uploads_dir,
         normalize_filename,
     )
-    from deerflow.uploads.sandbox_sync import make_upload_paths_available_async
+    from deerflow.uploads.sandbox_sync import (
+        make_upload_paths_available_async,
+        rollback_sandbox_sync_async,
+    )
 
     def _prepare_uploads_dir() -> Path:
         # Worker thread: directory creation is blocking filesystem IO that must
@@ -954,18 +967,25 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 continue
 
             publication = None
+            sandbox_receipt = None
             try:
                 publication = await publish_upload_bytes_leased_async(uploads_dir, safe_name, data)
                 dest = publication.path
                 virtual_path = upload_virtual_path(dest.name)
                 sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-                await make_upload_paths_available_async(
+                sandbox_receipt = await make_upload_paths_available_async(
                     sandbox_provider,
                     thread_id,
                     user_id=user_id,
                     paths=[(dest, virtual_path)],
                 )
+                created.append(_build_inbound_file_metadata(publication, virtual_path, data, ftype))
             except asyncio.CancelledError:
+                if sandbox_receipt is not None:
+                    try:
+                        await rollback_sandbox_sync_async(sandbox_receipt)
+                    except BaseException:
+                        logger.warning("[Manager] failed to roll back cancelled inbound sandbox file: %s", safe_name, exc_info=True)
                 if publication is not None:
                     try:
                         await rollback_published_upload_async(publication)
@@ -973,6 +993,11 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                         logger.warning("[Manager] failed to roll back cancelled inbound file: %s", safe_name, exc_info=True)
                 raise
             except UnsafeUploadPathError:
+                if sandbox_receipt is not None:
+                    try:
+                        await rollback_sandbox_sync_async(sandbox_receipt)
+                    except BaseException:
+                        logger.warning("[Manager] failed to roll back unsafe inbound sandbox file: %s", safe_name, exc_info=True)
                 if publication is not None:
                     try:
                         await rollback_published_upload_async(publication)
@@ -981,6 +1006,11 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
             except Exception:
+                if sandbox_receipt is not None:
+                    try:
+                        await rollback_sandbox_sync_async(sandbox_receipt)
+                    except BaseException:
+                        logger.warning("[Manager] failed to roll back rejected inbound sandbox file: %s", safe_name, exc_info=True)
                 if publication is not None:
                     try:
                         await rollback_published_upload_async(publication)
@@ -991,16 +1021,6 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
             finally:
                 if publication is not None:
                     await release_published_upload_async(publication)
-
-            actual_name = dest.name
-            created.append(
-                {
-                    "filename": actual_name,
-                    "size": len(data),
-                    "path": virtual_path,
-                    "is_image": ftype == "image",
-                }
-            )
 
     return created
 

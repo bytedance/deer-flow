@@ -50,6 +50,16 @@ def rollback_sandbox_sync(receipt: SandboxSyncReceipt) -> None:
         _remove_remote_paths(receipt.sandbox, receipt.virtual_paths)
 
 
+async def rollback_sandbox_sync_async(receipt: SandboxSyncReceipt) -> None:
+    """Cancellation-safely remove every remote path recorded by *receipt*."""
+    cleanup_task = asyncio.create_task(
+        asyncio.to_thread(rollback_sandbox_sync, receipt),
+        name="rollback-sandbox-upload-paths",
+    )
+    await wait_for_task_completion(cleanup_task)
+    cleanup_task.result()
+
+
 def _sync_remote_paths(sandbox: Any, paths: tuple[tuple[Path, str], ...]) -> SandboxSyncReceipt:
     attempted: list[str] = []
     completed: list[str] = []
@@ -112,13 +122,8 @@ async def make_upload_paths_available_async(
     cancelled = await wait_for_task_completion(sync_task)
     receipt = sync_task.result()
     if cancelled:
-        cleanup_task = asyncio.create_task(
-            asyncio.to_thread(rollback_sandbox_sync, receipt),
-            name=f"rollback-sandbox-upload-paths:{thread_id}",
-        )
-        await wait_for_task_completion(cleanup_task)
         try:
-            cleanup_task.result()
+            await rollback_sandbox_sync_async(receipt)
         except BaseException:
             logger.warning("Failed to roll back sandbox uploads after cancellation", exc_info=True)
         raise asyncio.CancelledError

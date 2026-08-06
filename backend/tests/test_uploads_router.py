@@ -177,7 +177,7 @@ def test_sandbox_sync_failure_rolls_back_published_generation(tmp_path):
     assert not (thread_uploads_dir / "notes.txt").exists()
 
 
-def test_partial_sandbox_sync_failure_removes_only_completed_remote_paths(tmp_path):
+def test_partial_sandbox_sync_failure_removes_all_attempted_remote_paths(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     provider = MagicMock()
@@ -214,9 +214,88 @@ def test_partial_sandbox_sync_failure_removes_only_completed_remote_paths(tmp_pa
 
     assert exc_info.value.status_code == 500
     assert synced_paths == ["/mnt/user-data/uploads/first.txt"]
-    sandbox.remove_file.assert_called_once_with("/mnt/user-data/uploads/first.txt")
+    assert [record.args[0] for record in sandbox.remove_file.call_args_list] == [
+        "/mnt/user-data/uploads/second.txt",
+        "/mnt/user-data/uploads/first.txt",
+    ]
     assert not (thread_uploads_dir / "first.txt").exists()
     assert not (thread_uploads_dir / "second.txt").exists()
+
+
+def test_post_commit_sandbox_error_removes_attempted_remote_path(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    remote_files: dict[str, bytes] = {}
+    removed_paths: list[str] = []
+
+    class Sandbox:
+        def update_file(self, virtual_path: str, data: bytes) -> None:
+            remote_files[virtual_path] = data
+            raise RuntimeError("transport failed after commit")
+
+        def remove_file(self, virtual_path: str) -> None:
+            removed_paths.append(virtual_path)
+            remote_files.pop(virtual_path, None)
+
+    provider.get.return_value = Sandbox()
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException):
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-remote",
+                    request=MagicMock(),
+                    files=[UploadFile(filename="notes.txt", file=BytesIO(b"payload"))],
+                    config=SimpleNamespace(),
+                )
+            )
+
+    assert remote_files == {}
+    assert removed_paths == ["/mnt/user-data/uploads/notes.txt"]
+    assert not (thread_uploads_dir / "notes.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_staging_creation_drains_and_aborts(tmp_path):
+    staging_created = threading.Event()
+    allow_create_to_return = threading.Event()
+    real_create = create_upload_staging_file
+
+    def paused_create(base_dir: Path):
+        staged = real_create(base_dir)
+        staging_created.set()
+        assert allow_create_to_return.wait(5)
+        return staged
+
+    with patch.object(uploads, "create_upload_staging_file", side_effect=paused_create):
+        task = asyncio.create_task(
+            uploads._write_upload_file_with_limits(
+                UploadFile(filename="notes.txt", file=BytesIO(b"payload")),
+                uploads_dir=tmp_path,
+                display_filename="notes.txt",
+                max_single_file_size=1024,
+                max_total_size=1024,
+                total_size=0,
+            )
+        )
+        assert await asyncio.to_thread(staging_created.wait, 5)
+        try:
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+        finally:
+            allow_create_to_return.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert list(tmp_path.glob(".upload-*.part")) == []
 
 
 @pytest.mark.asyncio

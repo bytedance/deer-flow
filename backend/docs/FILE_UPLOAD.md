@@ -52,7 +52,7 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。系统内部保留 `.upload-*.part` 作为暂存命名空间；使用该模式的 basename、包含 `<` 或 `>`、或包含保留模型上下文边界标记的文件名会在创建暂存文件前被拒绝，以保证所有已接受的文件名和 Agent 可见路径都能无损呈现。
+所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。系统内部保留 `.upload-*.part` 作为暂存命名空间；使用该模式的 basename、包含 NUL、`<` 或 `>`、或包含保留模型上下文边界标记的文件名会在创建暂存文件前被拒绝，以保证所有已接受的文件名和 Agent 可见路径都能无损呈现。若请求在 staging 创建尚未返回时被取消，Gateway 会等待创建结束并精确 abort 该临时文件。
 
 实际发布名会在转换、权限调整、沙箱同步和响应构造期间持有同名租约。删除该名称会等待当前生命周期完成；其他文件名仍可并发处理。跨进程协调使用 `.upload-conversions/.locks/` 下稳定保留的摘要锁文件，该目录属于内部实现，不应由 Agent 或部署脚本修改或清理。
 
@@ -183,7 +183,8 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
 - AIO 挂载模式把 `/mnt/user-data/.upload-conversions` 单独挂载为只读；Local 的结构化文件 API 通过更具体的只读路径映射执行同一规则，但 Local 宿主机 bash 不属于该边界
 - Gateway、嵌入式 `DeerFlowClient` 和 IM 通道都会执行同一沙箱可见性步骤：挂载型 provider 调整精确发布路径的读取权限；非挂载 provider 获取沙箱后，把本次主文件及生成转换件精确同步到各自虚拟路径
-- 非挂载同步副本是沙箱私有副本；任一路径失败、后续响应构造失败或请求取消时，会精确撤销本次创建的远端路径，再回滚宿主文件
+- 非挂载同步副本是沙箱私有副本；任一路径失败（包括远端已落盘但传输随后报错）、后续响应构造失败或请求取消时，会对本次尝试的精确远端路径执行幂等撤销，再回滚宿主文件
+- 嵌入式 `DeerFlowClient.upload_files()` 以整批为事务边界：后续文件失败会逆序撤销本次调用中此前成功的所有远端副本和宿主 generation
 - 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；上传路由会跳过 sandbox acquire 和逐文件同步
 - 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
 

@@ -65,6 +65,30 @@ async def test_receive_file_persist_does_not_block_event_loop(tmp_path, monkeypa
     assert (await asyncio.to_thread(uploaded.stat)).st_mode & 0o044 == 0o044
 
 
+async def test_receive_file_initializes_provider_off_event_loop(tmp_path, monkeypatch) -> None:
+    from app.channels.dingtalk import DingTalkChannel
+    from app.channels.message_bus import MessageBus
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    monkeypatch.setattr("app.channels.dingtalk.get_paths", lambda: paths)
+    event_loop_thread = threading.get_ident()
+    provider_threads: list[int] = []
+
+    def get_provider():
+        provider_threads.append(threading.get_ident())
+        return SimpleNamespace(uses_thread_data_mounts=True)
+
+    monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", get_provider)
+    channel = DingTalkChannel(MessageBus(), config={})
+    channel._download_by_code = AsyncMock(return_value=b"DATA")
+
+    result = await channel._receive_single_file("dc", "file", "a.pdf", "t1", user_id="default")
+
+    assert result == "/mnt/user-data/uploads/a.pdf"
+    assert provider_threads and provider_threads[0] != event_loop_thread
+
+
 async def test_receive_file_rejects_symlinked_upload_directory(tmp_path, monkeypatch) -> None:
     from app.channels.dingtalk import DingTalkChannel
     from app.channels.message_bus import MessageBus

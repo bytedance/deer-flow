@@ -181,8 +181,8 @@ def _cleanup_published_uploads(
             logger.warning("Failed to roll back published upload after rejected request: %s", publication.path, exc_info=True)
 
 
-def _cleanup_synced_sandbox_paths(sandbox, virtual_paths: list[str]) -> None:
-    """Best-effort removal of the exact remote copies completed by this request."""
+def _cleanup_attempted_sandbox_paths(sandbox, virtual_paths: list[str]) -> None:
+    """Best-effort removal of every exact remote path attempted by this request."""
     if sandbox is None or not virtual_paths:
         return
     for virtual_path in reversed(virtual_paths):
@@ -194,12 +194,12 @@ def _cleanup_synced_sandbox_paths(sandbox, virtual_paths: list[str]) -> None:
 
 def _rollback_upload_request(
     sandbox,
-    synced_sandbox_paths: list[str],
+    attempted_sandbox_paths: list[str],
     publications: list[PublishedUpload],
     generated_paths: list[os.PathLike[str] | str],
 ) -> None:
     try:
-        _cleanup_synced_sandbox_paths(sandbox, synced_sandbox_paths)
+        _cleanup_attempted_sandbox_paths(sandbox, attempted_sandbox_paths)
     finally:
         _cleanup_published_uploads(publications, generated_paths)
 
@@ -244,6 +244,23 @@ async def _publish_staged_upload_cancellation_safe(staged: StagedUpload, filenam
         raise
 
 
+async def _create_upload_staging_file_cancellation_safe(uploads_dir: Path) -> StagedUpload:
+    """Create a staged upload without leaking it when the caller is cancelled."""
+    create_task = asyncio.create_task(run_file_io(create_upload_staging_file, uploads_dir))
+    try:
+        return await asyncio.shield(create_task)
+    except asyncio.CancelledError:
+        await wait_for_task_completion(create_task)
+        if not create_task.cancelled() and create_task.exception() is None:
+            cleanup_task = asyncio.create_task(run_file_io(abort_staged_upload, create_task.result()))
+            await wait_for_task_completion(cleanup_task)
+            try:
+                cleanup_task.result()
+            except Exception:
+                logger.warning("Failed to abort a cancelled upload staging file", exc_info=True)
+        raise
+
+
 def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
     for file_path in paths:
         _make_file_sandbox_readable(file_path)
@@ -253,11 +270,12 @@ def _sync_upload_to_sandbox(
     sandbox,
     file_path: os.PathLike[str] | str,
     virtual_path: str,
-    synced_sandbox_paths: list[str],
+    attempted_sandbox_paths: list[str],
 ) -> None:
     _make_file_sandbox_writable(file_path)
-    sandbox.update_file(virtual_path, Path(file_path).read_bytes())
-    synced_sandbox_paths.append(virtual_path)
+    data = Path(file_path).read_bytes()
+    attempted_sandbox_paths.append(virtual_path)
+    sandbox.update_file(virtual_path, data)
 
 
 def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
@@ -288,7 +306,7 @@ async def _write_upload_file_with_limits(
     file_size = 0
     upload_temp: StagedUpload | None = None
     try:
-        upload_temp = await run_file_io(create_upload_staging_file, Path(uploads_dir))
+        upload_temp = await _create_upload_staging_file_cancellation_safe(Path(uploads_dir))
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
             total_size += len(chunk)
@@ -348,10 +366,10 @@ async def upload_files(
     publications: list[PublishedUpload] = []
     generated_paths: list[Path] = []
     sandbox_sync_targets = []
-    synced_sandbox_paths: list[str] = []
+    attempted_sandbox_paths: list[str] = []
     skipped_files = []
     total_size = 0
-    sandbox_provider = get_sandbox_provider()
+    sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
@@ -435,7 +453,7 @@ async def upload_files(
                     sandbox,
                     file_path,
                     virtual_path,
-                    synced_sandbox_paths,
+                    attempted_sandbox_paths,
                 )
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"
@@ -452,7 +470,7 @@ async def upload_files(
         await _run_file_io_cancellation_safe(
             _rollback_upload_request,
             sandbox,
-            synced_sandbox_paths,
+            attempted_sandbox_paths,
             publications,
             generated_paths,
         )
@@ -462,7 +480,7 @@ async def upload_files(
         await _run_file_io_cancellation_safe(
             _rollback_upload_request,
             sandbox,
-            synced_sandbox_paths,
+            attempted_sandbox_paths,
             publications,
             generated_paths,
         )
@@ -471,7 +489,7 @@ async def upload_files(
         await _run_file_io_cancellation_safe(
             _rollback_upload_request,
             sandbox,
-            synced_sandbox_paths,
+            attempted_sandbox_paths,
             publications,
             generated_paths,
         )

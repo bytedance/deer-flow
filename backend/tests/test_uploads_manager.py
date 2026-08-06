@@ -120,6 +120,10 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="reserved model-context token"):
             normalize_filename(filename)
 
+    def test_rejects_nul_before_any_filesystem_operation(self):
+        with pytest.raises(ValueError, match="NUL"):
+            normalize_filename("bad\0name.pdf")
+
 
 # ---------------------------------------------------------------------------
 # claim_unique_filename
