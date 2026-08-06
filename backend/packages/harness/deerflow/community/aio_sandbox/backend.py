@@ -7,6 +7,8 @@ import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +17,26 @@ import requests
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxDiscoveryResult:
+    """Non-creating discovery outcome with explicit absence semantics."""
+
+    status: Literal["found", "absent", "unknown"]
+    info: SandboxInfo | None = None
+
+    @classmethod
+    def found(cls, info: SandboxInfo) -> SandboxDiscoveryResult:
+        return cls(status="found", info=info)
+
+    @classmethod
+    def absent(cls) -> SandboxDiscoveryResult:
+        return cls(status="absent")
+
+    @classmethod
+    def unknown(cls) -> SandboxDiscoveryResult:
+        return cls(status="unknown")
 
 
 def sandbox_http_trust_env(sandbox_url: str) -> bool:
@@ -171,6 +193,20 @@ class SandboxBackend(ABC):
             SandboxInfo if found and healthy, None otherwise.
         """
         ...
+
+    def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
+        """Discover one exact old instance without creating a replacement.
+
+        The base contract cannot distinguish a definite absence from a
+        transient discovery failure, so only a positive lookup is conclusive.
+        Backends with authoritative lookup APIs should override this method.
+        """
+        try:
+            info = self.discover(sandbox_id)
+        except BaseException:
+            logger.warning("Sandbox discovery failed during reconciliation", exc_info=True)
+            return SandboxDiscoveryResult.unknown()
+        return SandboxDiscoveryResult.found(info) if info is not None else SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.

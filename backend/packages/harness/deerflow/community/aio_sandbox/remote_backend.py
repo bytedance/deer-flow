@@ -30,7 +30,7 @@ import requests
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 from deerflow.skills.storage import user_should_see_legacy_skills
 
-from .backend import SandboxBackend
+from .backend import SandboxBackend, SandboxDiscoveryResult
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
@@ -340,6 +340,39 @@ class RemoteSandboxBackend(SandboxBackend):
         the Pod exists.
         """
         return self._provisioner_discover(sandbox_id)
+
+    def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
+        """Look up an exact provisioner object without mount-version filtering."""
+        try:
+            resp = requests.get(
+                f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                return SandboxDiscoveryResult.absent()
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("Provisioner reconciliation response is not an object")
+            returned_id = data.get("sandbox_id")
+            if returned_id is not None and returned_id != sandbox_id:
+                raise ValueError("Provisioner reconciliation returned a different sandbox ID")
+            sandbox_url = data.get("sandbox_url")
+            if not isinstance(sandbox_url, str) or not sandbox_url:
+                raise ValueError("Provisioner reconciliation response has no sandbox URL")
+            return SandboxDiscoveryResult.found(
+                SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url=sandbox_url,
+                    user_id=data.get("user_id"),
+                    thread_id=data.get("thread_id"),
+                    mount_contract_version=data.get("mount_contract_version"),
+                )
+            )
+        except (requests.RequestException, ValueError, TypeError):
+            logger.warning("Provisioner reconciliation lookup failed for %s", sandbox_id, exc_info=True)
+            return SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Return all sandboxes currently managed by the provisioner.

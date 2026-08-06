@@ -446,6 +446,57 @@ class TestUploadPublication:
         finally:
             publication.release()
 
+    def test_unrelated_publication_survives_pending_deletion_finalization(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        journal = upload_manager_module._staged_deletion_remote_journal(staged_path)
+        journal.write_text("{}", encoding="utf-8")
+        transaction_dir = staged_path.parent.parent
+        primary_dir = staged_path.parent
+        stage_lease.release()
+
+        reached_primary_scan = threading.Event()
+        resume_primary_scan = threading.Event()
+        real_scandir = upload_manager_module.os.scandir
+        paused = False
+        pause_lock = threading.Lock()
+
+        def pause_first_primary_scan(path):
+            nonlocal paused
+            should_pause = False
+            with pause_lock:
+                if Path(path) == primary_dir and not paused:
+                    paused = True
+                    should_pause = True
+            if should_pause:
+                reached_primary_scan.set()
+                assert resume_primary_scan.wait(2)
+            return real_scandir(path)
+
+        with patch.object(upload_manager_module.os, "scandir", side_effect=pause_first_primary_scan):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                publication = pool.submit(publish_upload_bytes, uploads, "notes.txt", b"new")
+                assert reached_primary_scan.wait(2)
+                journal.unlink()
+                assert cleanup_stale_upload_staging_files(tmp_path) == 1
+                assert not transaction_dir.exists()
+                resume_primary_scan.set()
+                assert publication.result(timeout=2) == uploads / "notes.txt"
+
+        assert (uploads / "notes.txt").read_bytes() == b"new"
+
     def test_held_existing_name_does_not_block_next_collision_candidate(self, tmp_path):
         first = publish_upload_bytes_leased(tmp_path, "report.pdf", b"first")
         pool = ThreadPoolExecutor(max_workers=1)

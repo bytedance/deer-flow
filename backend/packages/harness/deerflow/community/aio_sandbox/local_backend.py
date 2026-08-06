@@ -15,7 +15,7 @@ from datetime import datetime
 
 from deerflow.utils.network import get_free_port, release_port
 
-from .backend import SandboxBackend, wait_for_sandbox_ready
+from .backend import SandboxBackend, SandboxDiscoveryResult, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,19 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_url=sandbox_url,
             container_name=container_name,
         )
+
+    def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
+        """Resolve an exact deterministic container, preserving uncertainty."""
+        container_name = f"{self._container_prefix}-{sandbox_id}"
+        try:
+            running = self._is_container_running(container_name)
+        except RuntimeError:
+            logger.warning("Could not verify container %s during reconciliation", container_name, exc_info=True)
+            return SandboxDiscoveryResult.unknown()
+        if not running:
+            return SandboxDiscoveryResult.absent()
+        info = self.discover(sandbox_id)
+        return SandboxDiscoveryResult.found(info) if info is not None else SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running containers matching the configured prefix.

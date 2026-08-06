@@ -317,37 +317,54 @@ def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str
 
     with os.scandir(conversion_dir) as transactions:
         for transaction in transactions:
-            if not (transaction.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction.is_dir(follow_symlinks=False)):
+            try:
+                is_transaction_dir = transaction.is_dir(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if not (transaction.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction.name.endswith(UPLOAD_STAGING_SUFFIX) and is_transaction_dir):
                 continue
             transaction_dir = Path(transaction.path)
             journal_path = transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL
             commit_path = transaction_dir / _UPLOAD_DELETION_COMMIT_MARKER
             primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
             try:
-                journal_stat = os.lstat(journal_path)
-                commit_stat = os.lstat(commit_path)
                 primary_dir_stat = os.lstat(primary_dir)
             except FileNotFoundError:
                 continue
-            if (
-                not stat.S_ISREG(journal_stat.st_mode)
-                or journal_stat.st_nlink != 1
-                or not stat.S_ISREG(commit_stat.st_mode)
-                or commit_stat.st_nlink != 1
-                or stat.S_ISLNK(primary_dir_stat.st_mode)
-                or not stat.S_ISDIR(primary_dir_stat.st_mode)
-            ):
+            if stat.S_ISLNK(primary_dir_stat.st_mode) or not stat.S_ISDIR(primary_dir_stat.st_mode):
                 raise UnsafeUploadPathError("Unsafe pending remote upload deletion transaction")
-            with os.scandir(primary_dir) as primary_entries:
-                entries = list(primary_entries)
+            try:
+                with os.scandir(primary_dir) as primary_entries:
+                    entries = list(primary_entries)
+            except FileNotFoundError:
+                # An unrelated transaction may be finalized while this name's
+                # lease is held. Its disappearance is a completed operation,
+                # not an upload failure.
+                continue
+            matching_entries = [entry for entry in entries if portable_name_coordination_key(entry.name) == coordination_key]
+            if not matching_entries:
+                continue
             if len(entries) != 1:
                 raise UnsafeUploadPathError("Malformed pending remote upload deletion transaction")
-            entry = entries[0]
-            entry_stat = entry.stat(follow_symlinks=False)
+            entry = matching_entries[0]
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+                journal_stat = os.lstat(journal_path)
+                commit_stat = os.lstat(commit_path)
+            except FileNotFoundError:
+                # Matching cleanup normally shares this name lease. Be robust
+                # to legacy cleanup paths: once the durable journal is gone,
+                # the old remote operation can no longer target a replacement.
+                try:
+                    os.lstat(journal_path)
+                except FileNotFoundError:
+                    continue
+                return True
+            if not stat.S_ISREG(journal_stat.st_mode) or journal_stat.st_nlink != 1 or not stat.S_ISREG(commit_stat.st_mode) or commit_stat.st_nlink != 1:
+                raise UnsafeUploadPathError("Unsafe pending remote upload deletion transaction")
             if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_nlink != 1:
                 raise UnsafeUploadPathError("Unsafe pending remote upload deletion tombstone")
-            if portable_name_coordination_key(entry.name) == coordination_key:
-                return True
+            return True
     return False
 
 
@@ -1483,9 +1500,11 @@ def delete_file_safe(
             # generation.
             _clear_staged_deletion_commit(staged_path)
             abort_remote_delete = getattr(delete_remote_copy, "abort_prepared", None)
-            if callable(abort_remote_delete):
-                abort_remote_delete()
-            _restore_staged_deletion(staged_path, actual_file_path, identity)
+            try:
+                if callable(abort_remote_delete):
+                    abort_remote_delete()
+            finally:
+                _restore_staged_deletion(staged_path, actual_file_path, identity)
             raise
         except RemoteDeletionCommitRequiredError:
             # At least one remote mutation could not be rolled back.  Restoring

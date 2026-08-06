@@ -43,7 +43,7 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, SandboxReconciliationResult
 from deerflow.uploads.layout import UPLOAD_CONVERSIONS_DIRNAME, ensure_conversion_dir
 
 from .aio_sandbox import AioSandbox
@@ -2570,6 +2570,51 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
         return sandbox
+
+    def reconciliation_provider_key(self) -> str:
+        """Bind durable journals to this provider's concrete backend namespace."""
+        provider_type = type(self)
+        backend = self._backend
+        backend_type = type(backend)
+        namespace_parts = [
+            f"{provider_type.__module__}.{provider_type.__qualname__}",
+            f"{backend_type.__module__}.{backend_type.__qualname__}",
+        ]
+        if isinstance(backend, RemoteSandboxBackend):
+            namespace_parts.append(backend.provisioner_url)
+        elif isinstance(backend, LocalContainerBackend):
+            namespace_parts.extend([backend.runtime, backend._container_prefix])
+        namespace = "\0".join(namespace_parts).encode("utf-8")
+        return f"{namespace_parts[0]}:{hashlib.sha256(namespace).hexdigest()}"
+
+    def reconnect_sandbox_for_reconciliation(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str | None,
+    ) -> SandboxReconciliationResult:
+        """Reconnect to exactly *sandbox_id* without acquiring or creating."""
+        active = self.get(sandbox_id)
+        if active is not None:
+            return SandboxReconciliationResult.found(active)
+        discovery = self._backend.discover_for_reconciliation(sandbox_id)
+        if discovery.status == "absent":
+            return SandboxReconciliationResult.absent()
+        if discovery.status != "found" or discovery.info is None:
+            return SandboxReconciliationResult.unknown()
+        info = discovery.info
+        if info.sandbox_id != sandbox_id:
+            return SandboxReconciliationResult.unknown()
+        if info.thread_id is not None and info.thread_id != thread_id:
+            return SandboxReconciliationResult.unknown()
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        if info.user_id is not None and info.user_id != effective_user_id:
+            return SandboxReconciliationResult.unknown()
+        return SandboxReconciliationResult.found(
+            AioSandbox(sandbox_id, info.sandbox_url),
+            close_after=True,
+        )
 
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use into the warm pool.

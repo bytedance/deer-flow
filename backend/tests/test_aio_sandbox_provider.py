@@ -2024,3 +2024,74 @@ def test_reconcile_adopts_unready_container_when_no_teardown_is_in_flight(tmp_pa
     provider._reconcile_orphans()
 
     assert "adoptable" in provider._warm_pool, "reconcile must still adopt a genuinely unowned container"
+
+
+def test_reconciliation_reconnects_exact_discovered_sandbox_without_acquiring(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    info = info_mod.SandboxInfo(
+        sandbox_id="old-id",
+        sandbox_url="http://sandbox-old",
+        thread_id="thread-1",
+        user_id="alice",
+    )
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda sandbox_id: backend_mod.SandboxDiscoveryResult.found(info),
+    )
+    provider.get = lambda _sandbox_id: None
+    created: list[tuple[str, str]] = []
+
+    class TransientSandbox:
+        def __init__(self, sandbox_id, sandbox_url):
+            created.append((sandbox_id, sandbox_url))
+
+    monkeypatch.setattr(aio_mod, "AioSandbox", TransientSandbox)
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "old-id",
+        thread_id="thread-1",
+        user_id="alice",
+    )
+
+    assert result.status == "found"
+    assert result.close_after is True
+    assert created == [("old-id", "http://sandbox-old")]
+
+
+def test_reconciliation_rejects_discovered_sandbox_from_another_identity():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    info = info_mod.SandboxInfo(
+        sandbox_id="old-id",
+        sandbox_url="http://sandbox-old",
+        thread_id="another-thread",
+        user_id="alice",
+    )
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda sandbox_id: backend_mod.SandboxDiscoveryResult.found(info),
+    )
+    provider.get = lambda _sandbox_id: None
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "old-id",
+        thread_id="thread-1",
+        user_id="alice",
+    )
+
+    assert result.status == "unknown"
+    assert result.sandbox is None
+
+
+def test_reconciliation_provider_key_changes_with_remote_backend_namespace():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    first = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    second = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    first._backend = remote_mod.RemoteSandboxBackend("http://provisioner-a:8002")
+    second._backend = remote_mod.RemoteSandboxBackend("http://provisioner-b:8002")
+
+    assert first.reconciliation_provider_key() != second.reconciliation_provider_key()

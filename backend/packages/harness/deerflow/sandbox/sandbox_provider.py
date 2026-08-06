@@ -2,10 +2,33 @@ import asyncio
 import inspect
 import threading
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Literal
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxReconciliationResult:
+    """Exact, non-creating lookup result for durable remote operations."""
+
+    status: Literal["found", "absent", "unknown"]
+    sandbox: Sandbox | None = None
+    close_after: bool = False
+
+    @classmethod
+    def found(cls, sandbox: Sandbox, *, close_after: bool = False) -> "SandboxReconciliationResult":
+        return cls(status="found", sandbox=sandbox, close_after=close_after)
+
+    @classmethod
+    def absent(cls) -> "SandboxReconciliationResult":
+        return cls(status="absent")
+
+    @classmethod
+    def unknown(cls) -> "SandboxReconciliationResult":
+        return cls(status="unknown")
 
 
 class SandboxProvider(ABC):
@@ -41,6 +64,30 @@ class SandboxProvider(ABC):
             sandbox_id: The ID of the sandbox environment to retain.
         """
         pass
+
+    def reconciliation_provider_key(self) -> str:
+        """Return a stable, non-secret backend namespace for durable journals."""
+        provider_type = type(self)
+        return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+    def reconnect_sandbox_for_reconciliation(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str | None,
+    ) -> SandboxReconciliationResult:
+        """Resolve exactly *sandbox_id* without creating or redirecting it.
+
+        Providers that can discover an old instance or prove it terminally
+        absent should override this method.  The conservative default only
+        trusts an already-active exact ID; a cache miss remains ``unknown``.
+        """
+        del thread_id, user_id
+        sandbox = self.get(sandbox_id)
+        if sandbox is None:
+            return SandboxReconciliationResult.unknown()
+        return SandboxReconciliationResult.found(sandbox)
 
     @abstractmethod
     def release(self, sandbox_id: str) -> None:

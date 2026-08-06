@@ -51,6 +51,54 @@ def test_list_running_delegates_to_provisioner_list(monkeypatch):
     assert backend.list_running() == [sandbox_info]
 
 
+def test_reconciliation_discovery_confirms_provisioner_absence(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(status_code=404))
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "absent"
+    assert result.info is None
+
+
+def test_reconciliation_discovery_preserves_transport_uncertainty(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(requests, "get", fail)
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "unknown"
+    assert result.info is None
+
+
+def test_reconciliation_discovery_accepts_exact_legacy_mount_contract(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "old-id",
+                "sandbox_url": "http://sandbox-old",
+                "thread_id": "thread-1",
+                "user_id": "alice",
+                "mount_contract_version": 1,
+            }
+        ),
+    )
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "found"
+    assert result.info is not None
+    assert result.info.sandbox_id == "old-id"
+    assert result.info.mount_contract_version == 1
+
+
 def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 

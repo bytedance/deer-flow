@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from typing import Any
 
 from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import (
+    SandboxReconciliationResult,
     sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts_async,
@@ -112,6 +114,7 @@ class _SandboxDeletionHook:
     sandbox_id: str | None = None
     thread_id: str | None = None
     user_id: str | None = None
+    provider_key: str | None = None
     _journal_path: Path | None = None
     _prepared_targets: tuple[tuple[str, bytes | None], ...] | None = None
 
@@ -129,6 +132,8 @@ class _SandboxDeletionHook:
         conversion_path: Path | None,
     ) -> None:
         """Persist enough context to retry an interrupted remote deletion."""
+        if not self.sandbox_id or not self.thread_id or not self.provider_key:
+            raise RuntimeError("Durable remote deletion requires sandbox, thread, and provider identities")
         targets = (
             (upload_virtual_path(filename), primary_path.read_bytes()),
             (
@@ -139,10 +144,11 @@ class _SandboxDeletionHook:
         journal_path = _staged_deletion_remote_journal(primary_path)
         payload = json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "sandbox_id": self.sandbox_id,
                 "thread_id": self.thread_id,
                 "user_id": self.user_id,
+                "provider_key": self.provider_key,
                 "filename": filename,
                 "virtual_paths": [path for path, _bytes in targets],
             },
@@ -260,13 +266,65 @@ def _deletion_hook_for_sandbox(
     sandbox_id: str | None = None,
     thread_id: str | None = None,
     user_id: str | None = None,
+    provider_key: str | None = None,
 ) -> _SandboxDeletionHook:
     return _SandboxDeletionHook(
         sandbox=sandbox,
         sandbox_id=sandbox_id,
         thread_id=thread_id,
         user_id=user_id,
+        provider_key=provider_key,
     )
+
+
+def _declared_callable(instance: Any, name: str) -> Callable[..., Any] | None:
+    """Return a real declared callable without trusting dynamic mock attributes."""
+    try:
+        inspect.getattr_static(instance, name)
+    except AttributeError:
+        return None
+    candidate = getattr(instance, name, None)
+    return candidate if callable(candidate) else None
+
+
+def _sandbox_provider_reconciliation_key(sandbox_provider: Any) -> str:
+    """Return the durable namespace that owns a provider's raw sandbox IDs."""
+    key_factory = _declared_callable(sandbox_provider, "reconciliation_provider_key")
+    if key_factory is None:
+        provider_type = type(sandbox_provider)
+        key = f"{provider_type.__module__}.{provider_type.__qualname__}"
+    else:
+        key = key_factory()
+    if not isinstance(key, str) or not key or len(key.encode("utf-8")) > 512:
+        raise ValueError("Sandbox reconciliation provider key must be a non-empty string of at most 512 bytes")
+    return key
+
+
+def _reconnect_sandbox_for_reconciliation(
+    sandbox_provider: Any,
+    sandbox_id: str,
+    *,
+    thread_id: str,
+    user_id: str | None,
+) -> SandboxReconciliationResult:
+    """Resolve one exact old sandbox without creating or redirecting it."""
+    resolver = _declared_callable(sandbox_provider, "reconnect_sandbox_for_reconciliation")
+    if resolver is not None:
+        result = resolver(
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+    else:
+        sandbox = sandbox_provider.get(sandbox_id)
+        result = SandboxReconciliationResult.found(sandbox) if sandbox is not None else SandboxReconciliationResult.unknown()
+    if not isinstance(result, SandboxReconciliationResult):
+        raise TypeError("Sandbox reconciliation returned an invalid result")
+    if result.status == "found" and result.sandbox is None:
+        raise ValueError("Found sandbox reconciliation result has no sandbox")
+    if result.status != "found" and (result.sandbox is not None or result.close_after):
+        raise ValueError("Non-found sandbox reconciliation result owns no sandbox")
+    return result
 
 
 def _pending_remote_deletion_journals(base_dir: Path) -> list[Path]:
@@ -329,12 +387,13 @@ def reconcile_pending_remote_deletions(
         try:
             try:
                 data = _read_remote_delete_journal(journal_path)
-                if data.get("version") != 1:
+                if data.get("version") != 2:
                     raise ValueError("unsupported journal version")
                 filename = data.get("filename")
                 thread_id = data.get("thread_id")
                 user_id = data.get("user_id")
                 sandbox_id = data.get("sandbox_id")
+                provider_key = data.get("provider_key")
                 virtual_paths = data.get("virtual_paths")
                 expected_paths = [
                     upload_virtual_path(filename) if isinstance(filename, str) else None,
@@ -347,6 +406,9 @@ def reconcile_pending_remote_deletions(
                     or (user_id is not None and not isinstance(user_id, str))
                     or not isinstance(sandbox_id, str)
                     or not sandbox_id
+                    or not isinstance(provider_key, str)
+                    or not provider_key
+                    or len(provider_key.encode("utf-8")) > 512
                     or virtual_paths != expected_paths
                 ):
                     raise ValueError("invalid remote deletion journal fields")
@@ -356,6 +418,12 @@ def reconcile_pending_remote_deletions(
 
                 if sandbox_provider is None:
                     sandbox_provider = sandbox_provider_factory()
+                if _sandbox_provider_reconciliation_key(sandbox_provider) != provider_key:
+                    logger.warning(
+                        "Pending remote upload deletion belongs to provider namespace %r, not the active namespace; leaving journal pending",
+                        provider_key,
+                    )
+                    continue
                 name_lease = UploadNameLease.try_acquire(
                     uploads_dir,
                     filename,
@@ -364,30 +432,40 @@ def reconcile_pending_remote_deletions(
                 if name_lease is None:
                     continue
                 try:
-                    sandbox = sandbox_provider.get(sandbox_id)
-                    if sandbox is None:
-                        acquired_sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
-                        if acquired_sandbox_id != sandbox_id:
-                            logger.warning(
-                                "Pending remote upload deletion targets sandbox %r, but thread %r acquired %r; leaving journal pending",
-                                sandbox_id,
-                                thread_id,
-                                acquired_sandbox_id,
-                            )
-                            continue
-                        sandbox = sandbox_provider.get(sandbox_id)
-                    if sandbox is None:
-                        raise RuntimeError(f"Sandbox {sandbox_id!r} not found during upload deletion reconciliation")
-                    pending = _SandboxDeletionHook(sandbox)._converge_to_deleted(tuple(virtual_paths))
-                    if pending:
+                    result = _reconnect_sandbox_for_reconciliation(
+                        sandbox_provider,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                    if result.status == "unknown":
                         logger.warning(
-                            "Remote upload deletion remains pending for %s: %s",
-                            journal_path,
-                            pending,
+                            "Exact sandbox %r could not be resolved for pending remote upload deletion; leaving journal pending",
+                            sandbox_id,
                         )
                         continue
-                    _unlink_journal_durably(journal_path)
-                    reconciled += 1
+                    if result.status == "absent":
+                        _unlink_journal_durably(journal_path)
+                        reconciled += 1
+                        continue
+                    sandbox = result.sandbox
+                    try:
+                        pending = _SandboxDeletionHook(sandbox)._converge_to_deleted(tuple(virtual_paths))
+                        if pending:
+                            logger.warning(
+                                "Remote upload deletion remains pending for %s: %s",
+                                journal_path,
+                                pending,
+                            )
+                            continue
+                        _unlink_journal_durably(journal_path)
+                        reconciled += 1
+                    finally:
+                        if result.close_after:
+                            try:
+                                sandbox.close()
+                            except BaseException:
+                                logger.warning("Failed to close a transient reconciliation sandbox client", exc_info=True)
                 finally:
                     name_lease.release()
             except BaseException:
@@ -423,6 +501,7 @@ def prepare_upload_deletion(
         sandbox_id=sandbox_id,
         thread_id=thread_id,
         user_id=user_id,
+        provider_key=_sandbox_provider_reconciliation_key(sandbox_provider),
     )
 
 
@@ -452,6 +531,7 @@ async def prepare_upload_deletion_async(
         sandbox_id=sandbox_id,
         thread_id=thread_id,
         user_id=user_id,
+        provider_key=_sandbox_provider_reconciliation_key(sandbox_provider),
     )
 
 
