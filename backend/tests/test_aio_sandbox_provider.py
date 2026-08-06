@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import stat
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -882,6 +883,128 @@ def test_cached_legacy_sandbox_is_not_reused_after_contract_upgrade(tmp_path):
         is None
     )
     assert ("default", "thread-1") not in provider._thread_sandboxes
+
+
+@pytest.mark.anyio
+async def test_acquire_internal_async_does_not_block_on_capability_snapshot(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    provider._backend = backend
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._reuse_in_process_sandbox = lambda *_args, **_kwargs: "cached-v2"
+    backend._capability_probe_lock.acquire()
+    release_probe = threading.Timer(0.15, backend._capability_probe_lock.release)
+    release_probe.start()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    task = asyncio.create_task(provider._acquire_internal_async("thread-1", user_id="default"))
+    await asyncio.sleep(0.02)
+    ticker_elapsed = loop.time() - started
+    result = await task
+    release_probe.join(timeout=1)
+
+    assert ticker_elapsed < 0.08
+    assert result == "cached-v2"
+
+
+def test_acquire_restarts_with_a_new_id_when_mount_contract_changes(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    snapshots = iter(
+        [
+            remote_mod.MountContractSnapshot(version=2, capability_known=True),
+            remote_mod.MountContractSnapshot(version=0, capability_known=True),
+        ]
+    )
+    provider._acquisition_contract_snapshot = lambda: next(snapshots)
+    attempted_ids: list[str] = []
+
+    def acquire_internal(thread_id, *, user_id, contract_snapshot):
+        sandbox_id = provider._sandbox_id_for_thread(thread_id, user_id, contract_snapshot)
+        attempted_ids.append(sandbox_id)
+        if contract_snapshot.version == 2:
+            raise remote_mod.MountContractChangedError(2, 0)
+        return sandbox_id
+
+    provider._acquire_internal = acquire_internal
+
+    result = provider.acquire("thread-1", user_id="default")
+
+    assert attempted_ids == [
+        provider._deterministic_sandbox_id("thread-1", "default", 2),
+        provider._deterministic_sandbox_id("thread-1", "default", 0),
+    ]
+    assert result == attempted_ids[-1]
+
+
+@pytest.mark.anyio
+async def test_acquire_async_restarts_with_a_new_id_when_mount_contract_changes(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    snapshots = iter(
+        [
+            remote_mod.MountContractSnapshot(version=2, capability_known=True),
+            remote_mod.MountContractSnapshot(version=3, capability_known=True),
+        ]
+    )
+    provider._acquisition_contract_snapshot = lambda: next(snapshots)
+    attempted_ids: list[str] = []
+
+    async def acquire_internal(thread_id, *, user_id, contract_snapshot):
+        sandbox_id = provider._sandbox_id_for_thread(thread_id, user_id, contract_snapshot)
+        attempted_ids.append(sandbox_id)
+        if contract_snapshot.version == 2:
+            raise remote_mod.MountContractChangedError(2, 3)
+        return sandbox_id
+
+    provider._acquire_internal_async = acquire_internal
+
+    result = await provider.acquire_async("thread-1", user_id="default")
+
+    assert attempted_ids == [
+        provider._deterministic_sandbox_id("thread-1", "default", 2),
+        provider._deterministic_sandbox_id("thread-1", "default", 3),
+    ]
+    assert result == attempted_ids[-1]
+
+
+@pytest.mark.parametrize(
+    ("global_version", "sandbox_version", "expected"),
+    [
+        (2, 0, False),
+        (0, 2, True),
+    ],
+)
+def test_sandbox_mount_mode_uses_instance_contract_not_global_capability(
+    tmp_path,
+    global_version,
+    sandbox_version,
+    expected,
+):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._config["thread_data_mounts"] = True
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = global_version
+    provider._sandbox_infos = {}
+    provider._sandbox_infos["sandbox-1"] = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-1",
+        sandbox_url="http://sandbox.local",
+        mount_contract_version=sandbox_version,
+    )
+
+    assert provider_mod.sandbox_provider_sandbox_uses_thread_data_mounts(provider, "sandbox-1") is expected
 
 
 @pytest.mark.anyio

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.sandbox.sandbox_provider import (
+    sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts_async,
 )
@@ -73,7 +74,7 @@ def prepare_upload_deletion(
     if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         return None
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
-    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, sandbox_id):
         return None
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
@@ -91,7 +92,7 @@ async def prepare_upload_deletion_async(
     if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         return None
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
-    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, sandbox_id):
         return None
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
@@ -146,7 +147,7 @@ def make_upload_paths_available(
         return SandboxSyncReceipt(sandbox=None)
 
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
-    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, sandbox_id):
         _make_paths_readable(sync_paths)
         return SandboxSyncReceipt(sandbox=None)
     sandbox = sandbox_provider.get(sandbox_id)
@@ -169,7 +170,7 @@ async def make_upload_paths_available_async(
         return SandboxSyncReceipt(sandbox=None)
 
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
-    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, sandbox_id):
         await run_upload_io_cancellation_safe(_make_paths_readable, sync_paths)
         return SandboxSyncReceipt(sandbox=None)
     sandbox = sandbox_provider.get(sandbox_id)

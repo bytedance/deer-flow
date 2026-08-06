@@ -819,6 +819,55 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             device=staged_stat.st_dev,
             inode=staged_stat.st_ino,
         )
+        if not recover_on_crash:
+            visible_matches: list[Path] = []
+            if staged_stat.st_nlink == 2:
+                # A discard transaction never restores a visible peer.  If a
+                # previous attempt crashed after relinking the tombstone (or a
+                # rollback raced with recovery), remove the one verified peer
+                # first; a crash after this unlink leaves an idempotent nlink=1
+                # tombstone for the next startup pass.
+                with os.scandir(uploads_dir) as upload_entries:
+                    for upload_entry in upload_entries:
+                        try:
+                            upload_stat = upload_entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        if stat.S_ISREG(upload_stat.st_mode) and (
+                            upload_stat.st_dev,
+                            upload_stat.st_ino,
+                        ) == (identity.device, identity.inode):
+                            visible_matches.append(Path(upload_entry.path))
+                if len(visible_matches) != 1:
+                    logger.warning(
+                        "Refusing ambiguous upload discard recovery with %s visible aliases: %s",
+                        len(visible_matches),
+                        staged_path,
+                    )
+                    return False
+            original_path = uploads_dir / original_name
+            try:
+                current_original_stat = os.lstat(original_path)
+            except FileNotFoundError:
+                current_original_stat = None
+            delete_conversion = current_original_stat is None or (stat.S_ISREG(current_original_stat.st_mode) and (current_original_stat.st_dev, current_original_stat.st_ino) == (identity.device, identity.inode))
+            if delete_conversion:
+                owned_conversion = existing_conversion_path_for_upload(original_path)
+                if owned_conversion is not None:
+                    owned_conversion.unlink(missing_ok=True)
+            else:
+                # The upload name was reused after the crash.  Its conversion
+                # path is generation-ambiguous, so preserve it rather than
+                # deleting a possible replacement generation's companion.
+                logger.warning(
+                    "Preserving replacement upload conversion during discard recovery: %s",
+                    original_path,
+                )
+            if visible_matches:
+                visible_matches[0].unlink()
+            staged_path.unlink()
+            _finish_deletion_transaction(staged_path)
+            return True
         if staged_stat.st_nlink == 2:
             # A previous recovery may have crashed after publishing the visible
             # hard link but before removing the tombstone.  Accept only one
@@ -842,10 +891,6 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
                     staged_path,
                 )
                 return False
-            staged_path.unlink()
-            _finish_deletion_transaction(staged_path)
-            return True
-        if not recover_on_crash:
             staged_path.unlink()
             _finish_deletion_transaction(staged_path)
             return True
@@ -1008,6 +1053,7 @@ def delete_file_safe(
             base_dir,
             actual_file_path,
             identity,
+            recover_on_crash=False,
         )
         try:
             if delete_remote_copy is not None:

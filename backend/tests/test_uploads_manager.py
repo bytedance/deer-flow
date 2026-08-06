@@ -974,6 +974,76 @@ class TestCleanupStaleUploadStagingFiles:
         assert not primary.exists()
         assert not staged_path.exists()
 
+    def test_crashed_discard_removes_a_republished_visible_link(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "failed.pdf"
+        primary.write_bytes(b"never committed")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=False,
+        )
+        os.link(staged_path, primary)
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert not primary.exists()
+        assert not staged_path.exists()
+
+    def test_crashed_committed_delete_removes_primary_and_conversion(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"delete me")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir(parents=True, exist_ok=True)
+        conversion.write_text("generated", encoding="utf-8")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=False,
+        )
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert not primary.exists()
+        assert not conversion.exists()
+        assert not staged_path.exists()
+
+    def test_crashed_committed_delete_preserves_replacement_conversion(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old generation")
+        old_identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            old_identity,
+            recover_on_crash=False,
+        )
+        primary.write_bytes(b"replacement generation")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir(exist_ok=True)
+        conversion.write_text("replacement conversion", encoding="utf-8")
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"replacement generation"
+        assert conversion.read_text(encoding="utf-8") == "replacement conversion"
+        assert not staged_path.exists()
+
 
 # ---------------------------------------------------------------------------
 # delete_file_safe

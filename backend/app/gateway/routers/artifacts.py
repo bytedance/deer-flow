@@ -24,7 +24,7 @@ from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import (
     get_sandbox_provider,
-    sandbox_provider_uses_thread_data_mounts,
+    sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts_async,
 )
 from deerflow.utils.thread_id import ThreadId
@@ -469,9 +469,9 @@ async def update_artifact(
             sandbox_provider = get_sandbox_provider()
             if not await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
                 sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                if not sandbox_provider_uses_thread_data_mounts(
+                if not sandbox_provider_sandbox_uses_thread_data_mounts(
                     sandbox_provider,
-                    refresh=False,
+                    sandbox_id,
                 ):
                     sandbox = sandbox_provider.get(sandbox_id)
                     if sandbox is None:

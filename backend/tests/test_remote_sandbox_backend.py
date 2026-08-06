@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import importlib
+import threading
+import time
+from unittest.mock import MagicMock
+
 import pytest
 import requests
 
@@ -217,7 +222,6 @@ def test_create_rejects_nondefault_user_on_unverified_legacy_provisioner(monkeyp
 @pytest.mark.parametrize(
     "response_payload",
     [
-        {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"},
         {
             "sandbox_id": "abc123",
             "sandbox_url": "http://k3s:31001",
@@ -232,16 +236,9 @@ def test_create_rejects_nondefault_user_on_unverified_legacy_provisioner(monkeyp
             "thread_id": "other-thread",
             "mount_contract_version": 2,
         },
-        {
-            "sandbox_id": "abc123",
-            "sandbox_url": "http://k3s:31001",
-            "user_id": "alice",
-            "thread_id": "thread-1",
-            "mount_contract_version": 1,
-        },
     ],
 )
-def test_current_contract_create_rejects_unverified_or_mismatched_response(monkeypatch, response_payload):
+def test_current_contract_create_rejects_mismatched_identity(monkeypatch, response_payload):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     backend._mount_contract_version = 2
     backend._mount_contract_capability_known = True
@@ -254,6 +251,37 @@ def test_current_contract_create_rejects_unverified_or_mismatched_response(monke
 
     with pytest.raises(RuntimeError, match="mount contract response"):
         backend.create("thread-1", "abc123", user_id="alice")
+
+
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"},
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "alice",
+            "thread_id": "thread-1",
+            "mount_contract_version": 1,
+        },
+    ],
+)
+def test_current_contract_create_restarts_after_response_contract_change(monkeypatch, response_payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(payload=response_payload),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+    assert backend._capability_next_probe_at == 0.0
 
 
 def test_current_contract_create_returns_verified_identity(monkeypatch):
@@ -303,8 +331,34 @@ def test_create_keeps_v2_response_validation_when_capability_changes_during_post
 
     monkeypatch.setattr(requests, "post", old_peer_response)
 
-    with pytest.raises(RuntimeError, match="mount contract response"):
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
         backend.create("thread-1", "abc123", user_id="alice")
+
+    assert backend._capability_next_probe_at == 0.0
+
+
+def test_legacy_create_restarts_when_response_advertises_another_version(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://legacy.local",
+                "mount_contract_version": 1,
+            }
+        ),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create("thread-1", "abc123", user_id="default")
+
+    assert backend._capability_next_probe_at == 0.0
 
 
 def test_capability_retry_backoff_does_not_overflow_after_long_outage(monkeypatch):
@@ -322,6 +376,85 @@ def test_capability_retry_backoff_does_not_overflow_after_long_outage(monkeypatc
     assert backend.refresh_capabilities_if_stale() is True
     assert backend._capability_probe_failures == 1025
     assert backend._capability_next_probe_at == 130.0
+
+
+def test_mount_mode_waits_for_an_inflight_stale_probe(monkeypatch):
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = 0.0
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = backend
+    result: list[bool] = []
+    completed = threading.Event()
+
+    backend._capability_probe_lock.acquire()
+    try:
+        worker = threading.Thread(
+            target=lambda: (
+                result.append(provider_mod.sandbox_provider_uses_thread_data_mounts(provider)),
+                completed.set(),
+            ),
+            daemon=True,
+        )
+        worker.start()
+        assert not completed.wait(0.05)
+        backend._mount_contract_version = 0
+        backend._mount_contract_capability_known = True
+        backend._capability_next_probe_at = time.monotonic() + 30
+    finally:
+        backend._capability_probe_lock.release()
+
+    assert completed.wait(1)
+    worker.join(timeout=1)
+    assert result == [False]
+
+
+def test_create_restarts_when_required_mount_contract_changed(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    post = MagicMock()
+    monkeypatch.setattr(requests, "post", post)
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create(
+            "thread-1",
+            "sandbox-v2",
+            user_id="default",
+            required_mount_contract_version=2,
+        )
+
+    post.assert_not_called()
+
+
+def test_create_accepts_and_validates_future_compatible_contract(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 3
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v3",
+                "sandbox_url": "http://v3.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 3,
+            }
+        ),
+    )
+
+    info = backend.create("thread-1", "sandbox-v3", user_id="alice")
+
+    assert info.mount_contract_version == 3
 
 
 def test_provisioner_create_returns_sandbox_info(monkeypatch):

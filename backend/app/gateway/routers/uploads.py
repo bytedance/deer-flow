@@ -16,7 +16,7 @@ from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import (
     get_sandbox_provider,
-    sandbox_provider_uses_thread_data_mounts,
+    sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts_async,
 )
 from deerflow.uploads.async_helpers import run_upload_lease_io, wait_for_task_completion
@@ -417,9 +417,9 @@ async def upload_files(
     sandbox = None
     if sync_to_sandbox:
         sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-        sync_to_sandbox = not sandbox_provider_uses_thread_data_mounts(
+        sync_to_sandbox = not sandbox_provider_sandbox_uses_thread_data_mounts(
             sandbox_provider,
-            refresh=False,
+            sandbox_id,
         )
         if sync_to_sandbox:
             sandbox = sandbox_provider.get(sandbox_id)

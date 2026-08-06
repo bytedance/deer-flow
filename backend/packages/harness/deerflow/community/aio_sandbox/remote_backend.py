@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 import requests
@@ -54,6 +55,23 @@ _CAPABILITY_RETRY_MAX_SECONDS = 30.0
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 _LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
+
+
+@dataclass(frozen=True, slots=True)
+class MountContractSnapshot:
+    """One immutable Provisioner capability decision used by an acquisition."""
+
+    version: int
+    capability_known: bool
+
+
+class MountContractChangedError(RuntimeError):
+    """The Provisioner contract changed while an acquisition was in flight."""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        super().__init__(f"Provisioner mount contract changed during sandbox acquisition: expected v{expected}, now v{actual}")
+        self.expected = expected
+        self.actual = actual
 
 
 def _provisioner_extra_mounts_payload(
@@ -171,13 +189,36 @@ class RemoteSandboxBackend(SandboxBackend):
         """Whether the peer definitively answered capability negotiation."""
         return self._mount_contract_capability_known
 
-    def mount_contract_snapshot(self) -> tuple[int, bool]:
+    def mount_contract_snapshot(self) -> MountContractSnapshot:
         """Return one capability snapshot for a complete caller operation."""
         with self._capability_probe_lock:
-            return (
-                self._mount_contract_version,
-                self._mount_contract_capability_known,
+            return MountContractSnapshot(
+                version=self._mount_contract_version,
+                capability_known=self._mount_contract_capability_known,
             )
+
+    def refresh_capabilities_and_snapshot(self) -> MountContractSnapshot:
+        """Wait for an in-flight probe and return a fresh atomic snapshot.
+
+        Unlike ``refresh_capabilities_if_stale()``, this operation deliberately
+        waits for the probe lock.  It is used only by synchronous callers or in
+        a worker thread so an expired v2 result can never be reused as mounted
+        while another thread is proving that the peer is legacy/unavailable.
+        """
+        with self._capability_probe_lock:
+            if time.monotonic() >= self._capability_next_probe_at:
+                self._probe_capabilities_locked()
+            return MountContractSnapshot(
+                version=self._mount_contract_version,
+                capability_known=self._mount_contract_capability_known,
+            )
+
+    def _invalidate_capability_snapshot(self) -> None:
+        """Fail closed and force the next acquisition attempt to re-probe."""
+        with self._capability_probe_lock:
+            self._mount_contract_version = 0
+            self._mount_contract_capability_known = False
+            self._capability_next_probe_at = 0.0
 
     @property
     def requires_create_validation(self) -> bool:
@@ -257,14 +298,20 @@ class RemoteSandboxBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        required_mount_contract_version: int | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        self.refresh_capabilities_if_stale()
-        mount_contract_version, _capability_known = self.mount_contract_snapshot()
+        snapshot = self.refresh_capabilities_and_snapshot()
+        if required_mount_contract_version is not None and snapshot.version != required_mount_contract_version:
+            raise MountContractChangedError(
+                required_mount_contract_version,
+                snapshot.version,
+            )
+        mount_contract_version = snapshot.version
         effective_user_id = user_id or get_effective_user_id()
         if mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
             raise RuntimeError(f"Provisioner mount contract v{mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
@@ -353,7 +400,7 @@ class RemoteSandboxBackend(SandboxBackend):
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
         if required_mount_contract_version is None:
-            required_mount_contract_version, _capability_known = self.mount_contract_snapshot()
+            required_mount_contract_version = self.mount_contract_snapshot().version
         effective_user_id = user_id or get_effective_user_id()
         include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
         payload = {
@@ -383,21 +430,34 @@ class RemoteSandboxBackend(SandboxBackend):
             if not isinstance(data, dict):
                 raise RuntimeError("Provisioner mount contract response is not an object")
             effective_thread_id = thread_id or sandbox_id
+            response_version = data.get("mount_contract_version")
             if required_mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION:
+                if type(response_version) is not int or response_version != required_mount_contract_version:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        response_version if type(response_version) is int else 0,
+                    )
                 response_contract = (
                     data.get("sandbox_id"),
                     data.get("user_id"),
                     data.get("thread_id"),
-                    data.get("mount_contract_version"),
+                    response_version,
                 )
                 expected_contract = (
                     sandbox_id,
                     effective_user_id,
                     effective_thread_id,
-                    _UPLOAD_MOUNT_CONTRACT_VERSION,
+                    required_mount_contract_version,
                 )
                 if response_contract != expected_contract:
                     raise RuntimeError(f"Provisioner mount contract response does not match the requested sandbox identity: expected={expected_contract!r}, received={response_contract!r}")
+            elif (type(response_version) is int and response_version != required_mount_contract_version) or (type(response_version) is not int and required_mount_contract_version != 0):
+                self._invalidate_capability_snapshot()
+                raise MountContractChangedError(
+                    required_mount_contract_version,
+                    response_version if type(response_version) is int else 0,
+                )
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
                 sandbox_id=sandbox_id,

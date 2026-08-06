@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import threading
 from abc import ABC, abstractmethod
 
@@ -183,11 +184,32 @@ def sandbox_provider_uses_thread_data_mounts(
     refresh: bool = True,
 ) -> bool:
     """Return one provider mount-mode decision, optionally refreshing it first."""
+    # ``MagicMock`` and some proxy providers fabricate arbitrary attributes from
+    # ``__getattr__``.  Only opt into the extended contract when the attribute
+    # really exists on the instance or its type; otherwise the legacy boolean is
+    # the source of truth.
+    static_mode_resolver = inspect.getattr_static(provider, "thread_data_mounts_mode", None)
+    mode_resolver = getattr(provider, "thread_data_mounts_mode", None) if static_mode_resolver is not None else None
+    if callable(mode_resolver):
+        return bool(mode_resolver(refresh=refresh))
     if refresh:
-        refresher = getattr(provider, "refresh_thread_data_mount_capabilities", None)
+        static_refresher = inspect.getattr_static(provider, "refresh_thread_data_mount_capabilities", None)
+        refresher = getattr(provider, "refresh_thread_data_mount_capabilities", None) if static_refresher is not None else None
         if callable(refresher):
             refresher()
     return bool(getattr(provider, "uses_thread_data_mounts", False))
+
+
+def sandbox_provider_sandbox_uses_thread_data_mounts(
+    provider: SandboxProvider,
+    sandbox_id: str,
+) -> bool:
+    """Return the immutable mount mode recorded for one acquired sandbox."""
+    static_mode_resolver = inspect.getattr_static(provider, "sandbox_uses_thread_data_mounts", None)
+    mode_resolver = getattr(provider, "sandbox_uses_thread_data_mounts", None) if static_mode_resolver is not None else None
+    if callable(mode_resolver):
+        return bool(mode_resolver(sandbox_id))
+    return sandbox_provider_uses_thread_data_mounts(provider, refresh=False)
 
 
 async def sandbox_provider_uses_thread_data_mounts_async(
