@@ -1,7 +1,9 @@
 import asyncio
 import json
+import multiprocessing
 import os
 import stat
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +34,14 @@ def _deletion_hook_for_sandbox(sandbox, **kwargs):
         kwargs.setdefault("backend_namespace", "tests.backend")
         kwargs.setdefault("incarnation_id", "tests.incarnation")
     return _raw_deletion_hook_for_sandbox(sandbox, **kwargs)
+
+
+def _publish_upload_in_process(uploads_dir, filename, payload, outcomes):
+    try:
+        published = publish_upload_bytes(Path(uploads_dir), filename, payload)
+        outcomes.put(published.name)
+    except BaseException as exc:  # pragma: no cover - surfaced in the parent
+        outcomes.put(repr(exc))
 
 
 class _ExactProviderMixin:
@@ -220,6 +230,53 @@ def test_remote_delete_finalize_failure_never_restores_deleted_host_generation(t
         assert cleanup_stale_upload_staging_files(tmp_path) == 0
 
 
+def test_finalize_guard_removal_failure_retains_host_tombstone_and_basename(tmp_path):
+    import deerflow.uploads.sandbox_sync as sandbox_sync_module
+
+    primary_virtual = upload_virtual_path("report.pdf")
+
+    class Sandbox:
+        def __init__(self) -> None:
+            self.files = {primary_virtual: b"pdf"}
+
+        def remove_file(self, path: str) -> None:
+            self.files.pop(path, None)
+
+    uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    primary = uploads / "report.pdf"
+    primary.write_bytes(b"pdf")
+    sandbox = Sandbox()
+    deletion_hook = _deletion_hook_for_sandbox(
+        sandbox,
+        sandbox_id="sandbox-1",
+        thread_id="thread-1",
+        user_id="alice",
+        provider_key="tests.Provider",
+    )
+    real_unlink_control = sandbox_sync_module._unlink_deletion_control_durably
+
+    def fail_guard_removal(path):
+        if path.name == ".remote-delete.finalizing":
+            raise OSError("finalize guard removal failed")
+        return real_unlink_control(path)
+
+    with patch.object(
+        sandbox_sync_module,
+        "_unlink_deletion_control_durably",
+        side_effect=fail_guard_removal,
+    ):
+        with pytest.raises(OSError, match="finalize guard removal failed"):
+            delete_file_safe(uploads, primary.name, delete_remote_copy=deletion_hook)
+
+    transaction = next((uploads.parent / ".upload-conversions").glob(".upload-delete-*.part"))
+    assert not (transaction / ".remote-delete.json").exists()
+    assert (transaction / ".remote-delete.finalizing").is_file()
+    assert (transaction / "primary" / primary.name).read_bytes() == b"pdf"
+    assert publish_upload_bytes(uploads, primary.name, b"new").name == "report_1.pdf"
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+
+
 def test_directory_fsync_failure_restores_journal_and_reserves_old_basename(tmp_path):
     import deerflow.uploads.manager as upload_manager_module
     import deerflow.uploads.sandbox_sync as sandbox_sync_module
@@ -281,18 +338,24 @@ def test_directory_fsync_failure_restores_journal_and_reserves_old_basename(tmp_
     real_fsync = sandbox_sync_module.os.fsync
     fsync_calls = 0
 
-    def fail_first_directory_fsync(descriptor):
+    def fail_journal_unlink_directory_fsync(descriptor):
         nonlocal fsync_calls
         fsync_calls += 1
-        if fsync_calls == 1:
+        if fsync_calls == 3:
             raise OSError("directory fsync failed")
         return real_fsync(descriptor)
 
-    with patch.object(sandbox_sync_module.os, "fsync", side_effect=fail_first_directory_fsync):
+    with patch.object(
+        sandbox_sync_module.os,
+        "fsync",
+        side_effect=fail_journal_unlink_directory_fsync,
+    ):
         with pytest.raises(OSError, match="directory fsync failed"):
             sandbox_sync_module._unlink_journal_durably(journal_path)
 
     assert journal_path.read_bytes() == journal_payload
+    finalize_guard = journal_path.with_name(".remote-delete.finalizing")
+    assert finalize_guard.read_bytes() == journal_payload
     replacement = publish_upload_bytes(uploads, "report.pdf", b"new primary")
     assert replacement.name == "report_1.pdf"
 
@@ -306,9 +369,10 @@ def test_directory_fsync_failure_restores_journal_and_reserves_old_basename(tmp_
     assert sandbox.files == {}
     assert replacement.read_bytes() == b"new primary"
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
+    assert not finalize_guard.exists()
 
 
-def test_failed_journal_restore_keeps_in_memory_name_reservation(tmp_path):
+def test_failed_journal_restore_keeps_cross_process_name_reservation(tmp_path):
     import deerflow.uploads.manager as upload_manager_module
     import deerflow.uploads.sandbox_sync as sandbox_sync_module
 
@@ -349,7 +413,9 @@ def test_failed_journal_restore_keeps_in_memory_name_reservation(tmp_path):
     def fail_directory_fsync(descriptor):
         nonlocal fsync_calls
         fsync_calls += 1
-        if fsync_calls == 1:
+        # The finalize guard's file and parent directory are persisted first.
+        # Fail the journal-unlink directory fsync that follows them.
+        if fsync_calls == 3:
             raise OSError("directory fsync failed")
         return real_fsync(descriptor)
 
@@ -358,23 +424,37 @@ def test_failed_journal_restore_keeps_in_memory_name_reservation(tmp_path):
             raise OSError("journal recreation failed")
         return real_open(path, flags, mode)
 
+    with (
+        patch.object(sandbox_sync_module.os, "fsync", side_effect=fail_directory_fsync),
+        patch.object(sandbox_sync_module.os, "open", side_effect=fail_journal_recreation),
+    ):
+        with pytest.raises(OSError, match="directory fsync failed"):
+            sandbox_sync_module._unlink_journal_durably(journal_path)
+
+    finalize_guard = journal_path.with_name(".remote-delete.finalizing")
+    assert not journal_path.exists()
+    assert finalize_guard.is_file()
+
+    context = multiprocessing.get_context("spawn")
+    outcomes = context.Queue()
+    worker = context.Process(
+        target=_publish_upload_in_process,
+        args=(str(uploads), "report.pdf", b"new primary", outcomes),
+    )
+    worker.start()
     try:
-        with (
-            patch.object(sandbox_sync_module.os, "fsync", side_effect=fail_directory_fsync),
-            patch.object(sandbox_sync_module.os, "open", side_effect=fail_journal_recreation),
-        ):
-            with pytest.raises(OSError, match="directory fsync failed"):
-                sandbox_sync_module._unlink_journal_durably(journal_path)
-
-        assert not journal_path.exists()
-        sandbox_sync_module._unlink_journal_durably(journal_path)
-        assert cleanup_stale_upload_staging_files(tmp_path) == 0
-        replacement = publish_upload_bytes(uploads, "report.pdf", b"new primary")
-        assert replacement.name == "report_1.pdf"
+        outcome = outcomes.get(timeout=10)
+        worker.join(10)
     finally:
-        upload_manager_module._release_uncertain_remote_journal_reservation(journal_path)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(2)
 
+    assert worker.exitcode == 0
+    assert outcome == "report_1.pdf"
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
+    assert not finalize_guard.exists()
+    assert (uploads / "report_1.pdf").read_bytes() == b"new primary"
 
 
 @pytest.mark.parametrize("unlink_first", [False, True], ids=["unlink", "directory-fsync"])

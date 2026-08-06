@@ -965,7 +965,15 @@ class TestCleanupStaleUploadStagingFiles:
 
     @pytest.mark.parametrize(
         "filename",
-        ["report.pdf", "primary", ".remote-delete.json", ".commit", ".restore", ".conversion"],
+        [
+            "report.pdf",
+            "primary",
+            ".remote-delete.json",
+            ".remote-delete.finalizing",
+            ".commit",
+            ".restore",
+            ".conversion",
+        ],
     )
     def test_restores_legacy_intentless_deletion_transaction(self, tmp_path, filename):
         import deerflow.uploads.manager as upload_manager_module
@@ -1141,7 +1149,17 @@ class TestCleanupStaleUploadStagingFiles:
         assert conversion.read_text(encoding="utf-8") == "conversion"
         assert not staged_path.exists()
 
-    @pytest.mark.parametrize("filename", [".commit", ".restore", ".conversion", ".remote-delete.json", "primary"])
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            ".commit",
+            ".restore",
+            ".conversion",
+            ".remote-delete.json",
+            ".remote-delete.finalizing",
+            "primary",
+        ],
+    )
     def test_crash_recovery_restores_control_named_primary_and_conversion(self, tmp_path, filename):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -1192,6 +1210,99 @@ class TestCleanupStaleUploadStagingFiles:
         assert not primary.exists()
         assert not conversion.exists()
         assert not staged_path.exists()
+
+    def test_committed_finalize_guard_confirms_journal_absence_before_cleanup(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        transaction_dir = staged_path.parent.parent
+        finalize_guard = transaction_dir / upload_manager_module._UPLOAD_DELETION_FINALIZE_GUARD
+        finalize_guard.write_text("{}", encoding="utf-8")
+        stage_lease.release()
+
+        confirmed_before_guard_unlink = False
+        real_fsync = upload_manager_module.os.fsync
+        transaction_identity = os.stat(transaction_dir)
+
+        def observe_fsync(descriptor):
+            nonlocal confirmed_before_guard_unlink
+            descriptor_stat = os.fstat(descriptor)
+            if (descriptor_stat.st_dev, descriptor_stat.st_ino) == (
+                transaction_identity.st_dev,
+                transaction_identity.st_ino,
+            ) and finalize_guard.exists():
+                confirmed_before_guard_unlink = True
+            return real_fsync(descriptor)
+
+        with patch.object(upload_manager_module.os, "fsync", side_effect=observe_fsync):
+            assert cleanup_stale_upload_staging_files(tmp_path) == 1
+
+        assert confirmed_before_guard_unlink
+        assert not transaction_dir.exists()
+        assert not primary.exists()
+
+    def test_committed_journal_and_finalize_guard_remain_pending(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        transaction_dir = staged_path.parent.parent
+        journal = transaction_dir / upload_manager_module._UPLOAD_DELETION_REMOTE_JOURNAL
+        finalize_guard = transaction_dir / upload_manager_module._UPLOAD_DELETION_FINALIZE_GUARD
+        journal.write_text("{}", encoding="utf-8")
+        finalize_guard.write_text("{}", encoding="utf-8")
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert journal.is_file()
+        assert finalize_guard.is_file()
+        assert staged_path.read_bytes() == b"primary"
+
+    def test_uncommitted_journal_and_finalize_guard_restore_host(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        transaction_dir = staged_path.parent.parent
+        journal = transaction_dir / upload_manager_module._UPLOAD_DELETION_REMOTE_JOURNAL
+        finalize_guard = transaction_dir / upload_manager_module._UPLOAD_DELETION_FINALIZE_GUARD
+        journal.write_text("{}", encoding="utf-8")
+        finalize_guard.write_text("{}", encoding="utf-8")
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"primary"
+        assert not transaction_dir.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1385,7 +1496,17 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"PDF"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
 
-    @pytest.mark.parametrize("filename", [".commit", ".restore", ".conversion", ".remote-delete.json", "primary"])
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            ".commit",
+            ".restore",
+            ".conversion",
+            ".remote-delete.json",
+            ".remote-delete.finalizing",
+            "primary",
+        ],
+    )
     def test_failed_remote_delete_restores_control_named_primary_and_conversion(self, tmp_path, filename):
         uploads = tmp_path / "user-data" / "uploads"
         uploads.mkdir(parents=True)

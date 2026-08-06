@@ -26,14 +26,14 @@ from deerflow.uploads.layout import conversion_virtual_path
 from deerflow.uploads.lease import UploadNameLease, UploadStageLease
 from deerflow.uploads.manager import (
     _UPLOAD_DELETION_COMMIT_MARKER,
+    _UPLOAD_DELETION_FINALIZE_GUARD,
     _UPLOAD_DELETION_PRIMARY_DIRNAME,
     RemoteDeletionCommitRequiredError,
     RemoteDeletionCompensatedError,
     _deletion_transaction_metadata,
     _normalize_existing_filename,
-    _release_uncertain_remote_journal_reservation,
-    _retain_uncertain_remote_journal_reservation,
     _staged_deletion_remote_journal,
+    _unlink_deletion_control_durably,
     cleanup_stale_upload_staging_files,
     make_upload_file_sandbox_readable,
     upload_virtual_path,
@@ -74,13 +74,67 @@ def _remove_remote_paths(sandbox: Any, virtual_paths: tuple[str, ...]) -> None:
         raise first_error
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _write_all(descriptor: int, payload: bytes, *, error_message: str) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError(error_message)
+        view = view[written:]
+
+
+def _ensure_finalize_guard_durable(
+    guard_path: Path,
+    journal_data: dict[str, Any],
+    journal_payload: bytes,
+) -> None:
+    try:
+        descriptor = os.open(guard_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        if _read_remote_delete_journal(guard_path) != journal_data:
+            raise ValueError("remote deletion finalization guard does not match journal")
+    else:
+        try:
+            _write_all(
+                descriptor,
+                journal_payload,
+                error_message="Failed to write remote deletion finalization guard",
+            )
+            os.fsync(descriptor)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            finally:
+                try:
+                    _unlink_deletion_control_durably(guard_path)
+                except BaseException:
+                    logger.error(
+                        "Failed to remove an incomplete remote deletion finalization guard: %s",
+                        guard_path,
+                        exc_info=True,
+                    )
+            raise
+        else:
+            os.close(descriptor)
+    # Existing guards may come from an attempt whose directory fsync failed.
+    # Persist the reservation before making the journal unlink visible.
+    _fsync_parent_directory(guard_path)
+
+
 def _unlink_journal_durably(journal_path: Path) -> None:
     try:
         journal_data = _read_remote_delete_journal(journal_path)
     except FileNotFoundError:
-        # A prior unlink whose directory fsync failed may still be absent from
-        # the live namespace yet reappear after a crash. Only a successful
-        # unlink + parent fsync below may release an in-memory reservation.
+        # A persistent finalization guard, when present, stays reserved until
+        # startup cleanup durably confirms this observed journal absence.
         return
     filename = journal_data.get("filename")
     if not isinstance(filename, str):
@@ -90,24 +144,17 @@ def _unlink_journal_durably(journal_path: Path) -> None:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    _retain_uncertain_remote_journal_reservation(journal_path, filename)
+    guard_path = journal_path.with_name(_UPLOAD_DELETION_FINALIZE_GUARD)
+    _ensure_finalize_guard_durable(guard_path, journal_data, journal_payload)
     try:
         journal_path.unlink(missing_ok=True)
-        directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-        _release_uncertain_remote_journal_reservation(journal_path)
+        _fsync_parent_directory(journal_path)
     except BaseException:
         # If unlink became visible but its directory fsync failed, allowing the
-        # basename reservation to disappear in this process would let a new
-        # generation reuse the remote path before a crash resurrected the old
-        # journal. Recreate the same journal entry before propagating. Even if
-        # the recreation's directory fsync also fails, its visible entry keeps
-        # publication reserved for the remainder of this process; after a crash
-        # either a journal survives (reserved) or neither journal does (nothing
-        # can replay against a later generation).
+        # basename reservation to disappear would let a new generation reuse
+        # the remote path before a crash resurrected the old journal. Recreate
+        # the same journal entry when possible; the already-durable guard keeps
+        # every process fail-closed even when recreation also fails.
         try:
             descriptor = os.open(journal_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -117,12 +164,11 @@ def _unlink_journal_durably(journal_path: Path) -> None:
         else:
             restored = False
             try:
-                view = memoryview(journal_payload)
-                while view:
-                    written = os.write(descriptor, view)
-                    if written <= 0:
-                        raise OSError("Failed to restore remote deletion journal")
-                    view = view[written:]
+                _write_all(
+                    descriptor,
+                    journal_payload,
+                    error_message="Failed to restore remote deletion journal",
+                )
                 os.fsync(descriptor)
                 restored = True
             except BaseException:
@@ -131,14 +177,11 @@ def _unlink_journal_durably(journal_path: Path) -> None:
                 os.close(descriptor)
             if restored:
                 try:
-                    directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                    try:
-                        os.fsync(directory_descriptor)
-                    finally:
-                        os.close(directory_descriptor)
+                    _fsync_parent_directory(journal_path)
                 except BaseException:
                     logger.error("Failed to persist a restored remote deletion journal directory entry: %s", journal_path, exc_info=True)
         raise
+    _unlink_deletion_control_durably(guard_path)
 
 
 def _read_remote_delete_journal(journal_path: Path) -> dict[str, Any]:

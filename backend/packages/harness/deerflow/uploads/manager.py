@@ -10,7 +10,6 @@ import os
 import secrets
 import shutil
 import stat
-import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -33,9 +32,6 @@ from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
-_uncertain_remote_journal_lock = threading.Lock()
-_uncertain_remote_journal_reservations: set[tuple[str, str, str]] = set()
-
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
 UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
@@ -46,6 +42,7 @@ _UPLOAD_DELETION_CONVERSION_TOMBSTONE = ".conversion"
 _UPLOAD_DELETION_COMMIT_MARKER = ".commit"
 _UPLOAD_DELETION_RESTORE_MARKER = ".restore"
 _UPLOAD_DELETION_REMOTE_JOURNAL = ".remote-delete.json"
+_UPLOAD_DELETION_FINALIZE_GUARD = ".remote-delete.finalizing"
 _WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
 
 
@@ -55,37 +52,6 @@ class RemoteDeletionCommitRequiredError(RuntimeError):
 
 class RemoteDeletionCompensatedError(RuntimeError):
     """Remote deletion failed but its side effects were fully compensated."""
-
-
-def _retain_uncertain_remote_journal_reservation(journal_path: Path, filename: str) -> None:
-    """Reserve a remote pathname while journal-unlink durability is unknown."""
-    base_dir = journal_path.parent.parent.parent / "uploads"
-    reservation = (
-        os.path.abspath(base_dir),
-        portable_name_coordination_key(filename),
-        os.path.abspath(journal_path),
-    )
-    with _uncertain_remote_journal_lock:
-        _uncertain_remote_journal_reservations.add(reservation)
-
-
-def _release_uncertain_remote_journal_reservation(journal_path: Path) -> None:
-    journal_key = os.path.abspath(journal_path)
-    with _uncertain_remote_journal_lock:
-        matches = {reservation for reservation in _uncertain_remote_journal_reservations if reservation[2] == journal_key}
-        _uncertain_remote_journal_reservations.difference_update(matches)
-
-
-def _uncertain_remote_journal_reserves_name(base_dir: Path, coordination_key: str) -> bool:
-    base_key = os.path.abspath(base_dir)
-    with _uncertain_remote_journal_lock:
-        return any(reservation_base == base_key and reservation_name == coordination_key for reservation_base, reservation_name, _journal in _uncertain_remote_journal_reservations)
-
-
-def _transaction_has_uncertain_remote_journal(transaction_dir: Path) -> bool:
-    transaction_key = os.path.abspath(transaction_dir)
-    with _uncertain_remote_journal_lock:
-        return any(os.path.dirname(journal_key) == transaction_key for _base, _name, journal_key in _uncertain_remote_journal_reservations)
 
 
 @dataclass(slots=True)
@@ -342,8 +308,6 @@ def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str
     Callers hold the candidate's name lease while scanning, so reconciliation
     cannot remove the journal between this check and publication.
     """
-    if _uncertain_remote_journal_reserves_name(base_dir, coordination_key):
-        return True
     conversion_dir = base_dir.parent / UPLOAD_CONVERSIONS_DIRNAME
     try:
         conversion_dir_stat = os.lstat(conversion_dir)
@@ -362,6 +326,7 @@ def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str
                 continue
             transaction_dir = Path(transaction.path)
             journal_path = transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL
+            finalize_guard_path = transaction_dir / _UPLOAD_DELETION_FINALIZE_GUARD
             commit_path = transaction_dir / _UPLOAD_DELETION_COMMIT_MARKER
             primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
             try:
@@ -386,18 +351,21 @@ def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str
             entry = matching_entries[0]
             try:
                 entry_stat = entry.stat(follow_symlinks=False)
-                journal_stat = os.lstat(journal_path)
                 commit_stat = os.lstat(commit_path)
             except FileNotFoundError:
                 # Matching cleanup normally shares this name lease. Be robust
-                # to legacy cleanup paths: once the durable journal is gone,
+                # to legacy cleanup paths: once both durable controls are gone,
                 # the old remote operation can no longer target a replacement.
+                continue
+            control_stats: list[os.stat_result] = []
+            for control_path in (journal_path, finalize_guard_path):
                 try:
-                    os.lstat(journal_path)
+                    control_stats.append(os.lstat(control_path))
                 except FileNotFoundError:
                     continue
-                return True
-            if not stat.S_ISREG(journal_stat.st_mode) or journal_stat.st_nlink != 1 or not stat.S_ISREG(commit_stat.st_mode) or commit_stat.st_nlink != 1:
+            if not control_stats:
+                continue
+            if any(not stat.S_ISREG(control_stat.st_mode) or control_stat.st_nlink != 1 for control_stat in control_stats) or not stat.S_ISREG(commit_stat.st_mode) or commit_stat.st_nlink != 1:
                 raise UnsafeUploadPathError("Unsafe pending remote upload deletion transaction")
             if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_nlink != 1:
                 raise UnsafeUploadPathError("Unsafe pending remote upload deletion tombstone")
@@ -877,12 +845,18 @@ def _staged_deletion_remote_journal(staged_path: Path) -> Path:
     return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_REMOTE_JOURNAL
 
 
-def _staged_deletion_has_remote_journal(staged_path: Path) -> bool:
-    try:
-        os.lstat(_staged_deletion_remote_journal(staged_path))
-    except FileNotFoundError:
-        return False
-    return True
+def _staged_deletion_has_remote_control(staged_path: Path) -> bool:
+    transaction_dir = _deletion_transaction_dir_for_staged_path(staged_path)
+    for control_name in (
+        _UPLOAD_DELETION_REMOTE_JOURNAL,
+        _UPLOAD_DELETION_FINALIZE_GUARD,
+    ):
+        try:
+            os.lstat(transaction_dir / control_name)
+        except FileNotFoundError:
+            continue
+        return True
+    return False
 
 
 def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
@@ -992,7 +966,7 @@ def _discard_staged_deletion(staged_path: Path) -> None:
     _staged_conversion_path(staged_path).unlink(missing_ok=True)
     staged_path.unlink(missing_ok=True)
     _clear_staged_deletion_restore(staged_path)
-    if not _staged_deletion_has_remote_journal(staged_path):
+    if not _staged_deletion_has_remote_control(staged_path):
         _clear_staged_deletion_commit(staged_path)
     _finish_deletion_transaction(staged_path)
 
@@ -1003,7 +977,7 @@ def _finalize_committed_staged_deletion(staged_path: Path) -> None:
     A remaining journal must retain the exact primary tombstone so publication
     can reserve its portable filename until reconciliation finishes.
     """
-    if _staged_deletion_has_remote_journal(staged_path):
+    if _staged_deletion_has_remote_control(staged_path):
         return
     _discard_staged_deletion(staged_path)
 
@@ -1043,14 +1017,17 @@ def _finish_deletion_transaction(staged_path: Path) -> None:
     if not (transaction_dir.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_dir.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction_dir.parent.name == UPLOAD_CONVERSIONS_DIRNAME):
         return
     primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
-    try:
-        os.lstat(transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL)
-    except FileNotFoundError:
-        pass
-    else:
+    for control_name in (
+        _UPLOAD_DELETION_REMOTE_JOURNAL,
+        _UPLOAD_DELETION_FINALIZE_GUARD,
+    ):
+        try:
+            os.lstat(transaction_dir / control_name)
+        except FileNotFoundError:
+            continue
         # Keep the empty primary container as the on-disk layout discriminator;
         # older direct-layout transactions may legitimately have a primary
-        # named exactly like the new journal control.
+        # named exactly like a current control.
         return
     try:
         primary_dir.rmdir()
@@ -1076,8 +1053,6 @@ def _finish_deletion_transaction(staged_path: Path) -> None:
 
 def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     """Restore a crash-abandoned tombstone whose basename records its target."""
-    if _transaction_has_uncertain_remote_journal(transaction_dir):
-        return False
     metadata = _deletion_transaction_metadata(transaction_dir.name)
     if metadata is None:
         logger.warning("Refusing malformed upload deletion transaction name: %s", transaction_dir)
@@ -1112,6 +1087,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     commit_entries = [entry for entry in entries if entry.path not in legacy_primary_paths and entry.name == _UPLOAD_DELETION_COMMIT_MARKER]
     restore_entries = [entry for entry in entries if entry.path not in legacy_primary_paths and entry.name == _UPLOAD_DELETION_RESTORE_MARKER]
     remote_journal_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_REMOTE_JOURNAL and primary_dir_entries]
+    finalize_guard_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_FINALIZE_GUARD and primary_dir_entries]
     legacy_unknown_entries = [
         entry
         for entry in entries
@@ -1127,6 +1103,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         or len(commit_entries) > 1
         or len(restore_entries) > 1
         or len(remote_journal_entries) > 1
+        or len(finalize_guard_entries) > 1
         or len(primary_dir_entries) > 1
         or len(legacy_primary_entries) > 1
         or legacy_unknown_entries
@@ -1142,6 +1119,11 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         remote_journal_stat = remote_journal_entries[0].stat(follow_symlinks=False)
         if not stat.S_ISREG(remote_journal_stat.st_mode) or remote_journal_stat.st_nlink != 1:
             logger.warning("Refusing malformed remote upload deletion journal: %s", transaction_dir)
+            return False
+    if finalize_guard_entries:
+        finalize_guard_stat = finalize_guard_entries[0].stat(follow_symlinks=False)
+        if not stat.S_ISREG(finalize_guard_stat.st_mode) or finalize_guard_stat.st_nlink != 1:
+            logger.warning("Refusing malformed remote upload deletion finalization guard: %s", transaction_dir)
             return False
     primary_dir: Path | None = None
     if primary_dir_entries:
@@ -1170,15 +1152,17 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             logger.warning("Refusing malformed upload deletion commit marker: %s", transaction_dir)
             return False
         recover_on_crash = False
-    elif remote_journal_entries:
+    elif remote_journal_entries or finalize_guard_entries:
         if not recover_on_crash:
-            logger.warning("Refusing discard transaction with an uncommitted remote journal: %s", transaction_dir)
+            logger.warning("Refusing discard transaction with an uncommitted remote control: %s", transaction_dir)
             return False
         # The process crashed after preparing the durable remote operation but
         # before persisting permission to start it. No remote side effect could
-        # have begun, so discard the prepared journal and restore the host.
-        _unlink_deletion_control_durably(Path(remote_journal_entries[0].path))
+        # have begun, so discard all prepared controls and restore the host.
+        for control_entry in (*remote_journal_entries, *finalize_guard_entries):
+            _unlink_deletion_control_durably(Path(control_entry.path))
         remote_journal_entries = []
+        finalize_guard_entries = []
     if restore_entries:
         restore_stat = restore_entries[0].stat(follow_symlinks=False)
         if not stat.S_ISREG(restore_stat.st_mode) or restore_stat.st_nlink != 1:
@@ -1194,6 +1178,18 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         # remote reconciler may clear the journal; a later cleanup pass then
         # commits these host tombstones.
         return False
+    if finalize_guard_entries:
+        # The journal unlink was visible, but the process did not finish
+        # removing its persistent guard.  Fsync the transaction directory while
+        # the guard still reserves the basename: this makes the observed journal
+        # absence durable before any process may publish a replacement.
+        directory_descriptor = os.open(transaction_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        _unlink_deletion_control_durably(Path(finalize_guard_entries[0].path))
+        finalize_guard_entries = []
     if not recover_on_crash and conversion_entries and conversion_stat.st_nlink != 1:
         logger.warning(
             "Refusing discard transaction with a linked conversion tombstone: %s",
