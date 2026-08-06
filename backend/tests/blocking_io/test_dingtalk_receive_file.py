@@ -131,7 +131,6 @@ async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lea
     from app.channels.dingtalk import DingTalkChannel
     from app.channels.message_bus import MessageBus
     from deerflow.config.paths import Paths
-    from deerflow.uploads.manager import delete_file_safe
 
     paths = await asyncio.to_thread(Paths, str(tmp_path))
     monkeypatch.setattr("app.channels.dingtalk.get_paths", lambda: paths)
@@ -139,16 +138,24 @@ async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lea
     allow_sync = threading.Event()
 
     class PausedSandbox:
+        def __init__(self):
+            self.removals = []
+
         def update_file(self, _path, _content):
             sync_started.set()
             assert allow_sync.wait(5)
+
+        def remove_file(self, path):
+            self.removals.append(path)
+
+    sandbox = PausedSandbox()
 
     async def acquire_async(_thread_id, user_id=None):
         return "remote"
 
     monkeypatch.setattr(
         "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=acquire_async, get=lambda _sandbox_id: PausedSandbox()),
+        lambda: SimpleNamespace(acquire_async=acquire_async, get=lambda _sandbox_id: sandbox),
     )
     channel = DingTalkChannel(MessageBus(), config={})
     channel._download_by_code = AsyncMock(return_value=b"DATA")
@@ -156,15 +163,13 @@ async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lea
     assert await asyncio.to_thread(sync_started.wait, 5)
     uploads = paths.sandbox_uploads_dir("t1", user_id="default")
     receive.cancel()
-    deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, "a.pdf"))
     try:
         await asyncio.sleep(0.05)
         assert not receive.done()
-        assert not deletion.done()
     finally:
         allow_sync.set()
         with suppress(asyncio.CancelledError):
             await receive
-        await deletion
 
     assert not await asyncio.to_thread((uploads / "a.pdf").exists)
+    assert sandbox.removals == ["/mnt/user-data/uploads/a.pdf"]

@@ -882,13 +882,19 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
     if not msg.files:
         return []
 
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    from deerflow.uploads.async_helpers import (
+        publish_upload_bytes_leased_async,
+        release_published_upload_async,
+        rollback_published_upload_async,
+    )
     from deerflow.uploads.layout import upload_virtual_path
     from deerflow.uploads.manager import (
         UnsafeUploadPathError,
         ensure_uploads_dir,
         normalize_filename,
-        publish_upload_bytes,
     )
+    from deerflow.uploads.sandbox_sync import make_upload_paths_available_async
 
     def _prepare_uploads_dir() -> Path:
         # Worker thread: directory creation is blocking filesystem IO that must
@@ -947,21 +953,51 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
                 )
                 continue
 
+            publication = None
             try:
-                dest = await asyncio.to_thread(publish_upload_bytes, uploads_dir, safe_name, data)
+                publication = await publish_upload_bytes_leased_async(uploads_dir, safe_name, data)
+                dest = publication.path
+                virtual_path = upload_virtual_path(dest.name)
+                sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+                await make_upload_paths_available_async(
+                    sandbox_provider,
+                    thread_id,
+                    user_id=user_id,
+                    paths=[(dest, virtual_path)],
+                )
+            except asyncio.CancelledError:
+                if publication is not None:
+                    try:
+                        await rollback_published_upload_async(publication)
+                    except Exception:
+                        logger.warning("[Manager] failed to roll back cancelled inbound file: %s", safe_name, exc_info=True)
+                raise
             except UnsafeUploadPathError:
+                if publication is not None:
+                    try:
+                        await rollback_published_upload_async(publication)
+                    except Exception:
+                        logger.warning("[Manager] failed to roll back unsafe inbound file: %s", safe_name, exc_info=True)
                 logger.warning("[Manager] skipping inbound file with unsafe destination: %s", safe_name)
                 continue
             except Exception:
+                if publication is not None:
+                    try:
+                        await rollback_published_upload_async(publication)
+                    except Exception:
+                        logger.warning("[Manager] failed to roll back rejected inbound file: %s", safe_name, exc_info=True)
                 logger.exception("[Manager] failed to write inbound file: %s", safe_name)
                 continue
+            finally:
+                if publication is not None:
+                    await release_published_upload_async(publication)
 
             actual_name = dest.name
             created.append(
                 {
                     "filename": actual_name,
                     "size": len(data),
-                    "path": upload_virtual_path(actual_name),
+                    "path": virtual_path,
                     "is_image": ftype == "image",
                 }
             )

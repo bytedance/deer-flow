@@ -97,6 +97,8 @@ def normalize_filename(filename: str) -> str:
     # but they indicate a Windows-style path that should be stripped or rejected.
     if "\\" in safe:
         raise ValueError(f"Filename contains backslash: {filename!r}")
+    if "<" in safe or ">" in safe or "--- BEGIN USER INPUT ---" in safe or "--- END USER INPUT ---" in safe:
+        raise ValueError(f"Filename contains reserved model-context token: {filename!r}")
     if len(safe.encode("utf-8")) > 255:
         raise ValueError(f"Filename too long: {len(safe)} chars")
     if is_upload_staging_file(safe):

@@ -882,6 +882,10 @@ class TestChannelManager:
 
         paths = Paths(tmp_path)
         monkeypatch.setattr("deerflow.uploads.manager.get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "deerflow.sandbox.sandbox_provider.get_sandbox_provider",
+            lambda: SimpleNamespace(uses_thread_data_mounts=True),
+        )
 
         async def read_file(file_info, client):
             del file_info, client

@@ -76,11 +76,13 @@ _default_sandbox_provider: SandboxProvider | None = None
 _provider_lock = threading.Lock()
 
 
-def get_sandbox_provider(**kwargs) -> SandboxProvider:
+def get_sandbox_provider(*, app_config=None, **kwargs) -> SandboxProvider:
     """Get the sandbox provider singleton.
 
     Returns a cached singleton instance. Use `reset_sandbox_provider()` to clear
     the cache, or `shutdown_sandbox_provider()` to properly shutdown and clear.
+    Embedded callers may pass their already-resolved ``app_config`` so cold
+    singleton construction uses the same configuration as the caller.
 
     Returns:
         A sandbox provider instance.
@@ -95,7 +97,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     # Cold start. Resolve + construct outside the lock: the import and the
     # provider constructor are plugin code and must not run under a non-reentrant
     # lock. The construction may race another caller; we reconcile under the lock.
-    config = get_app_config()
+    config = app_config or get_app_config()
     cls = resolve_class(config.sandbox.use, SandboxProvider)
     provider = cls(**kwargs)
 

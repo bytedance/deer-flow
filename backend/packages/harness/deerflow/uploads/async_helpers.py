@@ -105,3 +105,13 @@ async def release_published_upload_async(publication: PublishedUpload) -> None:
     release_task.result()
     if cancelled:
         raise asyncio.CancelledError
+
+
+async def rollback_published_upload_async(publication: PublishedUpload) -> None:
+    """Roll back a publication off-thread, draining repeated cancellation."""
+    rollback_task = asyncio.create_task(
+        asyncio.to_thread(rollback_published_upload, publication),
+        name=f"rollback-upload:{publication.path.name}",
+    )
+    await wait_for_task_completion(rollback_task)
+    rollback_task.result()

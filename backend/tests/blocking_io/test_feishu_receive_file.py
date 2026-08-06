@@ -38,11 +38,15 @@ def _channel_with_file(content: bytes = b"DATA", filename: str = "report.pdf"):
 class _RemoteSandbox:
     def __init__(self) -> None:
         self.updates: list[tuple[str, bytes]] = []
+        self.removals: list[str] = []
         self.update_thread_id: int | None = None
 
     def update_file(self, path: str, content: bytes) -> None:
         self.update_thread_id = threading.get_ident()
         self.updates.append((path, content))
+
+    def remove_file(self, path: str) -> None:
+        self.removals.append(path)
 
 
 class _RemoteProvider:
@@ -148,7 +152,6 @@ async def test_receive_file_holds_name_lease_through_remote_sync(tmp_path, monke
 
 async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lease(tmp_path, monkeypatch) -> None:
     from deerflow.config.paths import Paths
-    from deerflow.uploads.manager import delete_file_safe
 
     paths = await asyncio.to_thread(Paths, str(tmp_path))
     provider = _RemoteProvider()
@@ -175,18 +178,44 @@ async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lea
     assert await asyncio.to_thread(sync_started.wait, 5)
     uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
     receive.cancel()
-    deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, "report.pdf"))
     try:
         await asyncio.sleep(0.05)
         assert not receive.done()
-        assert not deletion.done()
     finally:
         allow_sync.set()
         with suppress(asyncio.CancelledError):
             await receive
-        await deletion
 
     assert not await asyncio.to_thread((uploads / "report.pdf").exists)
+    assert provider.sandbox.removals == ["/mnt/user-data/uploads/report.pdf"]
+
+
+async def test_receive_file_sync_failure_rolls_back_host_and_remote_copy(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    provider = _RemoteProvider()
+
+    def failed_update(path: str, content: bytes) -> None:
+        provider.sandbox.updates.append((path, content))
+        raise OSError("sync failed")
+
+    provider.sandbox.update_file = failed_update
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+    result = await _channel_with_file()._receive_single_file(
+        "message-1",
+        "file-key",
+        "file",
+        "thread-1",
+        user_id="ou-user",
+    )
+
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    assert result == "Failed to obtain the [file]"
+    assert not await asyncio.to_thread((uploads / "report.pdf").exists)
+    assert provider.sandbox.removals == ["/mnt/user-data/uploads/report.pdf"]
 
 
 async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monkeypatch) -> None:

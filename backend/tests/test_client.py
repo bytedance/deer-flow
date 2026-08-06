@@ -56,6 +56,7 @@ def mock_app_config():
     config.database.checkpoint_channel_mode = "full"
     config.database.checkpoint_delta.snapshot_frequency = 10
     config.authorization = AuthorizationConfig(enabled=False)
+    config.sandbox.use = "deerflow.sandbox.local:LocalSandboxProvider"
     return config
 
 
@@ -2183,6 +2184,52 @@ class TestUploads:
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
             assert (uploads_dir / "test.txt").stat().st_mode & 0o044 == 0o044
+
+    def test_upload_files_syncs_primary_and_conversion_to_non_mounted_sandbox(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"PDF")
+        updates: list[tuple[str, bytes]] = []
+        removals: list[str] = []
+
+        class Sandbox:
+            def update_file(self, path, content):
+                updates.append((path, content))
+
+            def remove_file(self, path):
+                removals.append(path)
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            def acquire(self, thread_id, user_id=None):
+                return "remote"
+
+            def get(self, sandbox_id):
+                return Sandbox() if sandbox_id == "remote" else None
+
+        async def fake_convert(path: Path, *, publication=None) -> Path:
+            assert publication is not None
+            conversion = conversion_path_for_upload(path)
+            conversion.parent.mkdir(parents=True, exist_ok=True)
+            conversion.write_bytes(b"MARKDOWN")
+            return conversion
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=fake_convert),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=Provider()),
+        ):
+            result = client.upload_files("thread-1", [source])
+
+        info = result["files"][0]
+        assert updates == [
+            (info["virtual_path"], b"PDF"),
+            (info["markdown_virtual_path"], b"MARKDOWN"),
+        ]
+        assert removals == []
 
     def test_upload_files_across_calls_never_overwrite(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"

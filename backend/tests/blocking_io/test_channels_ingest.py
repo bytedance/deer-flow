@@ -39,6 +39,10 @@ async def test_ingest_inbound_files_does_not_block_event_loop(tmp_path: Path, mo
         return b"payload-bytes"
 
     monkeypatch.setattr(mgr, "_read_http_inbound_file", _fake_reader)
+    monkeypatch.setattr(
+        "deerflow.sandbox.sandbox_provider.get_sandbox_provider",
+        lambda: type("MountedProvider", (), {"uses_thread_data_mounts": True})(),
+    )
 
     msg = InboundMessage(
         channel_name="unit-test-channel",  # absent from INBOUND_FILE_READERS -> default reader
