@@ -10,6 +10,7 @@ from deerflow.config.verification_config import VerificationConfig
 def test_defaults_receipts_on_judge_off():
     config = VerificationConfig()
     assert config.receipts_enabled is True
+    assert config.receipts_render_mode == "delegation_only"
     assert config.judge_enabled is False
     assert config.judge_model_name is None
 
@@ -29,6 +30,7 @@ def test_versioned_example_publishes_verification_section():
     assert example["config_version"] >= 33
     assert example["verification"] == {
         "receipts_enabled": True,
+        "receipts_render_mode": "delegation_only",
         "judge_enabled": False,
         "judge_model_name": None,
     }

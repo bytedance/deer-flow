@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from langchain_core.messages import ToolMessage
 
@@ -39,6 +39,12 @@ class ToolReceipt(TypedDict):
     output_sha256: str
     output_bytes: int
     created_at: str
+    # Bounded previews (<=200 chars each) enabling parent-side typed claim
+    # bindings (e.g. tests_passed matches the command text and the summary
+    # shape). output_preview takes the content TAIL — test summaries live at
+    # the end.
+    args_preview: NotRequired[str]
+    output_preview: NotRequired[str]
 
 
 def _short_hash(data: bytes) -> str:
@@ -49,7 +55,7 @@ def make_tool_receipt(tool_call: dict, message: ToolMessage) -> dict:
     """Build a receipt for one tool call/result pair (no display id yet)."""
     args = tool_call.get("args")
     args_bytes = json.dumps(args if isinstance(args, dict) else {}, sort_keys=True, default=str).encode("utf-8")
-    content = message.content if isinstance(message.content, str) else json.dumps(message.content, default=str)
+    content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
     meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
     status = str(meta.get("status") or getattr(message, "status", "success") or "success")
     return {
@@ -60,6 +66,8 @@ def make_tool_receipt(tool_call: dict, message: ToolMessage) -> dict:
         "output_sha256": _short_hash(content.encode("utf-8")),
         "output_bytes": len(content.encode("utf-8")),
         "created_at": datetime.now(UTC).isoformat(),
+        "args_preview": args_bytes.decode("utf-8", errors="replace")[:200],
+        "output_preview": content[-200:],
     }
 
 

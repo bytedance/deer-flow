@@ -158,6 +158,7 @@ def _build_runtime_middlewares(
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
+    receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
 ) -> list[AgentMiddleware]:
@@ -284,7 +285,7 @@ def _build_runtime_middlewares(
     if verification_config.receipts_enabled:
         from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware as _ToolReceiptMiddleware
 
-        tail.append(_ToolReceiptMiddleware())
+        tail.append(_ToolReceiptMiddleware(render_mode=receipts_render_mode))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
@@ -324,6 +325,9 @@ def build_lead_runtime_middlewares(
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        # The lead renders the receipt ledger only while processing subagent
+        # results (default "delegation_only"); stamping stays always-on.
+        receipts_render_mode=app_config.verification.receipts_render_mode,
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
@@ -352,6 +356,9 @@ def build_subagent_runtime_middlewares(
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        # Subagent chains always render the ledger: citations are produced in
+        # the subagent context — no ledger, no citations, Layer 1 goes inert.
+        receipts_render_mode="always",
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )

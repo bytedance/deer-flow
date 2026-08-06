@@ -172,6 +172,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["database"]["backend"] == "sqlite"
     assert upgraded["database"]["sqlite_dir"] == "custom-data"
     assert upgraded["verification"]["receipts_enabled"] is True
+    assert upgraded["verification"]["receipts_render_mode"] == "delegation_only"
     assert upgraded["verification"]["judge_enabled"] is False
     assert upgraded["verification"]["judge_model_name"] is None
 

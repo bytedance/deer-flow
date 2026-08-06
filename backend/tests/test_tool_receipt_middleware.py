@@ -106,6 +106,46 @@ def test_wrap_model_call_no_receipts_no_injection():
     assert seen["request"] is request  # untouched passthrough
 
 
+def _delegation_only_request(messages: list) -> MagicMock:
+    request = MagicMock()
+    request.messages = messages
+    request.override = lambda **kwargs: SimpleNamespace(messages=kwargs["messages"])
+    return request
+
+
+def test_delegation_only_mode_skips_plain_conversation():
+    middleware = ToolReceiptMiddleware(render_mode="delegation_only")
+    request = _delegation_only_request([HumanMessage(content="go"), _stamped_message()])
+    seen = {}
+
+    def handler(req):
+        seen["request"] = req
+        return MagicMock()
+
+    middleware.wrap_model_call(request, handler)
+    assert seen["request"] is request  # no completed delegation -> no ledger
+
+
+def test_delegation_only_mode_renders_when_processing_subagent_result():
+    middleware = ToolReceiptMiddleware(render_mode="delegation_only")
+    subagent_result = ToolMessage(
+        content="Task Succeeded. Result: done [r1]",
+        tool_call_id="tc-task",
+        name="task",
+        additional_kwargs={"subagent_status": "completed"},
+    )
+    request = _delegation_only_request([HumanMessage(content="go"), _stamped_message(), subagent_result])
+    captured = {}
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return MagicMock()
+
+    middleware.wrap_model_call(request, handler)
+    ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui")]
+    assert len(ledger_messages) == 1 and "r1" in ledger_messages[0].content
+
+
 def _build(app_config_dict: dict) -> list:
     from deerflow.agents.middlewares.tool_error_handling_middleware import _build_runtime_middlewares
     from deerflow.config.app_config import AppConfig

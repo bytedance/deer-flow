@@ -74,7 +74,7 @@ def test_render_empty_and_budget():
     receipts = extract_tool_receipts([_stamped_msg("ok", tool_call_id="tc-1", name="write_file", args={"path": "/tmp/a"})])
     text = render_tool_receipts(receipts)
     assert "r1" in text and "write_file" in text and "success" in text
-    # 反自动化偏误(设计规则 4):台账必须永远携带证据边界声明
+    # Anti-automation-bias (design rule 4): the ledger must always carry its evidence-boundary statement
     assert "do not validate claim correctness" in text
     assert len(render_tool_receipts(receipts, max_chars=10)) <= 14  # truncated + "\n..."
 

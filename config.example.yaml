@@ -1496,6 +1496,9 @@ sandbox:
 # are reserved for acceptance-criteria review and remain off by default.
 verification:
   receipts_enabled: true
+  # Lead-chain ledger rendering: 'delegation_only' renders only while
+  # processing subagent results (subagent chains always render).
+  receipts_render_mode: "delegation_only"
   judge_enabled: false
   judge_model_name: null
 
