@@ -847,7 +847,7 @@ class TestDeleteFileSafe:
             delete_file_safe(tmp_path, "nope.txt")
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
-    @pytest.mark.parametrize("filename", ["CON", "report?.pdf", "trailing "])
+    @pytest.mark.parametrize("filename", ["CON", "report?.pdf", "trailing ", r"report\draft.pdf", "...", " "])
     def test_delete_accepts_listed_legacy_posix_filename(self, tmp_path, filename):
         legacy = tmp_path / filename
         legacy.write_bytes(b"legacy")

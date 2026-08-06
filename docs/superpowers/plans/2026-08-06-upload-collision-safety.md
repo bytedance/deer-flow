@@ -34,7 +34,7 @@
 - Modify `backend/packages/harness/deerflow/client.py`: replace direct `shutil.copy2` and request-local naming with shared publication and conversion.
 - Modify `backend/app/channels/manager.py`: replace scan-then-write inbound attachment persistence with shared publication.
 - Modify `backend/app/channels/dingtalk.py`: replace the per-instance scan/claim/write sequence with shared publication.
-- Modify `backend/packages/harness/deerflow/utils/file_outline.py`: resolve owned conversion paths instead of guessing siblings.
+- Modify `backend/packages/harness/deerflow/utils/file_outline.py`: read verified direct Markdown primaries; for every other format resolve owned conversion paths instead of guessing siblings.
 - Modify upload, router, client, channel, outline, middleware, list-tool, and blocking-I/O tests named in the tasks below.
 - Modify `README.md`, `backend/AGENTS.md`, `backend/docs/API.md`, `backend/docs/FILE_UPLOAD.md`, `backend/docs/PATH_EXAMPLES.md`, and `backend/docs/rfc-extract-shared-modules.md`: document the invariant and exact paths.
 
@@ -365,7 +365,7 @@ git commit -m "fix: publish uploads without overwriting"
 - Produces: `replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Path` for atomic replace only inside the conversion namespace.
 - Produces: `convert_uploaded_file_to_markdown(upload_path: Path) -> Path | None`.
 - Changes: `delete_file_safe(base_dir: Path, filename: str) -> dict` deletes the exact owned conversion without an extension-set argument.
-- Changes: `extract_outline_for_file(file_path: Path)` reads `conversion_path_for_upload(file_path)` only.
+- Changes: `extract_outline_for_file(file_path: Path)` reads a verified regular primary when `file_path` is Markdown; otherwise it reads `conversion_path_for_upload(file_path)` only.
 
 - [ ] **Step 1: Write failing conversion ownership, deletion, and outline tests**
 

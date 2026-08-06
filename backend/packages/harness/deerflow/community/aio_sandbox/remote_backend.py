@@ -18,6 +18,9 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
+import re
+from pathlib import Path, PureWindowsPath
 
 import requests
 
@@ -30,6 +33,7 @@ from .sandbox_info import SandboxInfo
 logger = logging.getLogger(__name__)
 
 _PROVISIONER_EXTRA_MOUNT_PATHS = {
+    "/mnt/user-data/.upload-conversions",
     "/mnt/acp-workspace",
     "/mnt/skills/custom",
     "/mnt/skills/integrations",
@@ -37,6 +41,9 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
 }
+
+_UPLOADS_CONTAINER_PATH = "/mnt/user-data/uploads"
+_UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
 
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
@@ -69,10 +76,35 @@ def _provisioner_extra_mounts_payload(
 
     drop_runtime = provision_lark_cli_runtime or provision_lark_cli_broker
 
+    uploads_host_path = next(
+        (host_path for host_path, container_path, _read_only in extra_mounts if container_path == _UPLOADS_CONTAINER_PATH),
+        None,
+    )
+
+    def expected_conversion_host_path() -> str | None:
+        if uploads_host_path is None:
+            return None
+        if re.match(r"^[A-Za-z]:[\\/]", uploads_host_path) or uploads_host_path.startswith("\\\\") or "\\" in uploads_host_path:
+            return str(PureWindowsPath(uploads_host_path).parent / ".upload-conversions")
+        return str(Path(uploads_host_path).parent / ".upload-conversions")
+
+    expected_conversion_path = expected_conversion_host_path()
+
     payload: list[dict[str, object]] = []
     for host_path, container_path, read_only in extra_mounts:
         if container_path not in _PROVISIONER_EXTRA_MOUNT_PATHS:
             continue
+        if container_path == _UPLOAD_CONVERSIONS_CONTAINER_PATH:
+            if not read_only:
+                raise ValueError("Upload conversion mount must be read-only")
+            if expected_conversion_path is None:
+                raise ValueError("Upload conversion mount requires the matching uploads mount")
+            if re.match(r"^[A-Za-z]:[\\/]", expected_conversion_path) or expected_conversion_path.startswith("\\\\"):
+                matches_expected = PureWindowsPath(host_path) == PureWindowsPath(expected_conversion_path)
+            else:
+                matches_expected = os.path.normpath(host_path) == os.path.normpath(expected_conversion_path)
+            if not matches_expected:
+                raise ValueError("Upload conversion mount must belong to the same thread data directory")
         if drop_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
             continue
         payload.append(

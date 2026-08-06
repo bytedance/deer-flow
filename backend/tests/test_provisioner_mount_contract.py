@@ -24,5 +24,6 @@ def test_gateway_and_provisioner_extra_mount_contracts_match() -> None:
     provisioner_paths = _literal_assignment(provisioner_path, "ALLOWED_EXTRA_MOUNT_PATHS")
 
     assert gateway_paths == provisioner_paths
+    assert "/mnt/user-data/.upload-conversions" in gateway_paths
     assert "/mnt/integrations/lark-cli/runtime" in gateway_paths
     assert _literal_assignment(provisioner_path, "MAX_EXTRA_MOUNTS") == 9

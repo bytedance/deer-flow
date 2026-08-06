@@ -638,7 +638,11 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         if isinstance(exc.__cause__, FileNotFoundError):
             raise FileNotFoundError(f"File not found: {filename}") from exc
         raise
-    lease = UploadNameLease.acquire(base_dir, safe_name)
+    lease = UploadNameLease.acquire(
+        base_dir,
+        safe_name,
+        allow_legacy_posix_filename=True,
+    )
     try:
         file_path = base_dir / safe_name
         try:

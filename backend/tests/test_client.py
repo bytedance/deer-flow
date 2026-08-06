@@ -2625,10 +2625,11 @@ class TestUploads:
                     client.delete_upload("thread-1", "nope.txt")
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
-    def test_delete_upload_accepts_legacy_posix_filename(self, client, tmp_path):
+    @pytest.mark.parametrize("filename", ["report?.pdf", r"report\draft.pdf", "...", " "])
+    def test_delete_upload_accepts_legacy_posix_filename(self, client, tmp_path, filename):
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
-        legacy = uploads_dir / "report?.pdf"
+        legacy = uploads_dir / filename
         legacy.write_bytes(b"legacy")
 
         with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):

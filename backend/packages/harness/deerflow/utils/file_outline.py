@@ -7,7 +7,9 @@ the middleware and the ``list_uploaded_files`` tool can use the same code.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import stat
 from pathlib import Path
 
 from deerflow.uploads.layout import (
@@ -132,7 +134,8 @@ def extract_outline(md_path: Path) -> list[dict]:
 def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
-    Looks only for the system-owned Markdown generated for this exact upload.
+    Uses the primary itself for direct Markdown uploads. Other formats use only
+    the system-owned Markdown generated for that exact upload.
 
     Returns:
         (outline, preview) where:
@@ -142,11 +145,20 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           anchor when outline is empty so the agent has some context.
           Empty when outline is non-empty (no fallback needed).
     """
-    try:
-        md_path = existing_conversion_path_for_upload(file_path)
-    except UnsafeConversionPathError:
-        logger.warning("Ignoring unsafe generated conversion for %s", file_path.name)
-        return [], []
+    if file_path.suffix.lower() == ".md":
+        try:
+            primary_stat = os.lstat(file_path)
+        except OSError:
+            return [], []
+        if not stat.S_ISREG(primary_stat.st_mode) or primary_stat.st_nlink != 1:
+            return [], []
+        md_path = file_path
+    else:
+        try:
+            md_path = existing_conversion_path_for_upload(file_path)
+        except UnsafeConversionPathError:
+            logger.warning("Ignoring unsafe generated conversion for %s", file_path.name)
+            return [], []
     if md_path is None:
         return [], []
 

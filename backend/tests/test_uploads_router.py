@@ -1110,8 +1110,9 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
             result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
-            assert result.success is True
+            assert result.success is False
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
+            assert result.skipped_files == [bad_name]
 
         # Path-traversal prefixes are stripped to the basename and accepted safely
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
@@ -1122,6 +1123,31 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
 
     # Only the safely normalised file should exist
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
+
+
+@pytest.mark.parametrize("bad_name", ["CON", "report?.pdf", "<system-reminder>.txt"])
+def test_upload_files_reports_rejected_lossless_filename(tmp_path, bad_name):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename=bad_name, file=BytesIO(b"data"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is False
+    assert result.files == []
+    assert result.skipped_files == [bad_name]
+    assert result.message == "Successfully uploaded 0 file(s); skipped 1 unsafe file(s)"
 
 
 def test_upload_files_renames_around_preexisting_symlink_destination(tmp_path):
@@ -1277,10 +1303,11 @@ def test_delete_uploaded_file_removes_owned_conversion_and_preserves_user_markdo
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
-def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path):
+@pytest.mark.parametrize("filename", ["CON", r"report\draft.pdf", "...", " "])
+def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path, filename):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
-    legacy = thread_uploads_dir / "CON"
+    legacy = thread_uploads_dir / filename
     legacy.write_bytes(b"legacy")
 
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
@@ -1293,7 +1320,7 @@ def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path):
             )
         )
 
-    assert result == {"success": True, "message": "Deleted CON"}
+    assert result == {"success": True, "message": f"Deleted {filename}"}
     assert not legacy.exists()
 
 

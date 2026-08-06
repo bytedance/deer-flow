@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from deerflow.config.paths import Paths
 from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
 from deerflow.uploads.layout import conversion_path_for_upload, conversion_virtual_path
+from deerflow.utils.file_outline import extract_outline_for_file
 
 
 def _paths(tmp_path):
@@ -195,6 +196,32 @@ class TestListUploadedFiles:
         assert "outline" in result["files"][0]
         assert result["files"][0]["outline"][0]["title"] == "Heading 1"
         assert result["files"][0]["outline"][1]["title"] == "Heading 2"
+
+    def test_direct_markdown_upload_uses_primary_for_outline(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        primary = uploads_dir / "notes.md"
+        primary.write_text("# Direct heading\n\nBody text.\n", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        assert result["files"][0]["outline"] == [{"title": "Direct heading", "line": 1}]
+
+    def test_direct_markdown_outline_rejects_symlink_and_hardlink(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside.write_text("# Outside heading\n", encoding="utf-8")
+        symlink = uploads_dir / "symlink.md"
+        try:
+            symlink.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is not available")
+            raise
+        hardlink = uploads_dir / "hardlink.md"
+        os.link(outside, hardlink)
+
+        assert extract_outline_for_file(symlink) == ([], [])
+        assert extract_outline_for_file(hardlink) == ([], [])
 
     def test_long_filename_result_includes_exact_generated_markdown_path(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)

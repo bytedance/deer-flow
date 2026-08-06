@@ -423,6 +423,7 @@ async def upload_files(
                 original_filename = normalize_filename(file.filename)
             except ValueError:
                 logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                skipped_files.append(file.filename)
                 continue
 
             publication, file_size, total_size = await _write_upload_file_with_limits(

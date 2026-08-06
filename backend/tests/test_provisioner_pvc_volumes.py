@@ -332,6 +332,52 @@ class TestBuildVolumeMounts:
         assert extra_mount.name == "extra-0"
         assert extra_mount.sub_path == "deer-flow/users/alice/integrations/lark-cli/config"
 
+    def test_conversion_mount_is_exact_thread_read_only_subpath(self, provisioner_module):
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        conversion_mount = provisioner_module.ExtraMount(
+            host_path="/state/users/alice/threads/thread-1/user-data/.upload-conversions",
+            container_path="/mnt/user-data/.upload-conversions",
+            read_only=True,
+        )
+
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=[conversion_mount],
+        )
+
+        nested = next(mount for mount in mounts if mount.mount_path == "/mnt/user-data/.upload-conversions")
+        assert nested.read_only is True
+        assert nested.sub_path == "deer-flow/users/alice/threads/thread-1/user-data/.upload-conversions"
+
+    @pytest.mark.parametrize(
+        "mount",
+        [
+            {
+                "host_path": "/state/users/alice/threads/thread-1/user-data/.upload-conversions",
+                "container_path": "/mnt/user-data/.upload-conversions",
+                "read_only": False,
+            },
+            {
+                "host_path": "/state/users/bob/threads/thread-1/user-data/.upload-conversions",
+                "container_path": "/mnt/user-data/.upload-conversions",
+                "read_only": True,
+            },
+        ],
+    )
+    def test_conversion_mount_rejects_writable_or_cross_user_source(self, provisioner_module, mount):
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+
+        with pytest.raises(provisioner_module.HTTPException) as exc_info:
+            provisioner_module._build_volume_mounts(
+                "thread-1",
+                user_id="alice",
+                extra_mounts=[provisioner_module.ExtraMount(**mount)],
+            )
+
+        assert exc_info.value.status_code == 400
+
     def test_extra_mount_rejects_unknown_container_path(self, provisioner_module):
         """Only first-party managed mount paths are accepted."""
         provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"

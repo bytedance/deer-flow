@@ -288,9 +288,19 @@ class UploadNameLease:
     _state_lock: threading.Lock = field(default_factory=threading.Lock)
 
     @classmethod
-    def acquire(cls, uploads_dir: Path, filename: str) -> "UploadNameLease":
+    def acquire(
+        cls,
+        uploads_dir: Path,
+        filename: str,
+        *,
+        allow_legacy_posix_filename: bool = False,
+    ) -> "UploadNameLease":
         """Acquire the stable name lease, blocking until it is available."""
-        uploads_dir, coordination_key, digest = cls._validate_request(uploads_dir, filename)
+        uploads_dir, coordination_key, digest = cls._validate_request(
+            uploads_dir,
+            filename,
+            allow_legacy_posix_filename=allow_legacy_posix_filename,
+        )
         thread_lock_key, thread_lock_entry = _acquire_thread_lock(uploads_dir, coordination_key)
         lock_file: BinaryIO | None = None
         try:
@@ -312,9 +322,19 @@ class UploadNameLease:
             raise
 
     @classmethod
-    def try_acquire(cls, uploads_dir: Path, filename: str) -> "UploadNameLease | None":
+    def try_acquire(
+        cls,
+        uploads_dir: Path,
+        filename: str,
+        *,
+        allow_legacy_posix_filename: bool = False,
+    ) -> "UploadNameLease | None":
         """Acquire a name lease without waiting, or return ``None`` when busy."""
-        uploads_dir, coordination_key, digest = cls._validate_request(uploads_dir, filename)
+        uploads_dir, coordination_key, digest = cls._validate_request(
+            uploads_dir,
+            filename,
+            allow_legacy_posix_filename=allow_legacy_posix_filename,
+        )
         thread_lock = _try_acquire_thread_lock(uploads_dir, coordination_key)
         if thread_lock is None:
             return None
@@ -346,15 +366,26 @@ class UploadNameLease:
             raise
 
     @staticmethod
-    def _validate_request(uploads_dir: Path, filename: str) -> tuple[Path, str, str]:
-        if not filename or Path(filename).name != filename or "\\" in filename:
+    def _validate_request(
+        uploads_dir: Path,
+        filename: str,
+        *,
+        allow_legacy_posix_filename: bool = False,
+    ) -> tuple[Path, str, str]:
+        allow_legacy = allow_legacy_posix_filename and os.name != "nt"
+        if not filename or Path(filename).name != filename or ("\\" in filename and not allow_legacy):
             raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
         if len(filename.encode("utf-8")) > 255:
             raise UnsafeUploadPathError("Upload lease filename is too long")
         uploads_dir = Path(uploads_dir)
         coordination_key = portable_name_coordination_key(filename)
         if not coordination_key:
-            raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
+            if not allow_legacy:
+                raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
+            # New uploads reject components made entirely from Win32-ignored
+            # dots/spaces. Existing POSIX entries still need a stable, distinct
+            # lock key so they can be deleted after upgrade.
+            coordination_key = f"legacy-posix:{unicodedata.normalize('NFC', filename).casefold()}"
         digest = hashlib.sha256(coordination_key.encode("utf-8")).hexdigest()
         return uploads_dir, coordination_key, digest
 

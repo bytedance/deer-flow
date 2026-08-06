@@ -105,6 +105,7 @@ SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
 MAX_EXTRA_MOUNTS = 9
 ALLOWED_EXTRA_MOUNT_PATHS = {
+    "/mnt/user-data/.upload-conversions",
     "/mnt/acp-workspace",
     "/mnt/skills/custom",
     "/mnt/skills/integrations",
@@ -112,6 +113,8 @@ ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
 }
+UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
+UPLOAD_CONVERSIONS_DIRNAME = ".upload-conversions"
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -175,7 +178,12 @@ def _normalize_extra_mount_container_path(container_path: str) -> str:
     return normalized
 
 
-def _validated_extra_mounts(extra_mounts: list["ExtraMount"] | None) -> list["ExtraMount"]:
+def _validated_extra_mounts(
+    extra_mounts: list["ExtraMount"] | None,
+    *,
+    thread_id: str | None = None,
+    user_id: str = DEFAULT_USER_ID,
+) -> list["ExtraMount"]:
     """Validate extra mounts before converting them into K8s hostPath/PVC mounts."""
     if not extra_mounts:
         return []
@@ -193,6 +201,27 @@ def _validated_extra_mounts(extra_mounts: list["ExtraMount"] | None) -> list["Ex
             raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}")
 
         container_path = _normalize_extra_mount_container_path(mount.container_path)
+        if container_path == UPLOAD_CONVERSIONS_CONTAINER_PATH:
+            if not mount.read_only:
+                raise HTTPException(status_code=400, detail="Upload conversion mount must be read-only")
+            if thread_id is None:
+                raise HTTPException(status_code=400, detail="Upload conversion mount requires a thread")
+            expected_host_path = os.path.normpath(
+                join_host_path(
+                    host_base_dir,
+                    "users",
+                    user_id,
+                    "threads",
+                    thread_id,
+                    "user-data",
+                    UPLOAD_CONVERSIONS_DIRNAME,
+                )
+            )
+            if host_path != expected_host_path:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Upload conversion mount must match the requested user and thread",
+                )
         if container_path in seen_container_paths:
             raise HTTPException(status_code=400, detail=f"Duplicate extra mount path: {container_path}")
         seen_container_paths.add(container_path)
@@ -259,7 +288,13 @@ def _lark_broker_credential_mounts(extra_mounts: list["ExtraMount"] | None) -> d
     ``/var/lark/{config,data}`` paths.
     """
     result: dict[str, ExtraMount] = {}
-    for mount in _validated_extra_mounts(extra_mounts):
+    credential_candidates = [
+        mount
+        for mount in extra_mounts or []
+        if posixpath.normpath(mount.container_path)
+        in {LARK_CLI_CONFIG_CONTAINER_PATH, LARK_CLI_DATA_CONTAINER_PATH}
+    ]
+    for mount in _validated_extra_mounts(credential_candidates):
         normalized = posixpath.normpath(mount.container_path)
         if normalized in (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_CLI_DATA_CONTAINER_PATH):
             result[normalized] = mount
@@ -436,9 +471,16 @@ def _sandbox_url(sandbox_id: str, node_port: int | None = None) -> str:
     return f"http://{NODE_HOST}:{node_port}"
 
 
-def _build_extra_volumes(extra_mounts: list[ExtraMount] | None = None) -> list[k8s_client.V1Volume]:
+def _build_extra_volumes(
+    extra_mounts: list[ExtraMount] | None = None,
+    *,
+    thread_id: str | None = None,
+    user_id: str = DEFAULT_USER_ID,
+) -> list[k8s_client.V1Volume]:
     volumes: list[k8s_client.V1Volume] = []
-    for index, mount in enumerate(_validated_extra_mounts(extra_mounts)):
+    for index, mount in enumerate(
+        _validated_extra_mounts(extra_mounts, thread_id=thread_id, user_id=user_id)
+    ):
         if USERDATA_PVC_NAME:
             volumes.append(
                 k8s_client.V1Volume(
@@ -462,9 +504,16 @@ def _build_extra_volumes(extra_mounts: list[ExtraMount] | None = None) -> list[k
     return volumes
 
 
-def _build_extra_volume_mounts(extra_mounts: list[ExtraMount] | None = None) -> list[k8s_client.V1VolumeMount]:
+def _build_extra_volume_mounts(
+    extra_mounts: list[ExtraMount] | None = None,
+    *,
+    thread_id: str | None = None,
+    user_id: str = DEFAULT_USER_ID,
+) -> list[k8s_client.V1VolumeMount]:
     mounts: list[k8s_client.V1VolumeMount] = []
-    for index, mount in enumerate(_validated_extra_mounts(extra_mounts)):
+    for index, mount in enumerate(
+        _validated_extra_mounts(extra_mounts, thread_id=thread_id, user_id=user_id)
+    ):
         volume_mount = k8s_client.V1VolumeMount(
             name=_extra_mount_volume_name(index),
             mount_path=mount.container_path,
@@ -578,7 +627,9 @@ def _build_volumes(
                 extra_mounts,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
-            )
+            ),
+            thread_id=thread_id,
+            user_id=user_id,
         )
     )
     # The runtime emptyDir is shared by the init container (writer) and the
@@ -688,7 +739,9 @@ def _build_volume_mounts(
                 extra_mounts,
                 provision_lark_cli_runtime=provision_lark_cli_runtime,
                 provision_lark_cli_broker=provision_lark_cli_broker,
-            )
+            ),
+            thread_id=thread_id,
+            user_id=user_id,
         )
     )
     # Sandbox reads the runtime dir (real binary in Pattern A, shim in Pattern B).

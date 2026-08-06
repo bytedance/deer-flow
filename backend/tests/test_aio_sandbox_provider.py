@@ -275,13 +275,20 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     payload = remote_backend._provisioner_extra_mounts_payload(mounts)
     payload_paths = [str(item["container_path"]) for item in payload]
     assert len(payload_paths) == len(set(payload_paths))
+    conversion_payload = next(item for item in payload if item["container_path"] == "/mnt/user-data/.upload-conversions")
+    assert conversion_payload["read_only"] is True
 
     provisioner_module.DEER_FLOW_HOST_BASE_DIR = str(home)
-    validated = provisioner_module._validated_extra_mounts([provisioner_module.ExtraMount(**item) for item in payload])
+    validated = provisioner_module._validated_extra_mounts(
+        [provisioner_module.ExtraMount(**item) for item in payload],
+        thread_id="thread-1",
+        user_id="alice",
+    )
     validated_paths = [mount.container_path for mount in validated]
 
     assert len(validated_paths) == len(set(validated_paths))
     assert set(validated_paths) == {
+        "/mnt/user-data/.upload-conversions",
         "/mnt/acp-workspace",
         "/mnt/skills/custom",
         "/mnt/skills/integrations",
@@ -289,6 +296,24 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
         lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
         lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
     }
+
+
+@pytest.mark.parametrize(
+    "conversion_mount",
+    [
+        ("/state/users/alice/threads/thread-1/user-data/.upload-conversions", "/mnt/user-data/.upload-conversions", False),
+        ("/state/users/bob/threads/thread-1/user-data/.upload-conversions", "/mnt/user-data/.upload-conversions", True),
+    ],
+)
+def test_provisioner_payload_rejects_unsafe_conversion_mount(conversion_mount):
+    remote_backend = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    mounts = [
+        ("/state/users/alice/threads/thread-1/user-data/uploads", "/mnt/user-data/uploads", False),
+        conversion_mount,
+    ]
+
+    with pytest.raises(ValueError, match="Upload conversion mount"):
+        remote_backend._provisioner_extra_mounts_payload(mounts)
 
 
 def test_join_host_path_preserves_windows_drive_letter_style():
@@ -1062,6 +1087,18 @@ def test_aio_wider_id_separates_known_legacy_collision():
         thread_b,
         user_b,
     )
+
+
+def test_aio_mount_contract_upgrade_does_not_reuse_pre_upgrade_container_id():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    user_id = "alice"
+    thread_id = "thread-upgrade"
+    pre_upgrade_id = hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+
+    current_id = aio_mod.AioSandboxProvider._deterministic_sandbox_id(thread_id, user_id)
+
+    assert current_id != pre_upgrade_id
+    assert current_id == hashlib.sha256(f"mount-v{aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
 
 def test_aio_forced_collision_never_overwrites_active_tenant(

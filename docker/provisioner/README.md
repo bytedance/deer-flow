@@ -1,6 +1,6 @@
 # DeerFlow Sandbox Provisioner
 
-The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the DeerFlow backend to create, monitor, and destroy isolated sandbox environments for code execution.
+The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the DeerFlow backend to create, monitor, and destroy isolated sandbox environments for code execution. Generated upload conversions are passed only as the fixed `/mnt/user-data/.upload-conversions` nested mount; the Provisioner verifies that its source belongs to the requested user/thread and that it is read-only before building either a hostPath or PVC-backed Pod.
 
 ## Architecture
 

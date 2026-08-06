@@ -61,6 +61,8 @@ from .ownership import (
 from .remote_backend import RemoteSandboxBackend
 from .sandbox_info import SandboxInfo
 
+SANDBOX_MOUNT_CONTRACT_VERSION = 2
+
 logger = logging.getLogger(__name__)
 
 # Default configuration
@@ -751,11 +753,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Includes user_id so a previously-created default-bucket sandbox cannot be
         reused for an auth/channel run that should mount a user-scoped bucket.
 
-        During a mixed-version rollout, older 8-character containers are not
-        reused under the new 16-character identity. They remain eligible for
+        The mount-contract version is part of the identity. During a rolling
+        upgrade, a container created before a required mount was added is never
+        discovered or reclaimed by the new provider. It remains eligible for
         normal orphan cleanup while the first new-version acquire cold-starts.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return hashlib.sha256(f"mount-v{SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
     def _assert_active_identity_available_locked(
         self,
