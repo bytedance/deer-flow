@@ -1,8 +1,8 @@
 # Upload Collision Safety Design
 
-**Issue:** #3750  
-**Status:** Approved in conversation; awaiting review of this written specification  
-**Scope:** Gateway uploads, embedded client uploads, inbound IM attachments, DingTalk attachments, generated Markdown conversions, outline lookup, and upload deletion
+**Issue:** #3750
+**Status:** Approved
+**Scope:** Gateway uploads, embedded client uploads, inbound IM attachments, generated Markdown conversions, outline lookup, and upload deletion
 
 ## Problem
 
@@ -100,7 +100,8 @@ request-local `seen_filenames` are removed from adapters rather than retained as
 naming mechanism.
 
 The publisher returns the actual filename chosen. Gateway, embedded client, generic IM,
-and DingTalk adapters all use it instead of implementing their own scan-then-write flow.
+Feishu, DingTalk, and WeChat download staging all use it instead of implementing their
+own scan-then-write flow.
 
 ## Conversion Publication and Ownership
 
@@ -152,10 +153,17 @@ layout as the Gateway. Repeated calls cannot overwrite an earlier upload.
 Downloaded attachment bytes are staged and published by the shared publisher. Correctness
 does not depend on a pre-download directory scan, so parallel messages are safe.
 
-### DingTalk
+### Feishu and DingTalk
 
-DingTalk uses the same publisher. Its in-process lock may remain for provider-specific
-coordination, but it is not relied on for cross-process or cross-adapter safety.
+Both direct-to-thread adapters use the same publisher and preserve the unresolved upload
+directory path so the publisher can reject a planted directory symlink. No process-local
+lock or pre-publication directory scan is relied on for correctness.
+
+### WeChat
+
+WeChat first downloads and decrypts inbound media into its channel state directory before
+the generic IM ingestion step. This temporary materialization also uses the publisher, so
+parallel messages cannot overwrite one another before the thread upload copy occurs.
 
 ### Sandbox synchronization
 
@@ -190,7 +198,7 @@ Tests are written before implementation and cover:
    deterministic unique names.
 2. Existing files and symlinks are never followed or replaced.
 3. Gateway uploads collide safely across separate and concurrent requests.
-4. Embedded, generic IM, and DingTalk ingress paths follow the same naming behavior.
+4. Embedded, generic IM, Feishu, DingTalk, and WeChat ingress paths follow the same naming behavior.
 5. Same-stem files with different extensions receive distinct conversion paths.
 6. A user-uploaded `report.md` is neither overwritten by converting `report.pdf` nor
    removed when `report.pdf` is deleted.

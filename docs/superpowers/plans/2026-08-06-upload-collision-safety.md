@@ -4,7 +4,7 @@
 
 **Goal:** Make every DeerFlow upload ingress preserve same-name files under concurrent writes while isolating generated Markdown so conversion and deletion never overwrite or remove user uploads.
 
-**Architecture:** A shared upload manager stages complete payloads and publishes them with an atomic hard-link no-replace primitive, returning the actual `_N` filename. A focused layout module maps each primary upload to a system-owned `.upload-conversions/<full-primary-name>.md` asset, and a conversion wrapper publishes that asset atomically. Gateway, embedded client, generic IM, and DingTalk become transport adapters over these shared primitives.
+**Architecture:** A shared upload manager stages complete payloads and publishes them with an atomic hard-link no-replace primitive, returning the actual `_N` filename. A focused layout module maps each primary upload to a system-owned `.upload-conversions/<full-primary-name>.md` asset, and a conversion wrapper publishes that asset atomically. Gateway, embedded client, generic IM, Feishu, DingTalk, and WeChat download staging become transport adapters over these shared primitives.
 
 **Tech Stack:** Python 3.12+, pathlib/os/tempfile/shutil, asyncio, FastAPI/Pydantic, pytest/pytest-asyncio, unittest.mock, Ruff.
 
@@ -1135,11 +1135,11 @@ In DingTalk `_persist`, keep owner-scoped directory creation but replace the loc
 paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 uploads_dir = paths.sandbox_uploads_dir(
     thread_id, user_id=effective_user_id
-).resolve()
+)
 return publish_upload_bytes(uploads_dir, safe_filename, content)
 ```
 
-Remove `_file_write_lock` because the shared primitive supplies cross-thread and cross-process correctness. Keep the other DingTalk locks. Build the returned path through `upload_virtual_path(resolved_target.name)`.
+Do not resolve the upload directory before publication: the shared publisher must inspect and reject a planted directory symlink itself. Remove `_file_write_lock` because the shared primitive supplies cross-thread and cross-process correctness. Keep the other DingTalk locks. Build the returned path through `upload_virtual_path(resolved_target.name)`.
 
 - [ ] **Step 5: Refresh the channel blocking-I/O regression descriptions**
 
