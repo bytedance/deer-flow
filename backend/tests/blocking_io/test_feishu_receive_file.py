@@ -124,3 +124,55 @@ async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monke
     assert result == "/mnt/user-data/uploads/report.pdf"
     uploaded = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.pdf"
     assert await asyncio.to_thread(uploaded.read_bytes) == b"DATA"
+
+
+async def test_concurrent_same_name_files_preserve_every_payload(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: _MountedProvider())
+    payloads = [f"payload-{index}".encode() for index in range(8)]
+    channels = [_channel_with_file(payload, "report.pdf") for payload in payloads]
+
+    results = await asyncio.gather(
+        *(
+            channel._receive_single_file(
+                f"message-{index}",
+                f"file-key-{index}",
+                "file",
+                "thread-1",
+                user_id="ou-user",
+            )
+            for index, channel in enumerate(channels)
+        )
+    )
+
+    assert len(set(results)) == len(payloads)
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    assert {await asyncio.to_thread((uploads / result.rsplit("/", 1)[-1]).read_bytes) for result in results} == set(payloads)
+
+
+async def test_receive_file_renames_around_planted_symlink(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    await asyncio.to_thread(paths.ensure_thread_dirs, "thread-1", user_id="ou-user")
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    outside = tmp_path / "outside.pdf"
+    await asyncio.to_thread((uploads / "report.pdf").symlink_to, outside)
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: _MountedProvider())
+
+    result = await _channel_with_file(b"DATA", "report.pdf")._receive_single_file(
+        "message-1",
+        "file-key",
+        "file",
+        "thread-1",
+        user_id="ou-user",
+    )
+
+    assert result == "/mnt/user-data/uploads/report_1.pdf"
+    assert not await asyncio.to_thread(outside.exists)
+    assert await asyncio.to_thread((uploads / "report.pdf").is_symlink)
+    assert await asyncio.to_thread((uploads / "report_1.pdf").read_bytes) == b"DATA"

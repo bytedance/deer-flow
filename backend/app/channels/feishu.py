@@ -22,9 +22,11 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.layout import upload_virtual_path
+from deerflow.uploads.manager import publish_upload_bytes
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -447,11 +449,7 @@ class FeishuChannel(Channel):
         def _persist():
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
-            resolved_target = uploads_dir / filename
-            # Use thread_lock to avoid filename conflicts when writing.
-            with self._thread_lock:
-                resolved_target.write_bytes(content)
-            return resolved_target
+            return publish_upload_bytes(uploads_dir, filename, content)
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
@@ -459,7 +457,7 @@ class FeishuChannel(Channel):
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", filename, type)
             return f"Failed to obtain the [{type}]"
 
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
+        virtual_path = upload_virtual_path(resolved_target.name)
 
         try:
             sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
