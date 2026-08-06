@@ -176,9 +176,10 @@ parallel messages cannot overwrite one another before the thread upload copy occ
 ### Sandbox synchronization
 
 The existing primary upload sync remains unchanged. Generated conversion sync uses its
-exact virtual path under `/mnt/user-data/.upload-conversions/`. Local and AIO providers
-mount that namespace explicitly read-only; non-mounted providers sync the exact file
-explicitly.
+exact virtual path under `/mnt/user-data/.upload-conversions/`. Mounted AIO providers use
+a read-only nested mount, while Local structured file APIs enforce a read-only path
+mapping; Local host bash is outside that boundary. Non-mounted providers sync an isolated
+copy of the exact file and never receive authoritative host lock state.
 
 ## Error Handling
 

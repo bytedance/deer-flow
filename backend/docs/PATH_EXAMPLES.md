@@ -282,7 +282,7 @@ function FileUploadList({ threadId }: { threadId: string }) {
 4. **Markdown 转换**
    - 转换成功时，会返回额外的 `markdown_*` 字段
    - 常规生成文件位于 `.upload-conversions/<完整主文件名>.md`；超长名称使用 UTF-8 安全前缀和完整 SHA-256 摘要，因此始终以上传响应中的 `markdown_*` 字段为准
-   - `.upload-conversions` 在 Local 与 AIO 沙箱内只读，并且不会出现在主文件列表中
+   - AIO 挂载模式以只读挂载暴露 `.upload-conversions`；Local 结构化文件 API 通过只读映射拒绝写入，但 Local 宿主机 bash 不受该映射约束；该目录不会出现在主文件列表中
    - 同名主文件按 `file.pdf`、`file_1.pdf`、`file_2.pdf` 原子发布，不会覆盖
    - 删除主文件会等待该实际文件名的活跃生命周期，然后只删除其精确生成资产，不会删除用户上传的 `uploads/file.md`
    - `.upload-*.part` 是内部暂存名称，不能作为用户上传 basename

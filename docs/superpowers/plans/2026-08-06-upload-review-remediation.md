@@ -4,7 +4,7 @@
 
 **Goal:** Resolve every actionable finding from the independent review of PR #4704 and reach a fresh zero-finding review before marking the PR ready.
 
-**Architecture:** Add a cross-process per-filename lease that is acquired before atomic publication and retained through every pathname-dependent side effect. Conversion and deletion share the lease; `PublishedUpload` carries an inode identity for safe rollback. Generated conversions gain deterministic long-name mapping and explicit read-only Local/AIO mounts, while all async conversion filesystem work is offloaded.
+**Architecture:** Add a cross-process per-filename lease that is acquired before atomic publication and retained through every pathname-dependent side effect. Conversion and deletion share the lease; `PublishedUpload` carries an inode identity for safe rollback. Generated conversions gain deterministic long-name mapping and explicit mounted-AIO/Local-file-API read-only boundaries, while all async conversion filesystem work is offloaded and cancellation drains active workers.
 
 **Tech Stack:** Python 3.12, asyncio, POSIX `fcntl` / Windows `msvcrt`, FastAPI, pytest, pytest-asyncio, Blockbuster, Ruff.
 
@@ -13,10 +13,10 @@
 - Keep PR #4704 in Draft until a fresh independent review reports zero actionable findings.
 - Use test-driven development: every production behavior change must have a test observed failing for the intended reason before implementation.
 - Locks are per actual filename, work across threads and processes, and never require a database or manifest.
-- Stable lock files live under `user-data/.upload-conversions/.locks/` and are not deleted during normal operation.
+- Stable name-lock files live under `user-data/.upload-conversions/.locks/` and are not deleted during normal operation; transient stage-liveness locks live below `.locks/stages/`.
 - Unrelated filenames remain concurrent; only deletion of the exact name waits for its active lifecycle.
 - Conversion failure remains non-fatal to a successfully published primary upload.
-- Local and AIO sandboxes see `.upload-conversions` through a read-only mapping.
+- Mounted AIO uses a read-only conversion mount; Local structured file APIs use a read-only mapping, while Local host bash remains outside that enforcement boundary.
 - All filesystem calls made from async conversion and Gateway code run off the event loop.
 - Normal conversion names remain `<actual-primary-filename>.md`; overlong components use deterministic UTF-8-safe truncation plus a full SHA-256 digest.
 - Preserve public response/list/delete compatibility except where an internal staging-pattern filename is now rejected as unsafe.
@@ -124,7 +124,7 @@ def test_abort_unlinks_stage_when_close_raises(tmp_path):
 Add a multiprocessing regression with a top-level child-process helper: the parent holds
 the lease for `report.pdf`, the child attempts `delete_file_safe()`, and a queue/event
 proves the child cannot finish before release. This is the cross-process acceptance gate;
-the thread test separately protects the in-process striped-lock behavior.
+the thread test separately protects the in-process exact-name keyed-lock behavior.
 
 - [ ] **Step 2: Run the tests and verify the intended failures**
 
@@ -162,7 +162,10 @@ def ensure_upload_lock_dir(uploads_dir: Path) -> Path:
     return lock_dir
 ```
 
-Create `lease.py` using the repository's existing `fcntl`/`msvcrt` pattern. Use 64 pre-created `threading.Lock` stripes chosen from the first digest byte; do not retain an unbounded dictionary of filenames:
+Create `lease.py` using the repository's existing `fcntl`/`msvcrt` pattern. Use exact-name
+in-process locks keyed by upload-directory identity and filename. Reference-count holders
+and waiters, and remove the dictionary entry when its count reaches zero so unrelated names
+never alias and historical names are not retained:
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -190,10 +193,10 @@ class UploadNameLease:
     def acquire(cls, uploads_dir: Path, filename: str) -> "UploadNameLease":
         digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
         lock_path = ensure_upload_lock_dir(uploads_dir) / f"{digest}.lock"
-        # acquire stripe, open stable lock file, then acquire fcntl/msvcrt lock
+        # acquire the exact-name thread lock, then the stable fcntl/msvcrt lock
 
     def release(self) -> None:
-        # unlock and close the file before releasing the stripe; idempotent
+        # unlock and close the file before releasing the keyed thread lock; idempotent
 ```
 
 Keep the lock file in place after release.
@@ -549,7 +552,7 @@ git commit -m "fix: retain upload leases through adapter sync"
 
 ---
 
-### Task 5: Read-only conversion mounts in Local and AIO sandboxes
+### Task 5: Read-only conversion boundaries for mounted AIO and Local file APIs
 
 **Files:**
 - Modify: `backend/packages/harness/deerflow/sandbox/local/local_sandbox_provider.py`
@@ -559,7 +562,8 @@ git commit -m "fix: retain upload leases through adapter sync"
 
 **Interfaces:**
 - Consumes: `UPLOAD_CONVERSIONS_DIRNAME`, `ensure_conversion_dir`, and existing `join_host_path`.
-- Produces: explicit read-only `/mnt/user-data/.upload-conversions` mappings.
+- Produces: an explicit read-only AIO mount and a Local structured-file mapping for
+  `/mnt/user-data/.upload-conversions`; Local host bash is documented as outside the mapping.
 
 - [ ] **Step 1: Write failing mount-contract tests**
 
@@ -590,8 +594,8 @@ Expected: neither provider exposes the explicit mapping.
 - [ ] **Step 3: Add the Local and AIO mappings**
 
 Both builders call `ensure_conversion_dir(paths.sandbox_uploads_dir(...))` before returning.
-Local adds a longer, read-only `PathMapping` beneath the aggregate writable user-data map.
-AIO adds:
+Local adds a longer, read-only `PathMapping` beneath the aggregate writable user-data map
+for structured file operations. AIO adds:
 
 ```python
 (
@@ -635,8 +639,24 @@ git commit -m "fix: mount upload conversions read-only"
 
 Set the remediation spec status to `Implemented; awaiting independent review`. Explain that
 delete waits only for an active lifecycle of the exact filename. Document that generated
-conversions are read-only inside mounted sandboxes and that overlong conversion components
-use `<truncated-primary>.<full-sha256>.md`. State that `.upload-*.part` is reserved.
+conversions are read-only through mounted AIO and Local structured file interfaces, while
+Local host bash and non-mounted private copies have narrower guarantees. Overlong conversion
+components use `<truncated-primary>.<full-sha256>.md`. State that `.upload-*.part` is reserved.
+
+### Independent review round 2 amendments
+
+- Replace hash-striped thread locks with reference-counted exact-name locks; unrelated
+  filenames must never deadlock merely because their digests share a stripe.
+- Run blocking lease acquisition on a dedicated executor so same-name waiters cannot starve
+  lease release in the general file-I/O pool. Windows acquisition retries until success.
+- Give each active stage a cross-process liveness lock and make startup cleanup skip any
+  stage whose lock is held.
+- Drain conversion and publication workers before cancellation cleans a stage or releases a
+  generation lease.
+- Track successful non-mounted sandbox updates and remove those exact remote copies before
+  host rollback on later failure or cancellation.
+- Describe read-only behavior at the actual enforcement boundary: mounted AIO and Local
+  structured file APIs, not Local host bash or a non-mounted private copy.
 
 - [ ] **Step 2: Run the complete focused suite**
 

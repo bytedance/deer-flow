@@ -130,7 +130,7 @@ Deletion:  删除 report.pdf 时只删除 .upload-conversions/report.pdf.md；
            /mnt/user-data/uploads/report.md 永远不会被推断为生成文件或自动删除。
 ```
 
-通常生成名为 `<实际主文件名>.md`。如果这一文件名组件会超过 255 个 UTF-8 字节，系统会使用 UTF-8 安全截断的主文件名前缀、完整 SHA-256 摘要和 `.md`，并在响应中返回精确的 `markdown_*` 路径。客户端和 Agent 不应自行拼接生成路径。Local 与 AIO 沙箱都将 `.upload-conversions` 显式挂载为只读；只有 DeerFlow 宿主进程中的转换代码可以写入生成文件和内部锁。
+通常生成名为 `<实际主文件名>.md`。如果这一文件名组件会超过 255 个 UTF-8 字节，系统会使用 UTF-8 安全截断的主文件名前缀、完整 SHA-256 摘要和 `.md`，并在响应中返回精确的 `markdown_*` 路径。客户端和 Agent 不应自行拼接生成路径。AIO 挂载模式把 `.upload-conversions` 显式挂载为只读；Local 的结构化文件 API 通过只读路径映射拒绝写入，但可选的 Local 宿主机 bash 不受该映射约束，不应对不受信任任务启用。非挂载远端沙箱得到的是独立同步副本，该副本可能可写，但不会修改宿主机上的权威生成文件或内部锁。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -181,8 +181,8 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 上传流程采用“线程目录优先”策略：
 - 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
-- Local 与 AIO 的挂载模式会把 `/mnt/user-data/.upload-conversions` 单独映射为只读，即使 `/mnt/user-data` 或主上传目录可写
-- 默认情况下，非本地沙箱通过 `acquire_async` 获取后，再额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见
+- AIO 挂载模式把 `/mnt/user-data/.upload-conversions` 单独挂载为只读；Local 的结构化文件 API 通过更具体的只读路径映射执行同一规则，但 Local 宿主机 bash 不属于该边界
+- 默认情况下，非本地沙箱通过 `acquire_async` 获取后，再额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见；同步副本是沙箱私有副本，失败时只回滚本次已完成同步的精确路径
 - 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；上传路由会跳过 sandbox acquire 和逐文件同步
 - 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
 
