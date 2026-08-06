@@ -804,3 +804,26 @@ class LocalSandbox(Sandbox):
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
+
+    def remove_file(self, path: str) -> None:
+        mapping_match = self._find_path_mapping(path)
+        if mapping_match is None:
+            resolved = ResolvedPath(str(path), None)
+        else:
+            mapping, relative = mapping_match
+            local_root = Path(self._resolved_local_paths[mapping])
+            candidate = local_root / relative if relative else local_root
+            try:
+                candidate.parent.resolve().relative_to(local_root)
+            except ValueError as exc:
+                raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path) from exc
+            resolved = ResolvedPath(str(candidate), mapping)
+
+        if self._is_resolved_path_read_only(resolved):
+            raise OSError(errno.EROFS, "Read-only file system", path)
+        try:
+            os.unlink(resolved.path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise type(exc)(exc.errno, exc.strerror, path) from None

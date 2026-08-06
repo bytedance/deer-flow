@@ -182,8 +182,57 @@ class TestReadOnlyPath:
             sandbox.update_file("/mnt/skills/existing.py", b"updated")
         assert exc_info.value.errno == errno.EROFS
 
+    def test_remove_file_blocked_on_read_only(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        existing_file = skills_dir / "existing.py"
+        existing_file.write_bytes(b"original")
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True)],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.remove_file("/mnt/skills/existing.py")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert existing_file.read_bytes() == b"original"
+
+    def test_remove_file_deletes_exact_writable_path(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        existing_file = data_dir / "existing.txt"
+        existing_file.write_bytes(b"payload")
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/data", local_path=str(data_dir), read_only=False)],
+        )
+
+        sandbox.remove_file("/mnt/data/existing.txt")
+
+        assert not existing_file.exists()
+
 
 class TestSymlinkEscapes:
+    def test_remove_file_blocks_symlinked_parent_escape(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        victim = outside_dir / "victim.txt"
+        victim.write_text("protected", encoding="utf-8")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False)],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.remove_file("/mnt/data/escape/victim.txt")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert victim.read_text(encoding="utf-8") == "protected"
+
     def test_read_file_blocks_symlink_escape_from_mount(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
