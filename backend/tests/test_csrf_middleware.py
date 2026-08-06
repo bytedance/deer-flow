@@ -94,8 +94,9 @@ def test_auth_post_allows_same_origin_default_port_equivalence():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_forwarded_same_origin():
-    client = TestClient(_make_app(), base_url="http://internal:8000")
+def test_auth_post_allows_forwarded_same_origin(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("10.0.0.2", 12345))
 
     response = client.post(
         "/api/v1/auth/login/local",
@@ -110,8 +111,27 @@ def test_auth_post_allows_forwarded_same_origin():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
+def test_auth_post_rejects_spoofed_forwarded_same_origin_without_trusted_proxy(monkeypatch):
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
     client = TestClient(_make_app(), base_url="http://internal:8000")
+
+    response = client.post(
+        "/api/v1/auth/login/local",
+        headers={
+            "Origin": "https://deerflow.example",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "deerflow.example",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Cross-site auth request denied."
+    assert response.cookies.get("csrf_token") is None
+
+
+def test_auth_post_allows_forwarded_same_origin_with_non_default_port(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("10.0.0.2", 12345))
 
     response = client.post(
         "/api/v1/auth/login/local",
@@ -126,8 +146,9 @@ def test_auth_post_allows_forwarded_same_origin_with_non_default_port():
     assert response.cookies.get("csrf_token")
 
 
-def test_auth_post_allows_rfc_forwarded_same_origin():
-    client = TestClient(_make_app(), base_url="http://internal:8000")
+def test_auth_post_allows_rfc_forwarded_same_origin(monkeypatch):
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
+    client = TestClient(_make_app(), base_url="http://internal:8000", client=("10.0.0.2", 12345))
 
     response = client.post(
         "/api/v1/auth/login/local",
