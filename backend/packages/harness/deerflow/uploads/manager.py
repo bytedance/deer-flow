@@ -10,7 +10,7 @@ import os
 import secrets
 import shutil
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
@@ -616,12 +616,92 @@ def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> P
     return matching_path
 
 
-def delete_file_safe(base_dir: Path, filename: str) -> dict:
+def _restore_staged_deletion(
+    staged_path: Path,
+    original_path: Path,
+    identity: UploadIdentity,
+) -> None:
+    """Restore a staged primary without replacing a newly-created entry."""
+    try:
+        staged_stat = os.lstat(staged_path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(staged_stat.st_mode) or (
+        staged_stat.st_dev,
+        staged_stat.st_ino,
+    ) != (identity.device, identity.inode):
+        raise UnsafeUploadPathError("Staged upload deletion changed identity")
+    try:
+        original_stat = os.lstat(original_path)
+    except FileNotFoundError:
+        original_stat = None
+    if original_stat is not None:
+        if stat.S_ISREG(original_stat.st_mode) and (
+            original_stat.st_dev,
+            original_stat.st_ino,
+        ) == (identity.device, identity.inode):
+            staged_path.unlink()
+            return
+        raise UnsafeUploadPathError("Upload name was recreated while deletion was being rolled back")
+    try:
+        os.link(staged_path, original_path, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise UnsafeUploadPathError("Upload name was recreated while deletion was being rolled back") from exc
+    staged_path.unlink()
+
+
+def _stage_primary_deletion(
+    base_dir: Path,
+    primary_path: Path,
+    identity: UploadIdentity,
+) -> tuple[Path, UploadStageLease]:
+    """Move the selected directory entry behind a leased no-replace hard link."""
+    while True:
+        staged_path = base_dir / (f"{UPLOAD_STAGING_PREFIX}delete-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
+        stage_lease = UploadStageLease.acquire(base_dir, staged_path.name)
+        try:
+            os.link(primary_path, staged_path, follow_symlinks=False)
+        except FileExistsError:
+            stage_lease.release()
+            continue
+        except BaseException:
+            stage_lease.release()
+            raise
+
+        try:
+            primary_path.unlink()
+            staged_stat = os.lstat(staged_path)
+            if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
+                _restore_staged_deletion(staged_path, primary_path, identity)
+                raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
+            return staged_path, stage_lease
+        except BaseException:
+            if staged_path.exists():
+                try:
+                    _restore_staged_deletion(staged_path, primary_path, identity)
+                except BaseException:
+                    logger.warning(
+                        "Failed to restore staged upload deletion: %s",
+                        primary_path,
+                        exc_info=True,
+                    )
+            stage_lease.release()
+            raise
+
+
+def delete_file_safe(
+    base_dir: Path,
+    filename: str,
+    *,
+    delete_remote_copy: Callable[[str], None] | None = None,
+) -> dict:
     """Delete a primary upload and only its exact owned conversion.
 
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
+        delete_remote_copy: Optional provider hook invoked while the selected
+            primary is staged and its generation lease is still held.
     Returns:
         Dict with success and message.
 
@@ -655,12 +735,25 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         identity = UploadIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
         actual_file_path = _find_upload_path_by_identity(base_dir, identity)
         owned_conversion = existing_conversion_path_for_upload(actual_file_path)
-        if owned_conversion is not None:
-            owned_conversion.unlink(missing_ok=True)
         final_stat = os.lstat(actual_file_path)
         if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1 or (final_stat.st_dev, final_stat.st_ino) != (identity.device, identity.inode):
             raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
-        actual_file_path.unlink()
+        staged_path, stage_lease = _stage_primary_deletion(
+            base_dir,
+            actual_file_path,
+            identity,
+        )
+        try:
+            if delete_remote_copy is not None:
+                delete_remote_copy(actual_file_path.name)
+            if owned_conversion is not None:
+                owned_conversion.unlink(missing_ok=True)
+            staged_path.unlink()
+        except BaseException:
+            _restore_staged_deletion(staged_path, actual_file_path, identity)
+            raise
+        finally:
+            stage_lease.release()
     finally:
         lease.release()
 

@@ -44,6 +44,7 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
 
 _UPLOADS_CONTAINER_PATH = "/mnt/user-data/uploads"
 _UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
+_UPLOAD_MOUNT_CONTRACT_VERSION = 2
 
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
@@ -142,6 +143,7 @@ class RemoteSandboxBackend(SandboxBackend):
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
+        self._mount_contract_version = 0
 
     @property
     def provisioner_url(self) -> str:
@@ -149,6 +151,27 @@ class RemoteSandboxBackend(SandboxBackend):
 
     def _auth_headers(self) -> dict[str, str]:
         return {"X-API-Key": self._api_key} if self._api_key else {}
+
+    @property
+    def mount_contract_version(self) -> int:
+        """Provisioner mount contract negotiated during provider startup."""
+        return self._mount_contract_version
+
+    def probe_capabilities(self) -> None:
+        """Negotiate optional Provisioner capabilities without breaking old peers."""
+        try:
+            response = requests.get(
+                f"{self._provisioner_url}/api/capabilities",
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            version = payload.get("mount_contract_version", 0) if isinstance(payload, dict) else 0
+            self._mount_contract_version = version if isinstance(version, int) and version >= 0 else 0
+        except (requests.RequestException, ValueError, TypeError):
+            self._mount_contract_version = 0
+            logger.warning("Provisioner mount capabilities are unavailable; using explicit upload synchronization for rolling-upgrade compatibility")
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -330,9 +353,19 @@ class RemoteSandboxBackend(SandboxBackend):
                 return None
             resp.raise_for_status()
             data = resp.json()
+            if data.get("mount_contract_version") != _UPLOAD_MOUNT_CONTRACT_VERSION:
+                logger.info(
+                    "Provisioner discovery ignored sandbox %s with mount contract %r",
+                    sandbox_id,
+                    data.get("mount_contract_version"),
+                )
+                return None
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                user_id=data.get("user_id"),
+                thread_id=data.get("thread_id"),
+                mount_contract_version=data.get("mount_contract_version"),
             )
         except requests.RequestException as exc:
             logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")

@@ -58,6 +58,7 @@ class _RecordingCoreV1:
         self.service_read_counts: dict[str, int] = {}
         self.created_pods: list[str] = []
         self.created_pod_specs: dict[str, object] = {}
+        self.existing_pod_specs: dict[str, object] = {}
         self.created_services: list[str] = []
 
     def _record_k8s_call(self) -> None:
@@ -86,6 +87,11 @@ class _RecordingCoreV1:
 
     def read_namespaced_pod(self, _name: str, _namespace: str):
         self._record_k8s_call()
+        sandbox_id = _name.removeprefix("sandbox-")
+        pod = self.existing_pod_specs.get(sandbox_id) or self.created_pod_specs.get(sandbox_id)
+        if pod is not None:
+            pod.status = SimpleNamespace(phase="Running")
+            return pod
         return SimpleNamespace(status=SimpleNamespace(phase="Running"))
 
     def create_namespaced_pod(self, _namespace: str, pod) -> None:
@@ -172,6 +178,11 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     )
     monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
     monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="user-1",
+    )
 
     with _detect_provisioner_blocking_io(provisioner_module):
         transport = httpx.ASGITransport(app=provisioner_module.app)
@@ -187,6 +198,129 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     if expected_created_sandbox is not None:
         assert fake_core_v1.created_pods == [expected_created_sandbox]
         assert fake_core_v1.created_services == [expected_created_sandbox]
+
+
+def test_existing_sandbox_rejects_cross_tenant_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="bob",
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "another user" in exc_info.value.detail
+
+
+def test_existing_sandbox_validates_read_only_conversion_before_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="alice",
+                extra_mounts=[
+                    provisioner_module.ExtraMount(
+                        host_path=("/.deer-flow/users/alice/threads/thread-1/user-data/.upload-conversions"),
+                        container_path="/mnt/user-data/.upload-conversions",
+                        read_only=False,
+                    )
+                ],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "read-only" in exc_info.value.detail
+
+
+def test_existing_sandbox_rejects_tampered_mount_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    existing = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    userdata = next(volume for volume in existing.spec.volumes if volume.name == "user-data")
+    userdata.host_path.path = "/state/users/mallory/threads/thread-1/user-data"
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = existing
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="alice",
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "incompatible or unverifiable" in exc_info.value.detail
+
+
+def test_existing_sandbox_contract_ignores_kubernetes_service_account_injection(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    """Admission-added service-account mounts are outside the DeerFlow contract."""
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    existing = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    existing.spec.volumes.append(
+        provisioner_module.k8s_client.V1Volume(
+            name="kube-api-access-abcde",
+            projected=provisioner_module.k8s_client.V1ProjectedVolumeSource(sources=[]),
+        )
+    )
+    existing.spec.containers[0].volume_mounts.append(
+        provisioner_module.k8s_client.V1VolumeMount(
+            name="kube-api-access-abcde",
+            mount_path="/var/run/secrets/kubernetes.io/serviceaccount",
+            read_only=True,
+        )
+    )
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = existing
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-existing",
+            thread_id="thread-1",
+            user_id="alice",
+        )
+    )
+
+    assert response.status == "Running"
 
 
 @pytest.mark.parametrize(

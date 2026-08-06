@@ -261,10 +261,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Remote backends may require explicit file sync. Operators can override
         this detection when gateway and remote sandboxes share the same storage.
         """
-        override = self._config.get("thread_data_mounts")
-        if override is not None:
-            return override
-        return isinstance(self._backend, LocalContainerBackend)
+        config = getattr(self, "_config", {})
+        backend = getattr(self, "_backend", None)
+        override = config.get("thread_data_mounts")
+        # Mount helpers are also used as pure shape inspectors before provider
+        # initialization. Preserve their historical local/mounted default.
+        mounted = override if override is not None else backend is None or isinstance(backend, LocalContainerBackend)
+        if mounted and isinstance(backend, RemoteSandboxBackend):
+            if backend.mount_contract_version < SANDBOX_MOUNT_CONTRACT_VERSION:
+                logger.warning(
+                    "Configured remote thread-data mounts require Provisioner mount contract v%s; peer advertises v%s, so uploads will use explicit synchronization during the rolling upgrade",
+                    SANDBOX_MOUNT_CONTRACT_VERSION,
+                    backend.mount_contract_version,
+                )
+                return False
+        return mounted
 
     # ── Factory methods ──────────────────────────────────────────────────
 
@@ -281,7 +292,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if provisioner_url:
             logger.info(f"Using remote sandbox backend with provisioner at {provisioner_url}")
             api_key = self._config.get("provisioner_api_key", "")
-            return RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
+            backend = RemoteSandboxBackend(provisioner_url=provisioner_url, api_key=api_key)
+            backend.probe_capabilities()
+            return backend
 
         logger.info("Using local container sandbox backend")
         return LocalContainerBackend(
@@ -754,9 +767,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         reused for an auth/channel run that should mount a user-scoped bucket.
 
         The mount-contract version is part of the identity. During a rolling
-        upgrade, a container created before a required mount was added is never
-        discovered or reclaimed by the new provider. It remains eligible for
-        normal orphan cleanup while the first new-version acquire cold-starts.
+        upgrade, a container created before a required mount was added cannot
+        satisfy the new thread acquisition. Reconciliation may still enumerate
+        and adopt its old ID for normal orphan cleanup.
         """
         return hashlib.sha256(f"mount-v{SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
@@ -798,6 +811,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         if thread_id:
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
+            if not self.uses_thread_data_mounts:
+                mounts = [mount for mount in mounts if mount[1] != f"{VIRTUAL_PATH_PREFIX}/{UPLOAD_CONVERSIONS_DIRNAME}"]
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
         skills_mounts = self._get_skills_mounts(user_id=user_id)
@@ -1496,6 +1511,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 prevent. The window is a peer's in-flight container stop, so the
                 thread's next turn discovers nothing and cold-starts cleanly.
         """
+        if isinstance(self._backend, RemoteSandboxBackend) and (info.mount_contract_version != SANDBOX_MOUNT_CONTRACT_VERSION or info.user_id != user_id or info.thread_id != thread_id):
+            raise SandboxIdentityCollisionError(
+                info.sandbox_id,
+                (info.user_id or "unknown", info.thread_id or "unknown"),
+                (user_id, thread_id),
+            )
+
         key = self._thread_key(thread_id, user_id)
         with self._lock:
             if self._being_torn_down_locally(info.sandbox_id):

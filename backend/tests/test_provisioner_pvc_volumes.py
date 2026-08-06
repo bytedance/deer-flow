@@ -62,15 +62,28 @@ class TestBuildVolumes:
             "user-data",
         ]
 
-    def test_hostpath_userdata_includes_thread_id(self, provisioner_module):
-        """hostPath user-data path should include thread_id."""
+    @pytest.mark.parametrize("user_id", ["alice", "bob"])
+    def test_hostpath_userdata_uses_exact_user_thread_root(self, provisioner_module, user_id):
+        """Parent and nested upload mounts must resolve from one tenant root."""
         provisioner_module.USERDATA_PVC_NAME = ""
-        volumes = provisioner_module._build_volumes("my-thread-42")
-        userdata_vol = volumes[-1]
-        path = userdata_vol.host_path.path
-        assert "my-thread-42" in path
-        assert path.endswith("user-data")
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        conversion = provisioner_module.ExtraMount(
+            host_path=f"/state/users/{user_id}/threads/my-thread-42/user-data/.upload-conversions",
+            container_path="/mnt/user-data/.upload-conversions",
+            read_only=True,
+        )
+
+        volumes = provisioner_module._build_volumes(
+            "my-thread-42",
+            user_id=user_id,
+            extra_mounts=[conversion],
+        )
+
+        userdata_vol = next(volume for volume in volumes if volume.name == "user-data")
+        conversion_vol = next(volume for volume in volumes if volume.name == "extra-0")
+        assert userdata_vol.host_path.path == f"/state/users/{user_id}/threads/my-thread-42/user-data"
         assert userdata_vol.host_path.type == "DirectoryOrCreate"
+        assert conversion_vol.host_path.path == (f"/state/users/{user_id}/threads/my-thread-42/user-data/.upload-conversions")
 
     # ── PVC mode (single-volume fallback) ──────────────────────────────
 

@@ -62,6 +62,37 @@ def test_thread_data_mounts_override_precedes_backend_detection(backend_is_local
     assert provider.uses_thread_data_mounts is expected
 
 
+def test_thread_data_mounts_defaults_to_mounted_for_uninitialized_mount_helper():
+    """Pure mount-shape inspection historically works without running provider init."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    assert provider.uses_thread_data_mounts is True
+
+
+def test_remote_mount_override_downgrades_without_current_provisioner_contract():
+    """A new Gateway must remain usable while the Provisioner is still old."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = 0
+
+    assert provider.uses_thread_data_mounts is False
+
+
+def test_remote_mount_override_uses_current_provisioner_contract():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION
+
+    assert provider.uses_thread_data_mounts is True
+
+
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
 
@@ -262,6 +293,7 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     monkeypatch.setattr(remote_backend, "user_should_see_legacy_skills", lambda *_args, **_kwargs: False)
 
     provider = _make_provider(tmp_path)
+    provider._backend = object.__new__(aio_mod.LocalContainerBackend)
     mounts = provider._get_extra_mounts("thread-1", user_id="alice")
     container_paths = [container for _host, container, _read_only in mounts]
 
@@ -296,6 +328,117 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
         lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
         lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
     }
+
+
+def test_nonmounted_remote_provider_omits_read_only_conversion_mount(tmp_path, monkeypatch):
+    """Explicit-sync mode must not write into a nested read-only mount."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_skills_mounts", staticmethod(lambda **_kwargs: []))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_user_skill_mounts", staticmethod(lambda **_kwargs: []))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_lark_cli_runtime_mounts", staticmethod(lambda **_kwargs: []))
+    provider = _make_provider(tmp_path)
+    provider._config["thread_data_mounts"] = False
+    provider._backend = object()
+
+    mounts = provider._get_extra_mounts("thread-1", user_id="alice")
+
+    assert "/mnt/user-data/uploads" in {container for _host, container, _read_only in mounts}
+    assert "/mnt/user-data/.upload-conversions" not in {container for _host, container, _read_only in mounts}
+
+
+def test_remote_backend_negotiates_mount_contract_capability(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    requested: dict[str, object] = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"mount_contract_version": 2}
+
+    def _get(url, *, headers, timeout):
+        requested.update(url=url, headers=headers, timeout=timeout)
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "get", _get)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 2
+    assert requested == {
+        "url": "http://provisioner:8002/api/capabilities",
+        "headers": {"X-API-Key": "secret"},
+        "timeout": 5,
+    }
+
+
+def test_remote_backend_treats_missing_mount_capability_as_legacy(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"lark_cli_init_image": False}
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+
+
+def test_remote_discovery_carries_verified_identity(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    info = backend.discover("sandbox-1")
+
+    assert info is not None
+    assert (info.user_id, info.thread_id, info.mount_contract_version) == (
+        "alice",
+        "thread-1",
+        2,
+    )
+
+
+def test_remote_discovery_ignores_legacy_unverified_response(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://legacy.local"}
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    assert backend.discover("sandbox-old") is None
 
 
 @pytest.mark.parametrize(
@@ -1099,6 +1242,31 @@ def test_aio_mount_contract_upgrade_does_not_reuse_pre_upgrade_container_id():
 
     assert current_id != pre_upgrade_id
     assert current_id == hashlib.sha256(f"mount-v{aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
+
+
+def test_reconcile_may_adopt_pre_upgrade_id_only_for_orphan_cleanup(tmp_path):
+    """Versioning blocks new acquisition reuse, not orphan enumeration/reaping."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._warm_pool_identity = {}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._unowned_since = {}
+    old_id = hashlib.sha256(b"alice:thread-1").hexdigest()[:16]
+    old_info = aio_mod.SandboxInfo(
+        sandbox_id=old_id,
+        sandbox_url="http://old-sandbox",
+    )
+    provider._backend = SimpleNamespace(list_running=MagicMock(return_value=[old_info]))
+
+    provider._reconcile_orphans()
+
+    current_id = provider._deterministic_sandbox_id("thread-1", "alice")
+    assert old_id in provider._warm_pool
+    assert current_id != old_id
+    assert current_id not in provider._warm_pool
 
 
 def test_aio_forced_collision_never_overwrites_active_tenant(

@@ -10,7 +10,9 @@ import logging
 import os
 import re
 import stat
+from contextlib import contextmanager
 from pathlib import Path
+from typing import TextIO
 
 from deerflow.uploads.layout import (
     UnsafeConversionPathError,
@@ -67,6 +69,67 @@ def _clean_bold_title(raw: str) -> str:
     return merged
 
 
+def _extract_outline_from_stream(stream: TextIO) -> list[dict]:
+    outline: list[dict] = []
+    for lineno, line in enumerate(stream, 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("#"):
+            title = _clean_bold_title(stripped.lstrip("#").strip())
+            if title:
+                outline.append({"title": title, "line": lineno})
+        elif m := _BOLD_HEADING_RE.match(stripped):
+            title = m.group(1).strip()
+            if title:
+                outline.append({"title": title, "line": lineno})
+        elif _SPLIT_BOLD_HEADING_RE.match(stripped):
+            title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
+            if title:
+                outline.append({"title": title, "line": lineno})
+
+        if len(outline) > MAX_OUTLINE_ENTRIES:
+            outline.pop()
+            outline.append({"truncated": True})
+            break
+    return outline
+
+
+@contextmanager
+def _open_verified_markdown(md_path: Path):
+    """Open one exclusive regular file and keep that descriptor for all reads."""
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(md_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = os.lstat(md_path)
+    except (OSError, UnicodeError):
+        if descriptor is not None:
+            os.close(descriptor)
+        yield None
+        return
+
+    verified = (
+        stat.S_ISREG(descriptor_stat.st_mode) and descriptor_stat.st_nlink == 1 and stat.S_ISREG(path_stat.st_mode) and path_stat.st_nlink == 1 and (descriptor_stat.st_dev, descriptor_stat.st_ino) == (path_stat.st_dev, path_stat.st_ino)
+    )
+    if not verified:
+        os.close(descriptor)
+        yield None
+        return
+
+    try:
+        stream = os.fdopen(descriptor, "r", encoding="utf-8")
+    except (OSError, UnicodeError):
+        os.close(descriptor)
+        yield None
+        return
+    try:
+        yield stream
+    finally:
+        stream.close()
+
+
 def extract_outline(md_path: Path) -> list[dict]:
     """Extract document outline (headings) from a Markdown file.
 
@@ -94,41 +157,13 @@ def extract_outline(md_path: Path) -> list[dict]:
         render a "showing first N headings" hint without re-scanning the file.
         Returns an empty list if the file cannot be read or has no headings.
     """
-    outline: list[dict] = []
-    try:
-        with md_path.open(encoding="utf-8") as f:
-            for lineno, line in enumerate(f, 1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-
-                # Style 1: standard Markdown heading
-                if stripped.startswith("#"):
-                    title = _clean_bold_title(stripped.lstrip("#").strip())
-                    if title:
-                        outline.append({"title": title, "line": lineno})
-
-                # Style 2: single bold block with SEC structural keyword
-                elif m := _BOLD_HEADING_RE.match(stripped):
-                    title = m.group(1).strip()
-                    if title:
-                        outline.append({"title": title, "line": lineno})
-
-                # Style 3: split-bold heading — **<num>** **<title>**
-                # Regex already enforces max 4 blocks and non-numeric second block.
-                elif _SPLIT_BOLD_HEADING_RE.match(stripped):
-                    title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
-                    if title:
-                        outline.append({"title": title, "line": lineno})
-
-                if len(outline) > MAX_OUTLINE_ENTRIES:
-                    outline.pop()
-                    outline.append({"truncated": True})
-                    break
-    except Exception:
-        return []
-
-    return outline
+    with _open_verified_markdown(md_path) as stream:
+        if stream is None:
+            return []
+        try:
+            return _extract_outline_from_stream(stream)
+        except (OSError, UnicodeError):
+            return []
 
 
 def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
@@ -146,12 +181,6 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           Empty when outline is non-empty (no fallback needed).
     """
     if file_path.suffix.lower() == ".md":
-        try:
-            primary_stat = os.lstat(file_path)
-        except OSError:
-            return [], []
-        if not stat.S_ISREG(primary_stat.st_mode) or primary_stat.st_nlink != 1:
-            return [], []
         md_path = file_path
     else:
         try:
@@ -162,21 +191,24 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     if md_path is None:
         return [], []
 
-    outline = extract_outline(md_path)
-    if outline:
-        logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
-        return outline, []
+    with _open_verified_markdown(md_path) as stream:
+        if stream is None:
+            return [], []
+        try:
+            outline = _extract_outline_from_stream(stream)
+            if outline:
+                logger.debug("Extracted %d outline entries from %s", len(outline), file_path.name)
+                return outline, []
 
-    # outline is empty — read the first few non-empty lines as a content preview
-    preview: list[str] = []
-    try:
-        with md_path.open(encoding="utf-8") as f:
-            for line in f:
+            stream.seek(0)
+            preview: list[str] = []
+            for line in stream:
                 stripped = line.strip()
                 if stripped:
                     preview.append(stripped)
                 if len(preview) >= _OUTLINE_PREVIEW_LINES:
                     break
-    except Exception:
-        logger.debug("Failed to read preview lines from %s", md_path, exc_info=True)
-    return [], preview
+            return [], preview
+        except (OSError, UnicodeError):
+            logger.debug("Failed to read outline/preview lines from %s", md_path, exc_info=True)
+            return [], []

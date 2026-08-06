@@ -433,7 +433,10 @@ async def test_waiting_delete_cannot_starve_general_io_lease_release(tmp_path, m
     single_worker = ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(file_io_module, "_FILE_IO_EXECUTOR", single_worker)
 
-    with patch.object(uploads, "get_uploads_dir", return_value=tmp_path):
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+    ):
         deletion = asyncio.create_task(call_unwrapped(uploads.delete_uploaded_file, "thread-delete", "notes.txt", request=MagicMock()))
         await asyncio.sleep(0.05)
         release = asyncio.create_task(uploads._run_file_io_commit(publication.release))
@@ -1293,7 +1296,10 @@ def test_delete_uploaded_file_removes_owned_conversion_and_preserves_user_markdo
     conversion.parent.mkdir()
     conversion.write_text("converted", encoding="utf-8")
 
-    with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+    ):
         result = asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-aio", "report.pdf", request=MagicMock()))
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
@@ -1310,7 +1316,10 @@ def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path, fil
     legacy = thread_uploads_dir / filename
     legacy.write_bytes(b"legacy")
 
-    with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+    ):
         result = asyncio.run(
             call_unwrapped(
                 uploads.delete_uploaded_file,
@@ -1322,6 +1331,102 @@ def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path, fil
 
     assert result == {"success": True, "message": f"Deleted {filename}"}
     assert not legacy.exists()
+
+
+def test_delete_uploaded_file_removes_explicitly_synced_remote_paths(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    primary = thread_uploads_dir / "report.pdf"
+    primary.write_bytes(b"pdf")
+    conversion = conversion_path_for_upload(primary)
+    conversion.parent.mkdir()
+    conversion.write_text("generated", encoding="utf-8")
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.delete_uploaded_file,
+                "thread-remote",
+                "report.pdf",
+                request=MagicMock(),
+            )
+        )
+
+    assert result["success"] is True
+    assert sandbox.remove_file.call_args_list == [
+        (("/mnt/user-data/uploads/report.pdf",),),
+        (("/mnt/user-data/.upload-conversions/report.pdf.md",),),
+    ]
+    assert not primary.exists()
+    assert not conversion.exists()
+
+
+def test_delete_uploaded_file_preserves_host_when_remote_delete_fails(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    primary = thread_uploads_dir / "notes.txt"
+    primary.write_bytes(b"notes")
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+
+    def fail_remote_delete(_virtual_path):
+        assert not primary.exists(), "primary must be staged before remote deletion"
+        raise OSError("remote unavailable")
+
+    sandbox.remove_file.side_effect = fail_remote_delete
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.delete_uploaded_file,
+                    "thread-remote",
+                    "notes.txt",
+                    request=MagicMock(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert primary.read_bytes() == b"notes"
+
+
+@pytest.mark.parametrize("filename", ["", None])
+def test_upload_files_reports_empty_multipart_filename_as_skipped(tmp_path, filename):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename=filename, file=BytesIO(b"data"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is False
+    assert result.files == []
+    assert result.skipped_files == [""]
+    assert result.message == "Successfully uploaded 0 file(s); skipped 1 unsafe file(s)"
 
 
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():

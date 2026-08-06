@@ -149,6 +149,7 @@ async def test_list_uploaded_files_does_not_block_event_loop(tmp_path: Path, mon
 
 async def test_delete_uploaded_file_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
     uploads_dir = await _thread_uploads_dir("t-delete")
     target = uploads_dir / "notes.txt"
     await asyncio.to_thread(target.write_bytes, b"delete me")

@@ -35,6 +35,7 @@ from deerflow.uploads.manager import (
     upload_artifact_url,
     upload_virtual_path,
 )
+from deerflow.uploads.sandbox_sync import prepare_upload_deletion_async
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId
@@ -316,9 +317,18 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
     return result
 
 
-def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
+def _delete_uploaded_file_for_thread(
+    thread_id: str,
+    filename: str,
+    user_id: str,
+    delete_remote_copy=None,
+) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename)
+    return delete_file_safe(
+        uploads_dir,
+        filename,
+        delete_remote_copy=delete_remote_copy,
+    )
 
 
 async def _write_upload_file_with_limits(
@@ -416,6 +426,8 @@ async def upload_files(
     try:
         for file in files:
             if not file.filename:
+                logger.warning("Skipping multipart upload with an empty filename")
+                skipped_files.append("")
                 continue
             current_filename = file.filename
 
@@ -561,11 +573,19 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
+        user_id = get_effective_user_id()
+        sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+        delete_remote_copy = await prepare_upload_deletion_async(
+            sandbox_provider,
+            thread_id,
+            user_id=user_id,
+        )
         return await _run_upload_lease_io_cancellation_safe(
             _delete_uploaded_file_for_thread,
             thread_id,
             filename,
-            get_effective_user_id(),
+            user_id,
+            delete_remote_copy,
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")

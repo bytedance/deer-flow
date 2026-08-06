@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from deerflow.uploads.async_helpers import run_upload_io_cancellation_safe, wait_for_task_completion
-from deerflow.uploads.manager import make_upload_file_sandbox_readable
+from deerflow.uploads.layout import conversion_virtual_path
+from deerflow.uploads.manager import make_upload_file_sandbox_readable, upload_virtual_path
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,51 @@ def _remove_remote_paths(sandbox: Any, virtual_paths: tuple[str, ...]) -> None:
             logger.warning("Failed to remove synchronized sandbox upload: %s", virtual_path, exc_info=True)
     if first_error is not None:
         raise first_error
+
+
+def _deletion_hook_for_sandbox(sandbox: Any) -> Callable[[str], None]:
+    def delete_remote_copy(filename: str) -> None:
+        _remove_remote_paths(
+            sandbox,
+            (
+                conversion_virtual_path(filename),
+                upload_virtual_path(filename),
+            ),
+        )
+
+    return delete_remote_copy
+
+
+def prepare_upload_deletion(
+    sandbox_provider: Any,
+    thread_id: str,
+    *,
+    user_id: str | None,
+) -> Callable[[str], None] | None:
+    """Return a lease-safe remote deletion hook for an explicitly synced sandbox."""
+    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+        return None
+    sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
+    sandbox = sandbox_provider.get(sandbox_id)
+    if sandbox is None:
+        raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
+    return _deletion_hook_for_sandbox(sandbox)
+
+
+async def prepare_upload_deletion_async(
+    sandbox_provider: Any,
+    thread_id: str,
+    *,
+    user_id: str | None,
+) -> Callable[[str], None] | None:
+    """Async counterpart that keeps remote acquisition off the event loop."""
+    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+        return None
+    sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
+    sandbox = sandbox_provider.get(sandbox_id)
+    if sandbox is None:
+        raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
+    return _deletion_hook_for_sandbox(sandbox)
 
 
 def rollback_sandbox_sync(receipt: SandboxSyncReceipt) -> None:

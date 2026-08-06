@@ -473,7 +473,15 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
     def mock_get(url: str, timeout: int, headers=None):
-        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        )
 
     monkeypatch.setattr(requests, "get", mock_get)
 
@@ -481,6 +489,11 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     assert info is not None
     assert info.sandbox_id == "abc123"
     assert info.sandbox_url == "http://k3s:31001"
+    assert (info.user_id, info.thread_id, info.mount_contract_version) == (
+        "alice",
+        "thread-1",
+        2,
+    )
 
 
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):

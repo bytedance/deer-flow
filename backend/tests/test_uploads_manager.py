@@ -908,6 +908,36 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"payload"
         assert alias.read_bytes() == b"payload"
 
+    def test_delete_hardlink_after_identity_scan_preserves_conversion(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"payload")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("generated", encoding="utf-8")
+        alias = uploads / "alias.pdf"
+        real_find = upload_manager_module._find_upload_path_by_identity
+
+        def add_alias_after_scan(base_dir, identity):
+            found = real_find(base_dir, identity)
+            os.link(found, alias)
+            return found
+
+        with patch.object(
+            upload_manager_module,
+            "_find_upload_path_by_identity",
+            side_effect=add_alias_after_scan,
+        ):
+            with pytest.raises(UnsafeUploadPathError, match="exclusive"):
+                delete_file_safe(uploads, primary.name)
+
+        assert primary.read_bytes() == b"payload"
+        assert alias.read_bytes() == b"payload"
+        assert conversion.read_text(encoding="utf-8") == "generated"
+
     def test_delete_removes_owned_conversion_but_preserves_legacy_sibling(self, tmp_path):
         uploads = tmp_path / "user-data" / "uploads"
         uploads.mkdir(parents=True)

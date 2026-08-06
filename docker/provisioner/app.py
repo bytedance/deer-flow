@@ -29,6 +29,8 @@ Architecture (docker-compose-dev):
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -76,7 +78,9 @@ LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
 # Optional comma-separated lark-cli subcommand denylist forwarded to the broker
 # sidecar (issue #4338 hardening). Empty ⇒ no subcommand is blocked. See the
 # broker README's "subcommand denylist" section.
-LARK_CLI_BROKER_DENY_SUBCOMMANDS = os.environ.get("DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS", "")
+LARK_CLI_BROKER_DENY_SUBCOMMANDS = os.environ.get(
+    "DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS", ""
+)
 LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 # Where the broker sidecar reads the per-user credentials (sidecar-only paths).
@@ -95,15 +99,22 @@ SANDBOX_SERVICE_TYPE = os.environ.get("SANDBOX_SERVICE_TYPE", "NodePort")
 try:
     SANDBOX_CONTAINER_PORT = int(SANDBOX_CONTAINER_PORT_RAW)
 except ValueError as exc:
-    raise RuntimeError(f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT_RAW!r}; expected an integer TCP port") from exc
+    raise RuntimeError(
+        f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT_RAW!r}; expected an integer TCP port"
+    ) from exc
 if not (1 <= SANDBOX_CONTAINER_PORT <= 65535):
-    raise RuntimeError(f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT}; expected a value in [1, 65535]")
+    raise RuntimeError(
+        f"Invalid SANDBOX_CONTAINER_PORT={SANDBOX_CONTAINER_PORT}; expected a value in [1, 65535]"
+    )
 if SANDBOX_SERVICE_TYPE not in {"NodePort", "ClusterIP"}:
-    raise RuntimeError(f"Invalid SANDBOX_SERVICE_TYPE={SANDBOX_SERVICE_TYPE!r}; expected 'NodePort' or 'ClusterIP'")
+    raise RuntimeError(
+        f"Invalid SANDBOX_SERVICE_TYPE={SANDBOX_SERVICE_TYPE!r}; expected 'NodePort' or 'ClusterIP'"
+    )
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
 MAX_EXTRA_MOUNTS = 9
+MOUNT_CONTRACT_VERSION = 2
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/user-data/.upload-conversions",
     "/mnt/acp-workspace",
@@ -115,6 +126,12 @@ ALLOWED_EXTRA_MOUNT_PATHS = {
 }
 UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
 UPLOAD_CONVERSIONS_DIRNAME = ".upload-conversions"
+MOUNT_CONTRACT_LABEL = "deerflow.dev/mount-contract"
+USER_ID_HASH_LABEL = "deerflow.dev/user-id-hash"
+THREAD_ID_HASH_LABEL = "deerflow.dev/thread-id-hash"
+USER_ID_ANNOTATION = "deerflow.dev/user-id"
+THREAD_ID_ANNOTATION = "deerflow.dev/thread-id"
+MOUNT_SIGNATURE_ANNOTATION = "deerflow.dev/mount-signature"
 
 # Path to the kubeconfig *inside* the provisioner container.
 # Typically the host's ~/.kube/config is mounted here.
@@ -164,7 +181,9 @@ def _is_path_under_base(path: str, base: str) -> bool:
     if not base:
         return False
     try:
-        return os.path.commonpath([os.path.normpath(path), os.path.normpath(base)]) == os.path.normpath(base)
+        return os.path.commonpath(
+            [os.path.normpath(path), os.path.normpath(base)]
+        ) == os.path.normpath(base)
     except ValueError:
         return False
 
@@ -172,9 +191,14 @@ def _is_path_under_base(path: str, base: str) -> bool:
 def _normalize_extra_mount_container_path(container_path: str) -> str:
     normalized = posixpath.normpath(container_path)
     if not normalized.startswith("/"):
-        raise HTTPException(status_code=400, detail=f"Extra mount path must be absolute: {container_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Extra mount path must be absolute: {container_path}",
+        )
     if normalized not in ALLOWED_EXTRA_MOUNT_PATHS:
-        raise HTTPException(status_code=400, detail=f"Unsupported extra mount path: {container_path}")
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported extra mount path: {container_path}"
+        )
     return normalized
 
 
@@ -188,7 +212,9 @@ def _validated_extra_mounts(
     if not extra_mounts:
         return []
     if len(extra_mounts) > MAX_EXTRA_MOUNTS:
-        raise HTTPException(status_code=400, detail=f"Too many extra mounts; max is {MAX_EXTRA_MOUNTS}")
+        raise HTTPException(
+            status_code=400, detail=f"Too many extra mounts; max is {MAX_EXTRA_MOUNTS}"
+        )
 
     host_base_dir = _host_base_dir_for_extra_mounts()
     seen_container_paths: set[str] = set()
@@ -196,16 +222,26 @@ def _validated_extra_mounts(
     for mount in extra_mounts:
         host_path = os.path.normpath(mount.host_path)
         if not os.path.isabs(host_path):
-            raise HTTPException(status_code=400, detail=f"Extra mount host path must be absolute: {mount.host_path}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extra mount host path must be absolute: {mount.host_path}",
+            )
         if not _is_path_under_base(host_path, host_base_dir):
-            raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Extra mount host path is outside DeerFlow state: {mount.host_path}",
+            )
 
         container_path = _normalize_extra_mount_container_path(mount.container_path)
         if container_path == UPLOAD_CONVERSIONS_CONTAINER_PATH:
             if not mount.read_only:
-                raise HTTPException(status_code=400, detail="Upload conversion mount must be read-only")
+                raise HTTPException(
+                    status_code=400, detail="Upload conversion mount must be read-only"
+                )
             if thread_id is None:
-                raise HTTPException(status_code=400, detail="Upload conversion mount requires a thread")
+                raise HTTPException(
+                    status_code=400, detail="Upload conversion mount requires a thread"
+                )
             expected_host_path = os.path.normpath(
                 join_host_path(
                     host_base_dir,
@@ -223,7 +259,9 @@ def _validated_extra_mounts(
                     detail="Upload conversion mount must match the requested user and thread",
                 )
         if container_path in seen_container_paths:
-            raise HTTPException(status_code=400, detail=f"Duplicate extra mount path: {container_path}")
+            raise HTTPException(
+                status_code=400, detail=f"Duplicate extra mount path: {container_path}"
+            )
         seen_container_paths.add(container_path)
 
         validated.append(
@@ -278,10 +316,16 @@ def _runtime_provided_extra_mounts(
         dropped = {LARK_CLI_RUNTIME_CONTAINER_PATH}
     if not extra_mounts or not dropped:
         return list(extra_mounts or [])
-    return [mount for mount in extra_mounts if posixpath.normpath(mount.container_path) not in dropped]
+    return [
+        mount
+        for mount in extra_mounts
+        if posixpath.normpath(mount.container_path) not in dropped
+    ]
 
 
-def _lark_broker_credential_mounts(extra_mounts: list["ExtraMount"] | None) -> dict[str, "ExtraMount"]:
+def _lark_broker_credential_mounts(
+    extra_mounts: list["ExtraMount"] | None,
+) -> dict[str, "ExtraMount"]:
     """Extract the config/data credential mounts the broker sidecar needs.
 
     Keyed by container path so the caller can wire each into the sidecar's fixed
@@ -304,12 +348,21 @@ def _lark_broker_credential_mounts(extra_mounts: list["ExtraMount"] | None) -> d
 def _extra_mount_pvc_sub_path(host_path: str) -> str:
     host_base_dir = _host_base_dir_for_extra_mounts()
     if not _is_path_under_base(host_path, host_base_dir):
-        raise HTTPException(status_code=400, detail=f"Extra mount host path is outside DeerFlow state: {host_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Extra mount host path is outside DeerFlow state: {host_path}",
+        )
 
     rel_path = os.path.relpath(os.path.normpath(host_path), host_base_dir)
-    rel_parts = [part for part in rel_path.replace(os.sep, "/").split("/") if part and part != "."]
+    rel_parts = [
+        part
+        for part in rel_path.replace(os.sep, "/").split("/")
+        if part and part != "."
+    ]
     if not rel_parts or any(part == ".." for part in rel_parts):
-        raise HTTPException(status_code=400, detail=f"Invalid extra mount host path: {host_path}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid extra mount host path: {host_path}"
+        )
     return posixpath.join("deer-flow", *rel_parts)
 
 
@@ -326,18 +379,26 @@ def _init_k8s_client() -> k8s_client.CoreV1Api:
     """
     if os.path.exists(KUBECONFIG_PATH):
         if os.path.isdir(KUBECONFIG_PATH):
-            raise RuntimeError(f"KUBECONFIG_PATH points to a directory, expected a file: {KUBECONFIG_PATH}")
+            raise RuntimeError(
+                f"KUBECONFIG_PATH points to a directory, expected a file: {KUBECONFIG_PATH}"
+            )
         try:
             k8s_config.load_kube_config(config_file=KUBECONFIG_PATH)
             logger.info(f"Loaded kubeconfig from {KUBECONFIG_PATH}")
         except Exception as exc:
-            raise RuntimeError(f"Failed to load kubeconfig from {KUBECONFIG_PATH}: {exc}") from exc
+            raise RuntimeError(
+                f"Failed to load kubeconfig from {KUBECONFIG_PATH}: {exc}"
+            ) from exc
     else:
-        logger.warning(f"Kubeconfig not found at {KUBECONFIG_PATH}; trying in-cluster config")
+        logger.warning(
+            f"Kubeconfig not found at {KUBECONFIG_PATH}; trying in-cluster config"
+        )
         try:
             k8s_config.load_incluster_config()
         except Exception as exc:
-            raise RuntimeError(f"Failed to initialize Kubernetes client. No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}") from exc
+            raise RuntimeError(
+                f"Failed to initialize Kubernetes client. No kubeconfig at {KUBECONFIG_PATH}, and in-cluster config is unavailable: {exc}"
+            ) from exc
 
     # When connecting from inside Docker to the host's K8s API, the
     # kubeconfig may reference ``localhost`` or ``127.0.0.1``.  We
@@ -363,11 +424,17 @@ def _wait_for_kubeconfig(timeout: int = 30) -> None:
                 logger.info(f"Found kubeconfig file at {KUBECONFIG_PATH}")
                 return
             if os.path.isdir(KUBECONFIG_PATH):
-                raise RuntimeError(f"Kubeconfig path is a directory. Please mount a kubeconfig file at {KUBECONFIG_PATH}.")
-            raise RuntimeError(f"Kubeconfig path exists but is not a regular file: {KUBECONFIG_PATH}")
+                raise RuntimeError(
+                    f"Kubeconfig path is a directory. Please mount a kubeconfig file at {KUBECONFIG_PATH}."
+                )
+            raise RuntimeError(
+                f"Kubeconfig path exists but is not a regular file: {KUBECONFIG_PATH}"
+            )
         logger.info(f"Waiting for kubeconfig at {KUBECONFIG_PATH} …")
         time.sleep(2)
-    logger.warning(f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s; will attempt in-cluster Kubernetes config")
+    logger.warning(
+        f"Kubeconfig not found at {KUBECONFIG_PATH} after {timeout}s; will attempt in-cluster Kubernetes config"
+    )
 
 
 def _ensure_namespace() -> None:
@@ -412,8 +479,12 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 async def verify_api_key(request: Request, call_next):
     if request.url.path.startswith("/api/"):
         key = request.headers.get("X-API-Key", "")
-        if not PROVISIONER_API_KEY or not secrets.compare_digest(key, PROVISIONER_API_KEY):
-            logger.warning("provisioner auth rejected: %s %s", request.method, request.url.path)
+        if not PROVISIONER_API_KEY or not secrets.compare_digest(
+            key, PROVISIONER_API_KEY
+        ):
+            logger.warning(
+                "provisioner auth rejected: %s %s", request.method, request.url.path
+            )
             return Response(status_code=401, content="Unauthorized")
     return await call_next(request)
 
@@ -449,6 +520,9 @@ class SandboxResponse(BaseModel):
     sandbox_id: str
     sandbox_url: str
     status: str
+    user_id: str | None = None
+    thread_id: str | None = None
+    mount_contract_version: int | None = None
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -469,6 +543,131 @@ def _sandbox_url(sandbox_id: str, node_port: int | None = None) -> str:
     if node_port is None:
         raise RuntimeError("node_port is required when SANDBOX_SERVICE_TYPE=NodePort")
     return f"http://{NODE_HOST}:{node_port}"
+
+
+def _identity_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _mount_signature(pod: k8s_client.V1Pod) -> str:
+    """Hash the concrete volumes and container mounts that define isolation."""
+    contract_container_names = {
+        "sandbox",
+        "lark-cli-shim-init",
+        "lark-cli-init",
+        "lark-cli-broker",
+    }
+    contract_volume_names: set[str] = set()
+    container_payload = []
+    for container in [*(pod.spec.containers or []), *(pod.spec.init_containers or [])]:
+        if container.name not in contract_container_names:
+            continue
+        mounts = sorted(
+            ((mount.name or ""), mount.to_dict())
+            for mount in (container.volume_mounts or [])
+            if mount.mount_path == "/mnt"
+            or (mount.mount_path or "").startswith("/mnt/")
+            or (mount.mount_path or "").startswith("/var/lark/")
+        )
+        contract_volume_names.update(name for name, _payload in mounts)
+        container_payload.append((container.name or "", mounts))
+    volume_payload = sorted(
+        ((volume.name or ""), volume.to_dict())
+        for volume in (pod.spec.volumes or [])
+        if volume.name in contract_volume_names
+    )
+    payload = json.dumps(
+        {"volumes": volume_payload, "containers": sorted(container_payload)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _set_mount_contract_metadata(
+    pod: k8s_client.V1Pod,
+    *,
+    user_id: str,
+    thread_id: str,
+) -> k8s_client.V1Pod:
+    labels = dict(pod.metadata.labels or {})
+    labels.update(
+        {
+            MOUNT_CONTRACT_LABEL: str(MOUNT_CONTRACT_VERSION),
+            USER_ID_HASH_LABEL: _identity_hash(user_id),
+            THREAD_ID_HASH_LABEL: _identity_hash(thread_id),
+        }
+    )
+    pod.metadata.labels = labels
+    annotations = dict(pod.metadata.annotations or {})
+    annotations.update(
+        {
+            USER_ID_ANNOTATION: user_id,
+            THREAD_ID_ANNOTATION: thread_id,
+            MOUNT_SIGNATURE_ANNOTATION: _mount_signature(pod),
+        }
+    )
+    pod.metadata.annotations = annotations
+    return pod
+
+
+def _validate_existing_sandbox_contract(
+    sandbox_id: str,
+    *,
+    expected_pod: k8s_client.V1Pod | None = None,
+    user_id: str | None = None,
+    thread_id: str | None = None,
+) -> tuple[str, str]:
+    """Fail closed unless an existing Pod proves its tenant and mount contract."""
+    try:
+        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Existing sandbox '{sandbox_id}' has no verifiable Pod contract",
+        ) from exc
+
+    labels = pod.metadata.labels or {}
+    annotations = pod.metadata.annotations or {}
+    actual_user_id = annotations.get(USER_ID_ANNOTATION)
+    actual_thread_id = annotations.get(THREAD_ID_ANNOTATION)
+    expected_signature = annotations.get(MOUNT_SIGNATURE_ANNOTATION)
+    if (
+        labels.get(MOUNT_CONTRACT_LABEL) != str(MOUNT_CONTRACT_VERSION)
+        or not actual_user_id
+        or not actual_thread_id
+        or labels.get(USER_ID_HASH_LABEL) != _identity_hash(actual_user_id)
+        or labels.get(THREAD_ID_HASH_LABEL) != _identity_hash(actual_thread_id)
+        or not expected_signature
+        or _mount_signature(pod) != expected_signature
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Existing sandbox '{sandbox_id}' uses an incompatible or unverifiable mount contract; "
+                "destroy it before retrying"
+            ),
+        )
+
+    if user_id is not None and actual_user_id != user_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Existing sandbox '{sandbox_id}' belongs to another user",
+        )
+    if thread_id is not None and actual_thread_id != thread_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Existing sandbox '{sandbox_id}' belongs to another thread",
+        )
+    if (
+        expected_pod is not None
+        and _mount_signature(expected_pod) != expected_signature
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Existing sandbox '{sandbox_id}' does not match the requested mount contract",
+        )
+    return actual_user_id, actual_thread_id
 
 
 def _build_extra_volumes(
@@ -549,7 +748,9 @@ def _build_volumes(
     if SKILLS_PVC_NAME:
         # PVC mode: three-way subPath not yet supported; fall back to
         # single-volume mount for backward compatibility.
-        logger.warning("SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single /mnt/skills mount")
+        logger.warning(
+            "SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single /mnt/skills mount"
+        )
         volumes.append(
             k8s_client.V1Volume(
                 name="skills",
@@ -615,7 +816,14 @@ def _build_volumes(
         userdata_vol = k8s_client.V1Volume(
             name="user-data",
             host_path=k8s_client.V1HostPathVolumeSource(
-                path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
+                path=join_host_path(
+                    _host_base_dir_for_extra_mounts(),
+                    "users",
+                    user_id,
+                    "threads",
+                    thread_id,
+                    "user-data",
+                ),
                 type="DirectoryOrCreate",
             ),
         )
@@ -634,7 +842,9 @@ def _build_volumes(
     )
     # The runtime emptyDir is shared by the init container (writer) and the
     # sandbox container (reader) in both Pattern A and Pattern B (shim).
-    if _lark_cli_runtime_enabled(provision_lark_cli_runtime) or _lark_cli_broker_enabled(provision_lark_cli_broker):
+    if _lark_cli_runtime_enabled(
+        provision_lark_cli_runtime
+    ) or _lark_cli_broker_enabled(provision_lark_cli_broker):
         volumes.append(
             k8s_client.V1Volume(
                 name=LARK_CLI_RUNTIME_VOLUME_NAME,
@@ -666,7 +876,9 @@ def _build_volumes(
                         name=volume_name,
                         host_path=k8s_client.V1HostPathVolumeSource(
                             path=mount.host_path,
-                            type="Directory" if mount.read_only else "DirectoryOrCreate",
+                            type="Directory"
+                            if mount.read_only
+                            else "DirectoryOrCreate",
                         ),
                     )
                 )
@@ -731,7 +943,9 @@ def _build_volume_mounts(
         read_only=False,
     )
     if USERDATA_PVC_NAME:
-        userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+        userdata_mount.sub_path = (
+            f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
+        )
     mounts.append(userdata_mount)
     mounts.extend(
         _build_extra_volume_mounts(
@@ -745,7 +959,9 @@ def _build_volume_mounts(
         )
     )
     # Sandbox reads the runtime dir (real binary in Pattern A, shim in Pattern B).
-    if _lark_cli_runtime_enabled(provision_lark_cli_runtime) or _lark_cli_broker_enabled(provision_lark_cli_broker):
+    if _lark_cli_runtime_enabled(
+        provision_lark_cli_runtime
+    ) or _lark_cli_broker_enabled(provision_lark_cli_broker):
         mounts.append(
             k8s_client.V1VolumeMount(
                 name=LARK_CLI_RUNTIME_VOLUME_NAME,
@@ -772,7 +988,9 @@ def _build_lark_cli_init_containers(
         mount_path=LARK_CLI_RUNTIME_CONTAINER_PATH,
         read_only=False,
     )
-    secure = k8s_client.V1SecurityContext(privileged=False, allow_privilege_escalation=False)
+    secure = k8s_client.V1SecurityContext(
+        privileged=False, allow_privilege_escalation=False
+    )
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         return [
             k8s_client.V1Container(
@@ -780,7 +998,12 @@ def _build_lark_cli_init_containers(
                 image=LARK_CLI_BROKER_IMAGE,
                 image_pull_policy="IfNotPresent",
                 args=["install-shim", LARK_CLI_RUNTIME_CONTAINER_PATH],
-                env=[k8s_client.V1EnvVar(name="LARK_CLI_RUNTIME_DEST", value=LARK_CLI_RUNTIME_CONTAINER_PATH)],
+                env=[
+                    k8s_client.V1EnvVar(
+                        name="LARK_CLI_RUNTIME_DEST",
+                        value=LARK_CLI_RUNTIME_CONTAINER_PATH,
+                    )
+                ],
                 volume_mounts=[runtime_mount],
                 security_context=secure,
             )
@@ -819,8 +1042,16 @@ def _build_lark_cli_broker_sidecars(
     credential_mounts = _lark_broker_credential_mounts(extra_mounts)
     volume_mounts: list[k8s_client.V1VolumeMount] = []
     for container_path, volume_name, sidecar_path in (
-        (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME, LARK_BROKER_SIDECAR_CONFIG_PATH),
-        (LARK_CLI_DATA_CONTAINER_PATH, LARK_BROKER_DATA_VOLUME_NAME, LARK_BROKER_SIDECAR_DATA_PATH),
+        (
+            LARK_CLI_CONFIG_CONTAINER_PATH,
+            LARK_BROKER_CONFIG_VOLUME_NAME,
+            LARK_BROKER_SIDECAR_CONFIG_PATH,
+        ),
+        (
+            LARK_CLI_DATA_CONTAINER_PATH,
+            LARK_BROKER_DATA_VOLUME_NAME,
+            LARK_BROKER_SIDECAR_DATA_PATH,
+        ),
     ):
         mount = credential_mounts.get(container_path)
         if mount is None:
@@ -834,8 +1065,12 @@ def _build_lark_cli_broker_sidecars(
             sidecar_mount.sub_path = _extra_mount_pvc_sub_path(mount.host_path)
         volume_mounts.append(sidecar_mount)
     broker_env = [
-        k8s_client.V1EnvVar(name="LARKSUITE_CLI_CONFIG_DIR", value=LARK_BROKER_SIDECAR_CONFIG_PATH),
-        k8s_client.V1EnvVar(name="LARKSUITE_CLI_DATA_DIR", value=LARK_BROKER_SIDECAR_DATA_PATH),
+        k8s_client.V1EnvVar(
+            name="LARKSUITE_CLI_CONFIG_DIR", value=LARK_BROKER_SIDECAR_CONFIG_PATH
+        ),
+        k8s_client.V1EnvVar(
+            name="LARKSUITE_CLI_DATA_DIR", value=LARK_BROKER_SIDECAR_DATA_PATH
+        ),
     ]
     # Forward the optional subcommand denylist so the broker refuses secret-dump
     # subcommands (issue #4338 hardening); omitted when unset ⇒ nothing blocked.
@@ -874,9 +1109,12 @@ def _build_pod(
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     init_containers = (
-        _build_lark_cli_init_containers(provision_lark_cli_runtime, provision_lark_cli_broker) or None
+        _build_lark_cli_init_containers(
+            provision_lark_cli_runtime, provision_lark_cli_broker
+        )
+        or None
     )
-    return k8s_client.V1Pod(
+    pod = k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
             namespace=K8S_NAMESPACE,
@@ -894,7 +1132,11 @@ def _build_pod(
                     image=SANDBOX_IMAGE,
                     image_pull_policy="IfNotPresent",
                     env=(
-                        [k8s_client.V1EnvVar(name="DEERFLOW_LARK_BROKER_URL", value=LARK_BROKER_URL)]
+                        [
+                            k8s_client.V1EnvVar(
+                                name="DEERFLOW_LARK_BROKER_URL", value=LARK_BROKER_URL
+                            )
+                        ]
                         if _lark_cli_broker_enabled(provision_lark_cli_broker)
                         else None
                     ),
@@ -950,7 +1192,9 @@ def _build_pod(
                         allow_privilege_escalation=True,
                     ),
                 ),
-                *_build_lark_cli_broker_sidecars(provision_lark_cli_broker, extra_mounts),
+                *_build_lark_cli_broker_sidecars(
+                    provision_lark_cli_broker, extra_mounts
+                ),
             ],
             init_containers=init_containers,
             volumes=_build_volumes(
@@ -964,9 +1208,15 @@ def _build_pod(
             restart_policy="Always",
         ),
     )
+    return _set_mount_contract_metadata(pod, user_id=user_id, thread_id=thread_id)
 
 
-def _build_service(sandbox_id: str) -> k8s_client.V1Service:
+def _build_service(
+    sandbox_id: str,
+    *,
+    user_id: str = DEFAULT_USER_ID,
+    thread_id: str | None = None,
+) -> k8s_client.V1Service:
     """Construct a Service manifest for the configured access mode."""
     return k8s_client.V1Service(
         metadata=k8s_client.V1ObjectMeta(
@@ -977,6 +1227,9 @@ def _build_service(sandbox_id: str) -> k8s_client.V1Service:
                 "sandbox-id": sandbox_id,
                 "app.kubernetes.io/name": "deer-flow",
                 "app.kubernetes.io/component": "sandbox",
+                MOUNT_CONTRACT_LABEL: str(MOUNT_CONTRACT_VERSION),
+                USER_ID_HASH_LABEL: _identity_hash(user_id),
+                THREAD_ID_HASH_LABEL: _identity_hash(thread_id or sandbox_id),
             },
         ),
         spec=k8s_client.V1ServiceSpec(
@@ -1007,7 +1260,9 @@ def _url_from_service(svc, sandbox_id: str) -> str | None:
     return None
 
 
-def _sandbox_access_url(sandbox_id: str, *, tolerate_read_errors: bool = False) -> str | None:
+def _sandbox_access_url(
+    sandbox_id: str, *, tolerate_read_errors: bool = False
+) -> str | None:
     """Read the sandbox Service and return its backend-facing URL when ready."""
     try:
         svc = core_v1.read_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
@@ -1057,6 +1312,7 @@ async def capabilities():
     return {
         "lark_cli_init_image": bool(LARK_CLI_INIT_IMAGE),
         "lark_cli_broker_image": bool(LARK_CLI_BROKER_IMAGE),
+        "mount_contract_version": MOUNT_CONTRACT_VERSION,
     }
 
 
@@ -1073,6 +1329,17 @@ def create_sandbox(req: CreateSandboxRequest):
     include_legacy_skills = req.include_legacy_skills
     provision_lark_cli_runtime = req.provision_lark_cli_runtime
     provision_lark_cli_broker = req.provision_lark_cli_broker
+    # Build and validate the requested contract before the idempotent fast path;
+    # an existing Service must never bypass tenant or read-only mount checks.
+    expected_pod = _build_pod(
+        sandbox_id,
+        thread_id,
+        user_id=user_id,
+        include_legacy_skills=include_legacy_skills,
+        extra_mounts=req.extra_mounts,
+        provision_lark_cli_runtime=provision_lark_cli_runtime,
+        provision_lark_cli_broker=provision_lark_cli_broker,
+    )
 
     logger.info(
         "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s",
@@ -1087,34 +1354,46 @@ def create_sandbox(req: CreateSandboxRequest):
     # ── Fast path: sandbox already exists ────────────────────────────
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
+        _validate_existing_sandbox_contract(
+            sandbox_id,
+            expected_pod=expected_pod,
+            user_id=user_id,
+            thread_id=thread_id,
+        )
         return SandboxResponse(
             sandbox_id=sandbox_id,
             sandbox_url=existing_url,
             status=_get_pod_phase(sandbox_id),
+            user_id=user_id,
+            thread_id=thread_id,
+            mount_contract_version=MOUNT_CONTRACT_VERSION,
         )
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
         core_v1.create_namespaced_pod(
             K8S_NAMESPACE,
-            _build_pod(
-                sandbox_id,
-                thread_id,
-                user_id=user_id,
-                include_legacy_skills=include_legacy_skills,
-                extra_mounts=req.extra_mounts,
-                provision_lark_cli_runtime=provision_lark_cli_runtime,
-                provision_lark_cli_broker=provision_lark_cli_broker,
-            ),
+            expected_pod,
         )
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists
-            raise HTTPException(status_code=500, detail=f"Pod creation failed: {exc.reason}")
+            raise HTTPException(
+                status_code=500, detail=f"Pod creation failed: {exc.reason}"
+            )
+        _validate_existing_sandbox_contract(
+            sandbox_id,
+            expected_pod=expected_pod,
+            user_id=user_id,
+            thread_id=thread_id,
+        )
 
     # ── Create Service ───────────────────────────────────────────────
     try:
-        core_v1.create_namespaced_service(K8S_NAMESPACE, _build_service(sandbox_id))
+        core_v1.create_namespaced_service(
+            K8S_NAMESPACE,
+            _build_service(sandbox_id, user_id=user_id, thread_id=thread_id),
+        )
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:
@@ -1123,7 +1402,9 @@ def create_sandbox(req: CreateSandboxRequest):
                 core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
             except ApiException:
                 pass
-            raise HTTPException(status_code=500, detail=f"Service creation failed: {exc.reason}")
+            raise HTTPException(
+                status_code=500, detail=f"Service creation failed: {exc.reason}"
+            )
 
     # ── Wait until the Service has a usable access URL ───────────────
     sandbox_url: str | None = None
@@ -1134,12 +1415,17 @@ def create_sandbox(req: CreateSandboxRequest):
         time.sleep(0.5)
 
     if not sandbox_url:
-        raise HTTPException(status_code=500, detail="Service access URL was not available in time")
+        raise HTTPException(
+            status_code=500, detail="Service access URL was not available in time"
+        )
 
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        user_id=user_id,
+        thread_id=thread_id,
+        mount_contract_version=MOUNT_CONTRACT_VERSION,
     )
 
 
@@ -1165,7 +1451,9 @@ def destroy_sandbox(sandbox_id: str):
             errors.append(f"pod: {exc.reason}")
 
     if errors:
-        raise HTTPException(status_code=500, detail=f"Partial cleanup: {', '.join(errors)}")
+        raise HTTPException(
+            status_code=500, detail=f"Partial cleanup: {', '.join(errors)}"
+        )
 
     return {"ok": True, "sandbox_id": sandbox_id}
 
@@ -1176,11 +1464,15 @@ def get_sandbox(sandbox_id: str):
     sandbox_url = _sandbox_access_url(sandbox_id)
     if not sandbox_url:
         raise HTTPException(status_code=404, detail=f"Sandbox '{sandbox_id}' not found")
+    user_id, thread_id = _validate_existing_sandbox_contract(sandbox_id)
 
     return SandboxResponse(
         sandbox_id=sandbox_id,
         sandbox_url=sandbox_url,
         status=_get_pod_phase(sandbox_id),
+        user_id=user_id,
+        thread_id=thread_id,
+        mount_contract_version=MOUNT_CONTRACT_VERSION,
     )
 
 
@@ -1193,7 +1485,9 @@ def list_sandboxes():
             label_selector="app=deer-flow-sandbox",
         )
     except ApiException as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list services: {exc.reason}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to list services: {exc.reason}"
+        )
 
     sandboxes: list[SandboxResponse] = []
     for svc in services.items:

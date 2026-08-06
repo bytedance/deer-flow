@@ -223,6 +223,47 @@ class TestListUploadedFiles:
         assert extract_outline_for_file(symlink) == ([], [])
         assert extract_outline_for_file(hardlink) == ([], [])
 
+    @pytest.mark.parametrize("replacement", ["symlink", "hardlink"])
+    def test_direct_markdown_outline_reads_one_verified_descriptor(
+        self,
+        tmp_path,
+        monkeypatch,
+        replacement,
+    ):
+        """Replacing the path after validation must not expose replacement bytes."""
+        import deerflow.utils.file_outline as outline_module
+
+        uploads_dir = _uploads_dir(tmp_path)
+        primary = uploads_dir / "notes.md"
+        primary.write_text("# Safe heading\n", encoding="utf-8")
+        outside = tmp_path / "outside.md"
+        outside.write_text("# SECRET VIA REPLACEMENT\n", encoding="utf-8")
+        real_lstat = outline_module.os.lstat
+        replaced = False
+
+        def lstat_then_replace(path):
+            nonlocal replaced
+            result = real_lstat(path)
+            if Path(path) == primary and not replaced:
+                replaced = True
+                primary.unlink()
+                if replacement == "symlink":
+                    try:
+                        primary.symlink_to(outside)
+                    except OSError as exc:
+                        if getattr(exc, "winerror", None) == 1314:
+                            pytest.skip("Windows symlink privilege is not available")
+                        raise
+                else:
+                    os.link(outside, primary)
+            return result
+
+        monkeypatch.setattr(outline_module.os, "lstat", lstat_then_replace)
+
+        outline, preview = extract_outline_for_file(primary)
+
+        assert all("SECRET" not in str(item) for item in [*outline, *preview])
+
     def test_long_filename_result_includes_exact_generated_markdown_path(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
         filename = f"{'a' * 250}.pdf"

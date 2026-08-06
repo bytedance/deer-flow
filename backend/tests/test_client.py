@@ -2609,7 +2609,12 @@ class TestUploads:
             conversion.parent.mkdir()
             conversion.write_text("generated")
 
-            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 result = client.delete_upload("thread-1", "delete-me.txt")
 
             assert result["success"] is True
@@ -2620,7 +2625,11 @@ class TestUploads:
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 with pytest.raises(FileNotFoundError):
                     client.delete_upload("thread-1", "nope.txt")
 
@@ -2632,7 +2641,11 @@ class TestUploads:
         legacy = uploads_dir / filename
         legacy.write_bytes(b"legacy")
 
-        with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+        provider = MagicMock(uses_thread_data_mounts=True)
+        with (
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+        ):
             result = client.delete_upload("thread-1", legacy.name)
 
         assert result["success"] is True
@@ -2641,9 +2654,41 @@ class TestUploads:
     def test_delete_upload_path_traversal(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
-            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 with pytest.raises(PathTraversalError):
                     client.delete_upload("thread-1", "../../etc/passwd")
+
+    def test_delete_upload_removes_explicitly_synced_remote_paths(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        primary = uploads_dir / "report.pdf"
+        primary.write_bytes(b"pdf")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("generated", encoding="utf-8")
+        provider = MagicMock(uses_thread_data_mounts=False)
+        provider.acquire.return_value = "remote-1"
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+
+        with (
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+        ):
+            result = client.delete_upload("thread-1", "report.pdf")
+
+        assert result["success"] is True
+        assert sandbox.remove_file.call_args_list == [
+            (("/mnt/user-data/uploads/report.pdf",),),
+            (("/mnt/user-data/.upload-conversions/report.pdf.md",),),
+        ]
+        assert not primary.exists()
+        assert not conversion.exists()
 
 
 # ---------------------------------------------------------------------------

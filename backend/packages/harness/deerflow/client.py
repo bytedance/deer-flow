@@ -1671,8 +1671,21 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+        from deerflow.uploads.sandbox_sync import prepare_upload_deletion
+
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename)
+        sandbox_provider = get_sandbox_provider(app_config=self._app_config)
+        delete_remote_copy = prepare_upload_deletion(
+            sandbox_provider,
+            thread_id,
+            user_id=get_effective_user_id(),
+        )
+        return delete_file_safe(
+            uploads_dir,
+            filename,
+            delete_remote_copy=delete_remote_copy,
+        )
 
     # ------------------------------------------------------------------
     # Public API — artifacts

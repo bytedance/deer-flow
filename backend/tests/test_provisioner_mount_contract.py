@@ -18,6 +18,7 @@ def _literal_assignment(path: Path, name: str):
 
 def test_gateway_and_provisioner_extra_mount_contracts_match() -> None:
     gateway_path = REPO_ROOT / "backend/packages/harness/deerflow/community/aio_sandbox/remote_backend.py"
+    provider_path = REPO_ROOT / "backend/packages/harness/deerflow/community/aio_sandbox/aio_sandbox_provider.py"
     provisioner_path = REPO_ROOT / "docker/provisioner/app.py"
 
     gateway_paths = _literal_assignment(gateway_path, "_PROVISIONER_EXTRA_MOUNT_PATHS")
@@ -27,3 +28,11 @@ def test_gateway_and_provisioner_extra_mount_contracts_match() -> None:
     assert "/mnt/user-data/.upload-conversions" in gateway_paths
     assert "/mnt/integrations/lark-cli/runtime" in gateway_paths
     assert _literal_assignment(provisioner_path, "MAX_EXTRA_MOUNTS") == 9
+    assert _literal_assignment(gateway_path, "_UPLOAD_MOUNT_CONTRACT_VERSION") == _literal_assignment(
+        provider_path,
+        "SANDBOX_MOUNT_CONTRACT_VERSION",
+    )
+    assert _literal_assignment(provisioner_path, "MOUNT_CONTRACT_VERSION") == _literal_assignment(
+        provider_path,
+        "SANDBOX_MOUNT_CONTRACT_VERSION",
+    )
