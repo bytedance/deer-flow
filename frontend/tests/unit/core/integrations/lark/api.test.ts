@@ -15,6 +15,7 @@ import {
   installLarkIntegration,
   LarkIntegrationRequestError,
   loadLarkIntegrationStatus,
+  setLarkAppCredentials,
   startLarkAuthorization,
   startLarkConfiguration,
 } from "@/core/integrations/lark/api";
@@ -252,6 +253,65 @@ describe("lark integration api", () => {
           brand: "feishu",
           interval: 5,
           expires_in: 600,
+        }),
+      },
+    );
+  });
+
+  test("switches app credentials", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        message:
+          "Lark/Feishu app switched. Reconnect to authorize the new app.",
+        status: {
+          installed: true,
+          version: "v1.0.65",
+          manifest_version: "v1.0.65",
+          latest_available_version: "v1.0.65",
+          runtime_version_mismatch: false,
+          app_configured: true,
+          app_id: "cli_new",
+          app_brand: "feishu",
+          skills_expected: 27,
+          skills_installed: 1,
+          installed_skills: ["lark-doc"],
+          enabled_skills: ["lark-doc"],
+          install_path: "/tmp/lark-cli",
+          cli: {
+            available: true,
+            path: "/usr/bin/lark-cli",
+            version: "v1.0.65",
+            error: null,
+          },
+          auth: {
+            status: "not_authorized",
+            message: "not authorized",
+            user: null,
+          },
+        },
+      }),
+    );
+
+    await expect(
+      setLarkAppCredentials({
+        app_id: "cli_new",
+        app_secret: "new-secret",
+        brand: "feishu",
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      status: { app_configured: true, app_id: "cli_new" },
+    });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/integrations/lark/config/credentials",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app_id: "cli_new",
+          app_secret: "new-secret",
+          brand: "feishu",
         }),
       },
     );

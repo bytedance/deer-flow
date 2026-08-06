@@ -1037,6 +1037,42 @@ def complete_lark_config(
     )
 
 
+def set_lark_app_credentials(
+    user_id: str,
+    config: AppConfig,
+    *,
+    app_id: str,
+    app_secret: str,
+    brand: str = "feishu",
+) -> LarkConfigCompleteResult:
+    """Switch this user's Lark/Feishu app to an existing app's credentials.
+
+    Unlike :func:`complete_lark_config` (which drives the browser device-flow to
+    create/register an app), this binds a Lark app the user already owns by
+    persisting its ``app_id``/``app_secret`` directly through ``lark-cli config
+    init``. ``config init`` replaces the current app entry, so switching is a
+    per-user operation that does not touch any other user's credentials.
+
+    OAuth tokens under the user's ``data`` directory are intentionally left in
+    place: switching only rebinds the app credentials, and a stale token from a
+    previous app simply fails the next live verification, prompting a reconnect.
+    """
+    app_id = app_id.strip()
+    app_secret = app_secret.strip()
+    if not app_id:
+        raise ValueError("app_id is required.")
+    if not app_secret:
+        raise ValueError("app_secret is required.")
+    parsed_brand = _normalize_lark_brand(brand)
+    _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+    status = get_lark_integration_status(user_id, config)
+    return LarkConfigCompleteResult(
+        success=True,
+        status=status,
+        message="Lark/Feishu app switched. Reconnect to authorize the new app.",
+    )
+
+
 def start_lark_auth(
     user_id: str,
     *,

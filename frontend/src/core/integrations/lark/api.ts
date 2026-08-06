@@ -8,6 +8,7 @@ import type {
   LarkAuthStartResponse,
   LarkConfigCompleteRequest,
   LarkConfigCompleteResponse,
+  LarkConfigCredentialsRequest,
   LarkConfigStartRequest,
   LarkConfigStartResponse,
   LarkInstallResponse,
@@ -113,6 +114,28 @@ export async function completeLarkConfiguration(
 ): Promise<LarkConfigCompleteResponse> {
   const response = await fetch(
     `${getBackendBaseURL()}/api/integrations/lark/config/complete`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) {
+    throw new LarkIntegrationRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
+  }
+  return response.json();
+}
+
+export async function setLarkAppCredentials(
+  request: LarkConfigCredentialsRequest,
+): Promise<LarkConfigCompleteResponse> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/integrations/lark/config/credentials`,
     {
       method: "POST",
       headers: {

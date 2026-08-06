@@ -85,6 +85,12 @@ export interface LarkConfigCompleteRequest {
   expires_in: number | null;
 }
 
+export interface LarkConfigCredentialsRequest {
+  app_id: string;
+  app_secret: string;
+  brand: "feishu" | "lark";
+}
+
 export interface LarkConfigCompleteResponse {
   success: boolean;
   message: string;

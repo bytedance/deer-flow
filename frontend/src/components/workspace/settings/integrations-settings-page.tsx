@@ -35,6 +35,7 @@ import {
   useCompleteLarkConfiguration,
   useInstallLarkIntegration,
   useLarkIntegrationStatus,
+  useSetLarkAppCredentials,
   useStartLarkAuthorization,
   useStartLarkConfiguration,
 } from "@/core/integrations/lark";
@@ -133,8 +134,15 @@ function LarkIntegrationCard() {
   const completeConfig = useCompleteLarkConfiguration();
   const startAuth = useStartLarkAuthorization();
   const completeAuth = useCompleteLarkAuthorization();
+  const switchApp = useSetLarkAppCredentials();
   const [pendingFlow, setPendingFlow] = useState<PendingLarkFlow | null>(null);
   const [isCheckingConnection, setIsCheckingConnection] = useState(false);
+  const [showChangeApp, setShowChangeApp] = useState(false);
+  const [changeAppId, setChangeAppId] = useState("");
+  const [changeAppSecret, setChangeAppSecret] = useState("");
+  const [changeAppBrand, setChangeAppBrand] = useState<"feishu" | "lark">(
+    "feishu",
+  );
   const [selectedAuthDomains, setSelectedAuthDomains] = useState<
     LarkAuthDomain[]
   >([]);
@@ -178,6 +186,16 @@ function LarkIntegrationCard() {
       clearTimeout(authRetryTimeoutRef.current);
       authRetryTimeoutRef.current = null;
     }
+  };
+
+  const cancelPendingAuthorizationFlow = () => {
+    clearAuthRetryTimer();
+    authAttemptIdRef.current += 1;
+    if (authToastIdRef.current != null) {
+      toast.dismiss(authToastIdRef.current);
+      authToastIdRef.current = null;
+    }
+    setPendingFlow(null);
   };
 
   useEffect(
@@ -266,28 +284,71 @@ function LarkIntegrationCard() {
     );
   };
 
+  const startBrowserAppRegistration = (
+    brand: "feishu" | "lark",
+    browserWindow: Window | null,
+  ) => {
+    cancelPendingAuthorizationFlow();
+    startConfig.mutate(
+      { brand },
+      {
+        onSuccess: (result) => {
+          setPendingFlow({ kind: "config", ...result });
+          openAuthorizationUrl(result.verification_url, browserWindow);
+          toast.success(t.settings.integrations.lark.connectionStarted);
+        },
+        onError: (err) => {
+          closePendingBrowserWindow(browserWindow);
+          toast.error(err instanceof Error ? err.message : String(err));
+        },
+      },
+    );
+  };
+
   const startConnectionFlow = (
     status: LarkIntegrationStatus,
     browserWindow: Window | null,
   ) => {
     if (!status.app_configured) {
-      startConfig.mutate(
-        { brand: "feishu" },
-        {
-          onSuccess: (result) => {
-            setPendingFlow({ kind: "config", ...result });
-            openAuthorizationUrl(result.verification_url, browserWindow);
-            toast.success(t.settings.integrations.lark.connectionStarted);
-          },
-          onError: (err) => {
-            closePendingBrowserWindow(browserWindow);
-            toast.error(err instanceof Error ? err.message : String(err));
-          },
-        },
-      );
+      startBrowserAppRegistration("feishu", browserWindow);
       return;
     }
     startUserAuth(browserWindow);
+  };
+
+  const handleReRegisterInBrowser = () => {
+    startBrowserAppRegistration(changeAppBrand, openPendingBrowserWindow());
+  };
+
+  const handleChangeAppSubmit = () => {
+    // Pre-open the browser tab synchronously inside the click gesture: the
+    // subsequent user authorization runs only after the switch POST resolves,
+    // and opening the window then would be outside the gesture and blocked by
+    // the browser (same constraint as handleConnect).
+    const browserWindow = openPendingBrowserWindow();
+    switchApp.mutate(
+      {
+        app_id: changeAppId.trim(),
+        app_secret: changeAppSecret.trim(),
+        brand: changeAppBrand,
+      },
+      {
+        onSuccess: () => {
+          cancelPendingAuthorizationFlow();
+          toast.success(t.settings.integrations.lark.changeAppSwitched);
+          setChangeAppSecret("");
+          setShowChangeApp(false);
+          // The new app has no user authorization yet; drive the browser auth
+          // flow immediately so the switch ends in a usable connection.
+          authRequestRef.current = buildAuthRequest();
+          startUserAuth(browserWindow);
+        },
+        onError: (err) => {
+          closePendingBrowserWindow(browserWindow);
+          toast.error(err instanceof Error ? err.message : String(err));
+        },
+      },
+    );
   };
 
   const buildAuthRequest = (): LarkAuthStartRequest => {
@@ -684,12 +745,105 @@ function LarkIntegrationCard() {
                 ) : null}
                 {connectButtonLabel}
               </Button>
+              {data.installed && data.cli.available && data.app_configured && (
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowChangeApp((current) => !current)}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    switchApp.isPending
+                  }
+                >
+                  {t.settings.integrations.lark.changeAppButton}
+                </Button>
+              )}
               {!isAdmin && (
                 <span className="text-muted-foreground text-sm">
                   {t.settings.integrations.adminRequired}
                 </span>
               )}
             </div>
+            {showChangeApp && data.installed && data.cli.available && (
+              <div className="space-y-3 rounded-lg border p-3">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">
+                    {t.settings.integrations.lark.changeAppTitle}
+                  </div>
+                  <p className="text-muted-foreground text-sm">
+                    {t.settings.integrations.lark.changeAppDescription}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {(["feishu", "lark"] as const).map((brand) => (
+                    <Button
+                      key={brand}
+                      type="button"
+                      size="sm"
+                      variant={changeAppBrand === brand ? "default" : "outline"}
+                      onClick={() => setChangeAppBrand(brand)}
+                      disabled={switchApp.isPending}
+                    >
+                      {brand === "feishu"
+                        ? t.settings.integrations.lark.brandFeishu
+                        : t.settings.integrations.lark.brandLark}
+                    </Button>
+                  ))}
+                </div>
+                <div className="space-y-2">
+                  <Input
+                    value={changeAppId}
+                    onChange={(event) =>
+                      setChangeAppId(event.currentTarget.value)
+                    }
+                    disabled={switchApp.isPending}
+                    placeholder={t.settings.integrations.lark.changeAppIdLabel}
+                    aria-label={t.settings.integrations.lark.changeAppIdLabel}
+                  />
+                  <Input
+                    type="password"
+                    value={changeAppSecret}
+                    onChange={(event) =>
+                      setChangeAppSecret(event.currentTarget.value)
+                    }
+                    disabled={switchApp.isPending}
+                    placeholder={
+                      t.settings.integrations.lark.changeAppSecretLabel
+                    }
+                    aria-label={
+                      t.settings.integrations.lark.changeAppSecretLabel
+                    }
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    {t.settings.integrations.lark.changeAppKeepAuthNote}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={handleChangeAppSubmit}
+                    disabled={
+                      switchApp.isPending ||
+                      !changeAppId.trim() ||
+                      !changeAppSecret.trim()
+                    }
+                  >
+                    {switchApp.isPending ? (
+                      <RefreshCwIcon className="size-4 animate-spin" />
+                    ) : null}
+                    {t.settings.integrations.lark.changeAppSubmit}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleReRegisterInBrowser}
+                    disabled={connectActionBusy}
+                  >
+                    <ExternalLinkIcon className="size-4" />
+                    {t.settings.integrations.lark.changeAppReRegister}
+                  </Button>
+                </div>
+              </div>
+            )}
             {install.isPending && (
               <Alert>
                 <RefreshCwIcon className="size-4 animate-spin" />

@@ -23,6 +23,7 @@ from deerflow.integrations.lark_cli import (
     complete_lark_config,
     get_lark_integration_status,
     install_lark_integration,
+    set_lark_app_credentials,
     start_lark_auth,
     start_lark_config,
 )
@@ -120,6 +121,12 @@ class LarkConfigCompleteResponse(BaseModel):
     success: bool
     message: str
     status: LarkIntegrationStatusResponse
+
+
+class LarkConfigCredentialsRequest(BaseModel):
+    app_id: str = Field(..., description="Lark/Feishu App ID to switch this user's integration to")
+    app_secret: str = Field(..., description="Lark/Feishu App Secret paired with app_id")
+    brand: str = Field(default="feishu", description="Lark brand: feishu or lark")
 
 
 class LarkAuthStartResponse(BaseModel):
@@ -308,6 +315,29 @@ async def complete_lark_app_config(request: Request, body: LarkConfigCompleteReq
     except Exception as e:
         logger.error("Failed to complete Lark connection setup: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to complete Lark connection setup.")
+
+
+@router.post("/lark/config/credentials", response_model=LarkConfigCompleteResponse, summary="Switch Lark/Feishu App Credentials")
+async def switch_lark_app_credentials(request: Request, body: LarkConfigCredentialsRequest, config: AppConfig = Depends(get_config)) -> LarkConfigCompleteResponse:
+    try:
+        result = await asyncio.to_thread(
+            set_lark_app_credentials,
+            get_effective_user_id(),
+            config,
+            app_id=body.app_id,
+            app_secret=body.app_secret,
+            brand=body.brand,
+        )
+        return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to switch Lark app credentials: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to switch Lark app credentials.")
 
 
 @router.post("/lark/auth/start", response_model=LarkAuthStartResponse, summary="Start Lark/Feishu Browser Authorization")

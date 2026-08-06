@@ -1284,6 +1284,34 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route("**/api/integrations/lark/config/credentials", (route) => {
+    if (route.request().method() === "POST") {
+      larkIntegrationStatus = {
+        ...larkIntegrationStatus,
+        app_configured: true,
+        app_id: "cli_switched_mock",
+        app_brand: "feishu",
+        auth: {
+          status: "not_authorized",
+          message: "Lark user authorization is not configured",
+          user: null,
+          verified: false,
+        },
+      };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message:
+            "Lark/Feishu app switched. Reconnect to authorize the new app.",
+          status: larkIntegrationStatus,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+
   void page.route("**/api/integrations/lark/auth/start", (route) => {
     if (route.request().method() === "POST") {
       return route.fulfill({

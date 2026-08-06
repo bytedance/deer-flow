@@ -1680,3 +1680,107 @@ def test_lark_auth_complete_route_polls_device_code(monkeypatch, tmp_path):
     assert response.json()["status"]["auth"]["status"] == "authenticated"
     assert response.json()["status"]["auth"]["verified"] is True
     assert captured_kwargs == {"device_code": "device-code", "wait_timeout_seconds": 45}
+
+
+def _status_stub(*, app_configured: bool, app_id: str | None, auth_status: str) -> lark_cli.LarkIntegrationStatus:
+    return lark_cli.LarkIntegrationStatus(
+        installed=True,
+        version="v1.0.65",
+        manifest_version="v1.0.65",
+        latest_available_version=None,
+        runtime_version_mismatch=False,
+        app_configured=app_configured,
+        app_id=app_id,
+        app_brand="feishu",
+        skills_expected=27,
+        skills_installed=27,
+        installed_skills=("lark-doc",),
+        enabled_skills=("lark-doc",),
+        install_path="/tmp/lark",
+        cli=lark_cli.LarkCliProbe(available=True),
+        auth=lark_cli.LarkAuthProbe(status=auth_status, user=None),
+    )
+
+
+def test_set_lark_app_credentials_switches_app_and_keeps_prior_auth(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    captured: dict[str, object] = {}
+
+    # Seed an existing OAuth token file so we can prove switching the app does
+    # NOT wipe the previous authorization (data/ is preserved by design).
+    data_dir = lark_cli.lark_cli_data_dir("alice")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    token_file = data_dir / "token.json"
+    token_file.write_text('{"access_token": "old-app-token"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        lark_cli,
+        "_save_lark_app_config_with_cli",
+        lambda user_id, **kwargs: captured.update({"user_id": user_id, **kwargs}),
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "get_lark_integration_status",
+        lambda _user_id, _config, **_kwargs: _status_stub(app_configured=True, app_id="cli_new", auth_status="not_authorized"),
+    )
+
+    result = lark_cli.set_lark_app_credentials("alice", config, app_id="  cli_new  ", app_secret="  new-secret  ", brand="lark")
+
+    assert result.success is True
+    assert captured == {
+        "user_id": "alice",
+        "app_id": "cli_new",
+        "app_secret": "new-secret",
+        "brand": "lark",
+    }
+    # The previous app's OAuth data is intentionally retained.
+    assert token_file.read_text(encoding="utf-8") == '{"access_token": "old-app-token"}'
+
+
+@pytest.mark.parametrize(
+    ("app_id", "app_secret"),
+    [("", "secret"), ("cli_new", "")],
+)
+def test_set_lark_app_credentials_rejects_missing_fields(monkeypatch, tmp_path, app_id, app_secret):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("credentials must be validated before touching the CLI")
+
+    monkeypatch.setattr(lark_cli, "_save_lark_app_config_with_cli", _must_not_run)
+
+    with pytest.raises(ValueError):
+        lark_cli.set_lark_app_credentials("alice", config, app_id=app_id, app_secret=app_secret)
+
+
+def test_lark_config_credentials_route_switches_app(monkeypatch, tmp_path):
+    config = _config(tmp_path / "skills")
+    app = _make_app(system_role="user", config=config)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        integrations_router,
+        "set_lark_app_credentials",
+        lambda _user_id, _config, *, app_id, app_secret, brand: (
+            captured.update({"app_id": app_id, "app_secret": app_secret, "brand": brand})
+            or lark_cli.LarkConfigCompleteResult(
+                success=True,
+                message="Lark/Feishu app switched. Reconnect to authorize the new app.",
+                status=_status_stub(app_configured=True, app_id="cli_new", auth_status="not_authorized"),
+            )
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/lark/config/credentials",
+            json={"app_id": "cli_new", "app_secret": "new-secret", "brand": "feishu"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert response.json()["status"]["app_configured"] is True
+    assert response.json()["status"]["auth"]["status"] == "not_authorized"
+    assert captured == {"app_id": "cli_new", "app_secret": "new-secret", "brand": "feishu"}

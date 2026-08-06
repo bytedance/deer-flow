@@ -5,6 +5,7 @@ import {
   completeLarkConfiguration,
   installLarkIntegration,
   loadLarkIntegrationStatus,
+  setLarkAppCredentials,
   startLarkAuthorization,
   startLarkConfiguration,
 } from "./api";
@@ -53,6 +54,20 @@ export function useCompleteLarkConfiguration() {
       await queryClient.invalidateQueries({
         queryKey: larkIntegrationQueryKey,
       });
+    },
+  });
+}
+
+export function useSetLarkAppCredentials() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: setLarkAppCredentials,
+    // Only seed the switched status; do not invalidate. Switching is always
+    // followed by the browser auth flow, whose completion writes the
+    // authoritative status. A refetch here would race that write and could
+    // flash the UI back to the pre-authorization state.
+    onSuccess: (result) => {
+      queryClient.setQueryData(larkIntegrationQueryKey, result.status);
     },
   });
 }

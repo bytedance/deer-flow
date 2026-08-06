@@ -163,4 +163,103 @@ test.describe("Integrations settings", () => {
       dialog.getByText("https://open.feishu.cn/auth/mock-device"),
     ).toBeVisible();
   });
+
+  test("can switch the Lark app by entering new credentials", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page);
+
+    // A configured + CLI-available account is the precondition for surfacing
+    // the "Change Lark app" control.
+    const configuredStatus = {
+      installed: true,
+      version: "v1.0.65",
+      manifest_version: "v1.0.65",
+      latest_available_version: "v1.0.65",
+      runtime_version_mismatch: false,
+      app_configured: true,
+      app_id: "cli_existing_mock",
+      app_brand: "feishu",
+      skills_expected: 27,
+      skills_installed: 4,
+      installed_skills: ["lark-doc", "lark-im", "lark-shared", "lark-sheets"],
+      enabled_skills: ["lark-doc", "lark-im", "lark-shared", "lark-sheets"],
+      install_path: "/mock/integrations/skills/lark-cli",
+      cli: {
+        available: true,
+        path: "/usr/bin/lark-cli",
+        version: "lark-cli version v1.0.65",
+        error: null,
+      },
+      auth: {
+        status: "authenticated",
+        message: "Lark authorization is live-verified.",
+        user: "existing-user",
+        verified: true,
+      },
+      sandbox_runtime_mode: "none",
+      sandbox_runtime_ready: false,
+      sandbox_runtime_detail: null,
+    };
+    await page.route("**/api/integrations/lark/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(configuredStatus),
+      });
+    });
+
+    let credentialsRequest: unknown;
+    await page.route(
+      "**/api/integrations/lark/config/credentials",
+      async (route) => {
+        credentialsRequest = route.request().postDataJSON();
+        await route.fallback();
+      },
+    );
+    let authStartCalled = false;
+    await page.route("**/api/integrations/lark/auth/start", async (route) => {
+      authStartCalled = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verification_url: "https://open.feishu.cn/auth/switched-app",
+          device_code: "switched-device-code",
+          expires_in: 600,
+          user_code: null,
+          hint: null,
+        }),
+      });
+    });
+
+    await page.goto("/workspace/chats/new?settings=integrations");
+
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
+
+    // Reveal the switch form and submit new app credentials.
+    await dialog.getByRole("button", { name: "Change Lark app" }).click();
+    await expect(
+      dialog.getByText("Switch to a different Lark app"),
+    ).toBeVisible();
+    await dialog.getByLabel("App ID").fill("cli_new_mock");
+    await dialog.getByLabel("App Secret").fill("super-secret");
+    const popupPromise = page.waitForEvent("popup");
+    await dialog.getByRole("button", { name: "Switch app" }).click();
+    const popup = await popupPromise;
+
+    await expect
+      .poll(() => credentialsRequest)
+      .toMatchObject({
+        app_id: "cli_new_mock",
+        app_secret: "super-secret",
+        brand: "feishu",
+      });
+
+    // Switching a bot immediately drives the new app's browser authorization.
+    await expect.poll(() => authStartCalled).toBe(true);
+    await popup.close();
+  });
 });
