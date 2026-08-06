@@ -166,13 +166,23 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend._mount_contract_version = 2
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
-    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False, provision_lark_cli_broker=False):
+    def mock_create(
+        thread_id: str,
+        sandbox_id: str,
+        extra_mounts=None,
+        *,
+        user_id=None,
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+        required_mount_contract_version=None,
+    ):
         assert thread_id == "thread-1"
         assert sandbox_id == "abc123"
         assert extra_mounts == [("/host", "/container", False)]
         assert user_id == expected_user_id
         assert provision_lark_cli_runtime is True
         assert provision_lark_cli_broker is False
+        assert required_mount_contract_version == 2
         return expected
 
     monkeypatch.setattr(backend, "_provisioner_create", mock_create)
@@ -273,6 +283,45 @@ def test_current_contract_create_returns_verified_identity(monkeypatch):
         "thread-1",
         2,
     )
+
+
+def test_create_keeps_v2_response_validation_when_capability_changes_during_post(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def old_peer_response(*_args, **_kwargs):
+        backend._mount_contract_version = 0
+        backend._mount_contract_capability_known = False
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://legacy.local",
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", old_peer_response)
+
+    with pytest.raises(RuntimeError, match="mount contract response"):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+
+def test_capability_retry_backoff_does_not_overflow_after_long_outage(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._capability_probe_failures = 1024
+    backend._capability_next_probe_at = 0.0
+    now = [100.0]
+    monkeypatch.setattr(remote_backend_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError("still down")),
+    )
+
+    assert backend.refresh_capabilities_if_stale() is True
+    assert backend._capability_probe_failures == 1025
+    assert backend._capability_next_probe_at == 130.0
 
 
 def test_provisioner_create_returns_sandbox_info(monkeypatch):

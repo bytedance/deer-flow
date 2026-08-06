@@ -523,6 +523,17 @@ class TestUploadPublication:
         assert publication.path.read_bytes() == b"old"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
 
+    def test_successful_rollback_removes_deletion_transaction_directory(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        conversion_dir = conversion_path_for_upload(publication.path).parent
+        try:
+            rollback_published_upload(publication)
+        finally:
+            publication.release()
+
+        assert not publication.path.exists()
+        assert not list(conversion_dir.glob(".upload-delete-*.part"))
+
     def test_staging_unlink_failure_is_not_reported_as_success(self, tmp_path):
         staged = create_upload_staging_file(tmp_path)
         staged.handle.write(b"payload")
@@ -892,6 +903,34 @@ class TestCleanupStaleUploadStagingFiles:
         assert primary.read_bytes() == b"original"
         assert not staged_path.exists()
 
+    def test_restores_legacy_intentless_deletion_transaction(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"original")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+        )
+        stage_lease.release()
+        legacy_transaction_dir = staged_path.parent.with_name(
+            staged_path.parent.name.replace(
+                ".upload-delete-restore-",
+                ".upload-delete-",
+                1,
+            )
+        )
+        staged_path.parent.rename(legacy_transaction_dir)
+        legacy_staged_path = legacy_transaction_dir / staged_path.name
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"original"
+        assert not legacy_staged_path.exists()
+
     def test_refuses_replaced_deletion_tombstone_after_crash(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -914,6 +953,26 @@ class TestCleanupStaleUploadStagingFiles:
         assert cleanup_stale_upload_staging_files(tmp_path) == 0
         assert not primary.exists()
         assert staged_path.read_bytes() == b"replacement"
+
+    def test_crashed_upload_rollback_finishes_deletion_instead_of_restoring(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "failed.pdf"
+        primary.write_bytes(b"never committed")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=False,
+        )
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert not primary.exists()
+        assert not staged_path.exists()
 
 
 # ---------------------------------------------------------------------------

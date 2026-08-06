@@ -171,6 +171,14 @@ class RemoteSandboxBackend(SandboxBackend):
         """Whether the peer definitively answered capability negotiation."""
         return self._mount_contract_capability_known
 
+    def mount_contract_snapshot(self) -> tuple[int, bool]:
+        """Return one capability snapshot for a complete caller operation."""
+        with self._capability_probe_lock:
+            return (
+                self._mount_contract_version,
+                self._mount_contract_capability_known,
+            )
+
     @property
     def requires_create_validation(self) -> bool:
         """Require idempotent POST so the Provisioner checks requested mounts."""
@@ -227,9 +235,13 @@ class RemoteSandboxBackend(SandboxBackend):
             self._mount_contract_version = 0
             self._mount_contract_capability_known = False
             self._capability_probe_failures += 1
+            retry_exponent = min(
+                self._capability_probe_failures - 1,
+                int(_CAPABILITY_RETRY_MAX_SECONDS).bit_length(),
+            )
             retry_seconds = min(
                 _CAPABILITY_RETRY_MAX_SECONDS,
-                float(2 ** (self._capability_probe_failures - 1)),
+                float(2**retry_exponent),
             )
             self._capability_next_probe_at = time.monotonic() + retry_seconds
             logger.warning("Provisioner mount capabilities are unavailable; mounted thread data will fail closed until compatibility can be verified")
@@ -251,11 +263,11 @@ class RemoteSandboxBackend(SandboxBackend):
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        if self._mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION:
-            self.refresh_capabilities_if_stale()
+        self.refresh_capabilities_if_stale()
+        mount_contract_version, _capability_known = self.mount_contract_snapshot()
         effective_user_id = user_id or get_effective_user_id()
-        if self._mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
-            raise RuntimeError(f"Provisioner mount contract v{self._mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
+        if mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
+            raise RuntimeError(f"Provisioner mount contract v{mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
         return self._provisioner_create(
             thread_id,
             sandbox_id,
@@ -263,6 +275,7 @@ class RemoteSandboxBackend(SandboxBackend):
             user_id=user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
             provision_lark_cli_broker=provision_lark_cli_broker,
+            required_mount_contract_version=mount_contract_version,
         )
 
     def destroy(self, info: SandboxInfo) -> None:
@@ -336,8 +349,11 @@ class RemoteSandboxBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        required_mount_contract_version: int | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
+        if required_mount_contract_version is None:
+            required_mount_contract_version, _capability_known = self.mount_contract_snapshot()
         effective_user_id = user_id or get_effective_user_id()
         include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
         payload = {
@@ -367,7 +383,7 @@ class RemoteSandboxBackend(SandboxBackend):
             if not isinstance(data, dict):
                 raise RuntimeError("Provisioner mount contract response is not an object")
             effective_thread_id = thread_id or sandbox_id
-            if self._mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION:
+            if required_mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION:
                 response_contract = (
                     data.get("sandbox_id"),
                     data.get("user_id"),

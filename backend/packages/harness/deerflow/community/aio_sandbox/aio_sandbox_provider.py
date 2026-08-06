@@ -280,6 +280,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return False
         return mounted
 
+    def refresh_thread_data_mount_capabilities(self) -> bool:
+        """Refresh remote mount compatibility when its negotiated value is stale."""
+        backend = getattr(self, "_backend", None)
+        if isinstance(backend, RemoteSandboxBackend):
+            return backend.refresh_capabilities_if_stale()
+        return False
+
     # ── Factory methods ──────────────────────────────────────────────────
 
     def _create_backend(self) -> SandboxBackend:
@@ -763,7 +770,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _deterministic_sandbox_id(thread_id: str, user_id: str) -> str:
+    def _deterministic_sandbox_id(
+        thread_id: str,
+        user_id: str,
+        mount_contract_version: int = SANDBOX_MOUNT_CONTRACT_VERSION,
+    ) -> str:
         """Generate a deterministic sandbox ID from user/thread scope.
 
         Includes user_id so a previously-created default-bucket sandbox cannot be
@@ -774,7 +785,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         satisfy the new thread acquisition. Reconciliation may still enumerate
         and adopt its old ID for normal orphan cleanup.
         """
-        return hashlib.sha256(f"mount-v{SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return hashlib.sha256(f"mount-v{mount_contract_version}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
 
     def _assert_active_identity_available_locked(
         self,
@@ -810,9 +821,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _get_extra_mounts(self, thread_id: str | None, *, user_id: str | None = None) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
-        backend = getattr(self, "_backend", None)
-        if isinstance(backend, RemoteSandboxBackend):
-            backend.refresh_capabilities_if_stale()
         mounts: list[tuple[str, str, bool]] = []
 
         if thread_id:
@@ -1342,9 +1350,26 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
-        return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else str(uuid.uuid4())[:8]
+        if thread_id is None:
+            return str(uuid.uuid4())[:8]
+        backend = getattr(self, "_backend", None)
+        mount_contract_version = SANDBOX_MOUNT_CONTRACT_VERSION
+        if isinstance(backend, RemoteSandboxBackend):
+            mount_contract_version, _capability_known = backend.mount_contract_snapshot()
+        return self._deterministic_sandbox_id(
+            thread_id,
+            self._effective_acquire_user_id(user_id),
+            mount_contract_version,
+        )
 
-    def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
+    def _reuse_in_process_sandbox(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str | None = None,
+        post_lock: bool = False,
+        expected_sandbox_id: str | None = None,
+    ) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
             return None
@@ -1356,6 +1381,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
 
             existing_id = self._thread_sandboxes[key]
+            if expected_sandbox_id is not None and existing_id != expected_sandbox_id:
+                del self._thread_sandboxes[key]
+                logger.info(
+                    "Cached sandbox %s uses a superseded mount contract; expected %s",
+                    existing_id,
+                    expected_sandbox_id,
+                )
+                return None
             if self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
                 # Same answer as a peer's `del:` lease: cold-start instead.
@@ -1382,18 +1415,39 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             user_id=effective_user_id,
         )
 
+        replacement_client = None
+        if validated_info is not None and info is not None and validated_info.sandbox_url != info.sandbox_url:
+            replacement_client = AioSandbox(
+                id=existing_id,
+                base_url=validated_info.sandbox_url,
+            )
+
+        replaced_client = None
+        reuse_is_stale = False
         with self._lock:
             if self._thread_sandboxes.get(key) != existing_id:
-                return None
-            if existing_id not in self._sandboxes:
+                reuse_is_stale = True
+            elif existing_id not in self._sandboxes:
                 self._thread_sandboxes.pop(key, None)
-                return None
-            if validated_info is not None:
-                self._sandbox_infos[existing_id] = validated_info
+                reuse_is_stale = True
+            else:
+                if validated_info is not None:
+                    self._sandbox_infos[existing_id] = validated_info
+                if replacement_client is not None:
+                    replaced_client = self._sandboxes[existing_id]
+                    self._sandboxes[existing_id] = replacement_client
 
-            suffix = " (post-lock check)" if post_lock else ""
-            logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
-            self._last_activity[existing_id] = time.time()
+                suffix = " (post-lock check)" if post_lock else ""
+                logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
+                self._last_activity[existing_id] = time.time()
+
+        if reuse_is_stale:
+            if replacement_client is not None:
+                replacement_client.close()
+            return None
+
+        if replaced_client is not None:
+            replaced_client.close()
 
         # Fail closed: an OwnershipBackendError propagates rather than handing out
         # a sandbox we could not publish ownership for.
@@ -1542,7 +1596,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _recheck_cached_sandbox(self, thread_id: str, sandbox_id: str, *, user_id: str) -> str | None:
         """Re-check in-memory caches after acquiring the cross-process file lock."""
-        return self._reuse_in_process_sandbox(thread_id, user_id=user_id, post_lock=True) or self._reclaim_warm_pool_sandbox(
+        return self._reuse_in_process_sandbox(
+            thread_id,
+            user_id=user_id,
+            post_lock=True,
+            expected_sandbox_id=sandbox_id,
+        ) or self._reclaim_warm_pool_sandbox(
             thread_id,
             sandbox_id,
             user_id=user_id,
@@ -1878,6 +1937,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Returns:
             The ID of the acquired sandbox environment.
         """
+        self.refresh_thread_data_mount_capabilities()
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id, effective_user_id)
@@ -1893,6 +1953,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         event loop and using async-native readiness polling for newly created
         sandboxes.
         """
+        await asyncio.to_thread(self.refresh_thread_data_mount_capabilities)
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id, effective_user_id)
@@ -1913,12 +1974,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                  is needed — any process can derive the same container name)
         """
         self._ensure_skills_projection(user_id)
-        cached_id = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
+        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
+        expected_cached_id = sandbox_id if thread_id and isinstance(self._backend, RemoteSandboxBackend) else None
+        if expected_cached_id is None:
+            cached_id = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
+        else:
+            cached_id = self._reuse_in_process_sandbox(
+                thread_id,
+                user_id=user_id,
+                expected_sandbox_id=expected_cached_id,
+            )
         if cached_id is not None:
             return cached_id
 
-        # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:
@@ -1941,12 +2009,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
         await asyncio.to_thread(self._ensure_skills_projection, user_id)
-        cached_id = await asyncio.to_thread(self._reuse_in_process_sandbox, thread_id, user_id=user_id)
+        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
+        expected_cached_id = sandbox_id if thread_id and isinstance(self._backend, RemoteSandboxBackend) else None
+        if expected_cached_id is None:
+            cached_id = await asyncio.to_thread(
+                self._reuse_in_process_sandbox,
+                thread_id,
+                user_id=user_id,
+            )
+        else:
+            cached_id = await asyncio.to_thread(
+                self._reuse_in_process_sandbox,
+                thread_id,
+                user_id=user_id,
+                expected_sandbox_id=expected_cached_id,
+            )
         if cached_id is not None:
             return cached_id
 
-        # Deterministic ID for thread-specific, random for anonymous
-        sandbox_id = self._sandbox_id_for_thread(thread_id, user_id)
         if thread_id:
             key = self._thread_key(thread_id, user_id)
             with self._lock:

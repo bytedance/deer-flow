@@ -14,7 +14,11 @@ from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    get_sandbox_provider,
+    sandbox_provider_uses_thread_data_mounts,
+    sandbox_provider_uses_thread_data_mounts_async,
+)
 from deerflow.uploads.async_helpers import run_upload_lease_io, wait_for_task_completion
 from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
 from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
@@ -126,10 +130,6 @@ def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
     readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
     chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
     os.chmod(file_path, readable_mode, **chmod_kwargs)
-
-
-def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
-    return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
 
 
 def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
@@ -413,13 +413,18 @@ async def upload_files(
     reserved_coordination_keys: set[str] = set()
     total_size = 0
     sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-    sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
+    sync_to_sandbox = not await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
         sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-        sandbox = sandbox_provider.get(sandbox_id)
-        if sandbox is None:
-            raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
+        sync_to_sandbox = not sandbox_provider_uses_thread_data_mounts(
+            sandbox_provider,
+            refresh=False,
+        )
+        if sync_to_sandbox:
+            sandbox = sandbox_provider.get(sandbox_id)
+            if sandbox is None:
+                raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
     current_filename = "request"
 

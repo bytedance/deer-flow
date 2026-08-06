@@ -175,3 +175,29 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
     global _default_sandbox_provider
     with _provider_lock:
         _default_sandbox_provider = provider
+
+
+def sandbox_provider_uses_thread_data_mounts(
+    provider: SandboxProvider,
+    *,
+    refresh: bool = True,
+) -> bool:
+    """Return one provider mount-mode decision, optionally refreshing it first."""
+    if refresh:
+        refresher = getattr(provider, "refresh_thread_data_mount_capabilities", None)
+        if callable(refresher):
+            refresher()
+    return bool(getattr(provider, "uses_thread_data_mounts", False))
+
+
+async def sandbox_provider_uses_thread_data_mounts_async(
+    provider: SandboxProvider,
+    *,
+    refresh: bool = True,
+) -> bool:
+    """Async mount-mode decision that keeps capability probes off the event loop."""
+    return await asyncio.to_thread(
+        sandbox_provider_uses_thread_data_mounts,
+        provider,
+        refresh=refresh,
+    )

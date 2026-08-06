@@ -22,7 +22,11 @@ from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    get_sandbox_provider,
+    sandbox_provider_uses_thread_data_mounts,
+    sandbox_provider_uses_thread_data_mounts_async,
+)
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -463,11 +467,15 @@ async def update_artifact(
             updated = _encode_artifact_update(body.content)
 
             sandbox_provider = get_sandbox_provider()
-            if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
+            if not await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
                 sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    raise RuntimeError("Failed to acquire sandbox for artifact update")
+                if not sandbox_provider_uses_thread_data_mounts(
+                    sandbox_provider,
+                    refresh=False,
+                ):
+                    sandbox = sandbox_provider.get(sandbox_id)
+                    if sandbox is None:
+                        raise RuntimeError("Failed to acquire sandbox for artifact update")
 
             try:
                 if sandbox is not None:

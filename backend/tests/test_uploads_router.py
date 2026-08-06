@@ -189,6 +189,44 @@ def test_sandbox_sync_failure_rolls_back_published_generation(tmp_path):
     assert not (thread_uploads_dir / "notes.txt").exists()
 
 
+def test_upload_rechecks_mount_mode_after_sandbox_acquire(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    class ProviderThatBecomesMounted:
+        uses_thread_data_mounts = False
+
+        @staticmethod
+        def refresh_thread_data_mount_capabilities() -> bool:
+            return False
+
+        async def acquire_async(self, _thread_id, *, user_id=None):
+            self.uses_thread_data_mounts = True
+            return "mounted-sandbox"
+
+        @staticmethod
+        def get(_sandbox_id):
+            raise AssertionError("mounted mode must not explicitly synchronize uploads")
+
+    provider = ProviderThatBecomesMounted()
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-mounted-after-acquire",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.txt", file=BytesIO(b"payload"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"payload"
+
+
 def test_partial_sandbox_sync_failure_removes_all_attempted_remote_paths(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

@@ -94,6 +94,23 @@ def test_remote_mount_override_uses_current_provisioner_contract():
     assert provider.uses_thread_data_mounts is True
 
 
+def test_remote_mount_mode_refreshes_stale_current_contract(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION
+    provider._backend._mount_contract_capability_known = True
+    provider._backend._capability_next_probe_at = 0.0
+    response = MagicMock(status_code=404)
+    monkeypatch.setattr(remote_mod.requests, "get", MagicMock(return_value=response))
+
+    assert provider_mod.sandbox_provider_uses_thread_data_mounts(provider) is False
+    remote_mod.requests.get.assert_called_once()
+
+
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
 
 
@@ -807,6 +824,64 @@ async def test_remote_warm_pool_revalidates_current_contract_before_reclaim_asyn
     assert result == "sandbox-warm-async"
     assert len(calls) == 1
     assert calls[0]["sandbox_id"] == "sandbox-warm-async"
+
+
+def test_remote_active_cache_replaces_client_when_validated_url_changes(tmp_path, monkeypatch):
+    provider, old_client, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active-url")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active-url"}
+
+    def create(thread_id, sandbox_id, **_kwargs):
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url="http://new-sandbox-host",
+            user_id="alice",
+            thread_id=thread_id,
+            mount_contract_version=2,
+        )
+
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        is_alive=MagicMock(return_value=True),
+        create=create,
+    )
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._get_extra_mounts = lambda *_args, **_kwargs: []
+    provider._lark_integration_active = lambda _user_id: False
+    provider._lark_broker_active = lambda _user_id: False
+    new_client = SimpleNamespace(id="sandbox-active-url", base_url="http://new-sandbox-host", close=MagicMock())
+    monkeypatch.setattr(aio_mod, "AioSandbox", lambda **_kwargs: new_client)
+
+    assert provider._acquire_internal("thread-1", user_id="alice") == "sandbox-active-url"
+    assert provider.get("sandbox-active-url") is new_client
+    old_client.close.assert_called_once_with()
+
+
+def test_remote_sandbox_id_changes_with_negotiated_mount_contract(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = 0
+    legacy_id = provider._sandbox_id_for_thread("thread-1", "default")
+
+    provider._backend._mount_contract_version = 2
+    current_id = provider._sandbox_id_for_thread("thread-1", "default")
+
+    assert legacy_id != current_id
+
+
+def test_cached_legacy_sandbox_is_not_reused_after_contract_upgrade(tmp_path):
+    provider, _sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "legacy-id")
+    provider._thread_sandboxes = {("default", "thread-1"): "legacy-id"}
+
+    assert (
+        provider._reuse_in_process_sandbox(
+            "thread-1",
+            user_id="default",
+            expected_sandbox_id="current-id",
+        )
+        is None
+    )
+    assert ("default", "thread-1") not in provider._thread_sandboxes
 
 
 @pytest.mark.anyio
@@ -1588,7 +1663,7 @@ def test_aio_forced_collision_never_overwrites_active_tenant(
     monkeypatch.setattr(
         aio_mod.AioSandboxProvider,
         "_deterministic_sandbox_id",
-        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+        staticmethod(lambda thread_id, user_id, mount_contract_version=aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION: "deadbeefdeadbeef"),
     )
 
     sandbox_id = provider.acquire("thread-a", user_id="user-a")

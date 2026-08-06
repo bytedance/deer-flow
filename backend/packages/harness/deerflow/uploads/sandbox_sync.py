@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from deerflow.sandbox.sandbox_provider import (
+    sandbox_provider_uses_thread_data_mounts,
+    sandbox_provider_uses_thread_data_mounts_async,
+)
 from deerflow.uploads.async_helpers import run_upload_io_cancellation_safe, wait_for_task_completion
 from deerflow.uploads.layout import conversion_virtual_path
 from deerflow.uploads.manager import make_upload_file_sandbox_readable, upload_virtual_path
@@ -66,9 +70,11 @@ def prepare_upload_deletion(
     user_id: str | None,
 ) -> Callable[[str], None] | None:
     """Return a lease-safe remote deletion hook for an explicitly synced sandbox."""
-    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         return None
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+        return None
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
@@ -82,9 +88,11 @@ async def prepare_upload_deletion_async(
     user_id: str | None,
 ) -> Callable[[str], None] | None:
     """Async counterpart that keeps remote acquisition off the event loop."""
-    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+    if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         return None
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+        return None
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
@@ -133,11 +141,14 @@ def make_upload_paths_available(
 ) -> SandboxSyncReceipt:
     """Synchronously make exact host upload paths available to one provider."""
     sync_paths = tuple((Path(path), virtual_path) for path, virtual_path in paths)
-    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         _make_paths_readable(sync_paths)
         return SandboxSyncReceipt(sandbox=None)
 
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+        _make_paths_readable(sync_paths)
+        return SandboxSyncReceipt(sandbox=None)
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
@@ -153,11 +164,14 @@ async def make_upload_paths_available_async(
 ) -> SandboxSyncReceipt:
     """Cancellation-safely expose exact upload paths to a mounted or remote sandbox."""
     sync_paths = tuple((Path(path), virtual_path) for path, virtual_path in paths)
-    if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+    if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         await run_upload_io_cancellation_safe(_make_paths_readable, sync_paths)
         return SandboxSyncReceipt(sandbox=None)
 
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
+    if sandbox_provider_uses_thread_data_mounts(sandbox_provider, refresh=False):
+        await run_upload_io_cancellation_safe(_make_paths_readable, sync_paths)
+        return SandboxSyncReceipt(sandbox=None)
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")

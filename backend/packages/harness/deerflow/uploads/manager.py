@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
 UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
+_UPLOAD_DELETION_RESTORE_INTENT = "restore"
+_UPLOAD_DELETION_DISCARD_INTENT = "discard"
 _WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
 
 
@@ -467,6 +469,7 @@ def rollback_published_upload(publication: PublishedUpload) -> None:
             publication.path.parent,
             publication.path,
             publication.identity,
+            recover_on_crash=False,
         )
     except (FileNotFoundError, UnsafeUploadPathError):
         # The pathname was replaced after the optimistic identity check. The
@@ -476,6 +479,7 @@ def rollback_published_upload(publication: PublishedUpload) -> None:
         if owned_conversion is not None:
             owned_conversion.unlink(missing_ok=True)
         staged_path.unlink()
+        _finish_deletion_transaction(staged_path)
     except BaseException:
         _restore_staged_deletion(
             staged_path,
@@ -585,15 +589,26 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
     return removed
 
 
-def _deletion_transaction_inode(transaction_name: str) -> int | None:
-    """Decode the selected generation inode embedded in a transaction name."""
+def _deletion_transaction_metadata(transaction_name: str) -> tuple[int, bool] | None:
+    """Decode the selected inode and crash intent from a transaction name."""
     if not (transaction_name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_name.endswith(UPLOAD_STAGING_SUFFIX)):
         return None
     body = transaction_name[len(UPLOAD_DELETION_TRANSACTION_PREFIX) : -len(UPLOAD_STAGING_SUFFIX)]
+    intent, separator, remaining = body.partition("-")
+    if separator and intent in {
+        _UPLOAD_DELETION_RESTORE_INTENT,
+        _UPLOAD_DELETION_DISCARD_INTENT,
+    }:
+        recover_on_crash = intent == _UPLOAD_DELETION_RESTORE_INTENT
+        body = remaining
+    else:
+        # Transactions created before the intent field was introduced always
+        # represented user-requested deletion and therefore recover on crash.
+        recover_on_crash = True
     inode_hex, separator, token = body.partition("-")
     if not separator or not inode_hex or len(token) != 32 or any(character not in "0123456789abcdef" for character in inode_hex + token):
         return None
-    return int(inode_hex, 16)
+    return int(inode_hex, 16), recover_on_crash
 
 
 def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
@@ -751,10 +766,11 @@ def _finish_deletion_transaction(staged_path: Path) -> None:
 
 def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     """Restore a crash-abandoned tombstone whose basename records its target."""
-    expected_inode = _deletion_transaction_inode(transaction_dir.name)
-    if expected_inode is None:
+    metadata = _deletion_transaction_metadata(transaction_dir.name)
+    if metadata is None:
         logger.warning("Refusing malformed upload deletion transaction name: %s", transaction_dir)
         return False
+    expected_inode, recover_on_crash = metadata
     try:
         transaction_stat = os.lstat(transaction_dir)
     except FileNotFoundError:
@@ -829,6 +845,10 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             staged_path.unlink()
             _finish_deletion_transaction(staged_path)
             return True
+        if not recover_on_crash:
+            staged_path.unlink()
+            _finish_deletion_transaction(staged_path)
+            return True
         _restore_staged_deletion(
             staged_path,
             uploads_dir / original_name,
@@ -865,11 +885,14 @@ def _stage_primary_deletion(
     base_dir: Path,
     primary_path: Path,
     identity: UploadIdentity,
+    *,
+    recover_on_crash: bool = True,
 ) -> tuple[Path, UploadStageLease]:
     """Atomically move the selected entry into the protected conversion namespace."""
     staging_dir = ensure_conversion_dir(base_dir)
+    intent = _UPLOAD_DELETION_RESTORE_INTENT if recover_on_crash else _UPLOAD_DELETION_DISCARD_INTENT
     while True:
-        transaction_dir = staging_dir / (f"{UPLOAD_DELETION_TRANSACTION_PREFIX}{identity.inode:x}-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
+        transaction_dir = staging_dir / (f"{UPLOAD_DELETION_TRANSACTION_PREFIX}{intent}-{identity.inode:x}-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
         stage_lease = UploadStageLease.acquire(staging_dir, transaction_dir.name)
         try:
             transaction_dir.mkdir(mode=0o700)
