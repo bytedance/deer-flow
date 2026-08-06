@@ -1282,7 +1282,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     try:
         staged_path = Path(entry.path)
         staged_stat = os.lstat(staged_path)
-        if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink not in {1, 2}:
+        if not stat.S_ISREG(staged_stat.st_mode):
             logger.warning("Refusing unsafe upload deletion tombstone: %s", staged_path)
             return False
         identity = UploadIdentity(
@@ -1291,29 +1291,17 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         )
         if staged_stat.st_ino != expected_inode:
             # A non-cooperating writer may replace the selected inode between
-            # the identity scan and rename. If live recovery already published
-            # exactly one verified visible hard-link peer, only remove this
-            # hidden alias. A sole mismatched tombstone stays fail-closed: it
-            # cannot be distinguished from post-crash transaction tampering.
-            if staged_stat.st_nlink != 2 or conversion_entries or commit_entries or restore_entries:
+            # the identity scan and rename. Only an exact same-inode peer at
+            # the original target proves that removing this hidden alias keeps
+            # the requested name visible. An unrelated hard-link peer is not
+            # sufficient and stays fail-closed with the transaction retained.
+            if staged_stat.st_nlink < 2 or conversion_entries or commit_entries or restore_entries:
                 logger.warning("Refusing unsafe upload deletion tombstone: %s", staged_path)
                 return False
-            visible_matches: list[Path] = []
-            with os.scandir(uploads_dir) as upload_entries:
-                for upload_entry in upload_entries:
-                    try:
-                        upload_stat = upload_entry.stat(follow_symlinks=False)
-                    except FileNotFoundError:
-                        continue
-                    if stat.S_ISREG(upload_stat.st_mode) and (
-                        upload_stat.st_dev,
-                        upload_stat.st_ino,
-                    ) == (identity.device, identity.inode):
-                        visible_matches.append(Path(upload_entry.path))
-            if len(visible_matches) != 1:
+            original_path = uploads_dir / original_name
+            if not identity.matches(original_path):
                 logger.warning(
-                    "Refusing unexpected-inode upload recovery with %s visible aliases: %s",
-                    len(visible_matches),
+                    "Refusing unexpected-inode upload recovery without its exact visible target: %s",
                     staged_path,
                 )
                 return False
@@ -1322,6 +1310,9 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             _fsync_directory_durably(staged_path.parent)
             _finish_deletion_transaction(staged_path)
             return True
+        if staged_stat.st_nlink not in {1, 2}:
+            logger.warning("Refusing unsafe upload deletion tombstone: %s", staged_path)
+            return False
         if not recover_on_crash:
             visible_matches: list[Path] = []
             if staged_stat.st_nlink == 2:
@@ -1410,31 +1401,22 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
 def _restore_unexpected_staged_entry(staged_path: Path, original_path: Path) -> None:
     """Restore an entry moved during an identity race without unlinking it."""
     staged_stat = os.lstat(staged_path)
-    if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink not in {1, 2}:
+    if not stat.S_ISREG(staged_stat.st_mode):
         raise UnsafeUploadPathError("Unsafe staged upload entry cannot be restored")
-    if staged_stat.st_nlink == 2:
-        visible_matches: list[Path] = []
-        with os.scandir(original_path.parent) as upload_entries:
-            for upload_entry in upload_entries:
-                try:
-                    upload_stat = upload_entry.stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    continue
-                if stat.S_ISREG(upload_stat.st_mode) and (
-                    upload_stat.st_dev,
-                    upload_stat.st_ino,
-                ) == (staged_stat.st_dev, staged_stat.st_ino):
-                    visible_matches.append(Path(upload_entry.path))
-        if len(visible_matches) != 1:
-            raise UnsafeUploadPathError("Staged upload entry has an ambiguous hard-link peer")
-        _fsync_directory_durably(original_path.parent)
-        staged_path.unlink()
-        _fsync_directory_durably(staged_path.parent)
-        _finish_deletion_transaction(staged_path)
-        return
+    identity = UploadIdentity(device=staged_stat.st_dev, inode=staged_stat.st_ino)
     try:
         os.link(staged_path, original_path, follow_symlinks=False)
     except FileExistsError:
+        if identity.matches(original_path):
+            # A prior attempt published the exact target but failed before the
+            # directory fsync or hidden-alias removal. Re-persist that exact
+            # name before completing the idempotent cleanup. Other same-inode
+            # names alone never authorize dropping the staged target alias.
+            _fsync_directory_durably(original_path.parent)
+            staged_path.unlink()
+            _fsync_directory_durably(staged_path.parent)
+            _finish_deletion_transaction(staged_path)
+            return
         # A non-cooperating writer recreated the original name while the entry
         # was staged. Preserve the moved payload under a collision-resistant
         # visible recovery name instead of deleting either generation.

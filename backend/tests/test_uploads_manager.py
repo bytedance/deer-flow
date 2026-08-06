@@ -1925,6 +1925,51 @@ class TestDeleteFileSafe:
         assert os.lstat(primary).st_nlink == 1
         assert not list(conversion_dir_for_uploads(uploads).glob(".upload-delete-*.part"))
 
+    def test_unexpected_inode_hardlink_replacement_restores_exact_name_after_fsync_failure(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        stale_identity = UploadIdentity.from_path(primary)
+        primary.unlink()
+        peer = uploads / "other.bin"
+        peer.write_bytes(b"replacement")
+        os.link(peer, primary)
+        assert not stale_identity.matches(primary)
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+        failed = False
+
+        def fail_visible_peer_once(directory):
+            nonlocal failed
+            if Path(directory) == uploads and not failed:
+                failed = True
+                raise OSError("cannot persist visible hardlink replacement")
+            return real_fsync_directory(directory)
+
+        with patch.object(
+            upload_manager_module,
+            "_fsync_directory_durably",
+            side_effect=fail_visible_peer_once,
+        ):
+            with pytest.raises(OSError, match="cannot persist visible hardlink replacement"):
+                upload_manager_module._stage_primary_deletion(
+                    uploads,
+                    primary,
+                    stale_identity,
+                    recover_on_crash=False,
+                )
+
+        assert primary.read_bytes() == b"replacement"
+        assert peer.read_bytes() == b"replacement"
+        assert (os.lstat(primary).st_dev, os.lstat(primary).st_ino) == (
+            os.lstat(peer).st_dev,
+            os.lstat(peer).st_ino,
+        )
+        assert os.lstat(primary).st_nlink == 2
+        assert not list(conversion_dir_for_uploads(uploads).glob(".upload-delete-*.part"))
+
     def test_startup_cleans_verified_visible_peer_for_unexpected_inode_transaction(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -1934,7 +1979,9 @@ class TestDeleteFileSafe:
         primary.write_bytes(b"old")
         stale_identity = UploadIdentity.from_path(primary)
         primary.unlink()
-        primary.write_bytes(b"replacement")
+        peer = uploads / "other.bin"
+        peer.write_bytes(b"replacement")
+        os.link(peer, primary)
         assert not stale_identity.matches(primary)
 
         with patch.object(
@@ -1959,8 +2006,50 @@ class TestDeleteFileSafe:
 
         assert upload_manager_module._recover_stale_deletion_transaction(transaction_dir)
         assert primary.read_bytes() == b"replacement"
-        assert os.lstat(primary).st_nlink == 1
+        assert peer.read_bytes() == b"replacement"
+        assert os.lstat(primary).st_nlink == 2
         assert not transaction_dir.exists()
+
+    def test_startup_refuses_unrelated_peer_for_unexpected_inode_transaction(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        stale_identity = UploadIdentity.from_path(primary)
+        primary.unlink()
+        peer = uploads / "other.bin"
+        peer.write_bytes(b"replacement")
+        os.link(peer, primary)
+        assert not stale_identity.matches(primary)
+
+        with patch.object(
+            upload_manager_module,
+            "_restore_unexpected_staged_entry",
+            side_effect=OSError("simulate crash before live recovery"),
+        ):
+            with pytest.raises(OSError, match="simulate crash before live recovery"):
+                upload_manager_module._stage_primary_deletion(
+                    uploads,
+                    primary,
+                    stale_identity,
+                    recover_on_crash=False,
+                )
+
+        transactions = list(conversion_dir_for_uploads(uploads).glob(".upload-delete-*.part"))
+        assert len(transactions) == 1
+        transaction_dir = transactions[0]
+        staged_path = transaction_dir / upload_manager_module._UPLOAD_DELETION_PRIMARY_DIRNAME / primary.name
+        assert not upload_manager_module._recover_stale_deletion_transaction(transaction_dir)
+        assert not primary.exists()
+        assert peer.read_bytes() == b"replacement"
+        assert staged_path.read_bytes() == b"replacement"
+        assert (os.lstat(peer).st_dev, os.lstat(peer).st_ino) == (
+            os.lstat(staged_path).st_dev,
+            os.lstat(staged_path).st_ino,
+        )
+        assert transaction_dir.exists()
 
     def test_primary_tombstone_unlink_is_durable_before_commit_clear(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
