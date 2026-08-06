@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1015,6 +1016,46 @@ def test_handle_update_downloads_inbound_file(monkeypatch, tmp_path: Path):
         assert stored.read_bytes() == plaintext
 
     _run(go())
+
+
+def test_stage_downloaded_file_preserves_concurrent_same_name_payloads(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    payloads = [f"payload-{index}".encode() for index in range(8)]
+
+    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        paths = list(pool.map(lambda payload: channel._stage_downloaded_file("report.pdf", payload), payloads))
+
+    assert all(path is not None for path in paths)
+    assert {path.name for path in paths if path is not None} == {
+        "report.pdf",
+        "report_1.pdf",
+        "report_2.pdf",
+        "report_3.pdf",
+        "report_4.pdf",
+        "report_5.pdf",
+        "report_6.pdf",
+        "report_7.pdf",
+    }
+    assert {path.read_bytes() for path in paths if path is not None} == set(payloads)
+
+
+def test_stage_downloaded_file_renames_around_planted_symlink(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    download_dir = tmp_path / channel.DEFAULT_IMAGE_DOWNLOAD_DIRNAME
+    download_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"victim")
+    (download_dir / "report.pdf").symlink_to(victim)
+
+    stored = channel._stage_downloaded_file("report.pdf", b"attachment")
+
+    assert stored == download_dir / "report_1.pdf"
+    assert stored.read_bytes() == b"attachment"
+    assert victim.read_bytes() == b"victim"
 
 
 def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch, tmp_path: Path):

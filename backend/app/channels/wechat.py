@@ -27,6 +27,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.uploads.manager import UnsafeUploadPathError, publish_upload_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -1150,10 +1151,8 @@ class WechatChannel(Channel):
             return None
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
-            path = download_dir / filename
-            path.write_bytes(content)
-            return path
-        except OSError:
+            return publish_upload_bytes(download_dir, filename, content)
+        except (OSError, UnsafeUploadPathError):
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
             return None
 

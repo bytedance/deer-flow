@@ -55,3 +55,26 @@ async def test_receive_file_persist_does_not_block_event_loop(tmp_path, monkeypa
 
     assert "/uploads/a.pdf" in out.text
     assert out.files == []
+
+
+async def test_receive_file_rejects_symlinked_upload_directory(tmp_path, monkeypatch) -> None:
+    from app.channels.dingtalk import DingTalkChannel
+    from app.channels.message_bus import MessageBus
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    await asyncio.to_thread(paths.ensure_thread_dirs, "t1", user_id="default")
+    uploads = paths.sandbox_uploads_dir("t1", user_id="default")
+    outside = tmp_path / "outside"
+    await asyncio.to_thread(outside.mkdir)
+    await asyncio.to_thread(uploads.rmdir)
+    await asyncio.to_thread(uploads.symlink_to, outside, target_is_directory=True)
+    monkeypatch.setattr("app.channels.dingtalk.get_paths", lambda: paths)
+
+    channel = DingTalkChannel(MessageBus(), config={})
+    channel._download_by_code = AsyncMock(return_value=b"DATA")
+
+    result = await channel._receive_single_file("dc", "file", "a.pdf", "t1", user_id="default")
+
+    assert result == ""
+    assert not await asyncio.to_thread((outside / "a.pdf").exists)

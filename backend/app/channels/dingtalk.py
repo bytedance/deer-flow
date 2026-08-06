@@ -631,7 +631,7 @@ class DingTalkChannel(Channel):
             # Directory prep and collision-safe publication are blocking
             # filesystem IO, so the whole sequence stays off the event loop.
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)
             return publish_upload_bytes(uploads_dir, safe_filename, content)
 
         try:

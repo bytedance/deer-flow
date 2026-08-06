@@ -176,3 +176,28 @@ async def test_receive_file_renames_around_planted_symlink(tmp_path, monkeypatch
     assert not await asyncio.to_thread(outside.exists)
     assert await asyncio.to_thread((uploads / "report.pdf").is_symlink)
     assert await asyncio.to_thread((uploads / "report_1.pdf").read_bytes) == b"DATA"
+
+
+async def test_receive_file_rejects_symlinked_upload_directory(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    await asyncio.to_thread(paths.ensure_thread_dirs, "thread-1", user_id="ou-user")
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    outside = tmp_path / "outside"
+    await asyncio.to_thread(outside.mkdir)
+    await asyncio.to_thread(uploads.rmdir)
+    await asyncio.to_thread(uploads.symlink_to, outside, target_is_directory=True)
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: _MountedProvider())
+
+    result = await _channel_with_file(b"DATA", "report.pdf")._receive_single_file(
+        "message-1",
+        "file-key",
+        "file",
+        "thread-1",
+        user_id="ou-user",
+    )
+
+    assert result == "Failed to obtain the [file]"
+    assert not await asyncio.to_thread((outside / "report.pdf").exists)
