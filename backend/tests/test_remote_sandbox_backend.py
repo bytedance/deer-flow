@@ -204,6 +204,77 @@ def test_create_rejects_nondefault_user_on_unverified_legacy_provisioner(monkeyp
     assert called is False
 
 
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"},
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "mallory",
+            "thread_id": "thread-1",
+            "mount_contract_version": 2,
+        },
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "alice",
+            "thread_id": "other-thread",
+            "mount_contract_version": 2,
+        },
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "alice",
+            "thread_id": "thread-1",
+            "mount_contract_version": 1,
+        },
+    ],
+)
+def test_current_contract_create_rejects_unverified_or_mismatched_response(monkeypatch, response_payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(payload=response_payload),
+    )
+
+    with pytest.raises(RuntimeError, match="mount contract response"):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+
+def test_current_contract_create_returns_verified_identity(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        ),
+    )
+
+    info = backend.create("thread-1", "abc123", user_id="alice")
+
+    assert (info.sandbox_id, info.user_id, info.thread_id, info.mount_contract_version) == (
+        "abc123",
+        "alice",
+        "thread-1",
+        2,
+    )
+
+
 def test_provisioner_create_returns_sandbox_info(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
 _WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
 
 
@@ -540,7 +541,7 @@ def _iter_upload_storage_dirs(base_dir: Path):
 
 
 def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
-    """Remove orphaned Gateway upload staging files left by a hard crash."""
+    """Clean upload stages and recover interrupted primary deletions."""
     root = Path(base_dir) if base_dir is not None else get_paths().base_dir
     removed = 0
     for uploads_dir in _iter_upload_storage_dirs(root):
@@ -553,6 +554,16 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
         try:
             with os.scandir(uploads_dir) as entries:
                 for entry in entries:
+                    if entry.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and entry.name.endswith(UPLOAD_STAGING_SUFFIX) and entry.is_dir(follow_symlinks=False):
+                        stage_lease = UploadStageLease.try_acquire(uploads_dir, entry.name)
+                        if stage_lease is None:
+                            continue
+                        try:
+                            if _recover_stale_deletion_transaction(Path(entry.path)):
+                                removed += 1
+                        finally:
+                            stage_lease.release()
+                        continue
                     if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
                         continue
                     stage_lease = UploadStageLease.try_acquire(uploads_dir, entry.name)
@@ -572,6 +583,17 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
         except OSError:
             logger.warning("Failed to scan uploads directory for stale staging files: %s", uploads_dir, exc_info=True)
     return removed
+
+
+def _deletion_transaction_inode(transaction_name: str) -> int | None:
+    """Decode the selected generation inode embedded in a transaction name."""
+    if not (transaction_name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_name.endswith(UPLOAD_STAGING_SUFFIX)):
+        return None
+    body = transaction_name[len(UPLOAD_DELETION_TRANSACTION_PREFIX) : -len(UPLOAD_STAGING_SUFFIX)]
+    inode_hex, separator, token = body.partition("-")
+    if not separator or not inode_hex or len(token) != 32 or any(character not in "0123456789abcdef" for character in inode_hex + token):
+        return None
+    return int(inode_hex, 16)
 
 
 def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
@@ -613,7 +635,7 @@ def list_files_in_dir(directory: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
-def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> Path:
+def _scan_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> Path:
     """Return the directory entry that actually names *identity*."""
     matching_path: Path | None = None
     with os.scandir(base_dir) as entries:
@@ -637,6 +659,11 @@ def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> P
     return matching_path
 
 
+def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> Path:
+    """Re-scan for the selected identity immediately before deletion staging."""
+    return _scan_upload_path_by_identity(base_dir, identity)
+
+
 def _restore_staged_deletion(
     staged_path: Path,
     original_path: Path,
@@ -647,10 +674,7 @@ def _restore_staged_deletion(
         staged_stat = os.lstat(staged_path)
     except FileNotFoundError:
         return
-    if not stat.S_ISREG(staged_stat.st_mode) or (
-        staged_stat.st_dev,
-        staged_stat.st_ino,
-    ) != (identity.device, identity.inode):
+    if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
         raise UnsafeUploadPathError("Staged upload deletion changed identity")
     try:
         original_stat = os.lstat(original_path)
@@ -662,35 +686,179 @@ def _restore_staged_deletion(
             original_stat.st_ino,
         ) == (identity.device, identity.inode):
             staged_path.unlink()
+            _finish_deletion_transaction(staged_path)
             return
-        raise UnsafeUploadPathError("Upload name was recreated while deletion was being rolled back")
+        recovery_path = _preserve_staged_entry_as_recovery(staged_path, original_path)
+        logger.warning(
+            "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
+            recovery_path,
+        )
+        _finish_deletion_transaction(staged_path)
+        return
     try:
         os.link(staged_path, original_path, follow_symlinks=False)
-    except FileExistsError as exc:
-        raise UnsafeUploadPathError("Upload name was recreated while deletion was being rolled back") from exc
+    except FileExistsError:
+        recovery_path = _preserve_staged_entry_as_recovery(staged_path, original_path)
+        logger.warning(
+            "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
+            recovery_path,
+        )
+        _finish_deletion_transaction(staged_path)
+        return
     staged_path.unlink()
+    _finish_deletion_transaction(staged_path)
+
+
+def _recovery_path_for(original_path: Path) -> Path:
+    """Return a collision-resistant visible recovery name within NAME_MAX."""
+    marker = f"_recovered_{secrets.token_hex(8)}"
+    prefix = _truncate_utf8(
+        original_path.name,
+        255 - len(marker.encode("utf-8")),
+    )
+    return original_path.with_name(f"{prefix}{marker}")
+
+
+def _preserve_staged_entry_as_recovery(staged_path: Path, original_path: Path) -> Path:
+    """Publish staged bytes under a visible no-replace recovery name."""
+    while True:
+        recovery_path = _recovery_path_for(original_path)
+        try:
+            os.link(staged_path, recovery_path, follow_symlinks=False)
+            break
+        except FileExistsError:
+            continue
+    staged_path.unlink()
+    return recovery_path
+
+
+def _finish_deletion_transaction(staged_path: Path) -> None:
+    """Remove the now-empty transaction directory, when this is the new layout."""
+    transaction_dir = staged_path.parent
+    if not (transaction_dir.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_dir.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction_dir.parent.name == UPLOAD_CONVERSIONS_DIRNAME):
+        return
+    try:
+        transaction_dir.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "Failed to remove completed upload deletion transaction: %s",
+            transaction_dir,
+            exc_info=True,
+        )
+
+
+def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
+    """Restore a crash-abandoned tombstone whose basename records its target."""
+    expected_inode = _deletion_transaction_inode(transaction_dir.name)
+    if expected_inode is None:
+        logger.warning("Refusing malformed upload deletion transaction name: %s", transaction_dir)
+        return False
+    try:
+        transaction_stat = os.lstat(transaction_dir)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(transaction_stat.st_mode) or not stat.S_ISDIR(transaction_stat.st_mode):
+        return False
+
+    entries = list(os.scandir(transaction_dir))
+    if not entries:
+        transaction_dir.rmdir()
+        return True
+    if len(entries) != 1:
+        logger.warning(
+            "Refusing malformed upload deletion transaction with %s entries: %s",
+            len(entries),
+            transaction_dir,
+        )
+        return False
+    entry = entries[0]
+    if not entry.is_file(follow_symlinks=False):
+        logger.warning("Refusing malformed upload deletion transaction: %s", transaction_dir)
+        return False
+    try:
+        original_name = _normalize_existing_filename(entry.name)
+    except ValueError:
+        logger.warning("Refusing upload deletion transaction with unsafe target: %s", transaction_dir)
+        return False
+    if original_name != entry.name:
+        return False
+
+    uploads_dir = transaction_dir.parent.parent / "uploads"
+    name_lease = UploadNameLease.try_acquire(
+        uploads_dir,
+        original_name,
+        allow_legacy_posix_filename=True,
+    )
+    if name_lease is None:
+        return False
+    try:
+        staged_path = Path(entry.path)
+        staged_stat = os.lstat(staged_path)
+        if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink not in {1, 2} or staged_stat.st_ino != expected_inode:
+            logger.warning("Refusing unsafe upload deletion tombstone: %s", staged_path)
+            return False
+        identity = UploadIdentity(
+            device=staged_stat.st_dev,
+            inode=staged_stat.st_ino,
+        )
+        if staged_stat.st_nlink == 2:
+            # A previous recovery may have crashed after publishing the visible
+            # hard link but before removing the tombstone.  Accept only one
+            # exact visible peer; any additional/hidden alias is ambiguous.
+            visible_matches: list[Path] = []
+            with os.scandir(uploads_dir) as upload_entries:
+                for upload_entry in upload_entries:
+                    try:
+                        upload_stat = upload_entry.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISREG(upload_stat.st_mode) and (
+                        upload_stat.st_dev,
+                        upload_stat.st_ino,
+                    ) == (identity.device, identity.inode):
+                        visible_matches.append(Path(upload_entry.path))
+            if len(visible_matches) != 1:
+                logger.warning(
+                    "Refusing ambiguous upload deletion recovery with %s visible aliases: %s",
+                    len(visible_matches),
+                    staged_path,
+                )
+                return False
+            staged_path.unlink()
+            _finish_deletion_transaction(staged_path)
+            return True
+        _restore_staged_deletion(
+            staged_path,
+            uploads_dir / original_name,
+            identity,
+        )
+        return True
+    finally:
+        name_lease.release()
 
 
 def _restore_unexpected_staged_entry(staged_path: Path, original_path: Path) -> None:
     """Restore an entry moved during an identity race without unlinking it."""
+    staged_stat = os.lstat(staged_path)
+    if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1:
+        raise UnsafeUploadPathError("Unsafe staged upload entry cannot be restored")
     try:
         os.link(staged_path, original_path, follow_symlinks=False)
     except FileExistsError:
         # A non-cooperating writer recreated the original name while the entry
         # was staged. Preserve the moved payload under a collision-resistant
         # visible recovery name instead of deleting either generation.
-        while True:
-            recovery_path = original_path.with_name(f"{original_path.stem}_recovered_{secrets.token_hex(8)}{original_path.suffix}")
-            try:
-                os.link(staged_path, recovery_path, follow_symlinks=False)
-                break
-            except FileExistsError:
-                continue
+        recovery_path = _preserve_staged_entry_as_recovery(staged_path, original_path)
         logger.warning(
             "Upload entry changed during deletion; preserved the raced entry as %s",
             recovery_path,
         )
+        _finish_deletion_transaction(staged_path)
+        return
     staged_path.unlink()
+    _finish_deletion_transaction(staged_path)
 
 
 def _stage_primary_deletion(
@@ -701,19 +869,19 @@ def _stage_primary_deletion(
     """Atomically move the selected entry into the protected conversion namespace."""
     staging_dir = ensure_conversion_dir(base_dir)
     while True:
-        staged_path = staging_dir / (f"{UPLOAD_STAGING_PREFIX}delete-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
-        stage_lease = UploadStageLease.acquire(staging_dir, staged_path.name)
+        transaction_dir = staging_dir / (f"{UPLOAD_DELETION_TRANSACTION_PREFIX}{identity.inode:x}-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
+        stage_lease = UploadStageLease.acquire(staging_dir, transaction_dir.name)
         try:
-            os.lstat(staged_path)
-        except FileNotFoundError:
-            pass
-        else:
+            transaction_dir.mkdir(mode=0o700)
+        except FileExistsError:
             stage_lease.release()
             continue
+        staged_path = transaction_dir / primary_path.name
 
         try:
             os.rename(primary_path, staged_path)
         except BaseException:
+            transaction_dir.rmdir()
             stage_lease.release()
             raise
 
@@ -795,10 +963,21 @@ def delete_file_safe(
             raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
 
         identity = UploadIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
+        # Capture the exact directory-entry spelling before the final race
+        # check.  On case-insensitive or normalization-insensitive filesystems
+        # ``safe_name`` may be only an alias, while generated companions are
+        # keyed by the real published spelling.  A second scan below detects a
+        # non-cooperating rename; its new spelling must not redirect companion
+        # cleanup away from this initial generation.
+        initial_file_path = _scan_upload_path_by_identity(base_dir, identity)
+        if portable_name_coordination_key(initial_file_path.name) != portable_name_coordination_key(safe_name):
+            raise UnsafeUploadPathError("Upload name changed outside the requested generation lease")
+        owned_conversion = existing_conversion_path_for_upload(initial_file_path)
+        companion_name = initial_file_path.name
+
         actual_file_path = _find_upload_path_by_identity(base_dir, identity)
         if portable_name_coordination_key(actual_file_path.name) != portable_name_coordination_key(safe_name):
             raise UnsafeUploadPathError("Upload name changed outside the requested generation lease")
-        owned_conversion = existing_conversion_path_for_upload(actual_file_path)
         final_stat = os.lstat(actual_file_path)
         if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1 or (final_stat.st_dev, final_stat.st_ino) != (identity.device, identity.inode):
             raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
@@ -809,10 +988,11 @@ def delete_file_safe(
         )
         try:
             if delete_remote_copy is not None:
-                delete_remote_copy(actual_file_path.name)
+                delete_remote_copy(companion_name)
             if owned_conversion is not None:
                 owned_conversion.unlink(missing_ok=True)
             staged_path.unlink()
+            _finish_deletion_transaction(staged_path)
         except BaseException:
             _restore_staged_deletion(staged_path, actual_file_path, identity)
             raise

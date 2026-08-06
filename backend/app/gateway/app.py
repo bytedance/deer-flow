@@ -277,7 +277,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
         if removed_upload_staging_files:
-            logger.info("Removed %d stale upload staging file(s)", removed_upload_staging_files)
+            logger.info("Cleaned or recovered %d stale upload staging transaction(s)", removed_upload_staging_files)
     except Exception:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 

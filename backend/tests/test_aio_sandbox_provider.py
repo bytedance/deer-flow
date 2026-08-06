@@ -429,15 +429,86 @@ def test_remote_backend_distinguishes_unavailable_capability_probe(monkeypatch):
     assert backend.mount_contract_capability_known is False
 
 
-def test_remote_mount_override_fails_closed_when_capability_probe_is_unavailable():
+def test_remote_mount_override_falls_back_to_explicit_sync_when_capability_probe_is_unavailable():
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
     provider._config = {"thread_data_mounts": True}
     provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
 
-    with pytest.raises(RuntimeError, match="could not be verified"):
-        _ = provider.uses_thread_data_mounts
+    assert provider.uses_thread_data_mounts is False
+
+
+def test_remote_backend_retries_unavailable_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    now = [100.0]
+    responses = [
+        remote_mod.requests.ConnectionError("not ready"),
+        {"mount_contract_version": 2},
+    ]
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def _get(*_args, **_kwargs):
+        value = responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return _Response(value)
+
+    monkeypatch.setattr(remote_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(remote_mod.requests, "get", _get)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+    assert backend.mount_contract_capability_known is False
+
+    now[0] += 1.0
+    backend.refresh_capabilities_if_stale()
+
+    assert backend.mount_contract_capability_known is True
+    assert backend.mount_contract_version == 2
+
+
+def test_remote_backend_retries_known_legacy_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    now = [200.0]
+
+    class _Response:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        _Response(404),
+        _Response(200, {"mount_contract_version": 2}),
+    ]
+    monkeypatch.setattr(remote_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: responses.pop(0))
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+    assert backend.mount_contract_version == 0
+
+    now[0] += 30.0
+    backend.refresh_capabilities_if_stale()
+
+    assert backend.mount_contract_version == 2
 
 
 def test_remote_discovery_carries_verified_identity(monkeypatch):
@@ -612,6 +683,130 @@ async def test_remote_contract_backend_revalidates_existing_pod_via_create_async
     assert result == "sandbox-v2"
     provider._backend.discover.assert_not_called()
     assert create_calls == [("thread-1", "sandbox-v2", "alice")]
+
+
+def _install_remote_revalidation_backend(provider, aio_mod, calls):
+    def create(
+        thread_id,
+        sandbox_id,
+        *,
+        extra_mounts=None,
+        user_id=None,
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+    ):
+        calls.append(
+            {
+                "thread_id": thread_id,
+                "sandbox_id": sandbox_id,
+                "extra_mounts": extra_mounts,
+                "user_id": user_id,
+                "provision_lark_cli_runtime": provision_lark_cli_runtime,
+                "provision_lark_cli_broker": provision_lark_cli_broker,
+            }
+        )
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url="http://sandbox-host",
+            user_id=user_id,
+            thread_id=thread_id,
+            mount_contract_version=2,
+        )
+
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        is_alive=MagicMock(return_value=True),
+        create=create,
+    )
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._get_extra_mounts = lambda *_args, **_kwargs: [("/host/current", "/mnt/current", True)]
+    provider._lark_integration_active = lambda _user_id: True
+    provider._lark_broker_active = lambda _user_id: False
+
+
+def test_remote_active_cache_revalidates_current_contract_before_reuse(tmp_path):
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active"}
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = provider._acquire_internal("thread-1", user_id="alice")
+
+    assert result == "sandbox-active"
+    assert calls == [
+        {
+            "thread_id": "thread-1",
+            "sandbox_id": "sandbox-active",
+            "extra_mounts": [("/host/current", "/mnt/current", True)],
+            "user_id": "alice",
+            "provision_lark_cli_runtime": True,
+            "provision_lark_cli_broker": False,
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_remote_active_cache_revalidates_current_contract_before_reuse_async(tmp_path):
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active-async")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active-async"}
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = await provider._acquire_internal_async("thread-1", user_id="alice")
+
+    assert result == "sandbox-active-async"
+    assert len(calls) == 1
+    assert calls[0]["extra_mounts"] == [("/host/current", "/mnt/current", True)]
+
+
+def _make_remote_warm_provider(tmp_path, monkeypatch, sandbox_id):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._warm_pool = {
+        sandbox_id: (
+            aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
+            123.0,
+        )
+    }
+    provider._warm_pool_identity = {sandbox_id: None}
+    provider._sandbox_id_for_thread = lambda *_args, **_kwargs: sandbox_id
+    monkeypatch.setattr(
+        aio_mod,
+        "AioSandbox",
+        lambda id, base_url: SimpleNamespace(id=id, base_url=base_url),
+    )
+    return provider, aio_mod
+
+
+def test_remote_warm_pool_revalidates_current_contract_before_reclaim(tmp_path, monkeypatch):
+    provider, aio_mod = _make_remote_warm_provider(tmp_path, monkeypatch, "sandbox-warm")
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = provider._acquire_internal("thread-1", user_id="alice")
+
+    assert result == "sandbox-warm"
+    assert len(calls) == 1
+    assert calls[0]["sandbox_id"] == "sandbox-warm"
+    assert calls[0]["user_id"] == "alice"
+
+
+@pytest.mark.anyio
+async def test_remote_warm_pool_revalidates_current_contract_before_reclaim_async(tmp_path, monkeypatch):
+    provider, aio_mod = _make_remote_warm_provider(tmp_path, monkeypatch, "sandbox-warm-async")
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = await provider._acquire_internal_async("thread-1", user_id="alice")
+
+    assert result == "sandbox-warm-async"
+    assert len(calls) == 1
+    assert calls[0]["sandbox_id"] == "sandbox-warm-async"
 
 
 @pytest.mark.anyio
@@ -829,7 +1024,13 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
             return None
 
         def json(self):
-            return {"sandbox_url": "http://sandbox.local"}
+            return {
+                "sandbox_id": "sandbox-42",
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "user-7",
+                "thread_id": "thread-42",
+                "mount_contract_version": 2,
+            }
 
     def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
@@ -866,7 +1067,13 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
             return None
 
         def json(self):
-            return {"sandbox_url": "http://sandbox.local"}
+            return {
+                "sandbox_id": "sandbox-42",
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "ou-user",
+                "thread_id": "thread-42",
+                "mount_contract_version": 2,
+            }
 
     def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})

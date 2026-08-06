@@ -34,11 +34,11 @@ POST /api/threads/{thread_id}/uploads
     {
       "filename": "document.pdf",
       "size": 1234567,
-      "path": ".deer-flow/threads/{thread_id}/user-data/uploads/document.pdf",
+      "path": ".deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf",
       "markdown_file": "document.pdf.md",
-      "markdown_path": ".deer-flow/threads/{thread_id}/user-data/.upload-conversions/document.pdf.md",
+      "markdown_path": ".deer-flow/users/{user_id}/threads/{thread_id}/user-data/.upload-conversions/document.pdf.md",
       "markdown_virtual_path": "/mnt/user-data/.upload-conversions/document.pdf.md",
       "markdown_artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/.upload-conversions/document.pdf.md"
     }
@@ -84,7 +84,7 @@ GET /api/threads/{thread_id}/uploads/list
     {
       "filename": "document.pdf",
       "size": 1234567,
-      "path": ".deer-flow/threads/{thread_id}/user-data/uploads/document.pdf",
+      "path": ".deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf",
       "extension": ".pdf",
@@ -176,12 +176,12 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 
 **路径映射关系：**
 - Agent 使用：`/mnt/user-data/uploads/document.pdf`（虚拟路径）
-- 实际存储：`backend/.deer-flow/threads/{thread_id}/user-data/uploads/document.pdf`
+- 实际存储：`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf`
 - 前端访问：`/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf`（HTTP URL）
 - 转换结果：`/mnt/user-data/.upload-conversions/document.pdf.md`（以上传响应的 `markdown_virtual_path` 为准，不要自行推导）
 
-上传流程采用“线程目录优先”策略：
-- 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
+上传流程采用“用户/线程目录优先”策略：
+- 先写入 `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/` 作为权威存储
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
 - AIO 挂载模式把 `/mnt/user-data/.upload-conversions` 单独挂载为只读；Local 的结构化文件 API 通过更具体的只读路径映射执行同一规则，但 Local 宿主机 bash 不属于该边界
 - Gateway、嵌入式 `DeerFlowClient` 和 IM 通道都会执行同一沙箱可见性步骤：挂载型 provider 调整精确发布路径的读取权限；非挂载 provider 获取沙箱后，把本次主文件及生成转换件精确同步到各自虚拟路径
@@ -189,7 +189,7 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 - 嵌入式 `DeerFlowClient.upload_files()` 以整批为事务边界：后续文件失败会逆序撤销本次调用中此前成功的所有远端副本和宿主 generation
 - 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；只有 Provisioner 能通过 `/api/capabilities` 证明当前挂载契约时，上传路由才会跳过 sandbox acquire 和逐文件同步
 - 新 Gateway 与已确认的旧 Provisioner 混合部署时，只有 `default` 无认证用户可降级为显式同步；旧 Provisioner 的主挂载不包含 `user_id`，认证用户必须先升级 Provisioner，否则创建沙箱会 fail closed
-- `/api/capabilities` 暂时不可达时，显式请求的挂载模式 fail closed，不会把缺少嵌套只读转换挂载的 Pod 标记为当前契约；远端获取会通过幂等创建重新校验本次请求的完整 Pod 挂载签名，而不是只信任 discovery 响应
+- `/api/capabilities` 暂时不可达时会选择显式同步并按退避窗口重试能力协商，不会把缺少嵌套只读转换挂载的 Pod 标记为当前契约；在重试确认当前租户隔离契约之前，认证用户的沙箱创建仍会 fail closed。远端获取（包括活跃缓存和暖池复用）会通过幂等创建重新校验本次请求的完整 Pod 挂载签名，而不是只信任 discovery 或健康检查响应
 - 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
 
 ## 测试示例
@@ -247,17 +247,21 @@ print(response.json())
 ## 文件存储结构
 
 ```
-backend/.deer-flow/threads/
-└── {thread_id}/
-    └── user-data/
-        ├── uploads/
-        │   ├── document.pdf          # 用户主文件
-        │   ├── document.md           # 用户独立上传，绝不按名称推断归属
-        │   └── presentation.pptx
-        └── .upload-conversions/
-            ├── document.pdf.md       # document.pdf 的生成结果
-            └── presentation.pptx.md  # presentation.pptx 的生成结果
+backend/.deer-flow/users/
+└── {user_id}/
+    └── threads/
+        └── {thread_id}/
+            └── user-data/
+                ├── uploads/
+                │   ├── document.pdf          # 用户主文件
+                │   ├── document.md           # 用户独立上传，绝不按名称推断归属
+                │   └── presentation.pptx
+                └── .upload-conversions/
+                    ├── document.pdf.md       # document.pdf 的生成结果
+                    └── presentation.pptx.md  # presentation.pptx 的生成结果
 ```
+
+旧版 `backend/.deer-flow/threads/{thread_id}/...` 仅用于兼容和迁移已有数据；新写入不得继续使用该非租户隔离布局。
 
 ## 限制
 
@@ -308,7 +312,7 @@ backend/.deer-flow/threads/
 
 1. 确认 UploadsMiddleware 已在 agent.py 中注册
 2. 检查 thread_id 是否正确
-3. 确认文件确实已上传到 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/`
+3. 确认文件确实已上传到 `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/`
 4. 非本地沙箱场景下，确认上传接口没有报错（需要成功完成 sandbox 同步）
 
 ## 开发建议

@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path, PureWindowsPath
 
 import requests
@@ -45,6 +47,9 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
 _UPLOADS_CONTAINER_PATH = "/mnt/user-data/uploads"
 _UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
 _UPLOAD_MOUNT_CONTRACT_VERSION = 2
+_CAPABILITY_LEGACY_REFRESH_SECONDS = 30.0
+_CAPABILITY_CURRENT_REFRESH_SECONDS = 300.0
+_CAPABILITY_RETRY_MAX_SECONDS = 30.0
 
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
@@ -145,6 +150,9 @@ class RemoteSandboxBackend(SandboxBackend):
         self._api_key = api_key
         self._mount_contract_version = 0
         self._mount_contract_capability_known = False
+        self._capability_probe_failures = 0
+        self._capability_next_probe_at = time.monotonic() + 1.0
+        self._capability_probe_lock = threading.Lock()
 
     @property
     def provisioner_url(self) -> str:
@@ -170,6 +178,31 @@ class RemoteSandboxBackend(SandboxBackend):
 
     def probe_capabilities(self) -> None:
         """Negotiate optional Provisioner capabilities without breaking old peers."""
+        with self._capability_probe_lock:
+            self._probe_capabilities_locked()
+
+    def refresh_capabilities_if_stale(self) -> bool:
+        """Refresh a legacy/unavailable capability result after its retry window.
+
+        Returns ``True`` when this call performed the probe.  The non-blocking
+        lock prevents a burst of concurrent acquires from serially repeating the
+        same network request after one cached result expires.
+        """
+        now = time.monotonic()
+        if now < self._capability_next_probe_at:
+            return False
+        if not self._capability_probe_lock.acquire(blocking=False):
+            return False
+        try:
+            if time.monotonic() < self._capability_next_probe_at:
+                return False
+            self._probe_capabilities_locked()
+            return True
+        finally:
+            self._capability_probe_lock.release()
+
+    def _probe_capabilities_locked(self) -> None:
+        """Probe while ``_capability_probe_lock`` is held."""
         try:
             response = requests.get(
                 f"{self._provisioner_url}/api/capabilities",
@@ -179,15 +212,26 @@ class RemoteSandboxBackend(SandboxBackend):
             if getattr(response, "status_code", None) == 404:
                 self._mount_contract_version = 0
                 self._mount_contract_capability_known = True
+                self._capability_probe_failures = 0
+                self._capability_next_probe_at = time.monotonic() + _CAPABILITY_LEGACY_REFRESH_SECONDS
                 return
             response.raise_for_status()
             payload = response.json()
             version = payload.get("mount_contract_version", 0) if isinstance(payload, dict) else 0
             self._mount_contract_version = version if isinstance(version, int) and version >= 0 else 0
             self._mount_contract_capability_known = True
+            self._capability_probe_failures = 0
+            refresh_seconds = _CAPABILITY_CURRENT_REFRESH_SECONDS if self._mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION else _CAPABILITY_LEGACY_REFRESH_SECONDS
+            self._capability_next_probe_at = time.monotonic() + refresh_seconds
         except (requests.RequestException, ValueError, TypeError):
             self._mount_contract_version = 0
             self._mount_contract_capability_known = False
+            self._capability_probe_failures += 1
+            retry_seconds = min(
+                _CAPABILITY_RETRY_MAX_SECONDS,
+                float(2 ** (self._capability_probe_failures - 1)),
+            )
+            self._capability_next_probe_at = time.monotonic() + retry_seconds
             logger.warning("Provisioner mount capabilities are unavailable; mounted thread data will fail closed until compatibility can be verified")
 
     # ── SandboxBackend interface ──────────────────────────────────────────
@@ -207,6 +251,8 @@ class RemoteSandboxBackend(SandboxBackend):
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
+        if self._mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION:
+            self.refresh_capabilities_if_stale()
         effective_user_id = user_id or get_effective_user_id()
         if self._mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
             raise RuntimeError(f"Provisioner mount contract v{self._mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
@@ -318,10 +364,31 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("Provisioner mount contract response is not an object")
+            effective_thread_id = thread_id or sandbox_id
+            if self._mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION:
+                response_contract = (
+                    data.get("sandbox_id"),
+                    data.get("user_id"),
+                    data.get("thread_id"),
+                    data.get("mount_contract_version"),
+                )
+                expected_contract = (
+                    sandbox_id,
+                    effective_user_id,
+                    effective_thread_id,
+                    _UPLOAD_MOUNT_CONTRACT_VERSION,
+                )
+                if response_contract != expected_contract:
+                    raise RuntimeError(f"Provisioner mount contract response does not match the requested sandbox identity: expected={expected_contract!r}, received={response_contract!r}")
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                user_id=data.get("user_id"),
+                thread_id=data.get("thread_id"),
+                mount_contract_version=data.get("mount_contract_version"),
             )
         except requests.RequestException as exc:
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")

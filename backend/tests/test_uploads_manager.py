@@ -850,6 +850,71 @@ class TestCleanupStaleUploadStagingFiles:
         assert cleanup_stale_upload_staging_files(tmp_path) == 0
         assert staged.read_text() == "outside"
 
+    def test_restores_primary_left_in_deletion_transaction_after_crash(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"original")
+        identity = UploadIdentity.from_path(primary)
+
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+        )
+        stage_lease.release()
+
+        assert not primary.exists()
+        assert staged_path.read_bytes() == b"original"
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"original"
+        assert not staged_path.exists()
+
+    def test_finishes_recovery_that_crashed_after_publishing_visible_link(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"original")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+        )
+        os.link(staged_path, primary)
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"original"
+        assert not staged_path.exists()
+
+    def test_refuses_replaced_deletion_tombstone_after_crash(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"original")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+        )
+        replacement = tmp_path / "replacement.bin"
+        replacement.write_bytes(b"replacement")
+        staged_path.unlink()
+        replacement.rename(staged_path)
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert not primary.exists()
+        assert staged_path.read_bytes() == b"replacement"
+
 
 # ---------------------------------------------------------------------------
 # delete_file_safe
@@ -1041,3 +1106,61 @@ class TestDeleteFileSafe:
 
         assert primary.read_bytes() == b"PDF"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
+
+    def test_failed_delete_preserves_old_generation_when_name_is_recreated(self, tmp_path):
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old generation")
+
+        def recreate_then_fail(_filename):
+            primary.write_bytes(b"new generation")
+            raise OSError("remote delete failed")
+
+        with pytest.raises((OSError, UnsafeUploadPathError)):
+            delete_file_safe(
+                uploads,
+                primary.name,
+                delete_remote_copy=recreate_then_fail,
+            )
+
+        recovered = list(uploads.glob("report.pdf_recovered_*"))
+        assert primary.read_bytes() == b"new generation"
+        assert len(recovered) == 1
+        assert recovered[0].read_bytes() == b"old generation"
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert recovered[0].read_bytes() == b"old generation"
+
+    def test_portable_alias_rename_deletes_original_companions(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "straße.pdf"
+        primary.write_bytes(b"payload")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("generated", encoding="utf-8")
+        renamed = uploads / "strasse.pdf"
+        remote_names: list[str] = []
+        real_find = upload_manager_module._find_upload_path_by_identity
+
+        def rename_after_scan(base_dir, identity):
+            found = real_find(base_dir, identity)
+            found.rename(renamed)
+            return renamed
+
+        with patch.object(
+            upload_manager_module,
+            "_find_upload_path_by_identity",
+            side_effect=rename_after_scan,
+        ):
+            delete_file_safe(
+                uploads,
+                primary.name,
+                delete_remote_copy=remote_names.append,
+            )
+
+        assert not renamed.exists()
+        assert not conversion.exists()
+        assert remote_names == ["straße.pdf"]

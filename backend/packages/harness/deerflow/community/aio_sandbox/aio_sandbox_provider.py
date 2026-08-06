@@ -270,7 +270,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if mounted and isinstance(backend, RemoteSandboxBackend):
             if backend.mount_contract_version < SANDBOX_MOUNT_CONTRACT_VERSION:
                 if not backend.mount_contract_capability_known:
-                    raise RuntimeError("Provisioner mount compatibility could not be verified; retry after the Provisioner capability endpoint is reachable")
+                    logger.warning("Provisioner mount compatibility could not be verified; using explicit synchronization until a retry confirms the current contract")
+                    return False
                 logger.warning(
                     "Configured remote thread-data mounts require Provisioner mount contract v%s; peer advertises v%s, so uploads will use explicit synchronization during the rolling upgrade",
                     SANDBOX_MOUNT_CONTRACT_VERSION,
@@ -809,6 +810,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _get_extra_mounts(self, thread_id: str | None, *, user_id: str | None = None) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
+        backend = getattr(self, "_backend", None)
+        if isinstance(backend, RemoteSandboxBackend):
+            backend.refresh_capabilities_if_stale()
         mounts: list[tuple[str, str, bool]] = []
 
         if thread_id:
@@ -1372,12 +1376,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
             return None
 
+        validated_info = self._revalidate_reused_sandbox_contract(
+            thread_id,
+            existing_id,
+            user_id=effective_user_id,
+        )
+
         with self._lock:
             if self._thread_sandboxes.get(key) != existing_id:
                 return None
             if existing_id not in self._sandboxes:
                 self._thread_sandboxes.pop(key, None)
                 return None
+            if validated_info is not None:
+                self._sandbox_infos[existing_id] = validated_info
 
             suffix = " (post-lock check)" if post_lock else ""
             logger.info(f"Reusing in-process sandbox {existing_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
@@ -1417,6 +1429,34 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
         return existing_id
 
+    def _revalidate_reused_sandbox_contract(
+        self,
+        thread_id: str,
+        sandbox_id: str,
+        *,
+        user_id: str,
+    ) -> SandboxInfo | None:
+        """Replay remote creation so the Provisioner validates current mounts.
+
+        Remote POST is idempotent: an existing Pod is returned only after its
+        live identity, mounts, and optional runtime sidecars match this acquire.
+        Local backends keep their existing health-check-only fast path.
+        """
+        if getattr(self._backend, "requires_create_validation", False) is not True:
+            return None
+        extra_mounts = self._get_extra_mounts(thread_id, user_id=user_id)
+        info = self._backend.create(
+            thread_id,
+            sandbox_id,
+            extra_mounts=extra_mounts or None,
+            user_id=user_id,
+            provision_lark_cli_runtime=self._lark_integration_active(user_id),
+            provision_lark_cli_broker=self._lark_broker_active(user_id),
+        )
+        if info.sandbox_id != sandbox_id:
+            raise RuntimeError(f"Provisioner validated unexpected sandbox {info.sandbox_id!r}; expected {sandbox_id!r}")
+        return info
+
     def _reclaim_warm_pool_sandbox(
         self,
         thread_id: str | None,
@@ -1453,6 +1493,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
             return None
 
+        validated_info = self._revalidate_reused_sandbox_contract(
+            thread_id,
+            sandbox_id,
+            user_id=effective_user_id,
+        )
+
         # Publish ownership before the warm → active transition: a raise here must
         # not leave the sandbox tracked as active but unowned (a peer would see an
         # orphan and reap it mid-turn). On failure the entry stays warm and this
@@ -1481,6 +1527,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
             self._warm_pool_identity.pop(sandbox_id, None)
             info, _ = warm_item
+            if validated_info is not None:
+                info = validated_info
             sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
