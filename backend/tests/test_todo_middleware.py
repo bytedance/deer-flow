@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.todo_middleware import (
@@ -29,12 +29,18 @@ def _reminder_msg():
 
 class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
     _seen_messages: list[list[Any]] = PrivateAttr(default_factory=list)
+    _bound_tool_names: list[list[str]] = PrivateAttr(default_factory=list)
 
     @property
     def seen_messages(self) -> list[list[Any]]:
         return self._seen_messages
 
+    @property
+    def bound_tool_names(self) -> list[list[str]]:
+        return self._bound_tool_names
+
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        self._bound_tool_names.append([tool.name for tool in tools])
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
@@ -57,6 +63,21 @@ def _make_runtime_for(thread_id: str, run_id: str):
     runtime = _make_runtime()
     runtime.context = {"thread_id": thread_id, "run_id": run_id}
     return runtime
+
+
+def _make_model_request(runtime, messages):
+    request = MagicMock()
+    augmented_request = MagicMock()
+    final_request = MagicMock()
+    request.runtime = runtime
+    request.messages = messages
+    request.system_message = None
+    augmented_request.runtime = runtime
+    augmented_request.messages = messages
+    augmented_request.system_message = None
+    request.override.side_effect = lambda **kwargs: augmented_request if "messages" in kwargs else final_request
+    augmented_request.override.return_value = final_request
+    return request, augmented_request, final_request
 
 
 def _sample_todos():
@@ -342,10 +363,7 @@ class TestAfterModel:
         assert result["jump_to"] == "model"
         assert "messages" not in result
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
+        request, _, final_request = _make_model_request(runtime, state["messages"])
         handler = MagicMock(return_value="response")
 
         assert mw.wrap_model_call(request, handler) == "response"
@@ -356,7 +374,7 @@ class TestAfterModel:
         assert reminder.additional_kwargs["hide_from_ui"] is True
         assert "Step 2" in reminder.content
         assert "Step 3" in reminder.content
-        handler.assert_called_once_with("patched-request")
+        handler.assert_called_once_with(final_request)
 
     def test_reminder_lists_only_incomplete_items(self):
         mw = TodoMiddleware()
@@ -368,10 +386,7 @@ class TestAfterModel:
         result = mw.after_model(state, runtime)
         assert result is not None
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
+        request, _, _ = _make_model_request(runtime, state["messages"])
         mw.wrap_model_call(request, MagicMock(return_value="response"))
         content = request.override.call_args.kwargs["messages"][-1].content
         assert "Step 1" not in content  # completed — should not appear
@@ -453,16 +468,14 @@ class TestAafterModel:
 
 
 class TestWrapModelCall:
-    def test_no_pending_reminder_passthrough(self):
+    def test_no_pending_reminder_adds_system_prompt(self):
         mw = TodoMiddleware()
-        request = MagicMock()
-        request.runtime = _make_runtime()
-        request.messages = [HumanMessage(content="hi")]
+        request, _, final_request = _make_model_request(_make_runtime(), [HumanMessage(content="hi")])
         handler = MagicMock(return_value="response")
 
         assert mw.wrap_model_call(request, handler) == "response"
-        request.override.assert_not_called()
-        handler.assert_called_once_with(request)
+        assert "system_message" in request.override.call_args.kwargs
+        handler.assert_called_once_with(final_request)
 
     def test_pending_reminder_is_injected_once(self):
         mw = TodoMiddleware()
@@ -473,27 +486,24 @@ class TestWrapModelCall:
         }
         mw.after_model(state, runtime)
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
+        request, _, final_request = _make_model_request(runtime, state["messages"])
         handler = MagicMock(return_value="response")
 
         assert mw.wrap_model_call(request, handler) == "response"
         injected_messages = request.override.call_args.kwargs["messages"]
         assert injected_messages[-1].name == "todo_completion_reminder"
+        handler.assert_called_once_with(final_request)
 
-        request.override.reset_mock()
-        handler.reset_mock()
-        handler.return_value = "second-response"
-        assert mw.wrap_model_call(request, handler) == "second-response"
-        request.override.assert_not_called()
-        handler.assert_called_once_with(request)
+        second_request, _, second_final_request = _make_model_request(runtime, state["messages"])
+        second_handler = MagicMock(return_value="second-response")
+        assert mw.wrap_model_call(second_request, second_handler) == "second-response"
+        assert "messages" not in second_request.override.call_args.kwargs
+        second_handler.assert_called_once_with(second_final_request)
 
 
 class TestTodoMiddlewareAgentGraphIntegration:
     def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
-        mw = TodoMiddleware()
+        mw = TodoMiddleware(system_prompt="TODO SYSTEM PROMPT")
         model = _CapturingFakeMessagesListChatModel(
             responses=[
                 AIMessage(
@@ -527,6 +537,25 @@ class TestTodoMiddlewareAgentGraphIntegration:
         )
 
         assert result["todos"] == [{"content": "Step 1", "status": "pending"}]
+        assert model.bound_tool_names
+        assert all("write_todos" in names for names in model.bound_tool_names)
+        assert any(isinstance(message, SystemMessage) and "TODO SYSTEM PROMPT" in str(message.content) for message in model.seen_messages[0])
+
+    def test_async_model_call_keeps_todo_system_prompt(self):
+        mw = TodoMiddleware(system_prompt="ASYNC TODO SYSTEM PROMPT")
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="final")])
+        graph = create_agent(model=model, tools=[], middleware=[mw], state_schema=ThreadState)
+
+        asyncio.run(
+            graph.ainvoke(
+                {"messages": [("user", "create a todo")]},
+                context={"thread_id": "async-schema-thread", "run_id": "async-schema-run"},
+            )
+        )
+
+        assert model.bound_tool_names
+        assert all("write_todos" in names for names in model.bound_tool_names)
+        assert any(isinstance(message, SystemMessage) and "ASYNC TODO SYSTEM PROMPT" in str(message.content) for message in model.seen_messages[0])
 
     def test_completion_reminder_is_transient_in_real_agent_graph(self):
         mw = TodoMiddleware()
@@ -651,14 +680,11 @@ class TestAwrapModelCall:
         }
         mw.after_model(state, runtime)
 
-        request = MagicMock()
-        request.runtime = runtime
-        request.messages = state["messages"]
-        request.override.return_value = "patched-request"
+        request, _, final_request = _make_model_request(runtime, state["messages"])
         handler = AsyncMock(return_value="response")
 
         result = asyncio.run(mw.awrap_model_call(request, handler))
         assert result == "response"
         injected_messages = request.override.call_args.kwargs["messages"]
         assert injected_messages[-1].name == "todo_completion_reminder"
-        handler.assert_awaited_once_with("patched-request")
+        handler.assert_awaited_once_with(final_request)
