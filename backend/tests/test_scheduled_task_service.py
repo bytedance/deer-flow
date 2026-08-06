@@ -14,10 +14,18 @@ class DummyTaskRepo:
         self.claimed = False
         self.updated = None
         self.cancelled_stuck_once = None
+        self.reconciled_stuck_once = None
 
     async def cancel_stuck_once_tasks(self, *, error):
         self.cancelled_stuck_once = error
         return 0
+
+    async def reconcile_stuck_once_tasks(self, **kwargs):
+        self.reconciled_stuck_once = kwargs
+        return 0
+
+    async def claim_dispatch_lease(self, task_id, **_kwargs):
+        return next((dict(row) for row in self.rows if row["id"] == task_id), None)
 
     async def claim_due_tasks(self, **_kwargs):
         if self.claimed:
@@ -47,6 +55,7 @@ class DummyRunRepo:
         self.active = active
         self.active_count = active_count
         self.stale_marked = None
+        self.reconciled = None
 
     async def count_active_runs(self):
         return self.active_count
@@ -63,6 +72,10 @@ class DummyRunRepo:
 
     async def mark_stale_active_runs(self, *, error):
         self.stale_marked = error
+        return 0
+
+    async def reconcile_active_runs(self, **kwargs):
+        self.reconciled = kwargs
         return 0
 
 
@@ -574,6 +587,31 @@ async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
 
     assert run_repo.stale_marked is not None
     assert task_repo.cancelled_stuck_once == run_repo.stale_marked
+
+
+@pytest.mark.asyncio
+async def test_multi_instance_start_uses_lease_aware_reconciliation():
+    task_repo = DummyTaskRepo([])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        multi_instance=True,
+        run_lease_grace_seconds=17,
+    )
+
+    await service.start()
+    await service.stop()
+
+    assert run_repo.reconciled is not None
+    assert run_repo.reconciled["lease_grace_seconds"] == 17
+    assert task_repo.reconciled_stuck_once is not None
+    assert task_repo.reconciled_stuck_once["lease_grace_seconds"] == 17
+    assert task_repo.cancelled_stuck_once is None
 
 
 @pytest.mark.asyncio

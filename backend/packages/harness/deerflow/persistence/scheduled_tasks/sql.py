@@ -6,10 +6,20 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+
+def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int = 0) -> bool:
+    if lease_expires_at is None:
+        return False
+    if lease_expires_at.tzinfo is None:
+        lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+    return lease_expires_at >= now - timedelta(seconds=grace_seconds)
 
 
 class ScheduledTaskRepository:
@@ -192,6 +202,37 @@ class ScheduledTaskRepository:
             row.updated_at = datetime.now(UTC)
             await session.commit()
 
+    async def claim_dispatch_lease(
+        self,
+        task_id: str,
+        *,
+        lease_owner: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Reserve the short pre-launch window for a manual dispatch."""
+        stmt = (
+            select(ScheduledTaskRow)
+            .where(
+                ScheduledTaskRow.id == task_id,
+                or_(
+                    ScheduledTaskRow.lease_expires_at.is_(None),
+                    ScheduledTaskRow.lease_expires_at < now,
+                ),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).scalars().first()
+            if row is None:
+                return None
+            row.lease_owner = lease_owner
+            row.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_dict(row)
+
     async def list_by_user_and_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         stmt = (
             select(ScheduledTaskRow)
@@ -230,3 +271,52 @@ class ScheduledTaskRepository:
                 row.updated_at = now
             await session.commit()
             return len(rows)
+
+    async def reconcile_stuck_once_tasks(
+        self,
+        *,
+        error: str,
+        now: datetime,
+        lease_grace_seconds: int = 10,
+    ) -> int:
+        """Cancel once tasks only after their underlying run is no longer live."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(ScheduledTaskRow.id).where(
+                    ScheduledTaskRow.schedule_type == "once",
+                    ScheduledTaskRow.status == "running",
+                )
+            )
+            task_ids = list(result.scalars())
+            cancelled = 0
+            for task_id in task_ids:
+                task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+                if task is None or task.status != "running":
+                    continue
+                if _lease_is_alive(task.lease_expires_at, now=now, grace_seconds=0):
+                    continue
+                run_result = await session.execute(
+                    select(ScheduledTaskRunRow)
+                    .where(
+                        ScheduledTaskRunRow.task_id == task.id,
+                        ScheduledTaskRunRow.status.in_(("queued", "running")),
+                    )
+                    .order_by(ScheduledTaskRunRow.created_at.desc())
+                    .limit(1)
+                )
+                task_run = run_result.scalars().first()
+                run_ids = [candidate for candidate in (task_run.run_id if task_run else None, task.last_run_id) if candidate]
+                live_run = None
+                for run_id in dict.fromkeys(run_ids):
+                    candidate = await session.get(RunRow, run_id, with_for_update=True)
+                    if candidate is not None and candidate.status in {"pending", "running"} and _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
+                        live_run = candidate
+                        break
+                if live_run is not None:
+                    continue
+                task.status = "cancelled"
+                task.last_error = error
+                task.updated_at = datetime.now(UTC)
+                cancelled += 1
+            await session.commit()
+            return cancelled

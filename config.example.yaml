@@ -2036,9 +2036,9 @@ agent_storage:
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
-# The scheduler is single-instance. Gateway startup rejects scheduler.enabled=true
-# with GATEWAY_WORKERS > 1. For multi-pod deployments, enable the scheduler on
-# exactly one Gateway pod and leave it disabled on every other pod.
+# The scheduler is single-instance by default. Set multi_instance: true only
+# when every Gateway instance shares Postgres, run ownership heartbeats, and
+# database-backed run events; startup recovery then preserves live peer runs.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
@@ -2048,6 +2048,7 @@ agent_storage:
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 scheduler:
   enabled: false
+  multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3

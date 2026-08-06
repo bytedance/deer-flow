@@ -56,12 +56,13 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
 
 
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
-    """Refuse unsafe multi-worker configurations before persistence starts.
+    """Refuse unsafe multi-process configurations before persistence starts.
 
-    Five checks (all must pass for multi-worker):
+    Multi-instance scheduler recovery also needs the durable run ownership
+    contract even when each Pod runs a single Gateway worker.
 
-    1. The background scheduler must be disabled. Each worker starts its own
-       scheduler and startup recovery can interrupt another worker's runs.
+    1. The background scheduler must be disabled for ordinary multi-worker
+       mode. ``scheduler.multi_instance`` opts into the lease-aware path.
     2. Process-local browser sessions must be disabled. Browser tools keep
        Chromium and Playwright objects in one worker's memory, while ordinary
        uvicorn dispatch provides no thread-id affinity.
@@ -83,23 +84,32 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     except (TypeError, ValueError):
         workers = 1
 
+    scheduler = getattr(config, "scheduler", None)
+    multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and getattr(scheduler, "multi_instance", False))
+
+    backend = getattr(config.database, "backend", None)
+    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
+    run_ownership = getattr(config, "run_ownership", None)
+
+    if multi_instance_scheduler and backend != "postgres":
+        raise SystemExit(f"scheduler.multi_instance=true requires database.backend='postgres'. database.backend is '{backend}'. Set scheduler.multi_instance=false or configure Postgres.")
+    if multi_instance_scheduler and run_events_backend != "db":
+        raise SystemExit(f"scheduler.multi_instance=true requires run_events.backend='db'. run_events.backend is '{run_events_backend}'. Set scheduler.multi_instance=false or configure run_events.backend: db.")
+    if multi_instance_scheduler and (run_ownership is None or not run_ownership.heartbeat_enabled):
+        raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
+
     if workers <= 1:
         return
 
-    if config.scheduler.enabled:
-        raise SystemExit(
-            f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. "
-            "Set GATEWAY_WORKERS=1 or scheduler.enabled=false. Multi-pod deployments may enable scheduler on exactly one Gateway pod."
-        )
+    if config.scheduler.enabled and not multi_instance_scheduler:
+        raise SystemExit(f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set GATEWAY_WORKERS=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
     if _browser_tools_enabled_in_config(config):
         raise SystemExit(browser_multi_worker_error(workers))
 
-    backend = getattr(config.database, "backend", None)
     if backend != "postgres":
         raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
 
-    run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
     if run_events_backend != "db":
         raise SystemExit(
             f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
@@ -107,7 +117,6 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
             "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
         )
 
-    run_ownership = getattr(config, "run_ownership", None)
     if run_ownership is None or not run_ownership.heartbeat_enabled:
         raise SystemExit(
             f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "

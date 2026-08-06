@@ -31,6 +31,7 @@ def _config_with_backend(
     browser_enabled: bool = False,
     run_events_backend: str = "db",
     scheduler_enabled: bool = False,
+    scheduler_multi_instance: bool = False,
 ) -> SimpleNamespace:
     run_ownership = RunOwnershipConfig(heartbeat_enabled=heartbeat_enabled) if heartbeat_enabled is not None else None
     tools = [SimpleNamespace(name="browser_navigate")] if browser_enabled else []
@@ -38,7 +39,7 @@ def _config_with_backend(
         database=DatabaseConfig(backend=backend),
         run_ownership=run_ownership,
         run_events=SimpleNamespace(backend=run_events_backend),
-        scheduler=SimpleNamespace(enabled=scheduler_enabled),
+        scheduler=SimpleNamespace(enabled=scheduler_enabled, multi_instance=scheduler_multi_instance),
         tools=tools,
     )
 
@@ -78,9 +79,9 @@ def test_gate_rejects_multi_worker_with_scheduler_enabled(monkeypatch):
             )
         )
     msg = str(exc_info.value)
-    assert "scheduler.enabled=false" in msg
+    assert "scheduler.multi_instance=true" in msg
     assert "GATEWAY_WORKERS=1" in msg
-    assert "exactly one Gateway pod" in msg
+    assert "scheduler.enabled=false" in msg
 
 
 def test_gate_allows_single_worker_with_scheduler_enabled(monkeypatch):
@@ -88,6 +89,70 @@ def test_gate_allows_single_worker_with_scheduler_enabled(monkeypatch):
     _enforce_postgres_for_multi_worker(
         _config_with_backend("sqlite", scheduler_enabled=True),
     )
+
+
+def test_gate_allows_multi_instance_scheduler_with_single_worker(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    _enforce_postgres_for_multi_worker(
+        _config_with_backend(
+            "postgres",
+            heartbeat_enabled=True,
+            scheduler_enabled=True,
+            scheduler_multi_instance=True,
+        )
+    )
+
+
+def test_gate_allows_multi_instance_scheduler_with_multiple_workers(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(
+        _config_with_backend(
+            "postgres",
+            heartbeat_enabled=True,
+            scheduler_enabled=True,
+            scheduler_multi_instance=True,
+        )
+    )
+
+
+def test_gate_rejects_multi_instance_scheduler_without_postgres(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit, match="database.backend='postgres'"):
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "sqlite",
+                heartbeat_enabled=True,
+                scheduler_enabled=True,
+                scheduler_multi_instance=True,
+            )
+        )
+
+
+def test_gate_rejects_multi_instance_scheduler_without_heartbeat(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit, match="heartbeat_enabled=true"):
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "postgres",
+                heartbeat_enabled=False,
+                scheduler_enabled=True,
+                scheduler_multi_instance=True,
+            )
+        )
+
+
+def test_gate_rejects_multi_instance_scheduler_with_process_local_events(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit, match="run_events.backend='db'"):
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "postgres",
+                heartbeat_enabled=True,
+                run_events_backend="memory",
+                scheduler_enabled=True,
+                scheduler_multi_instance=True,
+            )
+        )
 
 
 @pytest.mark.parametrize("run_events_backend", ["memory", "jsonl"])

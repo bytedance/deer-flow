@@ -240,6 +240,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   double-submit can create two runs on one thread (checkpoint corruption), a
   cancel can land on a non-owner pod (409), and a crashed pod's runs stay
   `pending`/`running` forever. Stay on 1 replica until that work lands.
+- **Scheduled task recovery.** If a deployment explicitly enables
+  `scheduler.multi_instance: true`, it must use shared Postgres,
+  `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
+  Scheduler startup then preserves live scheduled runs owned by another Pod
+  and reclaims only expired leases. This does not remove the broader Gateway
+  replica limitations described above.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in

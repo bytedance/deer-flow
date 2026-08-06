@@ -1149,7 +1149,7 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
-The background scheduler is single-instance: `scheduler.enabled: true` requires `GATEWAY_WORKERS=1`. In multi-pod deployments, enable the scheduler on exactly one Gateway pod and leave it disabled on every other pod.
+The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup recovery then preserves live peer runs and only reclaims expired leases. Without those settings, enable the scheduler on exactly one Gateway pod.
 
 ## Terminal Workbench (TUI)
 

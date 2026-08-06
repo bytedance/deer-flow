@@ -32,6 +32,8 @@ class ScheduledTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
+        multi_instance: bool = False,
+        run_lease_grace_seconds: int = 10,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -39,11 +41,15 @@ class ScheduledTaskService:
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        self._multi_instance = multi_instance
+        self._run_lease_grace_seconds = run_lease_grace_seconds
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
     async def run_once(self, *, now: datetime) -> None:
+        if self._multi_instance:
+            await self._reconcile_startup_state(now=now)
         # ``max_concurrent_runs`` is a global cap on active scheduled runs, not
         # just a per-poll claim batch: long runs accumulate across poll cycles,
         # so each cycle only claims into the remaining budget.
@@ -160,6 +166,16 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+
+        if self._multi_instance and trigger == "manual":
+            task = await self._task_repo.claim_dispatch_lease(
+                task["id"],
+                lease_owner=self._lease_owner,
+                now=now,
+                lease_seconds=self._lease_seconds,
+            )
+            if task is None:
+                return self._active_run_conflict_result(execution_thread_id)
 
         task_run_id = f"task-run-{uuid.uuid4().hex}"
         try:
@@ -488,23 +504,49 @@ class ScheduledTaskService:
         if self._task is not None:
             return
         restart_error = "interrupted: gateway restarted before the run reached a terminal state"
-        try:
-            stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
-            if stale:
-                logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
-        except Exception:
-            logger.exception("Failed to sweep stale scheduled task runs at startup")
-        try:
-            # The run rows above are only half the story: a launched `once`
-            # task is parked in "running" until the (now dead) completion hook
-            # would have finalized it, so reconcile the parent rows too.
-            stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
-            if stuck:
-                logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
-        except Exception:
-            logger.exception("Failed to reconcile stuck once tasks at startup")
+        if self._multi_instance:
+            await self._reconcile_startup_state(now=datetime.now(UTC))
+        else:
+            try:
+                stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
+                if stale:
+                    logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
+            except Exception:
+                logger.exception("Failed to sweep stale scheduled task runs at startup")
+            try:
+                # The run rows above are only half the story: a launched `once`
+                # task is parked in "running" until the (now dead) completion hook
+                # would have finalized it, so reconcile the parent rows too.
+                stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
+                if stuck:
+                    logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
+            except Exception:
+                logger.exception("Failed to reconcile stuck once tasks at startup")
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _reconcile_startup_state(self, *, now: datetime) -> None:
+        error = "interrupted: gateway restarted before the run reached a terminal state"
+        try:
+            stale = await self._task_run_repo.reconcile_active_runs(
+                error=error,
+                now=now,
+                lease_grace_seconds=self._run_lease_grace_seconds,
+            )
+            if stale:
+                logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)
+        except Exception:
+            logger.exception("Failed to reconcile scheduled task runs with leases")
+        try:
+            stuck = await self._task_repo.reconcile_stuck_once_tasks(
+                error=error,
+                now=now,
+                lease_grace_seconds=self._run_lease_grace_seconds,
+            )
+            if stuck:
+                logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
+        except Exception:
+            logger.exception("Failed to reconcile once tasks with leases")
 
     async def stop(self) -> None:
         if self._task is None:
