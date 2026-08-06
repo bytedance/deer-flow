@@ -8,9 +8,17 @@ append-only message list, which keeps them stable across turns.
 
 Layering contract: a tool receipt is an immutable *fact* record per tool call,
 message-carried. It is distinct from the runtime-layer run delivery receipt
-(``run.delivery`` event, one per run, event-store-carried) — the two never
-share channels or field names beyond the verdict shape convention
-(``source``/``requirement``/``satisfied``).
+(``run.delivery`` event, one per run, event-store-carried) — the two layers
+share only the verdict *structure* convention (``source``/``requirement`` +
+details); the ``satisfied`` boolean stays exclusive to the runtime hard gate,
+and advisory layers use neutral vocabulary (``citation_resolved``,
+``supported``) so the model never conflates evidence with acceptance.
+
+Freshness caveat: receipts capture execution truth (the raw tool return,
+stamped before sanitization/truncation rewrites content further out the
+chain). After compaction, only the sanitized ``content`` survives — so
+``output_sha256`` is a *freshness stamp*, not a re-checkable fingerprint
+against the persisted message.
 """
 
 from __future__ import annotations
