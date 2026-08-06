@@ -911,12 +911,13 @@ class TestCleanupStaleUploadStagingFiles:
         assert primary.read_bytes() == b"original"
         assert not staged_path.exists()
 
-    def test_restores_legacy_intentless_deletion_transaction(self, tmp_path):
+    @pytest.mark.parametrize("filename", ["report.pdf", "primary", ".remote-delete.json"])
+    def test_restores_legacy_intentless_deletion_transaction(self, tmp_path, filename):
         import deerflow.uploads.manager as upload_manager_module
 
         uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
         uploads.mkdir(parents=True)
-        primary = uploads / "report.pdf"
+        primary = uploads / filename
         primary.write_bytes(b"original")
         identity = UploadIdentity.from_path(primary)
         staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
@@ -925,14 +926,21 @@ class TestCleanupStaleUploadStagingFiles:
             identity,
         )
         stage_lease.release()
-        legacy_transaction_dir = staged_path.parent.with_name(
-            staged_path.parent.name.replace(
+        transaction_dir = staged_path.parent.parent
+        legacy_transaction_dir = transaction_dir.with_name(
+            transaction_dir.name.replace(
                 ".upload-delete-restore-",
                 ".upload-delete-",
                 1,
             )
         )
-        staged_path.parent.rename(legacy_transaction_dir)
+        current_primary_dir = staged_path.parent
+        temporary_primary_dir = transaction_dir / ".current-primary"
+        current_primary_dir.rename(temporary_primary_dir)
+        legacy_staged_path = transaction_dir / staged_path.name
+        (temporary_primary_dir / staged_path.name).rename(legacy_staged_path)
+        temporary_primary_dir.rmdir()
+        transaction_dir.rename(legacy_transaction_dir)
         legacy_staged_path = legacy_transaction_dir / staged_path.name
 
         assert cleanup_stale_upload_staging_files(tmp_path) == 1
@@ -1059,6 +1067,32 @@ class TestCleanupStaleUploadStagingFiles:
         uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("conversion", encoding="utf-8")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+            conversion_path=conversion,
+        )
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"primary"
+        assert conversion.read_text(encoding="utf-8") == "conversion"
+        assert not staged_path.exists()
+
+    @pytest.mark.parametrize("filename", [".commit", ".restore", ".conversion", ".remote-delete.json", "primary"])
+    def test_crash_recovery_restores_control_named_primary_and_conversion(self, tmp_path, filename):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / filename
         primary.write_bytes(b"primary")
         conversion = conversion_path_for_upload(primary)
         conversion.parent.mkdir()
@@ -1296,7 +1330,52 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"PDF"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
 
-    def test_remote_success_does_not_restore_host_when_commit_marker_fails(self, tmp_path):
+    @pytest.mark.parametrize("filename", [".commit", ".restore", ".conversion", ".remote-delete.json", "primary"])
+    def test_failed_remote_delete_restores_control_named_primary_and_conversion(self, tmp_path, filename):
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / filename
+        primary.write_bytes(b"primary")
+        owned_conversion = conversion_path_for_upload(primary)
+        owned_conversion.parent.mkdir()
+        owned_conversion.write_text("generated", encoding="utf-8")
+
+        with pytest.raises(OSError, match="remote unavailable"):
+            delete_file_safe(
+                uploads,
+                filename,
+                delete_remote_copy=lambda _name, _primary, _conversion: (_ for _ in ()).throw(OSError("remote unavailable")),
+            )
+
+        assert primary.read_bytes() == b"primary"
+        assert owned_conversion.read_text(encoding="utf-8") == "generated"
+        assert not list(owned_conversion.parent.glob(".upload-delete-*.part"))
+
+    def test_remote_delete_phase_is_persisted_before_the_hook_runs(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        observed_marker = False
+
+        def observe_phase_then_fail(_name, staged_primary, _conversion):
+            nonlocal observed_marker
+            observed_marker = upload_manager_module._staged_deletion_commit_marker(staged_primary).is_file()
+            raise OSError("remote unavailable")
+
+        with pytest.raises(OSError, match="remote unavailable"):
+            delete_file_safe(
+                uploads,
+                primary.name,
+                delete_remote_copy=observe_phase_then_fail,
+            )
+
+        assert observed_marker
+        assert primary.read_bytes() == b"primary"
+
+    def test_commit_marker_failure_prevents_remote_side_effect_and_restores_host(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
         uploads = tmp_path / "user-data" / "uploads"
@@ -1320,9 +1399,9 @@ class TestDeleteFileSafe:
                     delete_remote_copy=lambda name, _primary, _conversion: remote_names.append(name),
                 )
 
-        assert remote_names == ["report.pdf"]
-        assert not primary.exists()
-        assert not owned_conversion.exists()
+        assert remote_names == []
+        assert primary.read_bytes() == b"PDF"
+        assert owned_conversion.read_text(encoding="utf-8") == "generated"
         assert not list(owned_conversion.parent.glob(".upload-delete-*.part"))
 
     def test_failed_delete_preserves_old_generation_when_name_is_recreated(self, tmp_path):

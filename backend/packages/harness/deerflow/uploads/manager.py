@@ -37,14 +37,20 @@ UPLOAD_STAGING_SUFFIX = ".part"
 UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
 _UPLOAD_DELETION_RESTORE_INTENT = "restore"
 _UPLOAD_DELETION_DISCARD_INTENT = "discard"
+_UPLOAD_DELETION_PRIMARY_DIRNAME = "primary"
 _UPLOAD_DELETION_CONVERSION_TOMBSTONE = ".conversion"
 _UPLOAD_DELETION_COMMIT_MARKER = ".commit"
 _UPLOAD_DELETION_RESTORE_MARKER = ".restore"
+_UPLOAD_DELETION_REMOTE_JOURNAL = ".remote-delete.json"
 _WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
 
 
 class RemoteDeletionCommitRequiredError(RuntimeError):
     """Remote deletion could not be compensated, so host deletion must commit."""
+
+
+class RemoteDeletionCompensatedError(RuntimeError):
+    """Remote deletion failed but its side effects were fully compensated."""
 
 
 @dataclass(slots=True)
@@ -735,15 +741,29 @@ def _restore_staged_deletion(
 
 
 def _staged_conversion_path(staged_path: Path) -> Path:
-    return staged_path.parent / _UPLOAD_DELETION_CONVERSION_TOMBSTONE
+    return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_CONVERSION_TOMBSTONE
+
+
+def _deletion_transaction_dir_for_staged_path(staged_path: Path) -> Path:
+    """Return the transaction root for both current and legacy layouts."""
+    parent = staged_path.parent
+    if parent.name == _UPLOAD_DELETION_PRIMARY_DIRNAME:
+        candidate = parent.parent
+        if candidate.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and candidate.name.endswith(UPLOAD_STAGING_SUFFIX):
+            return candidate
+    return parent
 
 
 def _staged_deletion_commit_marker(staged_path: Path) -> Path:
-    return staged_path.parent / _UPLOAD_DELETION_COMMIT_MARKER
+    return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_COMMIT_MARKER
 
 
 def _staged_deletion_restore_marker(staged_path: Path) -> Path:
-    return staged_path.parent / _UPLOAD_DELETION_RESTORE_MARKER
+    return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_RESTORE_MARKER
+
+
+def _staged_deletion_remote_journal(staged_path: Path) -> Path:
+    return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_REMOTE_JOURNAL
 
 
 def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
@@ -759,10 +779,15 @@ def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    directory_descriptor = os.open(marker.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def _mark_staged_deletion_committed(staged_path: Path) -> None:
-    """Persist that remote side effects completed and host recovery must discard."""
+    """Persist that remote side effects may begin and recovery must discard."""
     _create_deletion_phase_marker(
         _staged_deletion_commit_marker(staged_path),
         error_message="Unsafe upload deletion commit marker",
@@ -778,11 +803,23 @@ def _mark_staged_deletion_restore(staged_path: Path) -> None:
 
 
 def _clear_staged_deletion_commit(staged_path: Path) -> None:
-    _staged_deletion_commit_marker(staged_path).unlink(missing_ok=True)
+    _unlink_deletion_control_durably(_staged_deletion_commit_marker(staged_path))
 
 
 def _clear_staged_deletion_restore(staged_path: Path) -> None:
-    _staged_deletion_restore_marker(staged_path).unlink(missing_ok=True)
+    _unlink_deletion_control_durably(_staged_deletion_restore_marker(staged_path))
+
+
+def _unlink_deletion_control_durably(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def _restore_staged_conversion(staged_path: Path, restored_primary_path: Path) -> None:
@@ -821,8 +858,9 @@ def _discard_staged_deletion(staged_path: Path) -> None:
     """Commit deletion of the exact primary and conversion tombstones."""
     _staged_conversion_path(staged_path).unlink(missing_ok=True)
     staged_path.unlink(missing_ok=True)
-    _clear_staged_deletion_commit(staged_path)
     _clear_staged_deletion_restore(staged_path)
+    if not _staged_deletion_remote_journal(staged_path).exists():
+        _clear_staged_deletion_commit(staged_path)
     _finish_deletion_transaction(staged_path)
 
 
@@ -857,9 +895,25 @@ def _link_staged_entry_as_recovery(staged_path: Path, original_path: Path) -> Pa
 
 def _finish_deletion_transaction(staged_path: Path) -> None:
     """Remove the now-empty transaction directory, when this is the new layout."""
-    transaction_dir = staged_path.parent
+    transaction_dir = _deletion_transaction_dir_for_staged_path(staged_path)
     if not (transaction_dir.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_dir.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction_dir.parent.name == UPLOAD_CONVERSIONS_DIRNAME):
         return
+    primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
+    if (transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL).exists():
+        # Keep the empty primary container as the on-disk layout discriminator;
+        # older direct-layout transactions may legitimately have a primary
+        # named exactly like the new journal control.
+        return
+    try:
+        primary_dir.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning(
+            "Failed to remove completed upload deletion primary directory: %s",
+            primary_dir,
+            exc_info=True,
+        )
     try:
         transaction_dir.rmdir()
     except FileNotFoundError:
@@ -893,7 +947,9 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     conversion_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_CONVERSION_TOMBSTONE]
     commit_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_COMMIT_MARKER]
     restore_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_RESTORE_MARKER]
-    primary_entries = [
+    primary_dir_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_PRIMARY_DIRNAME and entry.is_dir(follow_symlinks=False)]
+    remote_journal_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_REMOTE_JOURNAL and primary_dir_entries]
+    legacy_primary_entries = [
         entry
         for entry in entries
         if entry.name
@@ -902,14 +958,45 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             _UPLOAD_DELETION_COMMIT_MARKER,
             _UPLOAD_DELETION_RESTORE_MARKER,
         }
+        and not (entry.name == _UPLOAD_DELETION_REMOTE_JOURNAL and remote_journal_entries)
+        and not (entry.name == _UPLOAD_DELETION_PRIMARY_DIRNAME and entry.is_dir(follow_symlinks=False))
     ]
-    if len(conversion_entries) > 1 or len(commit_entries) > 1 or len(restore_entries) > 1 or len(primary_entries) > 1:
+    if (
+        len(conversion_entries) > 1
+        or len(commit_entries) > 1
+        or len(restore_entries) > 1
+        or len(remote_journal_entries) > 1
+        or len(primary_dir_entries) > 1
+        or len(legacy_primary_entries) > 1
+        or (primary_dir_entries and legacy_primary_entries)
+    ):
         logger.warning(
             "Refusing malformed upload deletion transaction with %s entries: %s",
             len(entries),
             transaction_dir,
         )
         return False
+    if remote_journal_entries:
+        remote_journal_stat = remote_journal_entries[0].stat(follow_symlinks=False)
+        if not stat.S_ISREG(remote_journal_stat.st_mode) or remote_journal_stat.st_nlink != 1:
+            logger.warning("Refusing malformed remote upload deletion journal: %s", transaction_dir)
+            return False
+    primary_dir: Path | None = None
+    if primary_dir_entries:
+        primary_dir_entry = primary_dir_entries[0]
+        if not primary_dir_entry.is_dir(follow_symlinks=False):
+            logger.warning("Refusing malformed upload deletion primary directory: %s", transaction_dir)
+            return False
+        primary_dir = Path(primary_dir_entry.path)
+        nested_primary_entries = list(os.scandir(primary_dir))
+        if len(nested_primary_entries) > 1:
+            logger.warning("Refusing upload deletion transaction with multiple primary entries: %s", transaction_dir)
+            return False
+        primary_entries = nested_primary_entries
+    else:
+        # Compatibility with transactions written before primaries were
+        # isolated from fixed control names in a dedicated directory.
+        primary_entries = legacy_primary_entries
     if conversion_entries:
         conversion_stat = conversion_entries[0].stat(follow_symlinks=False)
         if not stat.S_ISREG(conversion_stat.st_mode) or conversion_stat.st_nlink not in {1, 2}:
@@ -921,6 +1008,15 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             logger.warning("Refusing malformed upload deletion commit marker: %s", transaction_dir)
             return False
         recover_on_crash = False
+    elif remote_journal_entries:
+        if not recover_on_crash:
+            logger.warning("Refusing discard transaction with an uncommitted remote journal: %s", transaction_dir)
+            return False
+        # The process crashed after preparing the durable remote operation but
+        # before persisting permission to start it. No remote side effect could
+        # have begun, so discard the prepared journal and restore the host.
+        _unlink_deletion_control_durably(Path(remote_journal_entries[0].path))
+        remote_journal_entries = []
     if restore_entries:
         restore_stat = restore_entries[0].stat(follow_symlinks=False)
         if not stat.S_ISREG(restore_stat.st_mode) or restore_stat.st_nlink != 1:
@@ -937,8 +1033,15 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         )
         return False
     if not primary_entries:
-        if restore_entries and not conversion_entries:
-            Path(restore_entries[0].path).unlink()
+        if remote_journal_entries:
+            # sandbox_sync reconciles this durable remote cleanup before the
+            # transaction and its commit marker can be removed.
+            return False
+        if recover_on_crash and not commit_entries and not conversion_entries:
+            if restore_entries:
+                Path(restore_entries[0].path).unlink()
+            if primary_dir is not None:
+                primary_dir.rmdir()
             transaction_dir.rmdir()
             return True
         if not commit_entries:
@@ -947,6 +1050,8 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         if conversion_entries:
             Path(conversion_entries[0].path).unlink()
         Path(commit_entries[0].path).unlink()
+        if primary_dir is not None:
+            primary_dir.rmdir()
         transaction_dir.rmdir()
         return True
     entry = primary_entries[0]
@@ -1101,11 +1206,19 @@ def _stage_primary_deletion(
         except FileExistsError:
             stage_lease.release()
             continue
-        staged_path = transaction_dir / primary_path.name
+        primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
+        try:
+            primary_dir.mkdir(mode=0o700)
+        except BaseException:
+            transaction_dir.rmdir()
+            stage_lease.release()
+            raise
+        staged_path = primary_dir / primary_path.name
 
         try:
             os.rename(primary_path, staged_path)
         except BaseException:
+            primary_dir.rmdir()
             transaction_dir.rmdir()
             stage_lease.release()
             raise
@@ -1224,16 +1337,44 @@ def delete_file_safe(
         try:
             if delete_remote_copy is not None:
                 staged_conversion = _staged_conversion_path(staged_path)
+                prepare_remote_delete = getattr(delete_remote_copy, "prepare", None)
+                if callable(prepare_remote_delete):
+                    prepare_remote_delete(
+                        companion_name,
+                        staged_path,
+                        staged_conversion if staged_conversion.exists() else None,
+                    )
+                # Once a remote mutation may begin, crash recovery must never
+                # resurrect a host generation whose sandbox copies may already
+                # be gone. A live, fully compensated failure clears this marker
+                # in _restore_staged_deletion below.
+                try:
+                    _mark_staged_deletion_committed(staged_path)
+                except BaseException:
+                    abort_remote_delete = getattr(delete_remote_copy, "abort_prepared", None)
+                    if callable(abort_remote_delete):
+                        abort_remote_delete()
+                    raise
                 delete_remote_copy(
                     companion_name,
                     staged_path,
                     staged_conversion if staged_conversion.exists() else None,
                 )
                 remote_delete_committed = True
-                _mark_staged_deletion_committed(staged_path)
             else:
                 _mark_staged_deletion_committed(staged_path)
             _discard_staged_deletion(staged_path)
+        except RemoteDeletionCompensatedError:
+            # Clear the irreversible phase before removing the durable remote
+            # journal. A crash between these steps is recovered as a prepared,
+            # never-started transaction and restores the authoritative host
+            # generation.
+            _clear_staged_deletion_commit(staged_path)
+            abort_remote_delete = getattr(delete_remote_copy, "abort_prepared", None)
+            if callable(abort_remote_delete):
+                abort_remote_delete()
+            _restore_staged_deletion(staged_path, actual_file_path, identity)
+            raise
         except RemoteDeletionCommitRequiredError:
             # At least one remote mutation could not be rolled back.  Restoring
             # the host generation would publish a permanently split view, so

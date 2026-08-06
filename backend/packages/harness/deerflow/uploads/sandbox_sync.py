@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import (
     sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts,
@@ -16,13 +20,22 @@ from deerflow.sandbox.sandbox_provider import (
 )
 from deerflow.uploads.async_helpers import run_upload_io_cancellation_safe, wait_for_task_completion
 from deerflow.uploads.layout import conversion_virtual_path
+from deerflow.uploads.lease import UploadStageLease
 from deerflow.uploads.manager import (
+    _UPLOAD_DELETION_COMMIT_MARKER,
+    _UPLOAD_DELETION_PRIMARY_DIRNAME,
     RemoteDeletionCommitRequiredError,
+    RemoteDeletionCompensatedError,
+    _staged_deletion_remote_journal,
+    cleanup_stale_upload_staging_files,
     make_upload_file_sandbox_readable,
+    normalize_filename,
     upload_virtual_path,
 )
 
 logger = logging.getLogger(__name__)
+_REMOTE_DELETE_CONVERGENCE_ATTEMPTS = 3
+_REMOTE_DELETE_JOURNAL_MAX_BYTES = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,14 +68,66 @@ def _remove_remote_paths(sandbox: Any, virtual_paths: tuple[str, ...]) -> None:
         raise first_error
 
 
-def _deletion_hook_for_sandbox(
-    sandbox: Any,
-) -> Callable[[str, Path, Path | None], None]:
-    def delete_remote_copy(
+def _unlink_journal_durably(journal_path: Path) -> None:
+    journal_path.unlink(missing_ok=True)
+    directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _read_remote_delete_journal(journal_path: Path) -> dict[str, Any]:
+    path_stat = os.lstat(journal_path)
+    if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+        raise ValueError("journal is not an exclusive regular file")
+    descriptor = os.open(journal_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_stat.st_mode) or descriptor_stat.st_nlink != 1 or (descriptor_stat.st_dev, descriptor_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
+            raise ValueError("journal changed identity while opening")
+        chunks: list[bytes] = []
+        remaining = _REMOTE_DELETE_JOURNAL_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    if len(payload) > _REMOTE_DELETE_JOURNAL_MAX_BYTES:
+        raise ValueError("journal exceeds maximum size")
+    data = json.loads(payload.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("journal payload is not an object")
+    return data
+
+
+@dataclass(slots=True)
+class _SandboxDeletionHook:
+    sandbox: Any
+    sandbox_id: str | None = None
+    thread_id: str | None = None
+    user_id: str | None = None
+    _journal_path: Path | None = None
+    _prepared_targets: tuple[tuple[str, bytes | None], ...] | None = None
+
+    def _remove_journal(self) -> None:
+        journal_path = self._journal_path
+        if journal_path is None:
+            return
+        _unlink_journal_durably(journal_path)
+        self._journal_path = None
+
+    def prepare(
+        self,
         filename: str,
         primary_path: Path,
         conversion_path: Path | None,
     ) -> None:
+        """Persist enough context to retry an interrupted remote deletion."""
         targets = (
             (upload_virtual_path(filename), primary_path.read_bytes()),
             (
@@ -70,10 +135,90 @@ def _deletion_hook_for_sandbox(
                 conversion_path.read_bytes() if conversion_path is not None else None,
             ),
         )
+        journal_path = _staged_deletion_remote_journal(primary_path)
+        payload = json.dumps(
+            {
+                "version": 1,
+                "sandbox_id": self.sandbox_id,
+                "thread_id": self.thread_id,
+                "user_id": self.user_id,
+                "filename": filename,
+                "virtual_paths": [path for path, _bytes in targets],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        descriptor = os.open(journal_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("Failed to write remote upload deletion journal")
+                view = view[written:]
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            journal_path.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(descriptor)
+        try:
+            directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except BaseException:
+            journal_path.unlink(missing_ok=True)
+            raise
+        self._journal_path = journal_path
+        self._prepared_targets = targets
+
+    def abort_prepared(self) -> None:
+        """Forget a journal when no remote side effect was allowed to start."""
+        self._remove_journal()
+        self._prepared_targets = None
+
+    def _converge_to_deleted(self, virtual_paths: tuple[str, ...]) -> tuple[str, ...]:
+        """Retry idempotent removal and return paths still not confirmed absent."""
+        pending = list(dict.fromkeys(virtual_paths))
+        for _attempt in range(_REMOTE_DELETE_CONVERGENCE_ATTEMPTS):
+            still_pending: list[str] = []
+            for virtual_path in pending:
+                try:
+                    self.sandbox.remove_file(virtual_path)
+                except BaseException:
+                    still_pending.append(virtual_path)
+                    logger.warning(
+                        "Failed to converge sandbox upload deletion: %s",
+                        virtual_path,
+                        exc_info=True,
+                    )
+            pending = still_pending
+            if not pending:
+                break
+        return tuple(pending)
+
+    def __call__(
+        self,
+        filename: str,
+        primary_path: Path,
+        conversion_path: Path | None,
+    ) -> None:
+        targets = self._prepared_targets
+        if targets is None:
+            targets = (
+                (upload_virtual_path(filename), primary_path.read_bytes()),
+                (
+                    conversion_virtual_path(filename),
+                    conversion_path.read_bytes() if conversion_path is not None else None,
+                ),
+            )
         removed: list[tuple[str, bytes | None]] = []
         for virtual_path, authoritative_bytes in targets:
             try:
-                sandbox.remove_file(virtual_path)
+                self.sandbox.remove_file(virtual_path)
             except BaseException as delete_error:
                 # A remote failure is ambiguous: the server may have removed
                 # the file before the client observed the error.  Re-publish
@@ -84,7 +229,7 @@ def _deletion_hook_for_sandbox(
                     if rollback_bytes is None:
                         continue
                     try:
-                        sandbox.update_file(rollback_path, rollback_bytes)
+                        self.sandbox.update_file(rollback_path, rollback_bytes)
                     except BaseException:
                         compensation_failed = True
                         logger.warning(
@@ -93,11 +238,132 @@ def _deletion_hook_for_sandbox(
                             exc_info=True,
                         )
                 if compensation_failed:
-                    raise RemoteDeletionCommitRequiredError("Remote upload deletion could not be compensated") from delete_error
-                raise
+                    # Compensation is no longer an all-or-nothing rollback.
+                    # Drive every target, including paths successfully written
+                    # back above, to the deletion outcome before committing the
+                    # authoritative host deletion. Repeated remove_file calls
+                    # are idempotent and narrow transient transport failures.
+                    pending = self._converge_to_deleted(tuple(path for path, _bytes in targets))
+                    if not pending:
+                        self._remove_journal()
+                    detail = f"; unconfirmed remote paths: {pending!r}" if pending else ""
+                    raise RemoteDeletionCommitRequiredError(f"Remote upload deletion could not be compensated{detail}") from delete_error
+                raise RemoteDeletionCompensatedError(str(delete_error)) from delete_error
             removed.append((virtual_path, authoritative_bytes))
+        self._remove_journal()
 
-    return delete_remote_copy
+
+def _deletion_hook_for_sandbox(
+    sandbox: Any,
+    *,
+    sandbox_id: str | None = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+) -> _SandboxDeletionHook:
+    return _SandboxDeletionHook(
+        sandbox=sandbox,
+        sandbox_id=sandbox_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+
+
+def _pending_remote_deletion_journals(base_dir: Path) -> list[Path]:
+    patterns = (
+        "threads/*/user-data/.upload-conversions/.upload-delete-*.part/.remote-delete.json",
+        "users/*/threads/*/user-data/.upload-conversions/.upload-delete-*.part/.remote-delete.json",
+    )
+    journals: list[Path] = []
+    for pattern in patterns:
+        for path in base_dir.glob(pattern):
+            try:
+                primary_dir_stat = os.lstat(path.parent / _UPLOAD_DELETION_PRIMARY_DIRNAME)
+                commit_stat = os.lstat(path.parent / _UPLOAD_DELETION_COMMIT_MARKER)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(primary_dir_stat.st_mode) and not stat.S_ISLNK(primary_dir_stat.st_mode) and stat.S_ISREG(commit_stat.st_mode) and commit_stat.st_nlink == 1:
+                journals.append(path)
+    return sorted(journals)
+
+
+def reconcile_pending_remote_deletions(
+    *,
+    sandbox_provider_factory: Callable[[], Any],
+    base_dir: Path | str | None = None,
+) -> int:
+    """Retry durable remote upload deletions before host transaction cleanup."""
+    root = Path(base_dir) if base_dir is not None else get_paths().base_dir
+    journals = _pending_remote_deletion_journals(root)
+    if not journals:
+        return 0
+    sandbox_provider: Any | None = None
+    reconciled = 0
+    for journal_path in journals:
+        transaction_dir = journal_path.parent
+        stage_lease = UploadStageLease.try_acquire(transaction_dir.parent, transaction_dir.name)
+        if stage_lease is None:
+            continue
+        try:
+            try:
+                data = _read_remote_delete_journal(journal_path)
+                if data.get("version") != 1:
+                    raise ValueError("unsupported journal version")
+                filename = data.get("filename")
+                thread_id = data.get("thread_id")
+                user_id = data.get("user_id")
+                sandbox_id = data.get("sandbox_id")
+                virtual_paths = data.get("virtual_paths")
+                expected_paths = [
+                    upload_virtual_path(filename) if isinstance(filename, str) else None,
+                    conversion_virtual_path(filename) if isinstance(filename, str) else None,
+                ]
+                if (
+                    not isinstance(filename, str)
+                    or not isinstance(thread_id, str)
+                    or not thread_id
+                    or (user_id is not None and not isinstance(user_id, str))
+                    or (sandbox_id is not None and not isinstance(sandbox_id, str))
+                    or virtual_paths != expected_paths
+                ):
+                    raise ValueError("invalid remote deletion journal fields")
+                if normalize_filename(filename) != filename:
+                    raise ValueError("invalid remote deletion journal filename")
+
+                if sandbox_provider is None:
+                    sandbox_provider = sandbox_provider_factory()
+                sandbox = sandbox_provider.get(sandbox_id) if sandbox_id else None
+                effective_sandbox_id = sandbox_id
+                if sandbox is None:
+                    effective_sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
+                    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, effective_sandbox_id):
+                        # A newly acquired mounted sandbox reads the already
+                        # committed authoritative host state; no explicit remote
+                        # cache remains to reconcile under this contract.
+                        _unlink_journal_durably(journal_path)
+                        reconciled += 1
+                        continue
+                    sandbox = sandbox_provider.get(effective_sandbox_id)
+                if sandbox is None:
+                    raise RuntimeError(f"Sandbox {effective_sandbox_id!r} not found during upload deletion reconciliation")
+                pending = _SandboxDeletionHook(sandbox)._converge_to_deleted(tuple(virtual_paths))
+                if pending:
+                    logger.warning(
+                        "Remote upload deletion remains pending for %s: %s",
+                        journal_path,
+                        pending,
+                    )
+                    continue
+                _unlink_journal_durably(journal_path)
+                reconciled += 1
+            except BaseException:
+                logger.warning(
+                    "Failed to reconcile remote upload deletion journal: %s",
+                    journal_path,
+                    exc_info=True,
+                )
+        finally:
+            stage_lease.release()
+    return reconciled
 
 
 def prepare_upload_deletion(
@@ -107,6 +373,8 @@ def prepare_upload_deletion(
     user_id: str | None,
 ) -> Callable[[str, Path, Path | None], None] | None:
     """Return a lease-safe remote deletion hook for an explicitly synced sandbox."""
+    if reconcile_pending_remote_deletions(sandbox_provider_factory=lambda: sandbox_provider):
+        cleanup_stale_upload_staging_files()
     if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         return None
     sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
@@ -115,7 +383,12 @@ def prepare_upload_deletion(
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
-    return _deletion_hook_for_sandbox(sandbox)
+    return _deletion_hook_for_sandbox(
+        sandbox,
+        sandbox_id=sandbox_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
 
 
 async def prepare_upload_deletion_async(
@@ -125,6 +398,12 @@ async def prepare_upload_deletion_async(
     user_id: str | None,
 ) -> Callable[[str, Path, Path | None], None] | None:
     """Async counterpart that keeps remote acquisition off the event loop."""
+    reconciled = await asyncio.to_thread(
+        reconcile_pending_remote_deletions,
+        sandbox_provider_factory=lambda: sandbox_provider,
+    )
+    if reconciled:
+        await asyncio.to_thread(cleanup_stale_upload_staging_files)
     if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         return None
     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
@@ -133,7 +412,12 @@ async def prepare_upload_deletion_async(
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
-    return _deletion_hook_for_sandbox(sandbox)
+    return _deletion_hook_for_sandbox(
+        sandbox,
+        sandbox_id=sandbox_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
 
 
 def rollback_sandbox_sync(receipt: SandboxSyncReceipt) -> None:
