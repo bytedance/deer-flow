@@ -1521,6 +1521,7 @@ class DeerFlowClient:
         uploaded_files: list[dict] = []
         publications: list[PublishedUpload] = []
         sandbox_receipts: list[SandboxSyncReceipt] = []
+        reserved_coordination_keys: set[str] = set()
 
         conversion_pool = None
         if has_convertible_file:
@@ -1545,7 +1546,12 @@ class DeerFlowClient:
 
         try:
             for src_path in resolved_files:
-                publication = publish_upload_copy_leased(uploads_dir, src_path.name, src_path)
+                publication = publish_upload_copy_leased(
+                    uploads_dir,
+                    src_path.name,
+                    src_path,
+                    reserved_coordination_keys=reserved_coordination_keys,
+                )
                 publications.append(publication)
                 dest = publication.path
                 dest_name = dest.name

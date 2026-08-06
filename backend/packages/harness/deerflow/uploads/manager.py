@@ -25,7 +25,7 @@ from deerflow.uploads.layout import (
     existing_conversion_path_for_upload,
     upload_virtual_path,
 )
-from deerflow.uploads.lease import UploadIdentity, UploadNameLease, UploadStageLease
+from deerflow.uploads.lease import UploadIdentity, UploadNameLease, UploadStageLease, portable_name_coordination_key
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -260,7 +260,12 @@ def _release_lease_without_masking(lease: UploadNameLease) -> None:
         logger.warning("Failed to release upload name lease: %s", lease.lock_path, exc_info=True)
 
 
-def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) -> PublishedUpload:
+def publish_staged_upload_leased(
+    staged: StagedUpload,
+    preferred_filename: str,
+    *,
+    reserved_coordination_keys: set[str] | None = None,
+) -> PublishedUpload:
     """Atomically publish a staging file and retain its actual-name lease."""
     safe_name = normalize_filename(preferred_filename)
     if not staged.handle.closed:
@@ -268,6 +273,9 @@ def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) 
     _validate_staged_upload(staged)
     staged_identity = UploadIdentity.from_path(staged.path)
     for candidate_name in _filename_candidates(safe_name):
+        coordination_key = portable_name_coordination_key(candidate_name)
+        if reserved_coordination_keys is not None and coordination_key in reserved_coordination_keys:
+            continue
         candidate = staged.base_dir / candidate_name
         try:
             os.lstat(candidate)
@@ -311,7 +319,10 @@ def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) 
             if not stat.S_ISREG(candidate_stat.st_mode) or candidate_stat.st_nlink != 1 or not staged_identity.matches(candidate):
                 _rollback_link_without_masking(candidate, staged_identity)
                 raise AtomicUploadPublishError("Published upload did not become an exclusive regular file")
-            return PublishedUpload(path=candidate, identity=staged_identity, lease=lease)
+            publication = PublishedUpload(path=candidate, identity=staged_identity, lease=lease)
+            if reserved_coordination_keys is not None:
+                reserved_coordination_keys.add(coordination_key)
+            return publication
         except BaseException:
             if linked:
                 _rollback_link_without_masking(candidate, staged_identity)
@@ -356,14 +367,24 @@ def publish_upload_bytes(base_dir: Path, preferred_filename: str, data: bytes) -
         publication.release()
 
 
-def publish_upload_copy_leased(base_dir: Path, preferred_filename: str, source_path: Path) -> PublishedUpload:
+def publish_upload_copy_leased(
+    base_dir: Path,
+    preferred_filename: str,
+    source_path: Path,
+    *,
+    reserved_coordination_keys: set[str] | None = None,
+) -> PublishedUpload:
     """Copy a source into staging, publish it, and retain the actual-name lease."""
     safe_name = normalize_filename(preferred_filename)
     staged = create_upload_staging_file(base_dir)
     try:
         with Path(source_path).open("rb") as source:
             shutil.copyfileobj(source, staged.handle)
-        return publish_staged_upload_leased(staged, safe_name)
+        return publish_staged_upload_leased(
+            staged,
+            safe_name,
+            reserved_coordination_keys=reserved_coordination_keys,
+        )
     except BaseException:
         _abort_staged_upload_without_masking(staged)
         raise
@@ -530,6 +551,22 @@ def list_files_in_dir(directory: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
+def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> Path:
+    """Return the directory entry that actually names *identity*."""
+    with os.scandir(base_dir) as entries:
+        for entry in entries:
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(entry_stat.st_mode) and (entry_stat.st_dev, entry_stat.st_ino) == (
+                identity.device,
+                identity.inode,
+            ):
+                return Path(entry.path)
+    raise UnsafeUploadPathError("Upload directory entry changed during deletion")
+
+
 def delete_file_safe(base_dir: Path, filename: str) -> dict:
     """Delete a primary upload and only its exact owned conversion.
 
@@ -562,10 +599,14 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
             raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
 
-        owned_conversion = existing_conversion_path_for_upload(file_path)
+        identity = UploadIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
+        actual_file_path = _find_upload_path_by_identity(base_dir, identity)
+        owned_conversion = existing_conversion_path_for_upload(actual_file_path)
         if owned_conversion is not None:
             owned_conversion.unlink(missing_ok=True)
-        file_path.unlink()
+        if not identity.matches(actual_file_path):
+            raise UnsafeUploadPathError("Upload changed during deletion")
+        actual_file_path.unlink()
     finally:
         lease.release()
 

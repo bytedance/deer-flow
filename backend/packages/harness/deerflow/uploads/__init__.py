@@ -13,7 +13,7 @@ from .layout import (
     existing_conversion_path_for_upload,
     validate_conversion_dir,
 )
-from .lease import UploadIdentity, UploadNameLease
+from .lease import UploadIdentity, UploadNameLease, portable_name_coordination_key
 from .manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
@@ -75,6 +75,7 @@ __all__ = [
     "AtomicUploadPublishError",
     "UploadIdentity",
     "UploadNameLease",
+    "portable_name_coordination_key",
     "StagedUpload",
     "PublishedUpload",
     "UPLOAD_STAGING_PREFIX",

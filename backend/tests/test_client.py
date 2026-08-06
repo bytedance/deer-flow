@@ -2294,6 +2294,25 @@ class TestUploads:
         assert (uploads_dir / "same.txt").read_bytes() == b"first"
         assert (uploads_dir / "same_1.txt").read_bytes() == b"second"
 
+    def test_upload_files_renames_portable_aliases_within_one_batch(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = first_dir / "Report.txt"
+        second = second_dir / "report.txt"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            result = client.upload_files("thread-aliases", [first, second])
+
+        assert [file["filename"] for file in result["files"]] == ["Report.txt", "report_1.txt"]
+        assert (uploads_dir / "Report.txt").read_bytes() == b"first"
+        assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
+
     def test_concurrent_client_uploads_preserve_all_payloads(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)

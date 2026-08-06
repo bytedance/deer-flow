@@ -420,6 +420,31 @@ async def test_waiting_publication_cannot_starve_lease_release(tmp_path, monkeyp
     assert second.path.name == "report.pdf"
 
 
+@pytest.mark.asyncio
+async def test_waiting_delete_cannot_starve_general_io_lease_release(tmp_path, monkeypatch):
+    import deerflow.utils.file_io as file_io_module
+
+    publication = publish_upload_bytes_leased(tmp_path, "notes.txt", b"payload")
+    single_worker = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(file_io_module, "_FILE_IO_EXECUTOR", single_worker)
+
+    with patch.object(uploads, "get_uploads_dir", return_value=tmp_path):
+        deletion = asyncio.create_task(call_unwrapped(uploads.delete_uploaded_file, "thread-delete", "notes.txt", request=MagicMock()))
+        await asyncio.sleep(0.05)
+        release = asyncio.create_task(uploads._run_file_io_commit(publication.release))
+        try:
+            await asyncio.wait_for(asyncio.shield(release), timeout=0.2)
+            await asyncio.wait_for(deletion, timeout=2)
+        finally:
+            if publication.is_active:
+                publication.release()
+            await release
+            await deletion
+            single_worker.shutdown(wait=True)
+
+    assert not (tmp_path / "notes.txt").exists()
+
+
 def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -983,6 +1008,33 @@ def test_upload_files_adjusts_read_permissions_for_mounted_non_local_sandbox(tmp
     make_readable.assert_called_once()
     called_path = make_readable.call_args[0][0]
     assert called_path.name == "notes.txt"
+
+
+def test_upload_files_renames_portable_aliases_within_one_batch(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-aliases",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="Report.txt", file=BytesIO(b"first")),
+                    UploadFile(filename="report.txt", file=BytesIO(b"second")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert [file.filename for file in result.files] == ["Report.txt", "report_1.txt"]
+    assert (thread_uploads_dir / "Report.txt").read_bytes() == b"first"
+    assert (thread_uploads_dir / "report_1.txt").read_bytes() == b"second"
 
 
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):

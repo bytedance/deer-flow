@@ -27,7 +27,8 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
-from deerflow.uploads.manager import normalize_filename, publish_upload_bytes
+from deerflow.uploads.async_helpers import publish_upload_bytes_leased_async, release_published_upload_async
+from deerflow.uploads.manager import normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -1079,7 +1080,7 @@ class WechatChannel(Channel):
         detected_image = _detect_image_extension_and_mime(decrypted)
         image_extension = detected_image[0] if detected_image else ".jpg"
         filename = _safe_media_filename("wechat-image", image_extension, message_id=message_id, index=index)
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
+        stored_path = await self._stage_downloaded_file(filename, decrypted)
         if stored_path is None:
             return None
 
@@ -1130,7 +1131,7 @@ class WechatChannel(Channel):
             logger.warning("[WeChat] inbound file exceeds size limit (%d bytes), skipping message_id=%s", len(decrypted), message_id)
             return None
 
-        stored_path = await asyncio.to_thread(self._stage_downloaded_file, filename, decrypted)
+        stored_path = await self._stage_downloaded_file(filename, decrypted)
         if stored_path is None:
             return None
 
@@ -1145,16 +1146,20 @@ class WechatChannel(Channel):
             "full_url": full_url,
         }
 
-    def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
+    async def _stage_downloaded_file(self, filename: str, content: bytes) -> Path | None:
         download_dir = self._download_dir()
         if download_dir is None:
             return None
         try:
-            download_dir.mkdir(parents=True, exist_ok=True)
-            return publish_upload_bytes(download_dir, filename, content)
+            await asyncio.to_thread(download_dir.mkdir, parents=True, exist_ok=True)
+            publication = await publish_upload_bytes_leased_async(download_dir, filename, content)
         except (OSError, ValueError):
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
             return None
+        try:
+            return publication.path
+        finally:
+            await release_published_upload_async(publication)
 
     @staticmethod
     def _decode_base64_aes_key(value: str) -> bytes | None:

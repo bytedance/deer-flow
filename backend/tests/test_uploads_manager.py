@@ -32,6 +32,7 @@ from deerflow.uploads.manager import (
     list_files_in_dir,
     normalize_filename,
     publish_staged_upload,
+    publish_staged_upload_leased,
     publish_upload_bytes,
     publish_upload_bytes_leased,
     publish_upload_copy,
@@ -151,6 +152,40 @@ def test_portable_filesystem_aliases_share_one_generation_lease(tmp_path, first_
             first.release()
         alias = future.result(timeout=5)
         alias.release()
+
+
+@pytest.mark.parametrize(
+    ("first_name", "alias_name", "expected_alias_name"),
+    [
+        ("Report.pdf", "report.pdf", "report_1.pdf"),
+        ("caf\u00e9.pdf", "cafe\u0301.pdf", "cafe\u0301_1.pdf"),
+    ],
+)
+def test_batch_portable_alias_reservation_chooses_distinct_name(
+    tmp_path,
+    first_name,
+    alias_name,
+    expected_alias_name,
+):
+    reserved_keys: set[str] = set()
+    publications = []
+    try:
+        for filename, payload in [(first_name, b"first"), (alias_name, b"second")]:
+            staged = create_upload_staging_file(tmp_path)
+            staged.handle.write(payload)
+            publications.append(
+                publish_staged_upload_leased(
+                    staged,
+                    filename,
+                    reserved_coordination_keys=reserved_keys,
+                )
+            )
+    finally:
+        for publication in reversed(publications):
+            publication.release()
+
+    assert [publication.path.name for publication in publications] == [first_name, expected_alias_name]
+    assert {publication.path.read_bytes() for publication in publications} == {b"first", b"second"}
 
 
 @pytest.mark.asyncio

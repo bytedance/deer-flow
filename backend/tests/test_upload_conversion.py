@@ -214,6 +214,42 @@ def test_multibyte_long_conversion_name_is_utf8_safe():
     assert converted.endswith(".md")
 
 
+def test_delete_long_upload_through_case_alias_removes_actual_owned_conversion(tmp_path):
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    filename = "A" * 251 + ".pdf"
+    alias = filename.lower()
+    upload = publish_upload_bytes(uploads, filename, b"PDF")
+    if not (uploads / alias).exists():
+        pytest.skip("filesystem is case-sensitive")
+    conversion = conversion_path_for_upload(upload)
+    conversion.parent.mkdir(parents=True, exist_ok=True)
+    conversion.write_text("converted", encoding="utf-8")
+
+    delete_file_safe(uploads, alias)
+
+    assert not upload.exists()
+    assert not conversion.exists()
+
+
+def test_delete_long_upload_through_unicode_alias_removes_actual_owned_conversion(tmp_path):
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    filename = "e\u0301" * 83 + ".pdf"
+    alias = "\u00e9" * 83 + ".pdf"
+    upload = publish_upload_bytes(uploads, filename, b"PDF")
+    if not (uploads / alias).exists():
+        pytest.skip("filesystem does not resolve Unicode normalization aliases")
+    conversion = conversion_path_for_upload(upload)
+    conversion.parent.mkdir(parents=True, exist_ok=True)
+    conversion.write_text("converted", encoding="utf-8")
+
+    delete_file_safe(uploads, alias)
+
+    assert not upload.exists()
+    assert not conversion.exists()
+
+
 @pytest.mark.asyncio
 async def test_conversion_uses_owned_full_filename_target(tmp_path):
     uploads = tmp_path / "user-data" / "uploads"

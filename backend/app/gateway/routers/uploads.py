@@ -235,8 +235,28 @@ async def _run_file_io_commit(function, *args):
     return task.result()
 
 
-async def _publish_staged_upload_cancellation_safe(staged: StagedUpload, filename: str) -> PublishedUpload:
-    publish_task = asyncio.create_task(run_upload_lease_io(publish_staged_upload_leased, staged, filename))
+async def _run_upload_lease_io_cancellation_safe(function, *args, **kwargs):
+    task = asyncio.create_task(run_upload_lease_io(function, *args, **kwargs))
+    cancelled = await wait_for_task_completion(task)
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _publish_staged_upload_cancellation_safe(
+    staged: StagedUpload,
+    filename: str,
+    reserved_coordination_keys: set[str] | None = None,
+) -> PublishedUpload:
+    publish_task = asyncio.create_task(
+        run_upload_lease_io(
+            publish_staged_upload_leased,
+            staged,
+            filename,
+            reserved_coordination_keys=reserved_coordination_keys,
+        )
+    )
     try:
         return await asyncio.shield(publish_task)
     except asyncio.CancelledError:
@@ -309,6 +329,7 @@ async def _write_upload_file_with_limits(
     max_single_file_size: int,
     max_total_size: int,
     total_size: int,
+    reserved_coordination_keys: set[str] | None = None,
 ) -> tuple[PublishedUpload, int, int]:
     file_size = 0
     upload_temp: StagedUpload | None = None
@@ -323,7 +344,11 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail="Total upload size too large")
             await run_file_io(upload_temp.handle.write, chunk)
 
-        publication = await _publish_staged_upload_cancellation_safe(upload_temp, display_filename)
+        publication = await _publish_staged_upload_cancellation_safe(
+            upload_temp,
+            display_filename,
+            reserved_coordination_keys,
+        )
         upload_temp = None
     except BaseException:
         if upload_temp is not None:
@@ -375,6 +400,7 @@ async def upload_files(
     sandbox_sync_targets = []
     attempted_sandbox_paths: list[str] = []
     skipped_files = []
+    reserved_coordination_keys: set[str] = set()
     total_size = 0
     sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
@@ -406,6 +432,7 @@ async def upload_files(
                 max_single_file_size=limits.max_file_size,
                 max_total_size=limits.max_total_size,
                 total_size=total_size,
+                reserved_coordination_keys=reserved_coordination_keys,
             )
             publications.append(publication)
             file_path = publication.path
@@ -533,7 +560,12 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
+        return await _run_upload_lease_io_cancellation_safe(
+            _delete_uploaded_file_for_thread,
+            thread_id,
+            filename,
+            get_effective_user_id(),
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:
