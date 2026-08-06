@@ -20,6 +20,7 @@ from deerflow.config.extensions_config import (
     normalize_mcp_transport_alias,
     reload_extensions_config,
 )
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
@@ -379,6 +380,10 @@ class McpServerConfigResponse(BaseModel):
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_name_prefix: bool = Field(default=True, description="Whether to prefix discovered tool names with the MCP server name")
     tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
+    # Default matches McpServerConfig: this model's defaults feed model_dump()
+    # into the persisted extensions config on PUT, so an API-created server that
+    # omits the field must get the same bring-up timeout as a file-created one.
+    session_init_timeout: float | None = Field(default=DEFAULT_MCP_SESSION_INIT_TIMEOUT, description="Timeout in seconds for MCP server bring-up (tool discovery and persistent stdio session initialization); null means no timeout")
     model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="before")

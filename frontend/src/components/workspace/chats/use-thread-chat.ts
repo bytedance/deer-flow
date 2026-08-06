@@ -119,7 +119,9 @@ export function useThreadChat() {
     setIsNewThreadState(nextIsNewThread);
   }, []);
 
-  const isMock = searchParams.get("mock") === "true";
+  const isMock =
+    actualPathname.startsWith("/showcase/") ||
+    searchParams.get("mock") === "true";
   return {
     threadId: isNewPath ? (newThreadIdRef.current ?? threadId) : threadId,
     setThreadId,

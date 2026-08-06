@@ -533,6 +533,17 @@ This section accumulates work toward the **2.1.0** milestone
   thread. ([#4394])
 - **tools:** Exclude injected runtime from the `list_uploaded_files` schema.
   ([#4376])
+- **mcp:** Bound MCP server bring-up — tool discovery (subprocess spawn +
+  `initialize` + `tools/list`) and persistent stdio session initialization —
+  with a new per-server `session_init_timeout` (default 60s, `null` disables),
+  so a hung stdio server can no longer block agent construction, or the whole
+  Gateway event loop, indefinitely. `tool_call_timeout` still bounds individual
+  stdio tool calls.
+- **runtime:** Tool-output budget externalization no longer trips run delivery
+  verification. The default `.tool-results` storage dir (and any custom
+  `tool_output.storage_subdir`) is excluded from workspace-change snapshots and
+  produced-artifact detection, so a run that only externalized oversized tool
+  outputs succeeds instead of failing as an error.
 
 ### Performance
 

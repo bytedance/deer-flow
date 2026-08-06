@@ -36,6 +36,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.constants import TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -205,17 +206,36 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
+    """Directory names workspace snapshots must skip for this deployment.
+
+    The tool-output budget middleware externalizes oversized tool outputs into
+    a storage subdir under outputs (default ``.tool-results``). Those files are
+    process feedback referenced from the budget preview via ``read_file``, not
+    deliverables: counting them as produced artifacts would fail run delivery
+    verification for any run that externalized a tool output without also
+    presenting a real artifact. The default name is excluded by the scanner
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
+    """
+    storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
+    return frozenset({storage_subdir})
+
+
 async def _produced_output_paths(
     before: WorkspaceSnapshot | None,
     *,
     thread_id: str,
     user_id: str | None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> list[str]:
     """Detect regular output files created or modified by this run."""
     if before is None:
         return []
     try:
-        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
         return get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
@@ -349,6 +369,8 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -370,6 +392,21 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if task_store is not None:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
+    # Publish the run's extension snapshot so work dispatched during graph
+    # execution (task delegation) binds the same generation the lead agent was
+    # built with, instead of re-reading a singleton that may have been replaced
+    # mid-run. Written after the caller merge and popped when absent, because a
+    # caller-supplied value for this host-internal key is never authoritative.
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+    if extensions is not None:
+        runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
+    else:
+        runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -388,6 +425,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
@@ -519,9 +557,17 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+
+    from deerflow_extension_api import ExtensionData
+
+    from deerflow.extensions import get_loaded_extensions
+
+    extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    task_store: ExtensionData | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
+    workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
@@ -631,6 +677,9 @@ async def run_agent(
             return
         started = True
 
+        if extensions.needs_task_store:
+            task_store = ExtensionData(run_id)
+
         if not record.ownership_lost and thread_store is not None:
             try:
                 await thread_store.update_status(thread_id, "running")
@@ -672,10 +721,15 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            # Resolved once per run so the pre-run snapshot, the post-run
+            # delivery scan, and the workspace-changes scan all agree on the
+            # same exclusion set.
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -698,7 +752,14 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            task_store,
+            extensions,
+        )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
         if deerflow_trace_id:
@@ -750,10 +811,13 @@ async def run_agent(
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
 
+        agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
-        else:
-            agent = agent_factory(config=initial_runnable_config)
+            agent_factory_kwargs["app_config"] = ctx.app_config
+        from deerflow.extensions import bind_agent_build_extensions
+
+        with bind_agent_build_extensions(extensions):
+            agent = agent_factory(**agent_factory_kwargs)
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -969,6 +1033,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1054,6 +1119,7 @@ async def run_agent(
                     run_id,
                     pre_run_workspace_snapshot,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
@@ -1075,6 +1141,7 @@ async def run_agent(
                         pre_run_workspace_snapshot,
                         thread_id=thread_id,
                         user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             receipt_persisted = await _persist_delivery_receipt(

@@ -242,6 +242,45 @@ class TestExternalizePathTraversal:
         assert path is None
 
 
+class TestStorageSubdirConfig:
+    """storage_subdir must be a single path segment.
+
+    The workspace-changes scanner prunes by directory name during os.walk,
+    which yields one-segment dirnames — a nested value like
+    ``cache/tool-results`` would silently never match the exclusion and its
+    files would be counted as produced artifacts again. Rejecting it at config
+    time keeps the dir-name-based exclusion sound.
+    """
+
+    def test_default_is_single_segment(self):
+        assert ToolOutputConfig().storage_subdir == ".tool-results"
+
+    def test_single_segment_custom_accepted(self):
+        assert ToolOutputConfig(storage_subdir="tool-output-cache").storage_subdir == "tool-output-cache"
+
+    def test_nested_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache/tool-results")
+
+    def test_windows_separator_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="cache\\tool-results")
+
+    def test_absolute_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="/abs/path")
+
+    def test_dot_and_dotdot_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir=".")
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="..")
+
+    def test_empty_storage_subdir_rejected(self):
+        with pytest.raises(ValueError):
+            ToolOutputConfig(storage_subdir="")
+
+
 class TestNeedsBudget:
     def test_small_output_does_not_need_budget(self):
         config = ToolOutputConfig(externalize_min_chars=1000)

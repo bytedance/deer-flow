@@ -9,11 +9,16 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
+from deerflow.config.app_config import AppConfig
+from deerflow.config.paths import Paths
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
+from deerflow.runtime.user_context import get_effective_user_id
 
 
 def _make_bridge():
@@ -213,6 +218,75 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
     assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_externalized_tool_results_do_not_trigger_delivery_verification(tmp_path, monkeypatch):
+    """Oversized tool outputs externalized under outputs/.tool-results/ are
+    process feedback for the model, not deliverables: a run that only produced
+    those files must succeed without any present_files call."""
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+
+    class ExternalizingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            # Simulates ToolOutputBudgetMiddleware persisting an oversized tool
+            # output mid-run (default storage_subdir is ".tool-results").
+            tool_results = paths.sandbox_outputs_dir("thread-1", user_id=get_effective_user_id()) / ".tool-results"
+            tool_results.mkdir(parents=True, exist_ok=True)
+            (tool_results / "bash-abcdef123456.log").write_text("x" * 20000, encoding="utf-8")
+            yield {"messages": [AIMessage(content="Here is the answer.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ExternalizingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert len(delivery) == 1
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    fetched = await run_manager.get(record.run_id)
+    assert fetched.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_custom_tool_output_storage_subdir_does_not_trigger_delivery_verification(tmp_path, monkeypatch):
+    """A custom tool_output.storage_subdir is honoured by the exclusion, not
+    only the default .tool-results name."""
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    app_config = AppConfig(sandbox=SandboxConfig(use="test"), tool_output=ToolOutputConfig(storage_subdir="tool-output-cache"))
+
+    class ExternalizingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            cache = paths.sandbox_outputs_dir("thread-1", user_id=get_effective_user_id()) / "tool-output-cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "web_fetch-abcdef123456.log").write_text("y" * 20000, encoding="utf-8")
+            yield {"messages": [AIMessage(content="Here is the answer.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store, app_config=app_config),
+        agent_factory=lambda *, config: ExternalizingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched.status == RunStatus.success
 
 
 @pytest.mark.anyio

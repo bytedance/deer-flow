@@ -2,7 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 
 import { Card } from "@/components/ui/card";
-import { pathOfThread } from "@/core/threads/utils";
+import { pathOfPublicDemoThread } from "@/core/threads/static-demo";
 import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
@@ -56,7 +56,7 @@ export function CaseStudySection({ className }: { className?: string }) {
         {caseStudies.map((caseStudy) => (
           <Link
             key={caseStudy.title}
-            href={pathOfThread(caseStudy.threadId) + "?mock=true"}
+            href={pathOfPublicDemoThread(caseStudy.threadId)}
             target="_blank"
             rel="noopener noreferrer"
           >
