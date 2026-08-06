@@ -1442,6 +1442,79 @@ def test_delete_uploaded_file_preserves_host_when_remote_delete_fails(tmp_path):
     assert primary.read_bytes() == b"notes"
 
 
+def test_delete_uploaded_file_compensates_partial_remote_delete_before_restoring_host(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    primary = thread_uploads_dir / "report.pdf"
+    primary.write_bytes(b"pdf")
+    conversion = conversion_path_for_upload(primary)
+    conversion.parent.mkdir()
+    conversion.write_text("generated", encoding="utf-8")
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+    sandbox.remove_file.side_effect = [None, OSError("conversion unavailable")]
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.delete_uploaded_file,
+                    "thread-remote",
+                    "report.pdf",
+                    request=MagicMock(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    sandbox.update_file.assert_any_call(
+        "/mnt/user-data/uploads/report.pdf",
+        b"pdf",
+    )
+    assert primary.read_bytes() == b"pdf"
+    assert conversion.read_text(encoding="utf-8") == "generated"
+
+
+def test_delete_uploaded_file_commits_host_delete_when_remote_compensation_fails(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    primary = thread_uploads_dir / "report.pdf"
+    primary.write_bytes(b"pdf")
+    conversion = conversion_path_for_upload(primary)
+    conversion.parent.mkdir()
+    conversion.write_text("generated", encoding="utf-8")
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+    sandbox.remove_file.side_effect = [None, OSError("conversion unavailable")]
+    sandbox.update_file.side_effect = OSError("remote rollback unavailable")
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.delete_uploaded_file,
+                    "thread-remote",
+                    "report.pdf",
+                    request=MagicMock(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert not primary.exists()
+    assert not conversion.exists()
+
+
 @pytest.mark.parametrize("filename", ["", None])
 def test_upload_files_reports_empty_multipart_filename_as_skipped(tmp_path, filename):
     thread_uploads_dir = tmp_path / "uploads"

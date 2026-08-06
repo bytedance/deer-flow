@@ -16,7 +16,11 @@ from deerflow.sandbox.sandbox_provider import (
 )
 from deerflow.uploads.async_helpers import run_upload_io_cancellation_safe, wait_for_task_completion
 from deerflow.uploads.layout import conversion_virtual_path
-from deerflow.uploads.manager import make_upload_file_sandbox_readable, upload_virtual_path
+from deerflow.uploads.manager import (
+    RemoteDeletionCommitRequiredError,
+    make_upload_file_sandbox_readable,
+    upload_virtual_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +55,47 @@ def _remove_remote_paths(sandbox: Any, virtual_paths: tuple[str, ...]) -> None:
         raise first_error
 
 
-def _deletion_hook_for_sandbox(sandbox: Any) -> Callable[[str], None]:
-    def delete_remote_copy(filename: str) -> None:
-        _remove_remote_paths(
-            sandbox,
+def _deletion_hook_for_sandbox(
+    sandbox: Any,
+) -> Callable[[str, Path, Path | None], None]:
+    def delete_remote_copy(
+        filename: str,
+        primary_path: Path,
+        conversion_path: Path | None,
+    ) -> None:
+        targets = (
+            (upload_virtual_path(filename), primary_path.read_bytes()),
             (
                 conversion_virtual_path(filename),
-                upload_virtual_path(filename),
+                conversion_path.read_bytes() if conversion_path is not None else None,
             ),
         )
+        removed: list[tuple[str, bytes | None]] = []
+        for virtual_path, authoritative_bytes in targets:
+            try:
+                sandbox.remove_file(virtual_path)
+            except BaseException as delete_error:
+                # A remote failure is ambiguous: the server may have removed
+                # the file before the client observed the error.  Re-publish
+                # the current target and every prior success from the staged
+                # authoritative bytes before allowing the host rollback.
+                compensation_failed = False
+                for rollback_path, rollback_bytes in reversed([*removed, (virtual_path, authoritative_bytes)]):
+                    if rollback_bytes is None:
+                        continue
+                    try:
+                        sandbox.update_file(rollback_path, rollback_bytes)
+                    except BaseException:
+                        compensation_failed = True
+                        logger.warning(
+                            "Failed to compensate partially deleted sandbox upload: %s",
+                            rollback_path,
+                            exc_info=True,
+                        )
+                if compensation_failed:
+                    raise RemoteDeletionCommitRequiredError("Remote upload deletion could not be compensated") from delete_error
+                raise
+            removed.append((virtual_path, authoritative_bytes))
 
     return delete_remote_copy
 
@@ -69,7 +105,7 @@ def prepare_upload_deletion(
     thread_id: str,
     *,
     user_id: str | None,
-) -> Callable[[str], None] | None:
+) -> Callable[[str, Path, Path | None], None] | None:
     """Return a lease-safe remote deletion hook for an explicitly synced sandbox."""
     if sandbox_provider_uses_thread_data_mounts(sandbox_provider):
         return None
@@ -87,7 +123,7 @@ async def prepare_upload_deletion_async(
     thread_id: str,
     *,
     user_id: str | None,
-) -> Callable[[str], None] | None:
+) -> Callable[[str, Path, Path | None], None] | None:
     """Async counterpart that keeps remote acquisition off the event loop."""
     if await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider):
         return None

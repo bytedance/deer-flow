@@ -22,6 +22,7 @@ from deerflow.uploads.layout import (
     UPLOAD_CONVERSIONS_DIRNAME,
     _truncate_utf8,
     artifact_url_for_virtual_path,
+    conversion_path_for_upload,
     ensure_conversion_dir,
     existing_conversion_path_for_upload,
     upload_virtual_path,
@@ -36,7 +37,14 @@ UPLOAD_STAGING_SUFFIX = ".part"
 UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
 _UPLOAD_DELETION_RESTORE_INTENT = "restore"
 _UPLOAD_DELETION_DISCARD_INTENT = "discard"
+_UPLOAD_DELETION_CONVERSION_TOMBSTONE = ".conversion"
+_UPLOAD_DELETION_COMMIT_MARKER = ".commit"
+_UPLOAD_DELETION_RESTORE_MARKER = ".restore"
 _WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
+
+
+class RemoteDeletionCommitRequiredError(RuntimeError):
+    """Remote deletion could not be compensated, so host deletion must commit."""
 
 
 @dataclass(slots=True)
@@ -470,16 +478,14 @@ def rollback_published_upload(publication: PublishedUpload) -> None:
             publication.path,
             publication.identity,
             recover_on_crash=False,
+            conversion_path=owned_conversion,
         )
     except (FileNotFoundError, UnsafeUploadPathError):
         # The pathname was replaced after the optimistic identity check. The
         # staging helper restores that replacement without deleting it.
         return
     try:
-        if owned_conversion is not None:
-            owned_conversion.unlink(missing_ok=True)
-        staged_path.unlink()
-        _finish_deletion_transaction(staged_path)
+        _discard_staged_deletion(staged_path)
     except BaseException:
         _restore_staged_deletion(
             staged_path,
@@ -684,43 +690,139 @@ def _restore_staged_deletion(
     original_path: Path,
     identity: UploadIdentity,
 ) -> None:
-    """Restore a staged primary without replacing a newly-created entry."""
+    """Restore a staged primary and conversion without replacing a new generation."""
     try:
         staged_stat = os.lstat(staged_path)
     except FileNotFoundError:
         return
     if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
         raise UnsafeUploadPathError("Staged upload deletion changed identity")
+    _clear_staged_deletion_commit(staged_path)
+    _mark_staged_deletion_restore(staged_path)
     try:
         original_stat = os.lstat(original_path)
     except FileNotFoundError:
         original_stat = None
+    restored_path: Path
     if original_stat is not None:
         if stat.S_ISREG(original_stat.st_mode) and (
             original_stat.st_dev,
             original_stat.st_ino,
         ) == (identity.device, identity.inode):
-            staged_path.unlink()
-            _finish_deletion_transaction(staged_path)
-            return
-        recovery_path = _preserve_staged_entry_as_recovery(staged_path, original_path)
-        logger.warning(
-            "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
-            recovery_path,
-        )
-        _finish_deletion_transaction(staged_path)
+            restored_path = original_path
+        else:
+            restored_path = _link_staged_entry_as_recovery(staged_path, original_path)
+            logger.warning(
+                "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
+                restored_path,
+            )
+    else:
+        try:
+            os.link(staged_path, original_path, follow_symlinks=False)
+        except FileExistsError:
+            restored_path = _link_staged_entry_as_recovery(staged_path, original_path)
+            logger.warning(
+                "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
+                restored_path,
+            )
+        else:
+            restored_path = original_path
+
+    _restore_staged_conversion(staged_path, restored_path)
+    staged_path.unlink()
+    _clear_staged_deletion_restore(staged_path)
+    _finish_deletion_transaction(staged_path)
+
+
+def _staged_conversion_path(staged_path: Path) -> Path:
+    return staged_path.parent / _UPLOAD_DELETION_CONVERSION_TOMBSTONE
+
+
+def _staged_deletion_commit_marker(staged_path: Path) -> Path:
+    return staged_path.parent / _UPLOAD_DELETION_COMMIT_MARKER
+
+
+def _staged_deletion_restore_marker(staged_path: Path) -> Path:
+    return staged_path.parent / _UPLOAD_DELETION_RESTORE_MARKER
+
+
+def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
+    """Create and validate one durable deletion phase marker."""
+    try:
+        descriptor = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        marker_stat = os.lstat(marker)
+        if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_nlink != 1:
+            raise UnsafeUploadPathError(error_message)
         return
     try:
-        os.link(staged_path, original_path, follow_symlinks=False)
-    except FileExistsError:
-        recovery_path = _preserve_staged_entry_as_recovery(staged_path, original_path)
-        logger.warning(
-            "Upload name was recreated during deletion rollback; preserved the prior generation as %s",
-            recovery_path,
-        )
-        _finish_deletion_transaction(staged_path)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _mark_staged_deletion_committed(staged_path: Path) -> None:
+    """Persist that remote side effects completed and host recovery must discard."""
+    _create_deletion_phase_marker(
+        _staged_deletion_commit_marker(staged_path),
+        error_message="Unsafe upload deletion commit marker",
+    )
+
+
+def _mark_staged_deletion_restore(staged_path: Path) -> None:
+    """Persist that a live rollback began and recovery must finish restoring."""
+    _create_deletion_phase_marker(
+        _staged_deletion_restore_marker(staged_path),
+        error_message="Unsafe upload deletion restore marker",
+    )
+
+
+def _clear_staged_deletion_commit(staged_path: Path) -> None:
+    _staged_deletion_commit_marker(staged_path).unlink(missing_ok=True)
+
+
+def _clear_staged_deletion_restore(staged_path: Path) -> None:
+    _staged_deletion_restore_marker(staged_path).unlink(missing_ok=True)
+
+
+def _restore_staged_conversion(staged_path: Path, restored_primary_path: Path) -> None:
+    """Restore the exact conversion moved into a deletion transaction."""
+    staged_conversion = _staged_conversion_path(staged_path)
+    try:
+        conversion_stat = os.lstat(staged_conversion)
+    except FileNotFoundError:
         return
-    staged_path.unlink()
+    if not stat.S_ISREG(conversion_stat.st_mode) or conversion_stat.st_nlink not in {1, 2}:
+        raise UnsafeUploadPathError("Staged upload conversion changed identity")
+
+    target = conversion_path_for_upload(restored_primary_path)
+    if conversion_stat.st_nlink == 2:
+        try:
+            target_stat = os.lstat(target)
+        except FileNotFoundError as exc:
+            raise UnsafeUploadPathError("Staged upload conversion has an unknown hard-link peer") from exc
+        if not stat.S_ISREG(target_stat.st_mode) or (target_stat.st_dev, target_stat.st_ino) != (conversion_stat.st_dev, conversion_stat.st_ino):
+            raise UnsafeUploadPathError("Staged upload conversion has an unexpected hard-link peer")
+        staged_conversion.unlink()
+        return
+    try:
+        os.link(staged_conversion, target, follow_symlinks=False)
+    except FileExistsError:
+        # A replacement generation may already own this deterministic target.
+        # Never overwrite it with the prior generation's conversion.
+        logger.warning(
+            "Discarding staged conversion because the restored target already exists: %s",
+            target,
+        )
+    staged_conversion.unlink()
+
+
+def _discard_staged_deletion(staged_path: Path) -> None:
+    """Commit deletion of the exact primary and conversion tombstones."""
+    _staged_conversion_path(staged_path).unlink(missing_ok=True)
+    staged_path.unlink(missing_ok=True)
+    _clear_staged_deletion_commit(staged_path)
+    _clear_staged_deletion_restore(staged_path)
     _finish_deletion_transaction(staged_path)
 
 
@@ -736,6 +838,13 @@ def _recovery_path_for(original_path: Path) -> Path:
 
 def _preserve_staged_entry_as_recovery(staged_path: Path, original_path: Path) -> Path:
     """Publish staged bytes under a visible no-replace recovery name."""
+    recovery_path = _link_staged_entry_as_recovery(staged_path, original_path)
+    staged_path.unlink()
+    return recovery_path
+
+
+def _link_staged_entry_as_recovery(staged_path: Path, original_path: Path) -> Path:
+    """Link staged bytes under a visible no-replace recovery name."""
     while True:
         recovery_path = _recovery_path_for(original_path)
         try:
@@ -743,7 +852,6 @@ def _preserve_staged_entry_as_recovery(staged_path: Path, original_path: Path) -
             break
         except FileExistsError:
             continue
-    staged_path.unlink()
     return recovery_path
 
 
@@ -782,14 +890,66 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     if not entries:
         transaction_dir.rmdir()
         return True
-    if len(entries) != 1:
+    conversion_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_CONVERSION_TOMBSTONE]
+    commit_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_COMMIT_MARKER]
+    restore_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_RESTORE_MARKER]
+    primary_entries = [
+        entry
+        for entry in entries
+        if entry.name
+        not in {
+            _UPLOAD_DELETION_CONVERSION_TOMBSTONE,
+            _UPLOAD_DELETION_COMMIT_MARKER,
+            _UPLOAD_DELETION_RESTORE_MARKER,
+        }
+    ]
+    if len(conversion_entries) > 1 or len(commit_entries) > 1 or len(restore_entries) > 1 or len(primary_entries) > 1:
         logger.warning(
             "Refusing malformed upload deletion transaction with %s entries: %s",
             len(entries),
             transaction_dir,
         )
         return False
-    entry = entries[0]
+    if conversion_entries:
+        conversion_stat = conversion_entries[0].stat(follow_symlinks=False)
+        if not stat.S_ISREG(conversion_stat.st_mode) or conversion_stat.st_nlink not in {1, 2}:
+            logger.warning("Refusing malformed upload conversion tombstone: %s", transaction_dir)
+            return False
+    if commit_entries:
+        commit_stat = commit_entries[0].stat(follow_symlinks=False)
+        if not stat.S_ISREG(commit_stat.st_mode) or commit_stat.st_nlink != 1:
+            logger.warning("Refusing malformed upload deletion commit marker: %s", transaction_dir)
+            return False
+        recover_on_crash = False
+    if restore_entries:
+        restore_stat = restore_entries[0].stat(follow_symlinks=False)
+        if not stat.S_ISREG(restore_stat.st_mode) or restore_stat.st_nlink != 1:
+            logger.warning("Refusing malformed upload deletion restore marker: %s", transaction_dir)
+            return False
+        if commit_entries:
+            logger.warning("Refusing upload deletion transaction with conflicting phase markers: %s", transaction_dir)
+            return False
+        recover_on_crash = True
+    if not recover_on_crash and conversion_entries and conversion_stat.st_nlink != 1:
+        logger.warning(
+            "Refusing discard transaction with a linked conversion tombstone: %s",
+            transaction_dir,
+        )
+        return False
+    if not primary_entries:
+        if restore_entries and not conversion_entries:
+            Path(restore_entries[0].path).unlink()
+            transaction_dir.rmdir()
+            return True
+        if not commit_entries:
+            logger.warning("Refusing upload deletion transaction without a primary: %s", transaction_dir)
+            return False
+        if conversion_entries:
+            Path(conversion_entries[0].path).unlink()
+        Path(commit_entries[0].path).unlink()
+        transaction_dir.rmdir()
+        return True
+    entry = primary_entries[0]
     if not entry.is_file(follow_symlinks=False):
         logger.warning("Refusing malformed upload deletion transaction: %s", transaction_dir)
         return False
@@ -845,28 +1005,22 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
                         staged_path,
                     )
                     return False
-            original_path = uploads_dir / original_name
-            try:
-                current_original_stat = os.lstat(original_path)
-            except FileNotFoundError:
-                current_original_stat = None
-            delete_conversion = current_original_stat is None or (stat.S_ISREG(current_original_stat.st_mode) and (current_original_stat.st_dev, current_original_stat.st_ino) == (identity.device, identity.inode))
-            if delete_conversion:
-                owned_conversion = existing_conversion_path_for_upload(original_path)
-                if owned_conversion is not None:
-                    owned_conversion.unlink(missing_ok=True)
-            else:
-                # The upload name was reused after the crash.  Its conversion
-                # path is generation-ambiguous, so preserve it rather than
-                # deleting a possible replacement generation's companion.
-                logger.warning(
-                    "Preserving replacement upload conversion during discard recovery: %s",
-                    original_path,
-                )
+            if not conversion_entries:
+                # Backward compatibility for transactions created before the
+                # exact conversion was moved beside the primary tombstone.
+                original_path = uploads_dir / original_name
+                try:
+                    current_original_stat = os.lstat(original_path)
+                except FileNotFoundError:
+                    current_original_stat = None
+                delete_conversion = current_original_stat is None or (stat.S_ISREG(current_original_stat.st_mode) and (current_original_stat.st_dev, current_original_stat.st_ino) == (identity.device, identity.inode))
+                if delete_conversion:
+                    owned_conversion = existing_conversion_path_for_upload(original_path)
+                    if owned_conversion is not None:
+                        owned_conversion.unlink(missing_ok=True)
             if visible_matches:
                 visible_matches[0].unlink()
-            staged_path.unlink()
-            _finish_deletion_transaction(staged_path)
+            _discard_staged_deletion(staged_path)
             return True
         if staged_stat.st_nlink == 2:
             # A previous recovery may have crashed after publishing the visible
@@ -891,7 +1045,9 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
                     staged_path,
                 )
                 return False
+            _restore_staged_conversion(staged_path, visible_matches[0])
             staged_path.unlink()
+            _clear_staged_deletion_restore(staged_path)
             _finish_deletion_transaction(staged_path)
             return True
         _restore_staged_deletion(
@@ -932,8 +1088,9 @@ def _stage_primary_deletion(
     identity: UploadIdentity,
     *,
     recover_on_crash: bool = True,
+    conversion_path: Path | None = None,
 ) -> tuple[Path, UploadStageLease]:
-    """Atomically move the selected entry into the protected conversion namespace."""
+    """Move one primary generation and its exact conversion into a transaction."""
     staging_dir = ensure_conversion_dir(base_dir)
     intent = _UPLOAD_DELETION_RESTORE_INTENT if recover_on_crash else _UPLOAD_DELETION_DISCARD_INTENT
     while True:
@@ -958,6 +1115,13 @@ def _stage_primary_deletion(
             if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
                 _restore_unexpected_staged_entry(staged_path, primary_path)
                 raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
+            if conversion_path is not None:
+                conversion_identity = UploadIdentity.from_path(conversion_path)
+                staged_conversion = _staged_conversion_path(staged_path)
+                os.rename(conversion_path, staged_conversion)
+                staged_conversion_stat = os.lstat(staged_conversion)
+                if not stat.S_ISREG(staged_conversion_stat.st_mode) or staged_conversion_stat.st_nlink != 1 or (staged_conversion_stat.st_dev, staged_conversion_stat.st_ino) != (conversion_identity.device, conversion_identity.inode):
+                    raise UnsafeUploadPathError("Upload conversion changed during deletion staging")
             return staged_path, stage_lease
         except BaseException:
             if staged_path.exists():
@@ -991,7 +1155,7 @@ def delete_file_safe(
     base_dir: Path,
     filename: str,
     *,
-    delete_remote_copy: Callable[[str], None] | None = None,
+    delete_remote_copy: Callable[[str, Path, Path | None], None] | None = None,
 ) -> dict:
     """Delete a primary upload and only its exact owned conversion.
 
@@ -1053,16 +1217,53 @@ def delete_file_safe(
             base_dir,
             actual_file_path,
             identity,
-            recover_on_crash=False,
+            recover_on_crash=True,
+            conversion_path=owned_conversion,
         )
+        remote_delete_committed = False
         try:
             if delete_remote_copy is not None:
-                delete_remote_copy(companion_name)
-            if owned_conversion is not None:
-                owned_conversion.unlink(missing_ok=True)
-            staged_path.unlink()
-            _finish_deletion_transaction(staged_path)
+                staged_conversion = _staged_conversion_path(staged_path)
+                delete_remote_copy(
+                    companion_name,
+                    staged_path,
+                    staged_conversion if staged_conversion.exists() else None,
+                )
+                remote_delete_committed = True
+                _mark_staged_deletion_committed(staged_path)
+            else:
+                _mark_staged_deletion_committed(staged_path)
+            _discard_staged_deletion(staged_path)
+        except RemoteDeletionCommitRequiredError:
+            # At least one remote mutation could not be rolled back.  Restoring
+            # the host generation would publish a permanently split view, so
+            # keep the persisted discard intent and finish locally when able.
+            try:
+                _mark_staged_deletion_committed(staged_path)
+                _discard_staged_deletion(staged_path)
+            except BaseException:
+                logger.warning(
+                    "Failed to finish a deletion after remote compensation failed: %s",
+                    actual_file_path,
+                    exc_info=True,
+                )
+            raise
         except BaseException:
+            if remote_delete_committed:
+                # The remote view already committed.  Leave the discard
+                # transaction for startup recovery if cleanup still fails,
+                # instead of resurrecting a host-only generation.  This also
+                # handles a commit-marker write error while the process is
+                # still alive.
+                try:
+                    _discard_staged_deletion(staged_path)
+                except BaseException:
+                    logger.warning(
+                        "Failed to finish a deletion after the remote copy was removed: %s",
+                        actual_file_path,
+                        exc_info=True,
+                    )
+                raise
             _restore_staged_deletion(staged_path, actual_file_path, identity)
             raise
         finally:

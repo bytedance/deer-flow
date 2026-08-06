@@ -1247,6 +1247,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "sandbox_id": "sandbox-42",
         "thread_id": "thread-42",
         "user_id": "user-7",
+        "required_mount_contract_version": 2,
         "include_legacy_skills": True,
         "provision_lark_cli_runtime": False,
         "provision_lark_cli_broker": False,
@@ -1285,6 +1286,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     assert posted["json"]["user_id"] == "ou-user"
     assert posted["json"]["include_legacy_skills"] is False
+    assert posted["json"]["required_mount_contract_version"] == 2
 
 
 def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypatch):

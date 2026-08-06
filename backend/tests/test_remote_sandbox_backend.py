@@ -457,6 +457,84 @@ def test_create_accepts_and_validates_future_compatible_contract(monkeypatch):
     assert info.mount_contract_version == 3
 
 
+def test_create_sends_frozen_mount_contract_as_a_provisioner_precondition(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    captured: dict = {}
+
+    def post(_url, *, json, **_kwargs):
+        captured.update(json)
+        return _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v2",
+                "sandbox_url": "http://v2.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", post)
+
+    backend.create("thread-1", "sandbox-v2", user_id="alice")
+
+    assert captured["required_mount_contract_version"] == 2
+
+
+def test_create_retries_structured_provisioner_contract_precondition_failure(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            status_code=409,
+            payload={
+                "detail": {
+                    "code": "mount_contract_changed",
+                    "expected": 2,
+                    "actual": 3,
+                }
+            },
+        ),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError) as exc_info:
+        backend.create("thread-1", "sandbox-v2", user_id="alice")
+
+    assert (exc_info.value.expected, exc_info.value.actual) == (2, 3)
+    assert backend._capability_next_probe_at == 0.0
+
+
+@pytest.mark.parametrize("invalid_version", ["2", True])
+def test_legacy_create_rejects_non_integer_response_contract(monkeypatch, invalid_version):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v0",
+                "sandbox_url": "http://legacy.local",
+                "mount_contract_version": invalid_version,
+            }
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="mount contract response"):
+        backend.create("thread-1", "sandbox-v0", user_id="default")
+
+
 def test_provisioner_create_returns_sandbox_info(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)
@@ -467,6 +545,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
             "sandbox_id": "abc123",
             "thread_id": "thread-1",
             "user_id": "test-user-autouse",
+            "required_mount_contract_version": 0,
             "include_legacy_skills": True,
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,
@@ -588,6 +667,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
             "sandbox_id": "anon123",
             "thread_id": None,
             "user_id": "test-user-autouse",
+            "required_mount_contract_version": 0,
             "include_legacy_skills": False,
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,

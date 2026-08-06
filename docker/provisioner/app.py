@@ -502,6 +502,7 @@ class CreateSandboxRequest(BaseModel):
     sandbox_id: str
     thread_id: str | None = Field(default=None, pattern=SAFE_THREAD_ID_PATTERN)
     user_id: str = Field(default=DEFAULT_USER_ID, pattern=SAFE_USER_ID_PATTERN)
+    required_mount_contract_version: int | None = Field(default=None, ge=0)
     extra_mounts: list[ExtraMount] = Field(default_factory=list)
     include_legacy_skills: bool = False
     # When true (and LARK_CLI_INIT_IMAGE is configured), provision the sandbox
@@ -1323,6 +1324,23 @@ def create_sandbox(req: CreateSandboxRequest):
     If the sandbox already exists, returns the existing information
     (idempotent).
     """
+    if (
+        req.required_mount_contract_version is not None
+        and req.required_mount_contract_version != MOUNT_CONTRACT_VERSION
+    ):
+        # The Gateway derives the deterministic sandbox ID and mount set from
+        # one frozen capability snapshot.  Reject a stale snapshot before any
+        # Kubernetes read or write so a rolling upgrade cannot create a Pod
+        # whose ID belongs to another mount contract.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "mount_contract_changed",
+                "expected": req.required_mount_contract_version,
+                "actual": MOUNT_CONTRACT_VERSION,
+            },
+        )
+
     sandbox_id = req.sandbox_id
     thread_id = req.thread_id or sandbox_id
     user_id = req.user_id

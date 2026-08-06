@@ -502,14 +502,16 @@ class TestUploadPublication:
         assert publication.path.read_bytes() == b"new"
 
     def test_rollback_preserves_primary_when_conversion_removal_fails(self, tmp_path):
-        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        publication = publish_upload_bytes_leased(uploads, "report.pdf", b"old")
         owned_conversion = conversion_path_for_upload(publication.path)
         owned_conversion.parent.mkdir(exist_ok=True)
         owned_conversion.write_text("generated", encoding="utf-8")
         real_unlink = Path.unlink
 
         def fail_conversion_unlink(path, *args, **kwargs):
-            if path == owned_conversion:
+            if path.name == ".conversion" and path.parent.name.startswith(".upload-delete-"):
                 raise OSError("cannot unlink conversion")
             return real_unlink(path, *args, **kwargs)
 
@@ -522,9 +524,15 @@ class TestUploadPublication:
 
         assert publication.path.read_bytes() == b"old"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert publication.path.read_bytes() == b"old"
+        assert owned_conversion.read_text(encoding="utf-8") == "generated"
+        assert not list(owned_conversion.parent.glob(".upload-delete-*.part"))
 
     def test_successful_rollback_removes_deletion_transaction_directory(self, tmp_path):
-        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        publication = publish_upload_bytes_leased(uploads, "report.pdf", b"old")
         conversion_dir = conversion_path_for_upload(publication.path).parent
         try:
             rollback_published_upload(publication)
@@ -1019,29 +1027,81 @@ class TestCleanupStaleUploadStagingFiles:
         assert not conversion.exists()
         assert not staged_path.exists()
 
-    def test_crashed_committed_delete_preserves_replacement_conversion(self, tmp_path):
+    def test_crashed_committed_delete_does_not_rebind_old_conversion_to_replacement(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
         uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old generation")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("old conversion", encoding="utf-8")
         old_identity = UploadIdentity.from_path(primary)
         staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
             uploads,
             primary,
             old_identity,
             recover_on_crash=False,
+            conversion_path=conversion,
         )
         primary.write_bytes(b"replacement generation")
-        conversion = conversion_path_for_upload(primary)
-        conversion.parent.mkdir(exist_ok=True)
-        conversion.write_text("replacement conversion", encoding="utf-8")
         stage_lease.release()
 
         assert cleanup_stale_upload_staging_files(tmp_path) == 1
         assert primary.read_bytes() == b"replacement generation"
-        assert conversion.read_text(encoding="utf-8") == "replacement conversion"
+        assert not conversion.exists()
+        assert not staged_path.exists()
+
+    def test_crash_before_remote_delete_restores_primary_and_conversion(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("conversion", encoding="utf-8")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+            conversion_path=conversion,
+        )
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert primary.read_bytes() == b"primary"
+        assert conversion.read_text(encoding="utf-8") == "conversion"
+        assert not staged_path.exists()
+
+    def test_crash_after_remote_delete_commits_primary_and_conversion(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "users" / "alice" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("conversion", encoding="utf-8")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+            conversion_path=conversion,
+        )
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        stage_lease.release()
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert not primary.exists()
+        assert not conversion.exists()
         assert not staged_path.exists()
 
 
@@ -1175,7 +1235,7 @@ class TestDeleteFileSafe:
             conversion.rename(renamed_conversion)
             return renamed
 
-        def publish_replacement(actual_name):
+        def publish_replacement(actual_name, _primary_path, _conversion_path):
             remote_names.append(actual_name)
             publish_upload_bytes(uploads, actual_name, b"new")
             renamed_conversion.unlink()
@@ -1225,7 +1285,7 @@ class TestDeleteFileSafe:
         real_unlink = Path.unlink
 
         def fail_conversion_unlink(path, *args, **kwargs):
-            if path == owned_conversion:
+            if path.name == ".conversion" and path.parent.name.startswith(".upload-delete-"):
                 raise OSError("cannot unlink conversion")
             return real_unlink(path, *args, **kwargs)
 
@@ -1236,13 +1296,42 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"PDF"
         assert owned_conversion.read_text(encoding="utf-8") == "generated"
 
+    def test_remote_success_does_not_restore_host_when_commit_marker_fails(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"PDF")
+        owned_conversion = conversion_path_for_upload(primary)
+        owned_conversion.parent.mkdir()
+        owned_conversion.write_text("generated", encoding="utf-8")
+        remote_names: list[str] = []
+
+        with patch.object(
+            upload_manager_module,
+            "_mark_staged_deletion_committed",
+            side_effect=OSError("cannot persist commit marker"),
+        ):
+            with pytest.raises(OSError, match="cannot persist commit marker"):
+                delete_file_safe(
+                    uploads,
+                    "report.pdf",
+                    delete_remote_copy=lambda name, _primary, _conversion: remote_names.append(name),
+                )
+
+        assert remote_names == ["report.pdf"]
+        assert not primary.exists()
+        assert not owned_conversion.exists()
+        assert not list(owned_conversion.parent.glob(".upload-delete-*.part"))
+
     def test_failed_delete_preserves_old_generation_when_name_is_recreated(self, tmp_path):
         uploads = tmp_path / "user-data" / "uploads"
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old generation")
 
-        def recreate_then_fail(_filename):
+        def recreate_then_fail(_filename, _primary_path, _conversion_path):
             primary.write_bytes(b"new generation")
             raise OSError("remote delete failed")
 
@@ -1287,7 +1376,7 @@ class TestDeleteFileSafe:
             delete_file_safe(
                 uploads,
                 primary.name,
-                delete_remote_copy=remote_names.append,
+                delete_remote_copy=lambda name, _primary, _conversion: remote_names.append(name),
             )
 
         assert not renamed.exists()

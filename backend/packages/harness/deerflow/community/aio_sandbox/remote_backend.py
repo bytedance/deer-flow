@@ -407,6 +407,7 @@ class RemoteSandboxBackend(SandboxBackend):
             "sandbox_id": sandbox_id,
             "thread_id": thread_id,
             "user_id": effective_user_id,
+            "required_mount_contract_version": required_mount_contract_version,
             "include_legacy_skills": include_legacy_skills,
             "provision_lark_cli_runtime": provision_lark_cli_runtime,
             "provision_lark_cli_broker": provision_lark_cli_broker,
@@ -425,6 +426,15 @@ class RemoteSandboxBackend(SandboxBackend):
                 headers=self._auth_headers(),
                 timeout=30,
             )
+            if getattr(resp, "status_code", 200) == 409:
+                conflict_payload = resp.json()
+                detail = conflict_payload.get("detail") if isinstance(conflict_payload, dict) else None
+                if isinstance(detail, dict) and detail.get("code") == "mount_contract_changed" and type(detail.get("actual")) is int:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        detail["actual"],
+                    )
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
@@ -452,11 +462,20 @@ class RemoteSandboxBackend(SandboxBackend):
                 )
                 if response_contract != expected_contract:
                     raise RuntimeError(f"Provisioner mount contract response does not match the requested sandbox identity: expected={expected_contract!r}, received={response_contract!r}")
-            elif (type(response_version) is int and response_version != required_mount_contract_version) or (type(response_version) is not int and required_mount_contract_version != 0):
+            elif response_version is None:
+                if required_mount_contract_version != 0:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        0,
+                    )
+            elif type(response_version) is not int:
+                raise RuntimeError("Provisioner mount contract response contains a non-integer version")
+            elif response_version != required_mount_contract_version:
                 self._invalidate_capability_snapshot()
                 raise MountContractChangedError(
                     required_mount_contract_version,
-                    response_version if type(response_version) is int else 0,
+                    response_version,
                 )
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
@@ -464,7 +483,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_url=data["sandbox_url"],
                 user_id=data.get("user_id"),
                 thread_id=data.get("thread_id"),
-                mount_contract_version=data.get("mount_contract_version"),
+                mount_contract_version=response_version,
             )
         except requests.RequestException as exc:
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")

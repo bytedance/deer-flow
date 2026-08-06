@@ -42,6 +42,33 @@ def test_provisioner_accepts_canonical_thread_ids(provisioner_module, thread_id:
     assert request.thread_id == thread_id
 
 
+def test_create_rejects_mount_contract_precondition_before_k8s_io(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    required_version = provisioner_module.MOUNT_CONTRACT_VERSION + 1
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-wrong-contract",
+                thread_id="thread-1",
+                user_id="alice",
+                required_mount_contract_version=required_version,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {
+        "code": "mount_contract_changed",
+        "expected": required_version,
+        "actual": provisioner_module.MOUNT_CONTRACT_VERSION,
+    }
+    assert fake_core_v1.thread_ids == []
+
+
 class _RecordingCoreV1:
     def __init__(
         self,
