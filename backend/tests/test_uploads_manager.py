@@ -23,6 +23,7 @@ from deerflow.uploads.lease import UploadIdentity, UploadNameLease
 from deerflow.uploads.manager import (
     AtomicUploadPublishError,
     PathTraversalError,
+    RemoteDeletionCompensatedError,
     UnsafeUploadPathError,
     abort_staged_upload,
     claim_unique_filename,
@@ -911,7 +912,10 @@ class TestCleanupStaleUploadStagingFiles:
         assert primary.read_bytes() == b"original"
         assert not staged_path.exists()
 
-    @pytest.mark.parametrize("filename", ["report.pdf", "primary", ".remote-delete.json"])
+    @pytest.mark.parametrize(
+        "filename",
+        ["report.pdf", "primary", ".remote-delete.json", ".commit", ".restore", ".conversion"],
+    )
     def test_restores_legacy_intentless_deletion_transaction(self, tmp_path, filename):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -1340,11 +1344,11 @@ class TestDeleteFileSafe:
         owned_conversion.parent.mkdir()
         owned_conversion.write_text("generated", encoding="utf-8")
 
-        with pytest.raises(OSError, match="remote unavailable"):
+        with pytest.raises(RemoteDeletionCompensatedError, match="remote unavailable"):
             delete_file_safe(
                 uploads,
                 filename,
-                delete_remote_copy=lambda _name, _primary, _conversion: (_ for _ in ()).throw(OSError("remote unavailable")),
+                delete_remote_copy=lambda _name, _primary, _conversion: (_ for _ in ()).throw(RemoteDeletionCompensatedError("remote unavailable")),
             )
 
         assert primary.read_bytes() == b"primary"
@@ -1363,9 +1367,9 @@ class TestDeleteFileSafe:
         def observe_phase_then_fail(_name, staged_primary, _conversion):
             nonlocal observed_marker
             observed_marker = upload_manager_module._staged_deletion_commit_marker(staged_primary).is_file()
-            raise OSError("remote unavailable")
+            raise RemoteDeletionCompensatedError("remote unavailable")
 
-        with pytest.raises(OSError, match="remote unavailable"):
+        with pytest.raises(RemoteDeletionCompensatedError, match="remote unavailable"):
             delete_file_safe(
                 uploads,
                 primary.name,
@@ -1412,9 +1416,9 @@ class TestDeleteFileSafe:
 
         def recreate_then_fail(_filename, _primary_path, _conversion_path):
             primary.write_bytes(b"new generation")
-            raise OSError("remote delete failed")
+            raise RemoteDeletionCompensatedError("remote delete failed")
 
-        with pytest.raises((OSError, UnsafeUploadPathError)):
+        with pytest.raises((RemoteDeletionCompensatedError, UnsafeUploadPathError)):
             delete_file_safe(
                 uploads,
                 primary.name,

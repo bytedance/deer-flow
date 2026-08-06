@@ -297,6 +297,60 @@ def _filename_candidates(name: str) -> Iterator[str]:
         counter += 1
 
 
+def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str) -> bool:
+    """Return whether a durable remote deletion still owns this filename.
+
+    A committed journal deletes fixed sandbox paths.  Until that journal is
+    reconciled, publishing another generation under the same portable name
+    would let the old operation delete the new generation's remote copy.
+    The retained primary tombstone is therefore a persistent name reservation.
+    Callers hold the candidate's name lease while scanning, so reconciliation
+    cannot remove the journal between this check and publication.
+    """
+    conversion_dir = base_dir.parent / UPLOAD_CONVERSIONS_DIRNAME
+    try:
+        conversion_dir_stat = os.lstat(conversion_dir)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(conversion_dir_stat.st_mode) or not stat.S_ISDIR(conversion_dir_stat.st_mode):
+        raise UnsafeUploadPathError("Unsafe upload conversion directory")
+
+    with os.scandir(conversion_dir) as transactions:
+        for transaction in transactions:
+            if not (transaction.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction.is_dir(follow_symlinks=False)):
+                continue
+            transaction_dir = Path(transaction.path)
+            journal_path = transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL
+            commit_path = transaction_dir / _UPLOAD_DELETION_COMMIT_MARKER
+            primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
+            try:
+                journal_stat = os.lstat(journal_path)
+                commit_stat = os.lstat(commit_path)
+                primary_dir_stat = os.lstat(primary_dir)
+            except FileNotFoundError:
+                continue
+            if (
+                not stat.S_ISREG(journal_stat.st_mode)
+                or journal_stat.st_nlink != 1
+                or not stat.S_ISREG(commit_stat.st_mode)
+                or commit_stat.st_nlink != 1
+                or stat.S_ISLNK(primary_dir_stat.st_mode)
+                or not stat.S_ISDIR(primary_dir_stat.st_mode)
+            ):
+                raise UnsafeUploadPathError("Unsafe pending remote upload deletion transaction")
+            with os.scandir(primary_dir) as primary_entries:
+                entries = list(primary_entries)
+            if len(entries) != 1:
+                raise UnsafeUploadPathError("Malformed pending remote upload deletion transaction")
+            entry = entries[0]
+            entry_stat = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(entry_stat.st_mode) or entry_stat.st_nlink != 1:
+                raise UnsafeUploadPathError("Unsafe pending remote upload deletion tombstone")
+            if portable_name_coordination_key(entry.name) == coordination_key:
+                return True
+    return False
+
+
 def _unlink_matching_upload(path: Path, identity: UploadIdentity) -> None:
     """Remove *path* only while it still names *identity*."""
     if identity.matches(path):
@@ -348,6 +402,9 @@ def publish_staged_upload_leased(
             continue
         linked = False
         try:
+            if _pending_remote_deletion_reserves_name(staged.base_dir, coordination_key):
+                lease.release()
+                continue
             try:
                 os.link(staged.path, candidate, follow_symlinks=False)
                 linked = True
@@ -766,6 +823,14 @@ def _staged_deletion_remote_journal(staged_path: Path) -> Path:
     return _deletion_transaction_dir_for_staged_path(staged_path) / _UPLOAD_DELETION_REMOTE_JOURNAL
 
 
+def _staged_deletion_has_remote_journal(staged_path: Path) -> bool:
+    try:
+        os.lstat(_staged_deletion_remote_journal(staged_path))
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
     """Create and validate one durable deletion phase marker."""
     try:
@@ -796,6 +861,11 @@ def _mark_staged_deletion_committed(staged_path: Path) -> None:
 
 def _mark_staged_deletion_restore(staged_path: Path) -> None:
     """Persist that a live rollback began and recovery must finish restoring."""
+    if _staged_deletion_restore_marker(staged_path) == staged_path:
+        # Legacy direct-layout transactions could stage a user primary named
+        # exactly like this control. Their restore intent is already encoded in
+        # the transaction name, and nlink=2 recovery is idempotent.
+        return
     _create_deletion_phase_marker(
         _staged_deletion_restore_marker(staged_path),
         error_message="Unsafe upload deletion restore marker",
@@ -803,10 +873,14 @@ def _mark_staged_deletion_restore(staged_path: Path) -> None:
 
 
 def _clear_staged_deletion_commit(staged_path: Path) -> None:
+    if _staged_deletion_commit_marker(staged_path) == staged_path:
+        return
     _unlink_deletion_control_durably(_staged_deletion_commit_marker(staged_path))
 
 
 def _clear_staged_deletion_restore(staged_path: Path) -> None:
+    if _staged_deletion_restore_marker(staged_path) == staged_path:
+        return
     _unlink_deletion_control_durably(_staged_deletion_restore_marker(staged_path))
 
 
@@ -825,6 +899,11 @@ def _unlink_deletion_control_durably(path: Path) -> None:
 def _restore_staged_conversion(staged_path: Path, restored_primary_path: Path) -> None:
     """Restore the exact conversion moved into a deletion transaction."""
     staged_conversion = _staged_conversion_path(staged_path)
+    if staged_conversion == staged_path:
+        # In the legacy direct layout, a primary named ``.conversion`` occupied
+        # the same path as the control tombstone. The expected-inode decoder has
+        # already established that this entry is the primary, not a companion.
+        return
     try:
         conversion_stat = os.lstat(staged_conversion)
     except FileNotFoundError:
@@ -859,9 +938,20 @@ def _discard_staged_deletion(staged_path: Path) -> None:
     _staged_conversion_path(staged_path).unlink(missing_ok=True)
     staged_path.unlink(missing_ok=True)
     _clear_staged_deletion_restore(staged_path)
-    if not _staged_deletion_remote_journal(staged_path).exists():
+    if not _staged_deletion_has_remote_journal(staged_path):
         _clear_staged_deletion_commit(staged_path)
     _finish_deletion_transaction(staged_path)
+
+
+def _finalize_committed_staged_deletion(staged_path: Path) -> None:
+    """Discard host tombstones only after durable remote cleanup converged.
+
+    A remaining journal must retain the exact primary tombstone so publication
+    can reserve its portable filename until reconciliation finishes.
+    """
+    if _staged_deletion_has_remote_journal(staged_path):
+        return
+    _discard_staged_deletion(staged_path)
 
 
 def _recovery_path_for(original_path: Path) -> Path:
@@ -899,7 +989,11 @@ def _finish_deletion_transaction(staged_path: Path) -> None:
     if not (transaction_dir.name.startswith(UPLOAD_DELETION_TRANSACTION_PREFIX) and transaction_dir.name.endswith(UPLOAD_STAGING_SUFFIX) and transaction_dir.parent.name == UPLOAD_CONVERSIONS_DIRNAME):
         return
     primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
-    if (transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL).exists():
+    try:
+        os.lstat(transaction_dir / _UPLOAD_DELETION_REMOTE_JOURNAL)
+    except FileNotFoundError:
+        pass
+    else:
         # Keep the empty primary container as the on-disk layout discriminator;
         # older direct-layout transactions may legitimately have a primary
         # named exactly like the new journal control.
@@ -944,22 +1038,33 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     if not entries:
         transaction_dir.rmdir()
         return True
-    conversion_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_CONVERSION_TOMBSTONE]
-    commit_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_COMMIT_MARKER]
-    restore_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_RESTORE_MARKER]
     primary_dir_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_PRIMARY_DIRNAME and entry.is_dir(follow_symlinks=False)]
+    legacy_primary_entries: list[os.DirEntry[str]] = []
+    if not primary_dir_entries:
+        for entry in entries:
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(entry_stat.st_mode) and entry_stat.st_ino == expected_inode:
+                legacy_primary_entries.append(entry)
+        if len(legacy_primary_entries) > 1:
+            logger.warning("Refusing legacy upload deletion transaction with multiple matching primaries: %s", transaction_dir)
+            return False
+    legacy_primary_paths = {entry.path for entry in legacy_primary_entries}
+    conversion_entries = [entry for entry in entries if entry.path not in legacy_primary_paths and entry.name == _UPLOAD_DELETION_CONVERSION_TOMBSTONE]
+    commit_entries = [entry for entry in entries if entry.path not in legacy_primary_paths and entry.name == _UPLOAD_DELETION_COMMIT_MARKER]
+    restore_entries = [entry for entry in entries if entry.path not in legacy_primary_paths and entry.name == _UPLOAD_DELETION_RESTORE_MARKER]
     remote_journal_entries = [entry for entry in entries if entry.name == _UPLOAD_DELETION_REMOTE_JOURNAL and primary_dir_entries]
-    legacy_primary_entries = [
+    legacy_unknown_entries = [
         entry
         for entry in entries
-        if entry.name
-        not in {
-            _UPLOAD_DELETION_CONVERSION_TOMBSTONE,
-            _UPLOAD_DELETION_COMMIT_MARKER,
-            _UPLOAD_DELETION_RESTORE_MARKER,
-        }
+        if not primary_dir_entries
+        and entry.path not in legacy_primary_paths
+        and entry not in conversion_entries
+        and entry not in commit_entries
+        and entry not in restore_entries
         and not (entry.name == _UPLOAD_DELETION_REMOTE_JOURNAL and remote_journal_entries)
-        and not (entry.name == _UPLOAD_DELETION_PRIMARY_DIRNAME and entry.is_dir(follow_symlinks=False))
     ]
     if (
         len(conversion_entries) > 1
@@ -968,6 +1073,7 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         or len(remote_journal_entries) > 1
         or len(primary_dir_entries) > 1
         or len(legacy_primary_entries) > 1
+        or legacy_unknown_entries
         or (primary_dir_entries and legacy_primary_entries)
     ):
         logger.warning(
@@ -1026,6 +1132,12 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
             logger.warning("Refusing upload deletion transaction with conflicting phase markers: %s", transaction_dir)
             return False
         recover_on_crash = True
+    if remote_journal_entries:
+        # The exact tombstones are both the authoritative recovery bytes and a
+        # persistent reservation for the remote path generation.  Only the
+        # remote reconciler may clear the journal; a later cleanup pass then
+        # commits these host tombstones.
+        return False
     if not recover_on_crash and conversion_entries and conversion_stat.st_nlink != 1:
         logger.warning(
             "Refusing discard transaction with a linked conversion tombstone: %s",
@@ -1333,7 +1445,7 @@ def delete_file_safe(
             recover_on_crash=True,
             conversion_path=owned_conversion,
         )
-        remote_delete_committed = False
+        remote_delete_may_have_started = False
         try:
             if delete_remote_copy is not None:
                 staged_conversion = _staged_conversion_path(staged_path)
@@ -1355,12 +1467,12 @@ def delete_file_safe(
                     if callable(abort_remote_delete):
                         abort_remote_delete()
                     raise
+                remote_delete_may_have_started = True
                 delete_remote_copy(
                     companion_name,
                     staged_path,
                     staged_conversion if staged_conversion.exists() else None,
                 )
-                remote_delete_committed = True
             else:
                 _mark_staged_deletion_committed(staged_path)
             _discard_staged_deletion(staged_path)
@@ -1381,7 +1493,7 @@ def delete_file_safe(
             # keep the persisted discard intent and finish locally when able.
             try:
                 _mark_staged_deletion_committed(staged_path)
-                _discard_staged_deletion(staged_path)
+                _finalize_committed_staged_deletion(staged_path)
             except BaseException:
                 logger.warning(
                     "Failed to finish a deletion after remote compensation failed: %s",
@@ -1390,14 +1502,13 @@ def delete_file_safe(
                 )
             raise
         except BaseException:
-            if remote_delete_committed:
-                # The remote view already committed.  Leave the discard
-                # transaction for startup recovery if cleanup still fails,
-                # instead of resurrecting a host-only generation.  This also
-                # handles a commit-marker write error while the process is
-                # still alive.
+            if remote_delete_may_have_started:
+                # The durable commit marker allowed remote side effects.  Any
+                # non-compensated failure after that point must converge to the
+                # deletion outcome; restoring the host could create a permanent
+                # split even when only journal finalization failed.
                 try:
-                    _discard_staged_deletion(staged_path)
+                    _finalize_committed_staged_deletion(staged_path)
                 except BaseException:
                     logger.warning(
                         "Failed to finish a deletion after the remote copy was removed: %s",

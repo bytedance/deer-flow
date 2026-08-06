@@ -20,16 +20,17 @@ from deerflow.sandbox.sandbox_provider import (
 )
 from deerflow.uploads.async_helpers import run_upload_io_cancellation_safe, wait_for_task_completion
 from deerflow.uploads.layout import conversion_virtual_path
-from deerflow.uploads.lease import UploadStageLease
+from deerflow.uploads.lease import UploadNameLease, UploadStageLease
 from deerflow.uploads.manager import (
     _UPLOAD_DELETION_COMMIT_MARKER,
     _UPLOAD_DELETION_PRIMARY_DIRNAME,
     RemoteDeletionCommitRequiredError,
     RemoteDeletionCompensatedError,
+    _deletion_transaction_metadata,
+    _normalize_existing_filename,
     _staged_deletion_remote_journal,
     cleanup_stale_upload_staging_files,
     make_upload_file_sandbox_readable,
-    normalize_filename,
     upload_virtual_path,
 )
 
@@ -286,6 +287,28 @@ def _pending_remote_deletion_journals(base_dir: Path) -> list[Path]:
     return sorted(journals)
 
 
+def _validate_remote_delete_tombstone(journal_path: Path, filename: str) -> Path:
+    """Validate that a journal still names its retained host generation."""
+    transaction_dir = journal_path.parent
+    metadata = _deletion_transaction_metadata(transaction_dir.name)
+    if metadata is None:
+        raise ValueError("invalid remote deletion transaction name")
+    expected_inode, _recover_on_crash = metadata
+    primary_dir = transaction_dir / _UPLOAD_DELETION_PRIMARY_DIRNAME
+    primary_dir_stat = os.lstat(primary_dir)
+    if stat.S_ISLNK(primary_dir_stat.st_mode) or not stat.S_ISDIR(primary_dir_stat.st_mode):
+        raise ValueError("invalid remote deletion primary directory")
+    with os.scandir(primary_dir) as entries:
+        primary_entries = list(entries)
+    if len(primary_entries) != 1:
+        raise ValueError("remote deletion transaction must retain one primary")
+    primary_entry = primary_entries[0]
+    primary_stat = primary_entry.stat(follow_symlinks=False)
+    if primary_entry.name != filename or not stat.S_ISREG(primary_stat.st_mode) or primary_stat.st_nlink != 1 or primary_stat.st_ino != expected_inode:
+        raise ValueError("remote deletion journal does not match its primary generation")
+    return transaction_dir.parent.parent / "uploads"
+
+
 def reconcile_pending_remote_deletions(
     *,
     sandbox_provider_factory: Callable[[], Any],
@@ -322,39 +345,51 @@ def reconcile_pending_remote_deletions(
                     or not isinstance(thread_id, str)
                     or not thread_id
                     or (user_id is not None and not isinstance(user_id, str))
-                    or (sandbox_id is not None and not isinstance(sandbox_id, str))
+                    or not isinstance(sandbox_id, str)
+                    or not sandbox_id
                     or virtual_paths != expected_paths
                 ):
                     raise ValueError("invalid remote deletion journal fields")
-                if normalize_filename(filename) != filename:
+                if _normalize_existing_filename(filename) != filename:
                     raise ValueError("invalid remote deletion journal filename")
+                uploads_dir = _validate_remote_delete_tombstone(journal_path, filename)
 
                 if sandbox_provider is None:
                     sandbox_provider = sandbox_provider_factory()
-                sandbox = sandbox_provider.get(sandbox_id) if sandbox_id else None
-                effective_sandbox_id = sandbox_id
-                if sandbox is None:
-                    effective_sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
-                    if sandbox_provider_sandbox_uses_thread_data_mounts(sandbox_provider, effective_sandbox_id):
-                        # A newly acquired mounted sandbox reads the already
-                        # committed authoritative host state; no explicit remote
-                        # cache remains to reconcile under this contract.
-                        _unlink_journal_durably(journal_path)
-                        reconciled += 1
-                        continue
-                    sandbox = sandbox_provider.get(effective_sandbox_id)
-                if sandbox is None:
-                    raise RuntimeError(f"Sandbox {effective_sandbox_id!r} not found during upload deletion reconciliation")
-                pending = _SandboxDeletionHook(sandbox)._converge_to_deleted(tuple(virtual_paths))
-                if pending:
-                    logger.warning(
-                        "Remote upload deletion remains pending for %s: %s",
-                        journal_path,
-                        pending,
-                    )
+                name_lease = UploadNameLease.try_acquire(
+                    uploads_dir,
+                    filename,
+                    allow_legacy_posix_filename=True,
+                )
+                if name_lease is None:
                     continue
-                _unlink_journal_durably(journal_path)
-                reconciled += 1
+                try:
+                    sandbox = sandbox_provider.get(sandbox_id)
+                    if sandbox is None:
+                        acquired_sandbox_id = sandbox_provider.acquire(thread_id, user_id=user_id)
+                        if acquired_sandbox_id != sandbox_id:
+                            logger.warning(
+                                "Pending remote upload deletion targets sandbox %r, but thread %r acquired %r; leaving journal pending",
+                                sandbox_id,
+                                thread_id,
+                                acquired_sandbox_id,
+                            )
+                            continue
+                        sandbox = sandbox_provider.get(sandbox_id)
+                    if sandbox is None:
+                        raise RuntimeError(f"Sandbox {sandbox_id!r} not found during upload deletion reconciliation")
+                    pending = _SandboxDeletionHook(sandbox)._converge_to_deleted(tuple(virtual_paths))
+                    if pending:
+                        logger.warning(
+                            "Remote upload deletion remains pending for %s: %s",
+                            journal_path,
+                            pending,
+                        )
+                        continue
+                    _unlink_journal_durably(journal_path)
+                    reconciled += 1
+                finally:
+                    name_lease.release()
             except BaseException:
                 logger.warning(
                     "Failed to reconcile remote upload deletion journal: %s",
