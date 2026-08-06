@@ -24,7 +24,7 @@ from pathlib import Path, PureWindowsPath
 
 import requests
 
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 from deerflow.skills.storage import user_should_see_legacy_skills
 
 from .backend import SandboxBackend
@@ -144,6 +144,7 @@ class RemoteSandboxBackend(SandboxBackend):
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._mount_contract_version = 0
+        self._mount_contract_capability_known = False
 
     @property
     def provisioner_url(self) -> str:
@@ -157,6 +158,16 @@ class RemoteSandboxBackend(SandboxBackend):
         """Provisioner mount contract negotiated during provider startup."""
         return self._mount_contract_version
 
+    @property
+    def mount_contract_capability_known(self) -> bool:
+        """Whether the peer definitively answered capability negotiation."""
+        return self._mount_contract_capability_known
+
+    @property
+    def requires_create_validation(self) -> bool:
+        """Require idempotent POST so the Provisioner checks requested mounts."""
+        return True
+
     def probe_capabilities(self) -> None:
         """Negotiate optional Provisioner capabilities without breaking old peers."""
         try:
@@ -165,13 +176,19 @@ class RemoteSandboxBackend(SandboxBackend):
                 headers=self._auth_headers(),
                 timeout=5,
             )
+            if getattr(response, "status_code", None) == 404:
+                self._mount_contract_version = 0
+                self._mount_contract_capability_known = True
+                return
             response.raise_for_status()
             payload = response.json()
             version = payload.get("mount_contract_version", 0) if isinstance(payload, dict) else 0
             self._mount_contract_version = version if isinstance(version, int) and version >= 0 else 0
+            self._mount_contract_capability_known = True
         except (requests.RequestException, ValueError, TypeError):
             self._mount_contract_version = 0
-            logger.warning("Provisioner mount capabilities are unavailable; using explicit upload synchronization for rolling-upgrade compatibility")
+            self._mount_contract_capability_known = False
+            logger.warning("Provisioner mount capabilities are unavailable; mounted thread data will fail closed until compatibility can be verified")
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -190,6 +207,9 @@ class RemoteSandboxBackend(SandboxBackend):
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
+        effective_user_id = user_id or get_effective_user_id()
+        if self._mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
+            raise RuntimeError(f"Provisioner mount contract v{self._mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
         return self._provisioner_create(
             thread_id,
             sandbox_id,

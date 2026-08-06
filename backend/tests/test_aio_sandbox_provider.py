@@ -78,6 +78,7 @@ def test_remote_mount_override_downgrades_without_current_provisioner_contract()
     provider._config = {"thread_data_mounts": True}
     provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
     provider._backend._mount_contract_version = 0
+    provider._backend._mount_contract_capability_known = True
 
     assert provider.uses_thread_data_mounts is False
 
@@ -368,6 +369,7 @@ def test_remote_backend_negotiates_mount_contract_capability(monkeypatch):
     backend.probe_capabilities()
 
     assert backend.mount_contract_version == 2
+    assert backend.mount_contract_capability_known is True
     assert requested == {
         "url": "http://provisioner:8002/api/capabilities",
         "headers": {"X-API-Key": "secret"},
@@ -391,6 +393,51 @@ def test_remote_backend_treats_missing_mount_capability_as_legacy(monkeypatch):
     backend.probe_capabilities()
 
     assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is True
+
+
+def test_remote_backend_treats_missing_capability_endpoint_as_known_legacy(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 404
+
+        def raise_for_status(self):
+            raise AssertionError("404 legacy response should not be raised")
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is True
+
+
+def test_remote_backend_distinguishes_unavailable_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    monkeypatch.setattr(
+        remote_mod.requests,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(remote_mod.requests.ConnectionError("not ready")),
+    )
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is False
+
+
+def test_remote_mount_override_fails_closed_when_capability_probe_is_unavailable():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    with pytest.raises(RuntimeError, match="could not be verified"):
+        _ = provider.uses_thread_data_mounts
 
 
 def test_remote_discovery_carries_verified_identity(monkeypatch):
@@ -513,6 +560,58 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+def test_remote_contract_backend_revalidates_existing_pod_via_create(tmp_path, monkeypatch):
+    """A GET cannot prove the live Pod matches the mounts requested this run."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        discover=MagicMock(side_effect=AssertionError("unvalidated discovery must be skipped")),
+    )
+    monkeypatch.setattr(provider, "_recheck_cached_sandbox", lambda *_args, **_kwargs: None)
+
+    with patch.object(provider, "_create_sandbox", return_value="sandbox-v2") as create:
+        result = provider._discover_or_create_with_lock(
+            "thread-1",
+            "sandbox-v2",
+            user_id="alice",
+        )
+
+    assert result == "sandbox-v2"
+    provider._backend.discover.assert_not_called()
+    create.assert_called_once_with("thread-1", "sandbox-v2", user_id="alice")
+
+
+@pytest.mark.anyio
+async def test_remote_contract_backend_revalidates_existing_pod_via_create_async(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        discover=MagicMock(side_effect=AssertionError("unvalidated discovery must be skipped")),
+    )
+    monkeypatch.setattr(provider, "_recheck_cached_sandbox", lambda *_args, **_kwargs: None)
+    create_calls: list[tuple[str, str, str | None]] = []
+
+    async def create(thread_id, sandbox_id, *, user_id=None):
+        create_calls.append((thread_id, sandbox_id, user_id))
+        return sandbox_id
+
+    monkeypatch.setattr(provider, "_create_sandbox_async", create)
+
+    result = await provider._discover_or_create_with_lock_async(
+        "thread-1",
+        "sandbox-v2",
+        user_id="alice",
+    )
+
+    assert result == "sandbox-v2"
+    provider._backend.discover.assert_not_called()
+    assert create_calls == [("thread-1", "sandbox-v2", "alice")]
 
 
 @pytest.mark.anyio
@@ -721,6 +820,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
     """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
     backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     token = set_current_user(SimpleNamespace(id="user-7"))
     posted: dict = {}
 
@@ -758,6 +858,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
     """Provisioner mode must not fall back to the ambient default for channel runs."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
     backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     posted: dict = {}
 
     class _Response:

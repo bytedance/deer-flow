@@ -22,6 +22,7 @@ from deerflow.uploads.layout import (
     UPLOAD_CONVERSIONS_DIRNAME,
     _truncate_utf8,
     artifact_url_for_virtual_path,
+    ensure_conversion_dir,
     existing_conversion_path_for_upload,
     upload_virtual_path,
 )
@@ -460,9 +461,29 @@ def rollback_published_upload(publication: PublishedUpload) -> None:
     if not publication.identity.matches(publication.path):
         return
     owned_conversion = existing_conversion_path_for_upload(publication.path)
-    if owned_conversion is not None:
-        owned_conversion.unlink(missing_ok=True)
-    publication.path.unlink()
+    try:
+        staged_path, stage_lease = _stage_primary_deletion(
+            publication.path.parent,
+            publication.path,
+            publication.identity,
+        )
+    except (FileNotFoundError, UnsafeUploadPathError):
+        # The pathname was replaced after the optimistic identity check. The
+        # staging helper restores that replacement without deleting it.
+        return
+    try:
+        if owned_conversion is not None:
+            owned_conversion.unlink(missing_ok=True)
+        staged_path.unlink()
+    except BaseException:
+        _restore_staged_deletion(
+            staged_path,
+            publication.path,
+            publication.identity,
+        )
+        raise
+    finally:
+        stage_lease.release()
 
 
 def replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Path:
@@ -650,35 +671,76 @@ def _restore_staged_deletion(
     staged_path.unlink()
 
 
+def _restore_unexpected_staged_entry(staged_path: Path, original_path: Path) -> None:
+    """Restore an entry moved during an identity race without unlinking it."""
+    try:
+        os.link(staged_path, original_path, follow_symlinks=False)
+    except FileExistsError:
+        # A non-cooperating writer recreated the original name while the entry
+        # was staged. Preserve the moved payload under a collision-resistant
+        # visible recovery name instead of deleting either generation.
+        while True:
+            recovery_path = original_path.with_name(f"{original_path.stem}_recovered_{secrets.token_hex(8)}{original_path.suffix}")
+            try:
+                os.link(staged_path, recovery_path, follow_symlinks=False)
+                break
+            except FileExistsError:
+                continue
+        logger.warning(
+            "Upload entry changed during deletion; preserved the raced entry as %s",
+            recovery_path,
+        )
+    staged_path.unlink()
+
+
 def _stage_primary_deletion(
     base_dir: Path,
     primary_path: Path,
     identity: UploadIdentity,
 ) -> tuple[Path, UploadStageLease]:
-    """Move the selected directory entry behind a leased no-replace hard link."""
+    """Atomically move the selected entry into the protected conversion namespace."""
+    staging_dir = ensure_conversion_dir(base_dir)
     while True:
-        staged_path = base_dir / (f"{UPLOAD_STAGING_PREFIX}delete-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
-        stage_lease = UploadStageLease.acquire(base_dir, staged_path.name)
+        staged_path = staging_dir / (f"{UPLOAD_STAGING_PREFIX}delete-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
+        stage_lease = UploadStageLease.acquire(staging_dir, staged_path.name)
         try:
-            os.link(primary_path, staged_path, follow_symlinks=False)
-        except FileExistsError:
+            os.lstat(staged_path)
+        except FileNotFoundError:
+            pass
+        else:
             stage_lease.release()
             continue
+
+        try:
+            os.rename(primary_path, staged_path)
         except BaseException:
             stage_lease.release()
             raise
 
         try:
-            primary_path.unlink()
             staged_stat = os.lstat(staged_path)
             if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1 or (staged_stat.st_dev, staged_stat.st_ino) != (identity.device, identity.inode):
-                _restore_staged_deletion(staged_path, primary_path, identity)
+                _restore_unexpected_staged_entry(staged_path, primary_path)
                 raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
             return staged_path, stage_lease
         except BaseException:
             if staged_path.exists():
                 try:
-                    _restore_staged_deletion(staged_path, primary_path, identity)
+                    staged_stat = os.lstat(staged_path)
+                    if (staged_stat.st_dev, staged_stat.st_ino) == (
+                        identity.device,
+                        identity.inode,
+                    ):
+                        _restore_staged_deletion(
+                            staged_path,
+                            primary_path,
+                            identity,
+                        )
+                    else:
+                        _restore_unexpected_staged_entry(
+                            staged_path,
+                            primary_path,
+                        )
                 except BaseException:
                     logger.warning(
                         "Failed to restore staged upload deletion: %s",
@@ -734,6 +796,8 @@ def delete_file_safe(
 
         identity = UploadIdentity(device=file_stat.st_dev, inode=file_stat.st_ino)
         actual_file_path = _find_upload_path_by_identity(base_dir, identity)
+        if portable_name_coordination_key(actual_file_path.name) != portable_name_coordination_key(safe_name):
+            raise UnsafeUploadPathError("Upload name changed outside the requested generation lease")
         owned_conversion = existing_conversion_path_for_upload(actual_file_path)
         final_stat = os.lstat(actual_file_path)
         if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1 or (final_stat.st_dev, final_stat.st_ino) != (identity.device, identity.inode):

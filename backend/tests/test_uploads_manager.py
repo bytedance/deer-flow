@@ -19,7 +19,7 @@ from deerflow.uploads.layout import (
     conversion_path_for_upload,
     conversion_virtual_path,
 )
-from deerflow.uploads.lease import UploadNameLease
+from deerflow.uploads.lease import UploadIdentity, UploadNameLease
 from deerflow.uploads.manager import (
     AtomicUploadPublishError,
     PathTraversalError,
@@ -479,6 +479,28 @@ class TestUploadPublication:
 
         assert (tmp_path / "report.pdf").read_bytes() == b"new"
 
+    def test_rollback_does_not_unlink_replacement_after_identity_check(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        real_matches = UploadIdentity.matches
+        replaced = False
+
+        def replace_after_match(identity, path):
+            nonlocal replaced
+            matches = real_matches(identity, path)
+            if matches and path == publication.path and not replaced:
+                replaced = True
+                path.unlink()
+                path.write_bytes(b"new")
+            return matches
+
+        try:
+            with patch.object(UploadIdentity, "matches", autospec=True, side_effect=replace_after_match):
+                rollback_published_upload(publication)
+        finally:
+            publication.release()
+
+        assert publication.path.read_bytes() == b"new"
+
     def test_rollback_preserves_primary_when_conversion_removal_fails(self, tmp_path):
         publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
         owned_conversion = conversion_path_for_upload(publication.path)
@@ -937,6 +959,49 @@ class TestDeleteFileSafe:
         assert primary.read_bytes() == b"payload"
         assert alias.read_bytes() == b"payload"
         assert conversion.read_text(encoding="utf-8") == "generated"
+
+    def test_delete_rejects_identity_renamed_outside_requested_name_lease(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"old")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("old conversion", encoding="utf-8")
+        renamed = uploads / "other.pdf"
+        renamed_conversion = conversion_path_for_upload(renamed)
+        real_find = upload_manager_module._find_upload_path_by_identity
+        remote_names: list[str] = []
+
+        def rename_after_scan(base_dir, identity):
+            found = real_find(base_dir, identity)
+            found.rename(renamed)
+            conversion.rename(renamed_conversion)
+            return renamed
+
+        def publish_replacement(actual_name):
+            remote_names.append(actual_name)
+            publish_upload_bytes(uploads, actual_name, b"new")
+            renamed_conversion.unlink()
+            renamed_conversion.write_text("new conversion", encoding="utf-8")
+
+        with patch.object(
+            upload_manager_module,
+            "_find_upload_path_by_identity",
+            side_effect=rename_after_scan,
+        ):
+            with pytest.raises(UnsafeUploadPathError, match="name changed"):
+                delete_file_safe(
+                    uploads,
+                    primary.name,
+                    delete_remote_copy=publish_replacement,
+                )
+
+        assert remote_names == []
+        assert renamed.read_bytes() == b"old"
+        assert renamed_conversion.read_text(encoding="utf-8") == "old conversion"
 
     def test_delete_removes_owned_conversion_but_preserves_legacy_sibling(self, tmp_path):
         uploads = tmp_path / "user-data" / "uploads"

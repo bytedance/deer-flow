@@ -163,6 +163,7 @@ def test_user_should_see_legacy_skills_follows_storage_visibility_rule(monkeypat
 @pytest.mark.parametrize("expected_user_id", [None, "owner-1"])
 def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
     def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False, provision_lark_cli_broker=False):
@@ -184,6 +185,23 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
         provision_lark_cli_runtime=True,
     )
     assert result == expected
+
+
+def test_create_rejects_nondefault_user_on_unverified_legacy_provisioner(monkeypatch):
+    backend = RemoteSandboxBackend("http://legacy-provisioner:8002")
+    called = False
+
+    def unexpected_create(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe legacy create should not be attempted")
+
+    monkeypatch.setattr(backend, "_provisioner_create", unexpected_create)
+
+    with pytest.raises(RuntimeError, match="cannot isolate user 'alice'"):
+        backend.create("shared-thread", "sandbox-1", user_id="alice")
+
+    assert called is False
 
 
 def test_provisioner_create_returns_sandbox_info(monkeypatch):

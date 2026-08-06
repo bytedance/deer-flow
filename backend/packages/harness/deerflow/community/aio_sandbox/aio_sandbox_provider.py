@@ -269,6 +269,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         mounted = override if override is not None else backend is None or isinstance(backend, LocalContainerBackend)
         if mounted and isinstance(backend, RemoteSandboxBackend):
             if backend.mount_contract_version < SANDBOX_MOUNT_CONTRACT_VERSION:
+                if not backend.mount_contract_capability_known:
+                    raise RuntimeError("Provisioner mount compatibility could not be verified; retry after the Provisioner capability endpoint is reachable")
                 logger.warning(
                     "Configured remote thread-data mounts require Provisioner mount contract v%s; peer advertises v%s, so uploads will use explicit synchronization during the rolling upgrade",
                     SANDBOX_MOUNT_CONTRACT_VERSION,
@@ -1936,7 +1938,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     return cached_id
 
                 # Backend discovery: another process may have created the container.
-                discovered = self._backend.discover(sandbox_id)
+                discovered = (
+                    None
+                    if getattr(
+                        self._backend,
+                        "requires_create_validation",
+                        False,
+                    )
+                    is True
+                    else self._backend.discover(sandbox_id)
+                )
                 if discovered is not None:
                     return self._register_discovered_sandbox(thread_id, discovered, user_id=effective_user_id)
 
@@ -1965,7 +1976,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             # Backend discovery is sync because local discovery may inspect
             # Docker and perform a health check; keep it off the event loop.
-            discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
+            discovered = (
+                None
+                if getattr(
+                    self._backend,
+                    "requires_create_validation",
+                    False,
+                )
+                is True
+                else await asyncio.to_thread(
+                    self._backend.discover,
+                    sandbox_id,
+                )
+            )
             if discovered is not None:
                 # Registration publishes ownership, which is blocking store IO
                 # (filesystem or network depending on the backend) — same reason

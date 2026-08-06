@@ -88,10 +88,14 @@ When the Gateway mounts that same storage at its DeerFlow home and the PVC
 subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
 `config.yaml` to skip redundant upload-time sandbox acquire/sync. Leave the
 field unset when using unrelated storage or when the mount relationship is
-uncertain. The Gateway probes `/api/capabilities`; if the Provisioner does not
-advertise the current `mount_contract_version`, it temporarily uses explicit
-synchronization and omits the new nested conversion mount so either component
-can be upgraded first.
+uncertain. The Gateway probes `/api/capabilities`. A confirmed legacy
+Provisioner can use explicit synchronization only for the `default` no-auth
+user; its primary user-data mount does not isolate equal thread IDs belonging
+to different users, so authenticated deployments must upgrade the Provisioner
+before the Gateway. If the capability endpoint is temporarily unreachable,
+explicitly requested mounted mode fails closed. Remote acquisition uses the
+idempotent create endpoint even for an existing Pod so the Provisioner compares
+the live Pod against the complete mount signature requested by the current run.
 
 **Response**:
 ```json

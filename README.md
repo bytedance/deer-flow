@@ -989,8 +989,12 @@ can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
 acquire and sync. Leave the field unset for automatic detection; setting it
 incorrectly can make uploaded files unavailable inside the sandbox. During a
 mixed-version rollout, a new Gateway probes the Provisioner mount-contract
-version and temporarily falls back to explicit synchronization when the peer
-does not yet advertise the current contract.
+version. A confirmed legacy peer falls back to explicit synchronization for
+the default no-auth user, but authenticated user buckets fail closed because
+legacy Provisioners cannot isolate equal thread IDs across users. Upgrade the
+Provisioner first for authenticated deployments. If the capability probe is
+temporarily unreachable, explicitly requested mounted mode also fails closed
+instead of creating a Pod whose read-only conversion mount cannot be verified.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 

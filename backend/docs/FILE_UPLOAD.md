@@ -188,7 +188,8 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 - 非挂载同步副本是沙箱私有副本；任一路径失败（包括远端已落盘但传输随后报错）、后续响应构造失败或请求取消时，会对本次尝试的精确远端路径执行幂等撤销，再回滚宿主文件
 - 嵌入式 `DeerFlowClient.upload_files()` 以整批为事务边界：后续文件失败会逆序撤销本次调用中此前成功的所有远端副本和宿主 generation
 - 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；只有 Provisioner 能通过 `/api/capabilities` 证明当前挂载契约时，上传路由才会跳过 sandbox acquire 和逐文件同步
-- 新 Gateway 与旧 Provisioner 混合部署时会自动降级为显式同步并省略嵌套只读转换挂载，因此组件可按任一顺序滚动升级
+- 新 Gateway 与已确认的旧 Provisioner 混合部署时，只有 `default` 无认证用户可降级为显式同步；旧 Provisioner 的主挂载不包含 `user_id`，认证用户必须先升级 Provisioner，否则创建沙箱会 fail closed
+- `/api/capabilities` 暂时不可达时，显式请求的挂载模式 fail closed，不会把缺少嵌套只读转换挂载的 Pod 标记为当前契约；远端获取会通过幂等创建重新校验本次请求的完整 Pod 挂载签名，而不是只信任 discovery 响应
 - 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
 
 ## 测试示例

@@ -1278,7 +1278,9 @@ sandbox:
 #   # a correctly aligned shared PVC, NFS volume, hostPath, or bind mount.
 #   # true skips per-upload sandbox acquire/sync; false forces explicit sync.
 #   # In provisioner mode, true is honored only when /api/capabilities advertises
-#   # the current mount contract; older peers automatically fall back to sync.
+#   # the current mount contract; an unreachable probe fails closed. Confirmed
+#   # legacy peers may fall back to sync only for the default no-auth user;
+#   # authenticated deployments must upgrade the Provisioner first.
 #   # thread_data_mounts: true
 #
 #   # Optional: Additional mount directories from host to container
