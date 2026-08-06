@@ -1,3 +1,15 @@
+from .conversion import convert_uploaded_file_to_markdown
+from .layout import (
+    UPLOAD_CONVERSIONS_DIRNAME,
+    UnsafeConversionPathError,
+    artifact_url_for_virtual_path,
+    conversion_dir_for_uploads,
+    conversion_path_for_upload,
+    conversion_virtual_path,
+    ensure_conversion_dir,
+    existing_conversion_path_for_upload,
+    validate_conversion_dir,
+)
 from .manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
@@ -18,6 +30,7 @@ from .manager import (
     publish_staged_upload,
     publish_upload_bytes,
     publish_upload_copy,
+    replace_system_owned_staged_file,
     upload_artifact_url,
     upload_virtual_path,
     validate_path_traversal,
@@ -26,6 +39,16 @@ from .manager import (
 
 __all__ = [
     "get_uploads_dir",
+    "UPLOAD_CONVERSIONS_DIRNAME",
+    "UnsafeConversionPathError",
+    "conversion_dir_for_uploads",
+    "conversion_path_for_upload",
+    "conversion_virtual_path",
+    "artifact_url_for_virtual_path",
+    "validate_conversion_dir",
+    "ensure_conversion_dir",
+    "existing_conversion_path_for_upload",
+    "convert_uploaded_file_to_markdown",
     "ensure_uploads_dir",
     "normalize_filename",
     "PathTraversalError",
@@ -39,6 +62,7 @@ __all__ = [
     "publish_staged_upload",
     "publish_upload_bytes",
     "publish_upload_copy",
+    "replace_system_owned_staged_file",
     "cleanup_stale_upload_staging_files",
     "is_upload_staging_file",
     "validate_path_traversal",

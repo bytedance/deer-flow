@@ -17,7 +17,12 @@ from typing import BinaryIO
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.uploads.layout import artifact_url_for_virtual_path, upload_virtual_path
+from deerflow.uploads.layout import (
+    UPLOAD_CONVERSIONS_DIRNAME,
+    artifact_url_for_virtual_path,
+    existing_conversion_path_for_upload,
+    upload_virtual_path,
+)
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -245,6 +250,18 @@ def publish_upload_copy(base_dir: Path, preferred_filename: str, source_path: Pa
         raise
 
 
+def replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Path:
+    """Atomically replace one generated file inside the owned namespace."""
+    if staged.base_dir.name != UPLOAD_CONVERSIONS_DIRNAME:
+        raise UnsafeUploadPathError("System-owned replace requires conversion directory")
+    if not staged.handle.closed:
+        staged.handle.close()
+    _validate_staged_upload(staged)
+    target = staged.base_dir / normalize_filename(filename)
+    os.replace(staged.path, target)
+    return target
+
+
 def validate_path_traversal(path: Path, base: Path) -> None:
     """Verify that *path* is inside *base*.
 
@@ -276,17 +293,25 @@ def validate_upload_destination(base_dir: Path, filename: str) -> Path:
     return dest
 
 
-def _iter_upload_dirs(base_dir: Path):
-    yield from base_dir.glob("threads/*/user-data/uploads")
-    yield from base_dir.glob("users/*/threads/*/user-data/uploads")
+def _iter_upload_storage_dirs(base_dir: Path):
+    for user_data_dir in base_dir.glob("threads/*/user-data"):
+        yield user_data_dir / "uploads"
+        yield user_data_dir / UPLOAD_CONVERSIONS_DIRNAME
+    for user_data_dir in base_dir.glob("users/*/threads/*/user-data"):
+        yield user_data_dir / "uploads"
+        yield user_data_dir / UPLOAD_CONVERSIONS_DIRNAME
 
 
 def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
     """Remove orphaned Gateway upload staging files left by a hard crash."""
     root = Path(base_dir) if base_dir is not None else get_paths().base_dir
     removed = 0
-    for uploads_dir in _iter_upload_dirs(root):
-        if not uploads_dir.is_dir():
+    for uploads_dir in _iter_upload_storage_dirs(root):
+        try:
+            directory_stat = os.lstat(uploads_dir)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode):
             continue
         try:
             with os.scandir(uploads_dir) as entries:
@@ -346,18 +371,12 @@ def list_files_in_dir(directory: Path) -> dict:
     return {"files": files, "count": len(files)}
 
 
-def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: set[str] | None = None) -> dict:
-    """Delete a file inside *base_dir* after path-traversal validation.
-
-    If *convertible_extensions* is provided and the file's extension matches,
-    the companion ``.md`` file is also removed (if it exists).
+def delete_file_safe(base_dir: Path, filename: str) -> dict:
+    """Delete a primary upload and only its exact owned conversion.
 
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
-        convertible_extensions: Lowercase extensions (e.g. ``{".pdf", ".docx"}``)
-            whose companion markdown should be cleaned up.
-
     Returns:
         Dict with success and message.
 
@@ -365,17 +384,22 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
-    file_path = (base_dir / filename).resolve()
-    validate_path_traversal(file_path, base_dir)
-
-    if not file_path.is_file():
+    safe_name = normalize_filename(filename)
+    if safe_name != filename:
+        raise PathTraversalError("Path traversal detected")
+    base_dir = _validate_upload_directory(Path(base_dir))
+    file_path = base_dir / safe_name
+    try:
+        file_stat = os.lstat(file_path)
+    except FileNotFoundError:
         raise FileNotFoundError(f"File not found: {filename}")
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
 
+    owned_conversion = existing_conversion_path_for_upload(file_path)
     file_path.unlink()
-
-    # Clean up companion markdown generated during upload conversion.
-    if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-        file_path.with_suffix(".md").unlink(missing_ok=True)
+    if owned_conversion is not None:
+        owned_conversion.unlink(missing_ok=True)
 
     return {"success": True, "message": f"Deleted {filename}"}
 

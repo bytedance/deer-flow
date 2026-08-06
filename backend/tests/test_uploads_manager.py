@@ -15,6 +15,7 @@ from deerflow.uploads.layout import (
 from deerflow.uploads.manager import (
     AtomicUploadPublishError,
     PathTraversalError,
+    UnsafeUploadPathError,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
     delete_file_safe,
@@ -298,12 +299,22 @@ class TestCleanupStaleUploadStagingFiles:
     def test_removes_only_stale_staging_files_from_all_upload_layouts(self, tmp_path):
         legacy_uploads = tmp_path / "threads" / "thread-legacy" / "user-data" / "uploads"
         user_uploads = tmp_path / "users" / "owner-1" / "threads" / "thread-owned" / "user-data" / "uploads"
+        legacy_conversions = legacy_uploads.parent / ".upload-conversions"
+        user_conversions = user_uploads.parent / ".upload-conversions"
         unrelated_uploads = tmp_path / "misc" / "thread-other" / "user-data" / "uploads"
-        for uploads_dir in (legacy_uploads, user_uploads, unrelated_uploads):
+        for uploads_dir in (
+            legacy_uploads,
+            user_uploads,
+            legacy_conversions,
+            user_conversions,
+            unrelated_uploads,
+        ):
             uploads_dir.mkdir(parents=True)
 
         (legacy_uploads / ".upload-old.part").write_text("legacy partial")
         (user_uploads / ".upload-new.part").write_text("user partial")
+        (legacy_conversions / ".upload-converted-old.part").write_text("legacy conversion partial")
+        (user_conversions / ".upload-converted-new.part").write_text("user conversion partial")
         (unrelated_uploads / ".upload-ignore.part").write_text("outside layout")
         (legacy_uploads / ".env").write_text("intentional dotfile")
         (legacy_uploads / ".upload-note.txt").write_text("intentional upload")
@@ -311,13 +322,27 @@ class TestCleanupStaleUploadStagingFiles:
 
         removed = cleanup_stale_upload_staging_files(tmp_path)
 
-        assert removed == 2
+        assert removed == 4
         assert not (legacy_uploads / ".upload-old.part").exists()
         assert not (user_uploads / ".upload-new.part").exists()
+        assert not (legacy_conversions / ".upload-converted-old.part").exists()
+        assert not (user_conversions / ".upload-converted-new.part").exists()
         assert (unrelated_uploads / ".upload-ignore.part").exists()
         assert (legacy_uploads / ".env").exists()
         assert (legacy_uploads / ".upload-note.txt").exists()
         assert (legacy_uploads / "draft.part").exists()
+
+    def test_does_not_follow_symlinked_conversion_directory(self, tmp_path):
+        user_data = tmp_path / "threads" / "thread-legacy" / "user-data"
+        (user_data / "uploads").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        staged = outside / ".upload-outside.part"
+        staged.write_text("outside")
+        (user_data / ".upload-conversions").symlink_to(outside, target_is_directory=True)
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert staged.read_text() == "outside"
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +365,43 @@ class TestDeleteFileSafe:
     def test_delete_traversal_raises(self, tmp_path):
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
+
+    def test_delete_rejects_path_components(self, tmp_path):
+        primary = tmp_path / "report.pdf"
+        primary.write_bytes(b"PDF")
+
+        with pytest.raises(PathTraversalError, match="traversal"):
+            delete_file_safe(tmp_path, "folder/report.pdf")
+
+        assert primary.exists()
+
+    def test_delete_rejects_symlink_instead_of_unlinking_target(self, tmp_path):
+        outside = tmp_path / "outside.txt"
+        outside.write_text("protected", encoding="utf-8")
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        planted = uploads / "report.pdf"
+        planted.symlink_to(outside)
+
+        with pytest.raises(UnsafeUploadPathError):
+            delete_file_safe(uploads, "report.pdf")
+
+        assert planted.is_symlink()
+        assert outside.read_text(encoding="utf-8") == "protected"
+
+    def test_delete_removes_owned_conversion_but_preserves_legacy_sibling(self, tmp_path):
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"PDF")
+        legacy_or_user = uploads / "report.md"
+        legacy_or_user.write_text("user markdown", encoding="utf-8")
+        owned = conversion_path_for_upload(primary)
+        owned.parent.mkdir()
+        owned.write_text("generated", encoding="utf-8")
+
+        delete_file_safe(uploads, "report.pdf")
+
+        assert not primary.exists()
+        assert not owned.exists()
+        assert legacy_or_user.read_text(encoding="utf-8") == "user markdown"

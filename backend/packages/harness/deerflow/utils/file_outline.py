@@ -10,6 +10,11 @@ import logging
 import re
 from pathlib import Path
 
+from deerflow.uploads.layout import (
+    UnsafeConversionPathError,
+    existing_conversion_path_for_upload,
+)
+
 logger = logging.getLogger(__name__)
 
 # Regex for bold structural headings produced by pymupdf4llm when it can't
@@ -127,8 +132,7 @@ def extract_outline(md_path: Path) -> list[dict]:
 def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
-    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.
+    Looks only for the system-owned Markdown generated for this exact upload.
 
     Returns:
         (outline, preview) where:
@@ -138,8 +142,12 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           anchor when outline is empty so the agent has some context.
           Empty when outline is non-empty (no fallback needed).
     """
-    md_path = file_path.with_suffix(".md")
-    if not md_path.is_file():
+    try:
+        md_path = existing_conversion_path_for_upload(file_path)
+    except UnsafeConversionPathError:
+        logger.warning("Ignoring unsafe generated conversion for %s", file_path.name)
+        return [], []
+    if md_path is None:
         return [], []
 
     outline = extract_outline(md_path)
