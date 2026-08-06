@@ -3,10 +3,7 @@
 import logging
 import os
 import stat
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -17,23 +14,24 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
+from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
-    UPLOAD_STAGING_PREFIX,
-    UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
-    UnsafeUploadPathError,
-    claim_unique_filename,
+    StagedUpload,
+    abort_staged_upload,
+    create_upload_staging_file,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    publish_staged_upload,
     upload_artifact_url,
     upload_virtual_path,
-    validate_upload_destination,
 )
-from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId
 
@@ -45,13 +43,6 @@ UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
-
-
-@dataclass(slots=True)
-class _UploadTempFile:
-    file_path: Path
-    temp_path: Path
-    handle: BinaryIO
 
 
 class UploadedFileInfo(BaseModel):
@@ -178,52 +169,6 @@ def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
             logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
 
 
-def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> _UploadTempFile:
-    uploads_dir_path = Path(uploads_dir)
-    file_path = validate_upload_destination(uploads_dir_path, display_filename)
-    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
-    temp_path = Path(temp_path_str)
-    try:
-        handle = os.fdopen(temp_fd, "wb")
-    except Exception:
-        try:
-            os.close(temp_fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
-        raise
-    return _UploadTempFile(file_path=file_path, temp_path=temp_path, handle=handle)
-
-
-def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
-    upload_temp.handle.write(chunk)
-
-
-def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
-    try:
-        upload_temp.handle.close()
-    finally:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
-
-
-def _commit_upload_temp(upload_temp: _UploadTempFile) -> None:
-    upload_temp.handle.close()
-    try:
-        os.replace(upload_temp.temp_path, upload_temp.file_path)
-    except Exception:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
-        raise
-
-
 def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
     for file_path in paths:
         _make_file_sandbox_readable(file_path)
@@ -247,7 +192,7 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
 
 def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+    return delete_file_safe(uploads_dir, filename)
 
 
 async def _write_upload_file_with_limits(
@@ -260,9 +205,9 @@ async def _write_upload_file_with_limits(
     total_size: int,
 ) -> tuple[os.PathLike[str] | str, int, int]:
     file_size = 0
-    upload_temp: _UploadTempFile | None = None
+    upload_temp: StagedUpload | None = None
     try:
-        upload_temp = await run_file_io(_prepare_upload_destination, uploads_dir, display_filename)
+        upload_temp = await run_file_io(create_upload_staging_file, Path(uploads_dir))
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
             total_size += len(chunk)
@@ -270,14 +215,13 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
             if total_size > max_total_size:
                 raise HTTPException(status_code=413, detail="Total upload size too large")
-            await run_file_io(_write_upload_chunk, upload_temp, chunk)
+            await run_file_io(upload_temp.handle.write, chunk)
 
-        await run_file_io(_commit_upload_temp, upload_temp)
-        file_path = upload_temp.file_path
+        file_path = await run_file_io(publish_staged_upload, upload_temp, display_filename)
         upload_temp = None
     except Exception:
         if upload_temp is not None:
-            await run_file_io(_abort_upload_temp, upload_temp)
+            await run_file_io(abort_staged_upload, upload_temp)
         raise
     return file_path, file_size, total_size
 
@@ -324,11 +268,6 @@ async def upload_files(
     sandbox_sync_targets = []
     skipped_files = []
     total_size = 0
-    # Track filenames within this request so duplicate form parts do not
-    # silently truncate each other. Existing uploads keep the historical
-    # overwrite behavior for a single replacement upload.
-    seen_filenames: set[str] = set()
-
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
@@ -345,7 +284,6 @@ async def upload_files(
 
         try:
             original_filename = normalize_filename(file.filename)
-            safe_filename = claim_unique_filename(original_filename, seen_filenames)
         except ValueError:
             logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
             continue
@@ -354,12 +292,13 @@ async def upload_files(
             file_path, file_size, total_size = await _write_upload_file_with_limits(
                 file,
                 uploads_dir=uploads_dir,
-                display_filename=safe_filename,
+                display_filename=original_filename,
                 max_single_file_size=limits.max_file_size,
                 max_total_size=limits.max_total_size,
                 total_size=total_size,
             )
             written_paths.append(file_path)
+            safe_filename = Path(file_path).name
 
             virtual_path = upload_virtual_path(safe_filename)
 
@@ -380,39 +319,28 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                # Reserve the companion .md name in this request's seen set
-                # before writing so conversion cannot silently truncate another
-                # uploaded or derived file (same invariant as form-part dedupe).
-                provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
-                md_output = file_path.with_name(unique_md_name)
-                md_path = await convert_file_to_markdown(file_path, output_path=md_output)
+                try:
+                    md_path = await convert_uploaded_file_to_markdown(file_path)
+                except Exception:
+                    logger.warning("Failed to convert uploaded file: %s", file_path, exc_info=True)
+                    md_path = None
                 if md_path:
                     written_paths.append(md_path)
-                    md_virtual_path = upload_virtual_path(md_path.name)
+                    md_virtual_path = conversion_virtual_path(safe_filename)
 
                     if sync_to_sandbox:
                         sandbox_sync_targets.append((md_path, md_virtual_path))
 
                     file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                    file_info["markdown_path"] = str(md_path)
                     file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                else:
-                    # Conversion failed and wrote nothing, so release the claim;
-                    # holding it would rename a later same-stem upload against
-                    # a name nothing occupies.
-                    seen_filenames.discard(unique_md_name)
+                    file_info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
 
             uploaded_files.append(file_info)
 
         except HTTPException as e:
             await run_file_io(_cleanup_uploaded_paths, written_paths)
             raise e
-        except UnsafeUploadPathError as e:
-            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
-            skipped_files.append(safe_filename)
-            continue
         except Exception as e:
             logger.error(f"Failed to upload {file.filename}: {e}")
             await run_file_io(_cleanup_uploaded_paths, written_paths)
