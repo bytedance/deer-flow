@@ -7,12 +7,17 @@ Both Gateway and Client delegate to these functions.
 import errno
 import logging
 import os
+import shutil
 import stat
+import tempfile
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from typing import BinaryIO
 
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.uploads.layout import artifact_url_for_virtual_path, upload_virtual_path
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -24,10 +29,23 @@ class UnsafeUploadPathError(ValueError):
     """Raised when an upload destination is not a safe regular file path."""
 
 
+class AtomicUploadPublishError(UnsafeUploadPathError):
+    """Raised when storage cannot honor atomic no-replace publication."""
+
+
 logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+
+
+@dataclass(slots=True)
+class StagedUpload:
+    """A complete-or-in-progress upload stored under a hidden temporary name."""
+
+    base_dir: Path
+    path: Path
+    handle: BinaryIO
 
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
@@ -101,6 +119,132 @@ def is_upload_staging_file(filename: str) -> bool:
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
 
 
+def _validate_upload_directory(base_dir: Path) -> Path:
+    """Return a real upload directory without following a directory symlink."""
+    try:
+        st = os.lstat(base_dir)
+    except FileNotFoundError as exc:
+        raise UnsafeUploadPathError(f"Upload directory does not exist: {base_dir}") from exc
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        raise UnsafeUploadPathError(f"Upload directory is unsafe: {base_dir}")
+    return base_dir
+
+
+def create_upload_staging_file(base_dir: Path) -> StagedUpload:
+    """Create a hidden same-directory staging file for a complete payload."""
+    base_dir = _validate_upload_directory(Path(base_dir))
+    fd, temp_path_str = tempfile.mkstemp(
+        prefix=UPLOAD_STAGING_PREFIX,
+        suffix=UPLOAD_STAGING_SUFFIX,
+        dir=base_dir,
+    )
+    temp_path = Path(temp_path_str)
+    try:
+        handle = os.fdopen(fd, "wb")
+    except Exception:
+        os.close(fd)
+        temp_path.unlink(missing_ok=True)
+        raise
+    return StagedUpload(base_dir=base_dir, path=temp_path, handle=handle)
+
+
+def abort_staged_upload(staged: StagedUpload) -> None:
+    """Close and remove a staging file, tolerating repeated cleanup."""
+    if not staged.handle.closed:
+        staged.handle.close()
+    staged.path.unlink(missing_ok=True)
+
+
+def _validate_staged_upload(staged: StagedUpload) -> None:
+    """Reject a staging path that was replaced or moved outside its directory."""
+    _validate_upload_directory(staged.base_dir)
+    if staged.path.parent.resolve() != staged.base_dir.resolve():
+        raise UnsafeUploadPathError("Upload staging path escaped its directory")
+    try:
+        staged_stat = os.lstat(staged.path)
+    except FileNotFoundError as exc:
+        raise UnsafeUploadPathError("Upload staging file disappeared") from exc
+    if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1:
+        raise UnsafeUploadPathError("Upload staging path is not an exclusive regular file")
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _filename_candidates(name: str) -> Iterator[str]:
+    """Yield collision candidates that stay within the filename byte limit."""
+    yield name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    counter = 1
+    while True:
+        marker = f"_{counter}"
+        max_stem_bytes = 255 - len(marker.encode("utf-8")) - len(suffix.encode("utf-8"))
+        if max_stem_bytes < 1:
+            raise AtomicUploadPublishError("Filename suffix leaves no room for collision marker")
+        candidate_stem = _truncate_utf8(stem, max_stem_bytes)
+        if not candidate_stem:
+            raise AtomicUploadPublishError("Filename stem leaves no room for collision marker")
+        yield f"{candidate_stem}{marker}{suffix}"
+        counter += 1
+
+
+def publish_staged_upload(staged: StagedUpload, preferred_filename: str) -> Path:
+    """Atomically publish a complete staging file without replacing an entry."""
+    safe_name = normalize_filename(preferred_filename)
+    if not staged.handle.closed:
+        staged.handle.close()
+    try:
+        _validate_staged_upload(staged)
+        for candidate_name in _filename_candidates(safe_name):
+            candidate = staged.base_dir / candidate_name
+            try:
+                os.link(staged.path, candidate, follow_symlinks=False)
+            except FileExistsError:
+                continue
+            except (NotImplementedError, TypeError) as exc:
+                raise AtomicUploadPublishError("Storage does not support atomic no-replace publication") from exc
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    continue
+                raise AtomicUploadPublishError(f"Storage does not support atomic no-replace publication: {exc}") from exc
+
+            try:
+                staged.path.unlink()
+            except OSError:
+                logger.warning("Failed to remove published upload staging link: %s", staged.path, exc_info=True)
+            return candidate
+    except Exception:
+        staged.path.unlink(missing_ok=True)
+        raise
+
+
+def publish_upload_bytes(base_dir: Path, preferred_filename: str, data: bytes) -> Path:
+    """Stage and atomically publish an in-memory upload payload."""
+    staged = create_upload_staging_file(base_dir)
+    try:
+        staged.handle.write(data)
+        return publish_staged_upload(staged, preferred_filename)
+    except Exception:
+        abort_staged_upload(staged)
+        raise
+
+
+def publish_upload_copy(base_dir: Path, preferred_filename: str, source_path: Path) -> Path:
+    """Copy a local source into staging and atomically publish it."""
+    staged = create_upload_staging_file(base_dir)
+    try:
+        with Path(source_path).open("rb") as source:
+            shutil.copyfileobj(source, staged.handle)
+        return publish_staged_upload(staged, preferred_filename)
+    except Exception:
+        abort_staged_upload(staged)
+        raise
+
+
 def validate_path_traversal(path: Path, base: Path) -> None:
     """Verify that *path* is inside *base*.
 
@@ -163,100 +307,9 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
     return removed
 
 
-def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
-    """Open an upload destination for safe streaming writes.
-
-    Upload directories may be mounted into local sandboxes. A sandbox process can
-    therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
-    follows that link and can overwrite files outside the uploads directory with
-    gateway privileges. This helper rejects symlink destinations using ``O_NOFOLLOW``
-    on POSIX. On Windows (which lacks ``O_NOFOLLOW``), it uses dual ``lstat`` checks
-    and ``fstat`` validation after ``open()`` to reduce the TOCTOU window; this does
-    not eliminate all races but makes exploitation significantly harder. Path-traversal
-    validation prevents escapes from *base_dir* in both cases.
-    """
-    safe_name = normalize_filename(filename)
-    dest = validate_upload_destination(base_dir, safe_name)
-    try:
-        st = os.lstat(dest)
-    except FileNotFoundError:
-        st = None
-
-    has_nofollow = hasattr(os, "O_NOFOLLOW")
-
-    if has_nofollow:
-        # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
-        if hasattr(os, "O_NONBLOCK"):
-            flags |= os.O_NONBLOCK
-
-        try:
-            fd = os.open(dest, flags, 0o600)
-        except OSError as exc:
-            if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
-                raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
-            raise
-
-        try:
-            opened_stat = os.fstat(fd)
-            if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
-                raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
-            os.ftruncate(fd, 0)
-            fh = os.fdopen(fd, "wb")
-            fd = -1
-        finally:
-            if fd >= 0:
-                os.close(fd)
-        return dest, fh
-
-    # Windows: no O_NOFOLLOW available. Uses a second lstat immediately before open()
-    # to narrow the TOCTOU window, then fstat after open() as a further defence.
-    # Note: a narrow race window remains between the pre-open lstat and open(); the
-    # path-traversal check mitigates escapes from base_dir but cannot prevent an
-    # attacker who can atomically replace dest with a symlink after the check.
-    if st is not None and st.st_nlink > 1:
-        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
-
-    flags = os.O_WRONLY | os.O_CREAT
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
-
-    try:
-        pre_open_st = os.lstat(dest)
-    except FileNotFoundError:
-        pre_open_st = None
-
-    if pre_open_st is not None and not stat.S_ISREG(pre_open_st.st_mode):
-        raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if pre_open_st is not None and pre_open_st.st_nlink > 1:
-        raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
-
-    try:
-        fd = os.open(dest, flags, 0o600)
-    except OSError as exc:
-        if exc.errno in {errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
-            raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
-        raise
-
-    try:
-        opened_stat = os.fstat(fd)
-        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink > 1:
-            raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
-        os.ftruncate(fd, 0)
-        fh = os.fdopen(fd, "wb")
-        fd = -1
-    finally:
-        if fd >= 0:
-            os.close(fd)
-    return dest, fh
-
-
 def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
-    """Write upload bytes without following a pre-existing destination symlink."""
-    dest, fh = open_upload_file_no_symlink(base_dir, filename)
-    with fh:
-        fh.write(data)
-    return dest
+    """Compatibility wrapper for collision-safe upload publication."""
+    return publish_upload_bytes(base_dir, filename, data)
 
 
 def list_files_in_dir(directory: Path) -> dict:
@@ -332,12 +385,7 @@ def upload_artifact_url(thread_id: str, filename: str) -> str:
 
     *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
     """
-    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{quote(filename, safe='')}"
-
-
-def upload_virtual_path(filename: str) -> str:
-    """Build the virtual path for a file in the uploads directory."""
-    return f"{VIRTUAL_PATH_PREFIX}/uploads/{filename}"
+    return artifact_url_for_virtual_path(thread_id, upload_virtual_path(filename))
 
 
 def enrich_file_listing(result: dict, thread_id: str) -> dict:

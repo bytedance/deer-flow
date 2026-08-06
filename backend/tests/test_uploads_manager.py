@@ -2,18 +2,26 @@
 
 import errno
 import os
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import pytest
 
+from deerflow.uploads.layout import (
+    artifact_url_for_virtual_path,
+    conversion_path_for_upload,
+    conversion_virtual_path,
+)
 from deerflow.uploads.manager import (
+    AtomicUploadPublishError,
     PathTraversalError,
-    UnsafeUploadPathError,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
+    publish_upload_bytes,
+    publish_upload_copy,
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
@@ -105,56 +113,136 @@ class TestValidatePathTraversal:
 
 
 # ---------------------------------------------------------------------------
-# write_upload_file_no_symlink
+# upload publication
 # ---------------------------------------------------------------------------
 
 
-class TestWriteUploadFileNoSymlink:
-    def test_writes_new_file(self, tmp_path):
+class TestUploadPublication:
+    def test_compatibility_wrapper_writes_new_file(self, tmp_path):
         dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
 
         assert dest == tmp_path / "notes.txt"
         assert dest.read_bytes() == b"hello"
 
-    def test_overwrites_existing_regular_file_with_single_link(self, tmp_path):
+    def test_existing_regular_file_is_renamed_not_overwritten(self, tmp_path):
         dest = tmp_path / "notes.txt"
         dest.write_bytes(b"old contents")
         assert os.stat(dest).st_nlink == 1
 
-        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new contents")
+        result = publish_upload_bytes(tmp_path, "notes.txt", b"new contents")
 
-        assert result == dest
-        assert dest.read_bytes() == b"new contents"
+        assert result == tmp_path / "notes_1.txt"
+        assert dest.read_bytes() == b"old contents"
+        assert result.read_bytes() == b"new contents"
         assert os.stat(dest).st_nlink == 1
 
-    def test_fallback_without_no_follow_support_succeeds(self, tmp_path, monkeypatch):
-        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    def test_existing_symlink_is_preserved_and_skipped(self, tmp_path):
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"protected")
+        planted = tmp_path / "notes.txt"
+        planted.symlink_to(outside)
 
-        # When O_NOFOLLOW is absent (Windows), the function falls back to
-        # a dual-lstat + fstat approach and succeeds.
-        result = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
-        assert result == tmp_path / "notes.txt"
-        assert (tmp_path / "notes.txt").read_bytes() == b"hello"
+        result = publish_upload_bytes(tmp_path, "notes.txt", b"new")
 
-    def test_open_uses_nonblocking_flag_when_available(self, tmp_path):
-        if not hasattr(os, "O_NONBLOCK"):
-            pytest.skip("O_NONBLOCK not available on this platform")
-        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(errno.ENXIO, "no reader")) as open_mock:
-            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
-                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+        assert result == tmp_path / "notes_1.txt"
+        assert planted.is_symlink()
+        assert outside.read_bytes() == b"protected"
+        assert result.read_bytes() == b"new"
 
-        flags = open_mock.call_args.args[1]
-        assert flags & os.O_NONBLOCK
+    def test_existing_hard_link_is_preserved_and_skipped(self, tmp_path):
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"protected")
+        planted = tmp_path / "notes.txt"
+        os.link(outside, planted)
 
-    @pytest.mark.parametrize("open_errno", [errno.ENXIO, errno.EAGAIN])
-    def test_nonblocking_special_file_open_errors_are_unsafe(self, tmp_path, open_errno):
-        if not hasattr(os, "O_NONBLOCK"):
-            pytest.skip("O_NONBLOCK not available on this platform")
-        with patch("deerflow.uploads.manager.os.open", side_effect=OSError(open_errno, "would block")):
-            with pytest.raises(UnsafeUploadPathError, match="Unsafe upload destination"):
-                write_upload_file_no_symlink(tmp_path, "pipe.txt", b"hello")
+        result = publish_upload_bytes(tmp_path, "notes.txt", b"new")
 
-        assert not (tmp_path / "pipe.txt").exists()
+        assert result == tmp_path / "notes_1.txt"
+        assert outside.read_bytes() == b"protected"
+        assert planted.read_bytes() == b"protected"
+        assert result.read_bytes() == b"new"
+
+    def test_existing_directory_is_preserved_and_skipped(self, tmp_path):
+        planted = tmp_path / "notes.txt"
+        planted.mkdir()
+
+        result = publish_upload_bytes(tmp_path, "notes.txt", b"new")
+
+        assert result == tmp_path / "notes_1.txt"
+        assert planted.is_dir()
+        assert result.read_bytes() == b"new"
+
+    def test_parallel_publication_preserves_every_payload(self, tmp_path):
+        payloads = [f"payload-{i}".encode() for i in range(12)]
+
+        with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+            paths = list(pool.map(lambda payload: publish_upload_bytes(tmp_path, "same.txt", payload), payloads))
+
+        assert {path.name for path in paths} == {
+            "same.txt",
+            *(f"same_{i}.txt" for i in range(1, len(payloads))),
+        }
+        assert {path.read_bytes() for path in paths} == set(payloads)
+        assert not list(tmp_path.glob(".upload-*.part"))
+
+    def test_unsupported_atomic_publish_fails_and_cleans_stage(self, tmp_path):
+        with patch(
+            "deerflow.uploads.manager.os.link",
+            side_effect=OSError(errno.EOPNOTSUPP, "hard links unsupported"),
+        ):
+            with pytest.raises(AtomicUploadPublishError, match="atomic no-replace"):
+                publish_upload_bytes(tmp_path, "same.txt", b"payload")
+
+        assert not (tmp_path / "same.txt").exists()
+        assert not list(tmp_path.glob(".upload-*.part"))
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("archive.tar.gz", "archive.tar_1.gz"),
+            ("README", "README_1"),
+            (".env", ".env_1"),
+        ],
+    )
+    def test_suffix_is_inserted_before_final_extension(self, tmp_path, name, expected):
+        (tmp_path / name).write_bytes(b"old")
+
+        result = publish_upload_bytes(tmp_path, name, b"new")
+
+        assert result.name == expected
+        assert result.read_bytes() == b"new"
+
+    def test_collision_suffix_keeps_filename_within_255_utf8_bytes(self, tmp_path):
+        name = f"{'é' * 125}.txt"
+        assert len(name.encode("utf-8")) == 254
+        (tmp_path / name).write_bytes(b"old")
+
+        result = publish_upload_bytes(tmp_path, name, b"new")
+
+        assert result.name.endswith("_1.txt")
+        assert len(result.name.encode("utf-8")) <= 255
+        assert result.read_bytes() == b"new"
+
+    def test_publish_upload_copy_stages_complete_source(self, tmp_path):
+        source = tmp_path / "source.bin"
+        source.write_bytes(b"source bytes")
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+
+        result = publish_upload_copy(uploads, "copied.bin", source)
+
+        assert result == uploads / "copied.bin"
+        assert result.read_bytes() == b"source bytes"
+        assert not list(uploads.glob(".upload-*.part"))
+
+
+class TestUploadLayout:
+    def test_conversion_layout_uses_full_primary_name(self, tmp_path):
+        upload = tmp_path / "user-data" / "uploads" / "report.pdf"
+
+        assert conversion_path_for_upload(upload) == tmp_path / "user-data" / ".upload-conversions" / "report.pdf.md"
+        assert conversion_virtual_path("report.pdf") == "/mnt/user-data/.upload-conversions/report.pdf.md"
+        assert artifact_url_for_virtual_path("thread-1", conversion_virtual_path("report #1.pdf")) == ("/api/threads/thread-1/artifacts/mnt/user-data/.upload-conversions/report%20%231.pdf.md")
 
 
 # ---------------------------------------------------------------------------
