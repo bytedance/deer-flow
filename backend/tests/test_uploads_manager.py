@@ -17,6 +17,7 @@ import pytest
 from deerflow.uploads.async_helpers import release_published_upload_async
 from deerflow.uploads.layout import (
     artifact_url_for_virtual_path,
+    conversion_dir_for_uploads,
     conversion_path_for_upload,
     conversion_virtual_path,
 )
@@ -1609,6 +1610,47 @@ class TestDeleteFileSafe:
         assert primary_destination_sync < primary_source_sync < conversion_rename
         assert conversion_destination_sync < conversion_source_sync
 
+    def test_staging_root_is_durable_before_primary_source_removal(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        user_data = tmp_path / "user-data"
+        uploads = user_data / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        assert not conversion_dir_for_uploads(uploads).exists()
+        events: list[tuple[str, str]] = []
+        real_rename = upload_manager_module.os.rename
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+
+        def observe_rename(source, destination):
+            if Path(source) == primary:
+                events.append(("rename", "primary-source"))
+            return real_rename(source, destination)
+
+        def observe_fsync_directory(directory):
+            if Path(directory) == user_data:
+                events.append(("fsync", "user-data"))
+            return real_fsync_directory(directory)
+
+        with (
+            patch.object(upload_manager_module.os, "rename", side_effect=observe_rename),
+            patch.object(
+                upload_manager_module,
+                "_fsync_directory_durably",
+                side_effect=observe_fsync_directory,
+            ),
+        ):
+            delete_file_safe(
+                uploads,
+                primary.name,
+                delete_remote_copy=lambda *_args: None,
+            )
+
+        staging_root_sync = events.index(("fsync", "user-data"))
+        primary_rename = events.index(("rename", "primary-source"), staging_root_sync)
+        assert staging_root_sync < primary_rename
+
     def test_staging_directory_fsync_failure_restores_host_before_remote_mutation(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
@@ -1908,6 +1950,114 @@ class TestDeleteFileSafe:
         uploads_sync = events.index(("fsync", "uploads"), visible_unlink)
         commit_clear = events.index(("clear", "commit"), uploads_sync)
         assert visible_unlink < uploads_sync < commit_clear
+
+    def test_missing_primary_recovery_resyncs_tombstone_dir_before_commit_clear(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=True,
+        )
+        upload_manager_module._mark_staged_deletion_committed(staged_path)
+        transaction_dir = staged_path.parent.parent
+        primary_dir = staged_path.parent
+        # Model a previous discard whose unlink is visible but whose directory
+        # fsync failed. Recovery must persist this observed absence itself
+        # before making commit absence durable.
+        staged_path.unlink()
+        stage_lease.release()
+        events: list[tuple[str, str]] = []
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+        real_unlink_control = upload_manager_module._unlink_deletion_control_durably
+
+        def observe_fsync_directory(directory):
+            if Path(directory) == primary_dir:
+                events.append(("fsync", "primary-tombstone-dir"))
+            return real_fsync_directory(directory)
+
+        def observe_control_unlink(path):
+            if path.name == upload_manager_module._UPLOAD_DELETION_COMMIT_MARKER:
+                events.append(("clear", "commit"))
+            return real_unlink_control(path)
+
+        with (
+            patch.object(
+                upload_manager_module,
+                "_fsync_directory_durably",
+                side_effect=observe_fsync_directory,
+            ),
+            patch.object(
+                upload_manager_module,
+                "_unlink_deletion_control_durably",
+                side_effect=observe_control_unlink,
+            ),
+        ):
+            assert upload_manager_module._recover_stale_deletion_transaction(transaction_dir)
+
+        primary_dir_sync = events.index(("fsync", "primary-tombstone-dir"))
+        commit_clear = events.index(("clear", "commit"), primary_dir_sync)
+        assert primary_dir_sync < commit_clear
+
+    def test_missing_primary_recovery_resyncs_tombstone_dir_before_restore_clear(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=False,
+        )
+        upload_manager_module._mark_staged_deletion_restore(staged_path)
+        os.link(staged_path, primary)
+        transaction_dir = staged_path.parent.parent
+        primary_dir = staged_path.parent
+        # Model a restore that published and persisted the visible peer, then
+        # made the tombstone unlink visible but failed its directory fsync.
+        staged_path.unlink()
+        stage_lease.release()
+        events: list[tuple[str, str]] = []
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+        real_unlink_control = upload_manager_module._unlink_deletion_control_durably
+
+        def observe_fsync_directory(directory):
+            if Path(directory) == primary_dir:
+                events.append(("fsync", "primary-tombstone-dir"))
+            return real_fsync_directory(directory)
+
+        def observe_control_unlink(path):
+            if path.name == upload_manager_module._UPLOAD_DELETION_RESTORE_MARKER:
+                events.append(("clear", "restore"))
+            return real_unlink_control(path)
+
+        with (
+            patch.object(
+                upload_manager_module,
+                "_fsync_directory_durably",
+                side_effect=observe_fsync_directory,
+            ),
+            patch.object(
+                upload_manager_module,
+                "_unlink_deletion_control_durably",
+                side_effect=observe_control_unlink,
+            ),
+        ):
+            assert upload_manager_module._recover_stale_deletion_transaction(transaction_dir)
+
+        primary_dir_sync = events.index(("fsync", "primary-tombstone-dir"))
+        restore_clear = events.index(("clear", "restore"), primary_dir_sync)
+        assert primary_dir_sync < restore_clear
 
     def test_commit_marker_failure_prevents_remote_side_effect_and_restores_host(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module

@@ -1213,6 +1213,11 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         return False
     if not primary_entries:
         if recover_on_crash and not commit_entries and not conversion_entries:
+            if primary_dir is not None:
+                # A restore attempt may have unlinked the nested tombstone but
+                # failed while persisting that absence. Confirm it before
+                # clearing restore intent or removing the transaction tree.
+                _fsync_directory_durably(primary_dir)
             if restore_entries:
                 _unlink_deletion_control_durably(Path(restore_entries[0].path))
             if primary_dir is not None:
@@ -1225,6 +1230,11 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         if conversion_entries:
             Path(conversion_entries[0].path).unlink()
             _fsync_directory_durably(transaction_dir)
+        if primary_dir is not None:
+            # A prior discard may have made the nested primary unlink visible
+            # but failed while fsyncing this directory. Re-confirm that absence
+            # before making commit absence durable in the transaction root.
+            _fsync_directory_durably(primary_dir)
         _unlink_deletion_control_durably(Path(commit_entries[0].path))
         if primary_dir is not None:
             primary_dir.rmdir()
@@ -1379,6 +1389,10 @@ def _stage_primary_deletion(
 ) -> tuple[Path, UploadStageLease]:
     """Move one primary generation and its exact conversion into a transaction."""
     staging_dir = ensure_conversion_dir(base_dir)
+    # The conversion namespace may have been created lazily for a legacy
+    # thread. Persist its entry in user-data before moving the only primary
+    # into that subtree and durably removing the source name.
+    _fsync_directory_durably(staging_dir.parent)
     intent = _UPLOAD_DELETION_RESTORE_INTENT if recover_on_crash else _UPLOAD_DELETION_DISCARD_INTENT
     while True:
         transaction_dir = staging_dir / (f"{UPLOAD_DELETION_TRANSACTION_PREFIX}{intent}-{identity.inode:x}-{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}")
