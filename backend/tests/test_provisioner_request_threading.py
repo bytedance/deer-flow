@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -40,6 +41,34 @@ def test_provisioner_accepts_canonical_thread_ids(provisioner_module, thread_id:
     )
 
     assert request.thread_id == thread_id
+
+
+def test_sandbox_access_url_sanitizes_transient_error_log(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    class FailingCoreV1:
+        def read_namespaced_service(self, _name: str, _namespace: str):
+            raise ApiException(status=500, reason="upstream\nforged\rentry")
+
+    monkeypatch.setattr(provisioner_module, "core_v1", FailingCoreV1())
+    caplog.set_level(logging.WARNING, logger=provisioner_module.logger.name)
+
+    assert (
+        provisioner_module._sandbox_access_url(
+            "sandbox\nforged",
+            tolerate_read_errors=True,
+        )
+        is None
+    )
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "sandboxforged" in message
+    assert "upstreamforgedentry" in message
+    assert "\n" not in message
+    assert "\r" not in message
 
 
 def test_create_rejects_mount_contract_precondition_before_k8s_io(

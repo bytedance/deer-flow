@@ -58,6 +58,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+
+def _sanitize_log_param(value: object) -> str:
+    """Strip line-breaking controls from values before logging them."""
+    return str(value).replace("\r", "").replace("\n", "").replace("\x00", "")
+
+
 # ── Configuration (all tuneable via environment variables) ───────────────
 
 K8S_NAMESPACE = os.environ.get("K8S_NAMESPACE", "deer-flow")
@@ -1290,9 +1296,9 @@ def _sandbox_access_url(
         if tolerate_read_errors and exc.status not in {401, 403}:
             logger.warning(
                 "Transient error reading Service %s: status=%s reason=%s",
-                _svc_name(sandbox_id),
-                exc.status,
-                exc.reason,
+                _sanitize_log_param(_svc_name(sandbox_id)),
+                _sanitize_log_param(exc.status),
+                _sanitize_log_param(exc.reason),
             )
             return None
         raise

@@ -420,7 +420,7 @@ def test_failed_journal_restore_keeps_cross_process_name_reservation(tmp_path):
             raise OSError("directory fsync failed")
         return real_fsync(descriptor)
 
-    def fail_journal_recreation(path, flags, mode=0o777):
+    def fail_journal_recreation(path, flags, mode=0o600):
         if os.path.abspath(path) == os.path.abspath(journal_path) and flags & os.O_CREAT:
             raise OSError("journal recreation failed")
         return real_open(path, flags, mode)
