@@ -2,7 +2,7 @@
 
 **Issue:** #3750
 **PR:** #4704
-**Status:** Approved in conversation; awaiting written-spec confirmation
+**Status:** Written specification approved; implementation in progress
 **Scope:** Findings from the independent review of the collision-safe upload implementation
 
 ## Problem
