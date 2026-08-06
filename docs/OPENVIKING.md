@@ -27,8 +27,14 @@ tools are a separate integration surface and are not enabled by this backend.
 
 This version is for one DeerFlow user backed by one ordinary OpenViking **USER
 API key**. OpenViking derives the account and user from that credential.
-DeerFlow does not send trusted account/user headers and must not receive a root
-key for normal memory traffic.
+DeerFlow does not configure trusted account/user headers and must not receive a
+root key for normal memory traffic.
+
+The OpenViking SDK can read optional defaults from `OPENVIKING_*` environment
+variables or `ovcli.conf`. DeerFlow's explicit URL and API key take precedence,
+and request-local actor selection overrides an ambient actor peer during memory
+operations. Operators should still avoid unrelated identity defaults in the
+DeerFlow process environment and OpenViking CLI configuration.
 
 `owner_user_id` binds the configured key to one DeerFlow identity. Use
 `default` when DeerFlow authentication is disabled. In an authenticated
@@ -75,7 +81,7 @@ memory:
       top_k: 8
       score_threshold: 0.25
       max_injection_chars: 12000
-      content_mode: auto
+      content_mode: overview
       injection_query: >-
         user profile preferences important entities events ongoing goals
         constraints and prior decisions

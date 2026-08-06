@@ -78,7 +78,7 @@ class OpenVikingConfig:
             search_top_k=int(retrieval.pop("top_k", 8)),
             score_threshold=_optional_float(retrieval.pop("score_threshold", None)),
             max_injection_chars=int(retrieval.pop("max_injection_chars", 12_000)),
-            content_mode=str(retrieval.pop("content_mode", "auto")).lower(),  # type: ignore[arg-type]
+            content_mode=str(retrieval.pop("content_mode", "overview")).lower(),  # type: ignore[arg-type]
             injection_query=str(
                 retrieval.pop(
                     "injection_query",

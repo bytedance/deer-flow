@@ -1719,7 +1719,7 @@ memory:
   #     top_k: 8
   #     score_threshold: 0.25
   #     max_injection_chars: 12000
-  #     content_mode: auto
+  #     content_mode: overview
   #     injection_query: >-
   #       user profile preferences important entities events ongoing goals
   #       constraints and prior decisions

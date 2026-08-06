@@ -220,6 +220,7 @@ def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
     config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
 
     assert config.owner_user_id == "alice"
+    assert config.content_mode == "overview"
     assert config.injection_query == "profile preferences and prior decisions"
     assert "secret" not in repr(config)
 
@@ -258,6 +259,7 @@ def test_manager_uses_official_recorder_retriever_and_commit_always(
 
     assert manager._recorder.commit_policy.mode == "always"
     assert manager._retriever.client is manager._recorder.client
+    assert manager._retriever.kwargs["content_mode"] == "overview"
     assert manager._recorder.connection == {
         "url": "http://openviking:1933",
         "api_key": "user-key",

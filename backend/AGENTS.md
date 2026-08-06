@@ -1028,9 +1028,10 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   session locks are weakly cached, async entrypoints offload synchronous SDK
   and file IO, and graceful shutdown drains active operations before closing
   the recorder-owned client. Do not reintroduce a backend-local HTTP client,
-  trusted identity headers, root-key data access, or imports of the OpenViking
-  embedded runtime. Multi-user provisioning, query-aware refresh policy and
-  new lifecycle scheduling are separate changes, not part of this backend.
+  explicitly configured trusted identity headers, root-key data access, or
+  imports of the OpenViking embedded runtime. Multi-user provisioning,
+  query-aware refresh policy and new lifecycle scheduling are separate changes,
+  not part of this backend.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
 - Middleware extraction classifies proposed facts with extraction-only `scope`/`durability`/`authority` labels. `_apply_updates` accepts only `user` + `durable` + `descriptive` new/consolidated facts, accepts only wholly user-scoped summary prose with `authority=descriptive`, and rejects missing labels per item without aborting unrelated updates. Contradiction removals use object entries with `id`, `scope`, `reason`, and optional zero-based `replacementFactIndex`; task/project removals fail closed, and a paired removal runs only when the referenced replacement survives the scope/confidence gates, deduplication, and max-fact trim under another fact ID. The labels are not persisted, so no storage migration is required. Staleness removals retain their independent candidate/cap guardrails, while tool-mode CRUD remains outside this extraction gate. Custom `memory.backend_config.prompts_dir` templates (including per-agent overrides) must carry the same classification fields; an un-migrated template makes the fail-closed gate reject every extraction-driven write, observable only through `rejected_by_scope_gate` and the >60% fact-rejection warning.
