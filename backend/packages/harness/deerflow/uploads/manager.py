@@ -387,7 +387,12 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
     safe_name = normalize_filename(filename)
     if safe_name != filename:
         raise PathTraversalError("Path traversal detected")
-    base_dir = _validate_upload_directory(Path(base_dir))
+    try:
+        base_dir = _validate_upload_directory(Path(base_dir))
+    except UnsafeUploadPathError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise FileNotFoundError(f"File not found: {filename}") from exc
+        raise
     file_path = base_dir / safe_name
     try:
         file_stat = os.lstat(file_path)

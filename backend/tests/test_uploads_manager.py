@@ -362,6 +362,10 @@ class TestDeleteFileSafe:
         with pytest.raises(FileNotFoundError):
             delete_file_safe(tmp_path, "nope.txt")
 
+    def test_delete_from_nonexistent_directory_raises_file_not_found(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="ghost.txt"):
+            delete_file_safe(tmp_path / "missing-uploads", "ghost.txt")
+
     def test_delete_traversal_raises(self, tmp_path):
         with pytest.raises(PathTraversalError, match="traversal"):
             delete_file_safe(tmp_path, "../outside.txt")
