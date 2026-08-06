@@ -159,16 +159,17 @@ function LarkIntegrationCard() {
   const authAttemptIdRef = useRef(0);
   const authDeadlineRef = useRef(0);
   const flowGenerationRef = useRef(0);
-  const isMountedRef = useRef(true);
   const connectBusy =
     startConfig.isPending ||
     completeConfig.isPending ||
     startAuth.isPending ||
     completeAuth.isPending ||
     switchApp.isPending;
-  const connectActionBusy = connectBusy || isCheckingConnection;
-  const flowBusy = connectActionBusy || pendingFlow != null;
-  const integrationBusy = flowBusy || install.isPending;
+  const integrationBusy =
+    connectBusy ||
+    isCheckingConnection ||
+    pendingFlow != null ||
+    install.isPending;
   const credentialsConfigured = data?.auth.status === "authenticated";
   const isConnected = credentialsConfigured && data?.auth.verified === true;
   // The sandbox-runtime readiness row only applies when the sandbox actually
@@ -212,11 +213,10 @@ function LarkIntegrationCard() {
   };
 
   const isActiveFlow = (generation: number) =>
-    isMountedRef.current && generation === flowGenerationRef.current;
+    generation === flowGenerationRef.current;
 
   useEffect(
     () => () => {
-      isMountedRef.current = false;
       flowGenerationRef.current += 1;
       if (authRetryTimeoutRef.current != null) {
         clearTimeout(authRetryTimeoutRef.current);
@@ -522,9 +522,7 @@ function LarkIntegrationCard() {
     generation: number,
   ) => {
     clearAuthRetryTimer();
-    if (!isMountedRef.current) {
-      return;
-    }
+    if (!isActiveFlow(generation)) return;
     if (Date.now() >= authDeadlineRef.current) {
       toast.info(t.settings.integrations.lark.authorizationStillPending);
       return;
@@ -798,7 +796,7 @@ function LarkIntegrationCard() {
                 onClick={() => void handleConnect()}
                 disabled={authDisabled}
               >
-                {connectActionBusy ? (
+                {connectBusy || isCheckingConnection ? (
                   <RefreshCwIcon className="size-4 animate-spin" />
                 ) : null}
                 {connectButtonLabel}

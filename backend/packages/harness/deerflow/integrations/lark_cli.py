@@ -1083,17 +1083,10 @@ def set_lark_app_credentials(
         _validate_lark_app_credentials_with_cli(app_id=app_id, app_secret=app_secret, brand=parsed_brand)
         ensure_lark_cli_credential_tree(user_id)
         root = _lark_cli_credential_root(user_id)
-        with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
-            snapshot = Path(temp_dir) / "credentials"
-            _snapshot_lark_credential_tree(root, snapshot)
-            try:
-                _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
-                _clear_directory_contents(lark_cli_data_dir(user_id))
-                _revoke_lark_auth_from_snapshot(snapshot)
-            except Exception:
-                _restore_lark_credential_tree(root, snapshot)
-                ensure_lark_cli_credential_tree(user_id)
-                raise
+        with _lark_credential_transaction(user_id, root) as snapshot:
+            _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+            _clear_directory_contents(lark_cli_data_dir(user_id))
+            _revoke_lark_auth_from_snapshot(snapshot)
 
     status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
@@ -1421,10 +1414,6 @@ def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, bra
         )
 
 
-def _snapshot_lark_credential_tree(root: Path, snapshot: Path) -> None:
-    shutil.copytree(root, snapshot, symlinks=False)
-
-
 def _clear_directory_contents(directory: Path) -> None:
     if directory.is_symlink():
         raise ValueError(f"Lark CLI credential path must not be a symlink: {directory}")
@@ -1436,21 +1425,25 @@ def _clear_directory_contents(directory: Path) -> None:
             child.unlink()
 
 
-def _copy_directory_contents(source: Path, target: Path) -> None:
-    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for child in source.iterdir():
-        destination = target / child.name
-        if child.is_dir() and not child.is_symlink():
-            shutil.copytree(child, destination, symlinks=False)
-        else:
-            shutil.copy2(child, destination, follow_symlinks=False)
+@contextmanager
+def _lark_credential_transaction(user_id: str, root: Path):
+    """Restore the active credential tree if a switch step fails."""
+    with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
+        snapshot = Path(temp_dir) / "credentials"
+        shutil.copytree(root, snapshot, symlinks=False)
+        try:
+            yield snapshot
+        except Exception:
+            _restore_lark_credential_tree(root, snapshot)
+            ensure_lark_cli_credential_tree(user_id)
+            raise
 
 
 def _restore_lark_credential_tree(root: Path, snapshot: Path) -> None:
     for name in ("config", "data"):
         target = root / name
         _clear_directory_contents(target)
-        _copy_directory_contents(snapshot / name, target)
+        shutil.copytree(snapshot / name, target, dirs_exist_ok=True, symlinks=False)
 
 
 def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
