@@ -52,9 +52,9 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。系统内部保留 `.upload-*.part` 作为暂存命名空间；使用该模式的 basename、包含 NUL、`<` 或 `>`、或包含保留模型上下文边界标记的文件名会在创建暂存文件前被拒绝，以保证所有已接受的文件名和 Agent 可见路径都能无损呈现。若请求在 staging 创建尚未返回时被取消，Gateway 会等待创建结束并精确 abort 该临时文件。
+所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。系统内部保留 `.upload-*.part` 作为暂存命名空间；使用该模式的 basename、包含 NUL、`<` 或 `>`、包含保留模型上下文边界标记，或无法在 Windows 上无损表示（如设备名、尾随点/空格或保留字符）的文件名会在创建暂存文件前被拒绝，以保证所有已接受的文件名和 Agent 可见路径都能无损呈现。若请求在 staging 创建尚未返回时被取消，Gateway 会等待创建结束并精确 abort 该临时文件。
 
-实际发布名会在转换、权限调整、沙箱同步和响应构造期间持有同名租约。大小写及 Unicode 规范化等可移植文件系统别名共用同一协调键，避免在 APFS/Windows 上用别名绕过 generation lease。删除该名称会等待当前生命周期完成；其他文件名仍可并发处理。跨进程协调使用 `.upload-conversions/.locks/` 下稳定保留的摘要锁文件，该目录属于内部实现，不应由 Agent 或部署脚本修改或清理。最终 lease release 是明确提交点：如果新的取消恰在 release 期间到达，系统会先完成 release 并返回已构造的成功结果，而不会把已提交文件报告成取消。
+实际发布名会在转换、权限调整、沙箱同步和响应构造期间持有同名租约。大小写、Unicode 规范化及 Win32 尾随后缀等可移植文件系统别名共用同一协调键，避免用别名绕过 generation lease。发布遇到正在使用的协调键时不会等待，而会继续选择 `_N` 候选，因此逆序并发批次不会互相持锁；删除仍会等待目标 generation 生命周期完成，并在 hard-link 歧义下拒绝误报成功。跨进程协调使用 `.upload-conversions/.locks/` 下稳定保留的摘要锁文件，该目录属于内部实现，不应由 Agent 或部署脚本修改或清理。最终 lease release 是明确提交点：如果新的取消恰在 release 期间到达，系统会先完成 release 并返回已构造的成功结果，而不会把已提交文件报告成取消。
 
 ### 2. 查询上传限制
 ```

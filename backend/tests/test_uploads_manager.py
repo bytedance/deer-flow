@@ -58,6 +58,16 @@ def _delete_upload_in_process(
         finished.set()
 
 
+def _try_upload_lease_in_process(uploads_dir: str, filename: str, outcomes: Any) -> None:
+    try:
+        lease = UploadNameLease.try_acquire(Path(uploads_dir), filename)
+        outcomes.put(lease is not None)
+        if lease is not None:
+            lease.release()
+    except BaseException as exc:  # pragma: no cover - surfaced in the parent
+        outcomes.put(repr(exc))
+
+
 def _hold_staged_upload_in_process(
     uploads_dir: str,
     started: Any,
@@ -127,6 +137,21 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("bad\0name.pdf")
 
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            "report.pdf.",
+            "report.pdf ",
+            "CON",
+            "nul.txt",
+            "report:stream.pdf",
+            "report?.pdf",
+        ],
+    )
+    def test_rejects_windows_reserved_filenames(self, filename):
+        with pytest.raises(ValueError, match="Windows"):
+            normalize_filename(filename)
+
 
 @pytest.mark.parametrize(
     ("first_name", "alias_name"),
@@ -152,6 +177,36 @@ def test_portable_filesystem_aliases_share_one_generation_lease(tmp_path, first_
             first.release()
         alias = future.result(timeout=5)
         alias.release()
+
+
+def test_nonblocking_lease_treats_busy_windows_alias_as_collision(tmp_path):
+    first = UploadNameLease.acquire(tmp_path, "report.pdf")
+    try:
+        assert UploadNameLease.try_acquire(tmp_path, "REPORT.PDF. ") is None
+    finally:
+        first.release()
+
+
+def test_nonblocking_lease_observes_busy_portable_alias_across_processes(tmp_path):
+    first = UploadNameLease.acquire(tmp_path, "Report.pdf")
+    context = multiprocessing.get_context("spawn")
+    outcomes = context.Queue()
+    worker = context.Process(
+        target=_try_upload_lease_in_process,
+        args=(str(tmp_path), "report.pdf", outcomes),
+    )
+    worker.start()
+    try:
+        outcome = outcomes.get(timeout=5)
+        worker.join(5)
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(5)
+        first.release()
+
+    assert worker.exitcode == 0
+    assert outcome is False
 
 
 @pytest.mark.parametrize(
@@ -810,6 +865,25 @@ class TestDeleteFileSafe:
 
         assert planted.is_symlink()
         assert outside.read_text(encoding="utf-8") == "protected"
+
+    def test_delete_rejects_hardlink_race_without_unlinking_any_alias(self, tmp_path):
+        import deerflow.uploads.manager as upload_manager_module
+
+        primary = tmp_path / "zzz.txt"
+        primary.write_bytes(b"payload")
+        alias = tmp_path / "aaa.txt"
+        real_find = upload_manager_module._find_upload_path_by_identity
+
+        def add_alias_before_scan(base_dir, identity):
+            os.link(primary, alias)
+            return real_find(base_dir, identity)
+
+        with patch.object(upload_manager_module, "_find_upload_path_by_identity", side_effect=add_alias_before_scan):
+            with pytest.raises(UnsafeUploadPathError, match="exclusive"):
+                delete_file_safe(tmp_path, primary.name)
+
+        assert primary.read_bytes() == b"payload"
+        assert alias.read_bytes() == b"payload"
 
     def test_delete_removes_owned_conversion_but_preserves_legacy_sibling(self, tmp_path):
         uploads = tmp_path / "user-data" / "uploads"

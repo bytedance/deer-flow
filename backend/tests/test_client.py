@@ -2313,6 +2313,47 @@ class TestUploads:
         assert (uploads_dir / "Report.txt").read_bytes() == b"first"
         assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
 
+    def test_inverse_portable_alias_batches_do_not_deadlock(self, client, tmp_path):
+        import deerflow.client as client_module
+
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        batch_one = tmp_path / "batch-one"
+        batch_two = tmp_path / "batch-two"
+        batch_one.mkdir()
+        batch_two.mkdir()
+        files_one = [batch_one / "A.txt", batch_one / "B.txt"]
+        files_two = [batch_two / "b.txt", batch_two / "a.txt"]
+        for path in files_one + files_two:
+            path.write_bytes(path.name.encode())
+
+        first_publications = threading.Barrier(2)
+        batch_counts = {batch_one: 0, batch_two: 0}
+        counts_lock = threading.Lock()
+        real_publish = client_module.publish_upload_copy_leased
+
+        def pause_after_each_batch_publishes_first(base_dir, preferred_filename, source_path, **kwargs):
+            publication = real_publish(base_dir, preferred_filename, source_path, **kwargs)
+            with counts_lock:
+                batch_counts[source_path.parent] += 1
+                is_first = batch_counts[source_path.parent] == 1
+            if is_first:
+                first_publications.wait(timeout=5)
+            return publication
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.publish_upload_copy_leased", side_effect=pause_after_each_batch_publishes_first),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            future_one = pool.submit(client.upload_files, "thread-aliases", files_one)
+            future_two = pool.submit(client.upload_files, "thread-aliases", files_two)
+            result_one = future_one.result(timeout=5)
+            result_two = future_two.result(timeout=5)
+
+        assert [file["filename"] for file in result_one["files"]] == ["A.txt", "B_1.txt"]
+        assert [file["filename"] for file in result_two["files"]] == ["b.txt", "a_1.txt"]
+
     def test_concurrent_client_uploads_preserve_all_payloads(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)

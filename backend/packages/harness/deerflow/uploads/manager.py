@@ -12,7 +12,7 @@ import shutil
 import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
 from deerflow.config.paths import get_paths
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+_WINDOWS_FORBIDDEN_FILENAME_CHARS = frozenset('<>:"|?*')
 
 
 @dataclass(slots=True)
@@ -101,6 +102,8 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if "<" in safe or ">" in safe or "--- BEGIN USER INPUT ---" in safe or "--- END USER INPUT ---" in safe:
         raise ValueError(f"Filename contains reserved model-context token: {filename!r}")
+    if safe.endswith((" ", ".")) or PureWindowsPath(safe).is_reserved() or any(character in _WINDOWS_FORBIDDEN_FILENAME_CHARS or ord(character) < 32 for character in safe):
+        raise ValueError(f"Filename is reserved or invalid on Windows: {filename!r}")
     if len(safe.encode("utf-8")) > 255:
         raise ValueError(f"Filename too long: {len(safe)} chars")
     if is_upload_staging_file(safe):
@@ -286,7 +289,9 @@ def publish_staged_upload_leased(
             # its lease. This also lets one multi-file request retain the first
             # generation's lease while choosing a suffix for a duplicate name.
             continue
-        lease = UploadNameLease.acquire(staged.base_dir, candidate_name)
+        lease = UploadNameLease.try_acquire(staged.base_dir, candidate_name)
+        if lease is None:
+            continue
         linked = False
         try:
             try:
@@ -553,6 +558,7 @@ def list_files_in_dir(directory: Path) -> dict:
 
 def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> Path:
     """Return the directory entry that actually names *identity*."""
+    matching_path: Path | None = None
     with os.scandir(base_dir) as entries:
         for entry in entries:
             try:
@@ -563,8 +569,15 @@ def _find_upload_path_by_identity(base_dir: Path, identity: UploadIdentity) -> P
                 identity.device,
                 identity.inode,
             ):
-                return Path(entry.path)
-    raise UnsafeUploadPathError("Upload directory entry changed during deletion")
+                if entry_stat.st_nlink != 1 or matching_path is not None:
+                    raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
+                matching_path = Path(entry.path)
+    if matching_path is None:
+        raise UnsafeUploadPathError("Upload directory entry changed during deletion")
+    matching_stat = os.lstat(matching_path)
+    if not stat.S_ISREG(matching_stat.st_mode) or matching_stat.st_nlink != 1 or (matching_stat.st_dev, matching_stat.st_ino) != (identity.device, identity.inode):
+        raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
+    return matching_path
 
 
 def delete_file_safe(base_dir: Path, filename: str) -> dict:
@@ -604,8 +617,9 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         owned_conversion = existing_conversion_path_for_upload(actual_file_path)
         if owned_conversion is not None:
             owned_conversion.unlink(missing_ok=True)
-        if not identity.matches(actual_file_path):
-            raise UnsafeUploadPathError("Upload changed during deletion")
+        final_stat = os.lstat(actual_file_path)
+        if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1 or (final_stat.st_dev, final_stat.st_ino) != (identity.device, identity.inode):
+            raise UnsafeUploadPathError("Upload is no longer an exclusive directory entry")
         actual_file_path.unlink()
     finally:
         lease.release()

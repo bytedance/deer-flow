@@ -1,4 +1,5 @@
 import re
+import secrets
 import shlex
 from abc import ABC, abstractmethod
 
@@ -186,7 +187,8 @@ class Sandbox(ABC):
         """Remove one exact sandbox file using the provider's virtual-path mapping."""
         resolver = getattr(self, "_resolve_path", None)
         resolved = resolver(path) if callable(resolver) else path
-        marker = "__DEERFLOW_REMOVE_FILE_OK__"
-        output = self.execute_command(f"rm -f -- {shlex.quote(resolved)} && printf '%s' {marker}")
-        if marker not in str(output):
+        marker = f"__DEERFLOW_REMOVE_FILE_OK_{secrets.token_hex(16)}__"
+        output = self.execute_command(f"rm -f -- {shlex.quote(resolved)} && printf '%s\\n' {marker}")
+        output_lines = str(output).splitlines()
+        if not output_lines or output_lines[-1] != marker:
             raise OSError(f"Sandbox did not confirm removal of {path}")

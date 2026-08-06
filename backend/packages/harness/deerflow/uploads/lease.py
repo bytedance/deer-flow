@@ -38,7 +38,7 @@ _THREAD_LOCKS: dict[tuple[int, int, str], _ThreadLockEntry] = {}
 
 def portable_name_coordination_key(filename: str) -> str:
     """Collapse portable filesystem case and Unicode aliases for lease locking."""
-    return unicodedata.normalize("NFC", filename).casefold()
+    return unicodedata.normalize("NFC", filename).casefold().rstrip(" .")
 
 
 def _acquire_thread_lock(uploads_dir: Path, filename: str) -> tuple[tuple[int, int, str], _ThreadLockEntry]:
@@ -61,6 +61,29 @@ def _acquire_thread_lock(uploads_dir: Path, filename: str) -> tuple[tuple[int, i
                 del _THREAD_LOCKS[key]
         raise
     return key, entry
+
+
+def _try_acquire_thread_lock(
+    uploads_dir: Path,
+    filename: str,
+) -> tuple[tuple[int, int, str], _ThreadLockEntry] | None:
+    directory_stat = os.lstat(uploads_dir)
+    if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode):
+        raise UnsafeUploadPathError("Unsafe upload lease directory")
+    key = (directory_stat.st_dev, directory_stat.st_ino, filename)
+    with _THREAD_LOCKS_GUARD:
+        entry = _THREAD_LOCKS.get(key)
+        if entry is None:
+            entry = _ThreadLockEntry()
+            _THREAD_LOCKS[key] = entry
+        entry.references += 1
+    if entry.lock.acquire(blocking=False):
+        return key, entry
+    with _THREAD_LOCKS_GUARD:
+        entry.references -= 1
+        if entry.references == 0 and _THREAD_LOCKS.get(key) is entry:
+            del _THREAD_LOCKS[key]
+    return None
 
 
 def _release_thread_lock(key: tuple[int, int, str], entry: _ThreadLockEntry) -> None:
@@ -267,14 +290,7 @@ class UploadNameLease:
     @classmethod
     def acquire(cls, uploads_dir: Path, filename: str) -> "UploadNameLease":
         """Acquire the stable name lease, blocking until it is available."""
-        if not filename or Path(filename).name != filename or "\\" in filename:
-            raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
-        if len(filename.encode("utf-8")) > 255:
-            raise UnsafeUploadPathError("Upload lease filename is too long")
-
-        uploads_dir = Path(uploads_dir)
-        coordination_key = portable_name_coordination_key(filename)
-        digest = hashlib.sha256(coordination_key.encode("utf-8")).hexdigest()
+        uploads_dir, coordination_key, digest = cls._validate_request(uploads_dir, filename)
         thread_lock_key, thread_lock_entry = _acquire_thread_lock(uploads_dir, coordination_key)
         lock_file: BinaryIO | None = None
         try:
@@ -294,6 +310,53 @@ class UploadNameLease:
                 lock_file.close()
             _release_thread_lock(thread_lock_key, thread_lock_entry)
             raise
+
+    @classmethod
+    def try_acquire(cls, uploads_dir: Path, filename: str) -> "UploadNameLease | None":
+        """Acquire a name lease without waiting, or return ``None`` when busy."""
+        uploads_dir, coordination_key, digest = cls._validate_request(uploads_dir, filename)
+        thread_lock = _try_acquire_thread_lock(uploads_dir, coordination_key)
+        if thread_lock is None:
+            return None
+        thread_lock_key, thread_lock_entry = thread_lock
+        thread_lock_owned = True
+        lock_file: BinaryIO | None = None
+        try:
+            lock_path = ensure_upload_lock_dir(uploads_dir) / f"{digest}.lock"
+            lock_file = _open_lock_file(lock_path)
+            if not _try_lock_file(lock_file):
+                lock_file.close()
+                lock_file = None
+                _release_thread_lock(thread_lock_key, thread_lock_entry)
+                thread_lock_owned = False
+                return None
+            return cls(
+                uploads_dir=uploads_dir,
+                filename=filename,
+                lock_path=lock_path,
+                _lock_file=lock_file,
+                _thread_lock_key=thread_lock_key,
+                _thread_lock_entry=thread_lock_entry,
+            )
+        except BaseException:
+            if lock_file is not None and not lock_file.closed:
+                lock_file.close()
+            if thread_lock_owned:
+                _release_thread_lock(thread_lock_key, thread_lock_entry)
+            raise
+
+    @staticmethod
+    def _validate_request(uploads_dir: Path, filename: str) -> tuple[Path, str, str]:
+        if not filename or Path(filename).name != filename or "\\" in filename:
+            raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
+        if len(filename.encode("utf-8")) > 255:
+            raise UnsafeUploadPathError("Upload lease filename is too long")
+        uploads_dir = Path(uploads_dir)
+        coordination_key = portable_name_coordination_key(filename)
+        if not coordination_key:
+            raise UnsafeUploadPathError(f"Unsafe upload lease filename: {filename!r}")
+        digest = hashlib.sha256(coordination_key.encode("utf-8")).hexdigest()
+        return uploads_dir, coordination_key, digest
 
     @property
     def is_active(self) -> bool:

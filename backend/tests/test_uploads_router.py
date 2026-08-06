@@ -80,11 +80,23 @@ def test_sandbox_remove_file_uses_provider_virtual_path_resolution():
         @staticmethod
         def execute_command(command: str) -> str:
             commands.append(command)
-            return "__DEERFLOW_REMOVE_FILE_OK__"
+            return "__DEERFLOW_REMOVE_FILE_OK_abc123__"
 
-    Sandbox.remove_file(FakeSandbox(), "/mnt/user-data/uploads/report final.pdf")
+    with patch("deerflow.sandbox.sandbox.secrets.token_hex", return_value="abc123"):
+        Sandbox.remove_file(FakeSandbox(), "/mnt/user-data/uploads/report final.pdf")
 
-    assert commands == ["rm -f -- '/home/sandbox/uploads/report final.pdf' && printf '%s' __DEERFLOW_REMOVE_FILE_OK__"]
+    assert commands == ["rm -f -- '/home/sandbox/uploads/report final.pdf' && printf '%s\\n' __DEERFLOW_REMOVE_FILE_OK_abc123__"]
+
+
+def test_sandbox_remove_file_rejects_error_output_containing_legacy_marker():
+    class FakeSandbox:
+        @staticmethod
+        def execute_command(_command: str) -> str:
+            return "rm: cannot remove '__DEERFLOW_REMOVE_FILE_OK__': Permission denied"
+
+    with patch("deerflow.sandbox.sandbox.secrets.token_hex", return_value="abc123"):
+        with pytest.raises(OSError, match="did not confirm"):
+            Sandbox.remove_file(FakeSandbox(), "/mnt/user-data/uploads/__DEERFLOW_REMOVE_FILE_OK__")
 
 
 def test_cleanup_uses_publication_identity_not_reused_path(tmp_path):
@@ -394,30 +406,23 @@ async def test_cancellation_after_remote_sync_still_removes_the_completed_copy(t
 
 
 @pytest.mark.asyncio
-async def test_waiting_publication_cannot_starve_lease_release(tmp_path, monkeypatch):
-    import deerflow.utils.file_io as file_io_module
-
+async def test_busy_publication_uses_suffix_without_waiting_for_lease(tmp_path):
     first = UploadNameLease.acquire(tmp_path, "report.pdf")
     staged = create_upload_staging_file(tmp_path)
     staged.handle.write(b"second")
-    single_worker = ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr(file_io_module, "_FILE_IO_EXECUTOR", single_worker)
-
     publication_task = asyncio.create_task(uploads._publish_staged_upload_cancellation_safe(staged, "report.pdf"))
-    await asyncio.sleep(0.05)
-    release_task = asyncio.create_task(uploads._run_file_io_cancellation_safe(first.release))
     second = None
     try:
-        await asyncio.wait_for(asyncio.shield(release_task), timeout=0.2)
+        second = await asyncio.wait_for(publication_task, timeout=2)
+        assert first.is_active
     finally:
         if first.is_active:
             first.release()
-        await release_task
-        second = await asyncio.wait_for(publication_task, timeout=2)
-        second.release()
-        single_worker.shutdown(wait=True)
+        if second is not None:
+            second.release()
 
-    assert second.path.name == "report.pdf"
+    assert second is not None
+    assert second.path.name == "report_1.pdf"
 
 
 @pytest.mark.asyncio
@@ -1035,6 +1040,56 @@ def test_upload_files_renames_portable_aliases_within_one_batch(tmp_path):
     assert [file.filename for file in result.files] == ["Report.txt", "report_1.txt"]
     assert (thread_uploads_dir / "Report.txt").read_bytes() == b"first"
     assert (thread_uploads_dir / "report_1.txt").read_bytes() == b"second"
+
+
+@pytest.mark.asyncio
+async def test_inverse_portable_alias_gateway_batches_do_not_deadlock(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = _mounted_provider()
+    first_publications = asyncio.Barrier(2)
+    real_publish = uploads._publish_staged_upload_cancellation_safe
+
+    async def pause_after_each_batch_publishes_first(staged, filename, reserved_coordination_keys=None):
+        publication = await real_publish(staged, filename, reserved_coordination_keys)
+        if filename in {"A.txt", "b.txt"}:
+            await first_publications.wait()
+        return publication
+
+    async def run_batch(files):
+        return await call_unwrapped(
+            uploads.upload_files,
+            "thread-aliases",
+            request=MagicMock(),
+            files=files,
+            config=SimpleNamespace(),
+        )
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_publish_staged_upload_cancellation_safe", side_effect=pause_after_each_batch_publishes_first),
+    ):
+        result_one, result_two = await asyncio.wait_for(
+            asyncio.gather(
+                run_batch(
+                    [
+                        UploadFile(filename="A.txt", file=BytesIO(b"A")),
+                        UploadFile(filename="B.txt", file=BytesIO(b"B")),
+                    ]
+                ),
+                run_batch(
+                    [
+                        UploadFile(filename="b.txt", file=BytesIO(b"b")),
+                        UploadFile(filename="a.txt", file=BytesIO(b"a")),
+                    ]
+                ),
+            ),
+            timeout=5,
+        )
+
+    assert [file.filename for file in result_one.files] == ["A.txt", "B_1.txt"]
+    assert [file.filename for file in result_two.files] == ["b.txt", "a_1.txt"]
 
 
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):

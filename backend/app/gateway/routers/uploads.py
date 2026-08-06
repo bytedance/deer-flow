@@ -250,7 +250,7 @@ async def _publish_staged_upload_cancellation_safe(
     reserved_coordination_keys: set[str] | None = None,
 ) -> PublishedUpload:
     publish_task = asyncio.create_task(
-        run_upload_lease_io(
+        run_file_io(
             publish_staged_upload_leased,
             staged,
             filename,

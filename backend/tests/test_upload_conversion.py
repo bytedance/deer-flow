@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -15,7 +16,38 @@ from deerflow.uploads.layout import (
     conversion_virtual_path,
     existing_conversion_path_for_upload,
 )
+from deerflow.uploads.lease import UploadNameLease
 from deerflow.uploads.manager import delete_file_safe, publish_upload_bytes, publish_upload_bytes_leased
+
+
+@pytest.mark.asyncio
+async def test_active_publication_conversion_is_not_starved_by_lease_waiter(tmp_path, monkeypatch):
+    import deerflow.uploads.async_helpers as async_helpers
+
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    publication = publish_upload_bytes_leased(uploads, "report.pdf", b"PDF")
+    single_worker = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(async_helpers, "_UPLOAD_LEASE_EXECUTOR", single_worker)
+    waiter = asyncio.create_task(async_helpers.run_upload_lease_io(UploadNameLease.acquire, uploads, "report.pdf"))
+    await asyncio.sleep(0.05)
+
+    async def fake_convert(_source, output_path=None):
+        output_path.write_text("converted", encoding="utf-8")
+        return output_path
+
+    try:
+        with patch("deerflow.uploads.conversion.convert_file_to_markdown", side_effect=fake_convert):
+            converted = await asyncio.wait_for(
+                convert_uploaded_file_to_markdown(publication.path, publication=publication),
+                timeout=2,
+            )
+        assert converted is not None
+    finally:
+        publication.release()
+        waiting_lease = await asyncio.wait_for(waiter, timeout=2)
+        waiting_lease.release()
+        single_worker.shutdown(wait=True)
 
 
 @pytest.mark.asyncio

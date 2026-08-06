@@ -15,6 +15,7 @@ from deerflow.uploads.manager import (
     publish_upload_bytes_leased,
     rollback_published_upload,
 )
+from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ async def publish_upload_bytes_leased_async(
 ) -> PublishedUpload:
     """Publish bytes off-thread without leaking a lease when cancelled."""
     publish_task = asyncio.create_task(
-        run_upload_lease_io(publish_upload_bytes_leased, base_dir, preferred_filename, data),
+        run_file_io(publish_upload_bytes_leased, base_dir, preferred_filename, data),
         name=f"publish-upload:{preferred_filename}",
     )
     try:

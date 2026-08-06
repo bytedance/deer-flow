@@ -23,6 +23,7 @@ from deerflow.uploads.manager import (
     replace_system_owned_staged_file,
 )
 from deerflow.utils.file_conversion import convert_file_to_markdown
+from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +119,9 @@ async def _prepare_conversion_cancellation_safe(
     upload_path: Path,
     publication: PublishedUpload | None,
 ) -> _PreparedConversion:
+    prepare_io = run_upload_lease_io if publication is None else run_file_io
     prepare_task = asyncio.create_task(
-        run_upload_lease_io(_prepare_conversion, upload_path, publication),
+        prepare_io(_prepare_conversion, upload_path, publication),
         name=f"prepare-upload-conversion:{upload_path.name}",
     )
     cancelled = await wait_for_task_completion(prepare_task)
