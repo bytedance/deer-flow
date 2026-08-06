@@ -167,6 +167,10 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
         assert reconciled == 1
         assert (await task_run_repo.list_by_task("task-live"))[0]["status"] == "running"
         assert (await task_run_repo.list_by_task("task-expired"))[0]["status"] == "interrupted"
+        recovered = await durable_run_repo.get("run-expired", user_id=None)
+        assert recovered is not None
+        assert recovered["status"] == "error"
+        assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
         with pytest.raises(ActiveScheduledRunConflict):
             await task_run_repo.create(
                 run_record_id="task-run-live-duplicate",
@@ -569,3 +573,263 @@ async def test_list_by_user_and_thread_filters_in_sql(tmp_path):
     assert await repo.list_by_user_and_thread("user-2", "thread-1") == []
 
     await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_live_run_link_from_metadata(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf)
+        run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+
+        await task_repo.create(
+            task_id="task-metadata-link",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="metadata fallback",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_run_repo.create(
+            run_record_id="task-run-metadata-link",
+            task_id="task-metadata-link",
+            thread_id="thread-metadata-link",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        await run_repo.put(
+            "run-metadata-link",
+            thread_id="thread-metadata-link",
+            user_id="user-1",
+            status="running",
+            metadata={
+                "scheduled_task_id": "task-metadata-link",
+                "scheduled_task_run_id": "task-run-metadata-link",
+            },
+            owner_worker_id="worker-a",
+            lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
+        )
+
+        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        row = (await task_run_repo.list_by_task("task-metadata-link"))[0]
+        assert row["status"] == "queued"
+        assert row["run_id"] is None
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ignores_stale_parent_last_run_before_metadata_fallback(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf)
+        run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+
+        await task_repo.create(
+            task_id="task-stale-parent-link",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="stale parent link",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_run_repo.create(
+            run_record_id="task-run-current",
+            task_id="task-stale-parent-link",
+            thread_id="thread-current",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        await task_repo.update("task-stale-parent-link", user_id="user-1", updates={"last_run_id": "run-previous"})
+        await run_repo.put(
+            "run-previous",
+            thread_id="thread-previous",
+            user_id="user-1",
+            status="success",
+            metadata={"scheduled_task_id": "task-stale-parent-link", "scheduled_task_run_id": "task-run-previous"},
+        )
+        await run_repo.put(
+            "run-current",
+            thread_id="thread-current",
+            user_id="user-1",
+            status="running",
+            metadata={
+                "scheduled_task_id": "task-stale-parent-link",
+                "scheduled_task_run_id": "task-run-current",
+            },
+            owner_worker_id="worker-a",
+            lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
+        )
+
+        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert (await task_run_repo.list_by_task("task-stale-parent-link"))[0]["status"] == "queued"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_preserves_row_when_heartbeat_wins_takeover(tmp_path):
+    class RenewedRunRepository:
+        async def claim_for_takeover(self, *_args, **_kwargs):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return {"status": "running"}
+
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf, run_repository=RenewedRunRepository())
+        run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-heartbeat-race",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="heartbeat race",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_run_repo.create(
+            run_record_id="task-run-heartbeat-race",
+            task_id="task-heartbeat-race",
+            thread_id="thread-heartbeat-race",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="running",
+        )
+        await task_run_repo.update_status(
+            "task-run-heartbeat-race",
+            status="running",
+            run_id="run-heartbeat-race",
+        )
+        await run_repo.put(
+            "run-heartbeat-race",
+            thread_id="thread-heartbeat-race",
+            user_id="user-1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+
+        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        row = (await task_run_repo.list_by_task("task-heartbeat-race"))[0]
+        assert row["status"] == "running"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_update_after_launch_rejects_stale_lease_owner(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        repo = ScheduledTaskRepository(sf)
+        now = datetime.now(UTC)
+        await repo.create(
+            task_id="task-fenced",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="fenced",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=now,
+        )
+        assert await repo.claim_dispatch_lease("task-fenced", lease_owner="worker-a", now=now, lease_seconds=60) is not None
+        await repo.update(
+            "task-fenced",
+            user_id="user-1",
+            updates={
+                "lease_owner": "worker-b",
+                "lease_expires_at": now + timedelta(seconds=120),
+            },
+        )
+
+        updated = await repo.update_after_launch(
+            "task-fenced",
+            status="enabled",
+            next_run_at=now + timedelta(minutes=1),
+            last_run_at=now,
+            last_run_id="run-a",
+            last_thread_id="thread-a",
+            last_error=None,
+            increment_run_count=True,
+            expected_lease_owner="worker-a",
+        )
+        assert updated is False
+        task = await repo.get("task-fenced", user_id="user-1")
+        assert task is not None
+        assert task["lease_owner"] == "worker-b"
+        assert task["last_run_id"] is None
+        assert task["run_count"] == 0
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_global_budget_counts_dispatch_lease_reservations(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        repo = ScheduledTaskRepository(sf)
+        now = datetime.now(UTC)
+        for task_id in ("task-reserved", "task-due-a", "task-due-b"):
+            await repo.create(
+                task_id=task_id,
+                user_id="user-1",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title=task_id,
+                prompt="p",
+                schedule_type="cron",
+                schedule_spec={"cron": "* * * * *"},
+                timezone="UTC",
+                next_run_at=None if task_id == "task-reserved" else now,
+            )
+        assert await repo.claim_dispatch_lease("task-reserved", lease_owner="worker-a", now=now, lease_seconds=60) is not None
+
+        claimed = await repo.claim_due_tasks(
+            now=now,
+            lease_owner="worker-b",
+            lease_seconds=60,
+            limit=2,
+            global_max_concurrent_runs=2,
+        )
+        assert len(claimed) == 1
+        assert claimed[0]["id"] in {"task-due-a", "task-due-b"}
+    finally:
+        await close_engine()

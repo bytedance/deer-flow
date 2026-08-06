@@ -3,15 +3,17 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+_SCHEDULER_BUDGET_LOCK_KEY = 4694001
 
 
 def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int = 0) -> bool:
@@ -23,8 +25,14 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
 
 
 class ScheduledTaskRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        run_repository: RunRepository | None = None,
+    ) -> None:
         self._sf = session_factory
+        self._run_repository = run_repository or RunRepository(session_factory)
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
@@ -125,36 +133,60 @@ class ScheduledTaskRepository:
         lease_owner: str,
         lease_seconds: int,
         limit: int,
+        global_max_concurrent_runs: int | None = None,
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
-        stmt = (
-            select(ScheduledTaskRow)
-            .where(
-                ScheduledTaskRow.next_run_at.is_not(None),
-                ScheduledTaskRow.next_run_at <= now,
-                or_(
-                    and_(
-                        ScheduledTaskRow.status == "enabled",
-                        or_(
-                            ScheduledTaskRow.lease_expires_at.is_(None),
+        async with self._sf() as session:
+            if global_max_concurrent_runs is not None:
+                if session.get_bind().dialect.name == "postgresql":
+                    await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY})
+                active_runs = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("queued", "running"))))
+                active_run_for_task = exists(
+                    select(ScheduledTaskRunRow.id).where(
+                        ScheduledTaskRunRow.task_id == ScheduledTaskRow.id,
+                        ScheduledTaskRunRow.status.in_(("queued", "running")),
+                    )
+                )
+                dispatch_reservations = await session.scalar(
+                    select(func.count())
+                    .select_from(ScheduledTaskRow)
+                    .where(
+                        ScheduledTaskRow.lease_owner.is_not(None),
+                        ScheduledTaskRow.lease_expires_at >= now,
+                        ~active_run_for_task,
+                    )
+                )
+                active = int(active_runs or 0) + int(dispatch_reservations or 0)
+                limit = min(limit, max(0, global_max_concurrent_runs - active))
+            if limit <= 0:
+                return []
+            stmt = (
+                select(ScheduledTaskRow)
+                .where(
+                    ScheduledTaskRow.next_run_at.is_not(None),
+                    ScheduledTaskRow.next_run_at <= now,
+                    or_(
+                        and_(
+                            ScheduledTaskRow.status == "enabled",
+                            or_(
+                                ScheduledTaskRow.lease_expires_at.is_(None),
+                                ScheduledTaskRow.lease_expires_at < now,
+                            ),
+                        ),
+                        # A task stuck in "running" with an expired lease means the
+                        # claiming process died between claim and dispatch; it must
+                        # stay reclaimable or the task is dead forever.
+                        and_(
+                            ScheduledTaskRow.status == "running",
+                            ScheduledTaskRow.lease_expires_at.is_not(None),
                             ScheduledTaskRow.lease_expires_at < now,
                         ),
                     ),
-                    # A task stuck in "running" with an expired lease means the
-                    # claiming process died between claim and dispatch; it must
-                    # stay reclaimable or the task is dead forever.
-                    and_(
-                        ScheduledTaskRow.status == "running",
-                        ScheduledTaskRow.lease_expires_at.is_not(None),
-                        ScheduledTaskRow.lease_expires_at < now,
-                    ),
-                ),
+                )
+                .order_by(ScheduledTaskRow.next_run_at.asc(), ScheduledTaskRow.id.asc())
+                .limit(limit)
+                .with_for_update(skip_locked=True)
             )
-            .order_by(ScheduledTaskRow.next_run_at.asc(), ScheduledTaskRow.id.asc())
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-        async with self._sf() as session:
             result = await session.execute(stmt)
             rows = list(result.scalars())
             for row in rows:
@@ -177,11 +209,15 @@ class ScheduledTaskRepository:
         last_error: str | None,
         increment_run_count: bool,
         protect_terminal: bool = False,
-    ) -> None:
+        expected_lease_owner: str | None = None,
+    ) -> bool:
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
+            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
             if row is None:
-                return
+                return False
+            if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
+                await session.rollback()
+                return False
             if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
                 # A fast-failing run can reach handle_run_completion (which
                 # finalizes a `once` task) before this launch-path write
@@ -201,6 +237,7 @@ class ScheduledTaskRepository:
             row.lease_expires_at = None
             row.updated_at = datetime.now(UTC)
             await session.commit()
+            return True
 
     async def claim_dispatch_lease(
         self,
@@ -305,18 +342,40 @@ class ScheduledTaskRepository:
                     .limit(1)
                 )
                 task_run = run_result.scalars().first()
-                run_ids = [candidate for candidate in (task_run.run_id if task_run else None, task.last_run_id) if candidate]
-                live_run = None
-                for run_id in dict.fromkeys(run_ids):
-                    candidate = await session.get(RunRow, run_id, with_for_update=True)
-                    if candidate is not None and candidate.status in {"pending", "running"} and _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
-                        live_run = candidate
-                        break
-                if live_run is not None:
-                    continue
+                candidate = await self._find_underlying_run(session, task_run, task)
+                if candidate is not None and candidate.status in {"pending", "running"}:
+                    if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
+                        continue
+                    claimed = await self._run_repository.claim_for_takeover(
+                        candidate.run_id,
+                        grace_seconds=lease_grace_seconds,
+                        error=error,
+                        stop_reason="scheduled_task_orphan_recovered",
+                    )
+                    if not claimed:
+                        refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
+                        if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
+                            continue
                 task.status = "cancelled"
                 task.last_error = error
                 task.updated_at = datetime.now(UTC)
                 cancelled += 1
             await session.commit()
             return cancelled
+
+    @staticmethod
+    async def _find_underlying_run(session: AsyncSession, task_run: ScheduledTaskRunRow | None, task: ScheduledTaskRow) -> RunRow | None:
+        run_ids = [candidate for candidate in (task_run.run_id if task_run is not None else None, task.last_run_id) if candidate]
+        for run_id in dict.fromkeys(run_ids):
+            candidate = await session.get(RunRow, run_id)
+            if candidate is None:
+                continue
+            linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
+            if task_run is None or linked_task_run_id is None or linked_task_run_id == task_run.id:
+                return candidate
+
+        metadata_filter = RunRow.metadata_json["scheduled_task_id"].as_string() == task.id
+        if task_run is not None:
+            metadata_filter = RunRow.metadata_json["scheduled_task_run_id"].as_string() == task_run.id
+        result = await session.execute(select(RunRow).where(metadata_filter).order_by(RunRow.created_at.desc()).limit(1))
+        return result.scalars().first()

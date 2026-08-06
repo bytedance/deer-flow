@@ -128,6 +128,19 @@ def test_gate_rejects_multi_instance_scheduler_without_postgres(monkeypatch):
         )
 
 
+def test_gate_rejects_unsafe_multi_instance_config_even_when_scheduler_disabled(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit, match="database.backend='postgres'"):
+        _enforce_postgres_for_multi_worker(
+            _config_with_backend(
+                "sqlite",
+                heartbeat_enabled=True,
+                scheduler_enabled=False,
+                scheduler_multi_instance=True,
+            )
+        )
+
+
 def test_gate_rejects_multi_instance_scheduler_without_heartbeat(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "1")
     with pytest.raises(SystemExit, match="heartbeat_enabled=true"):

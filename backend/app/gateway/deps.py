@@ -85,17 +85,18 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         workers = 1
 
     scheduler = getattr(config, "scheduler", None)
-    multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and getattr(scheduler, "multi_instance", False))
+    multi_instance_requested = bool(getattr(scheduler, "multi_instance", False))
+    multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and multi_instance_requested)
 
     backend = getattr(config.database, "backend", None)
     run_events_backend = getattr(getattr(config, "run_events", None), "backend", None)
     run_ownership = getattr(config, "run_ownership", None)
 
-    if multi_instance_scheduler and backend != "postgres":
+    if multi_instance_requested and backend != "postgres":
         raise SystemExit(f"scheduler.multi_instance=true requires database.backend='postgres'. database.backend is '{backend}'. Set scheduler.multi_instance=false or configure Postgres.")
-    if multi_instance_scheduler and run_events_backend != "db":
+    if multi_instance_requested and run_events_backend != "db":
         raise SystemExit(f"scheduler.multi_instance=true requires run_events.backend='db'. run_events.backend is '{run_events_backend}'. Set scheduler.multi_instance=false or configure run_events.backend: db.")
-    if multi_instance_scheduler and (run_ownership is None or not run_ownership.heartbeat_enabled):
+    if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
         raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
 
     if workers <= 1:
@@ -438,8 +439,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
+            app.state.scheduled_task_repo = ScheduledTaskRepository(
+                sf,
+                run_repository=app.state.run_store,
+            )
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(
+                sf,
+                run_repository=app.state.run_store,
+            )
         else:
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
