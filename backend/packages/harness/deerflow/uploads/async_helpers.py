@@ -96,15 +96,19 @@ async def publish_upload_bytes_leased_async(
 
 
 async def release_published_upload_async(publication: PublishedUpload) -> None:
-    """Release a publication off-thread before propagating cancellation."""
+    """Commit by releasing a publication, delaying and swallowing new cancellation.
+
+    Callers use this only after response metadata has been constructed or after
+    rollback has completed. Once release starts, the transaction's outcome is
+    fixed, so a newly arriving cancellation must not turn committed files into
+    an indeterminate cancelled result.
+    """
     release_task = asyncio.create_task(
         asyncio.to_thread(publication.release),
         name=f"release-upload:{publication.path.name}",
     )
-    cancelled = await wait_for_task_completion(release_task)
+    await wait_for_task_completion(release_task)
     release_task.result()
-    if cancelled:
-        raise asyncio.CancelledError
 
 
 async def rollback_published_upload_async(publication: PublishedUpload) -> None:

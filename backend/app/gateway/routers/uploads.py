@@ -228,6 +228,13 @@ async def _run_file_io_cancellation_safe(function, *args):
     return result
 
 
+async def _run_file_io_commit(function, *args):
+    """Finish a commit operation and ignore cancellation that arrives during it."""
+    task = asyncio.create_task(run_file_io(function, *args))
+    await wait_for_task_completion(task)
+    return task.result()
+
+
 async def _publish_staged_upload_cancellation_safe(staged: StagedUpload, filename: str) -> PublishedUpload:
     publish_task = asyncio.create_task(run_upload_lease_io(publish_staged_upload_leased, staged, filename))
     try:
@@ -495,7 +502,7 @@ async def upload_files(
         )
         raise
     finally:
-        await _run_file_io_cancellation_safe(_release_publications, publications)
+        await _run_file_io_commit(_release_publications, publications)
 
 
 @router.get("/limits", response_model=UploadLimits)

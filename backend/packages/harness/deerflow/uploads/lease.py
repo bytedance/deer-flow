@@ -7,6 +7,7 @@ import os
 import stat
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
@@ -33,6 +34,11 @@ class _ThreadLockEntry:
 
 
 _THREAD_LOCKS: dict[tuple[int, int, str], _ThreadLockEntry] = {}
+
+
+def _portable_name_coordination_key(filename: str) -> str:
+    """Collapse portable filesystem case and Unicode aliases for lease locking."""
+    return unicodedata.normalize("NFC", filename).casefold()
 
 
 def _acquire_thread_lock(uploads_dir: Path, filename: str) -> tuple[tuple[int, int, str], _ThreadLockEntry]:
@@ -267,8 +273,9 @@ class UploadNameLease:
             raise UnsafeUploadPathError("Upload lease filename is too long")
 
         uploads_dir = Path(uploads_dir)
-        digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
-        thread_lock_key, thread_lock_entry = _acquire_thread_lock(uploads_dir, filename)
+        coordination_key = _portable_name_coordination_key(filename)
+        digest = hashlib.sha256(coordination_key.encode("utf-8")).hexdigest()
+        thread_lock_key, thread_lock_entry = _acquire_thread_lock(uploads_dir, coordination_key)
         lock_file: BinaryIO | None = None
         try:
             lock_path = ensure_upload_lock_dir(uploads_dir) / f"{digest}.lock"

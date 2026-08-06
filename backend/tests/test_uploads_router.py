@@ -299,6 +299,60 @@ async def test_cancellation_during_staging_creation_drains_and_aborts(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_final_release_returns_committed_success(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    remote_files: dict[str, bytes] = {}
+
+    class Sandbox:
+        def update_file(self, virtual_path: str, data: bytes) -> None:
+            remote_files[virtual_path] = data
+
+        def remove_file(self, virtual_path: str) -> None:
+            remote_files.pop(virtual_path, None)
+
+    provider.get.return_value = Sandbox()
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    real_release = uploads._release_publications
+
+    def paused_release(publications):
+        release_started.set()
+        assert allow_release.wait(5)
+        real_release(publications)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_release_publications", side_effect=paused_release),
+    ):
+        task = asyncio.create_task(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-remote",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.txt", file=BytesIO(b"payload"))],
+                config=SimpleNamespace(),
+            )
+        )
+        assert await asyncio.to_thread(release_started.wait, 5)
+        try:
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+        finally:
+            allow_release.set()
+        result = await task
+
+    assert result.success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"payload"
+    assert remote_files == {"/mnt/user-data/uploads/notes.txt": b"payload"}
+
+
+@pytest.mark.asyncio
 async def test_cancellation_after_remote_sync_still_removes_the_completed_copy(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

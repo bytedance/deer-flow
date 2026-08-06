@@ -1,5 +1,6 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
+import asyncio
 import errno
 import multiprocessing
 import os
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.uploads.async_helpers import release_published_upload_async
 from deerflow.uploads.layout import (
     artifact_url_for_virtual_path,
     conversion_path_for_upload,
@@ -123,6 +125,58 @@ class TestNormalizeFilename:
     def test_rejects_nul_before_any_filesystem_operation(self):
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("bad\0name.pdf")
+
+
+@pytest.mark.parametrize(
+    ("first_name", "alias_name"),
+    [
+        ("Report.pdf", "report.pdf"),
+        ("caf\u00e9.pdf", "cafe\u0301.pdf"),
+    ],
+)
+def test_portable_filesystem_aliases_share_one_generation_lease(tmp_path, first_name, alias_name):
+    first = UploadNameLease.acquire(tmp_path, first_name)
+    alias_acquired = threading.Event()
+
+    def acquire_alias():
+        lease = UploadNameLease.acquire(tmp_path, alias_name)
+        alias_acquired.set()
+        return lease
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(acquire_alias)
+        try:
+            assert not alias_acquired.wait(0.1)
+        finally:
+            first.release()
+        alias = future.result(timeout=5)
+        alias.release()
+
+
+@pytest.mark.asyncio
+async def test_release_commit_delays_and_swallows_new_cancellation(tmp_path, monkeypatch):
+    publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"payload")
+    release_started = threading.Event()
+    allow_release = threading.Event()
+    real_release = UploadNameLease.release
+
+    def paused_release(lease):
+        release_started.set()
+        assert allow_release.wait(5)
+        real_release(lease)
+
+    monkeypatch.setattr(UploadNameLease, "release", paused_release)
+    task = asyncio.create_task(release_published_upload_async(publication))
+    assert await asyncio.to_thread(release_started.wait, 5)
+    try:
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+    finally:
+        allow_release.set()
+
+    await task
+    assert not publication.is_active
 
 
 # ---------------------------------------------------------------------------
