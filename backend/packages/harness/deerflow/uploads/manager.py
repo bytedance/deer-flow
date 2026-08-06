@@ -872,6 +872,10 @@ def _create_deletion_phase_marker(marker: Path, *, error_message: str) -> None:
         marker_stat = os.lstat(marker)
         if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_nlink != 1:
             raise UnsafeUploadPathError(error_message)
+        # A prior creation may have file-fsynced the marker but failed while
+        # syncing its directory. Re-confirm the visible entry before callers
+        # rely on this phase across a crash boundary.
+        _fsync_directory_durably(marker.parent)
         return
     try:
         os.fsync(descriptor)

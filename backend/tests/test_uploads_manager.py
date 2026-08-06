@@ -1553,6 +1553,71 @@ class TestDeleteFileSafe:
         assert observed_marker
         assert primary.read_bytes() == b"primary"
 
+    @pytest.mark.parametrize(
+        ("marker_function_name", "recover_on_crash"),
+        [
+            ("_mark_staged_deletion_committed", True),
+            ("_mark_staged_deletion_restore", False),
+        ],
+        ids=["commit", "restore"],
+    )
+    def test_existing_phase_marker_resyncs_parent_before_reuse(
+        self,
+        tmp_path,
+        marker_function_name,
+        recover_on_crash,
+    ):
+        import deerflow.uploads.manager as upload_manager_module
+
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"primary")
+        identity = UploadIdentity.from_path(primary)
+        staged_path, stage_lease = upload_manager_module._stage_primary_deletion(
+            uploads,
+            primary,
+            identity,
+            recover_on_crash=recover_on_crash,
+        )
+        transaction_dir = staged_path.parent.parent
+        marker_function = getattr(upload_manager_module, marker_function_name)
+        real_fsync_directory = upload_manager_module._fsync_directory_durably
+        failed = False
+
+        def fail_marker_parent_once(directory):
+            nonlocal failed
+            if Path(directory) == transaction_dir and not failed:
+                failed = True
+                raise OSError("cannot persist phase marker parent")
+            return real_fsync_directory(directory)
+
+        try:
+            with patch.object(
+                upload_manager_module,
+                "_fsync_directory_durably",
+                side_effect=fail_marker_parent_once,
+            ):
+                with pytest.raises(OSError, match="cannot persist phase marker parent"):
+                    marker_function(staged_path)
+
+            fsynced_directories: list[Path] = []
+
+            def observe_fsync_directory(directory):
+                fsynced_directories.append(Path(directory))
+                return real_fsync_directory(directory)
+
+            with patch.object(
+                upload_manager_module,
+                "_fsync_directory_durably",
+                side_effect=observe_fsync_directory,
+            ):
+                marker_function(staged_path)
+        finally:
+            stage_lease.release()
+
+        assert transaction_dir in fsynced_directories
+
     def test_staged_renames_are_durable_before_remote_mutation(self, tmp_path):
         import deerflow.uploads.manager as upload_manager_module
 
