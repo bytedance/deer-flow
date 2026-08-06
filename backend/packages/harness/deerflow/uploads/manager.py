@@ -7,9 +7,9 @@ Both Gateway and Client delegate to these functions.
 import errno
 import logging
 import os
+import secrets
 import shutil
 import stat
-import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +25,7 @@ from deerflow.uploads.layout import (
     existing_conversion_path_for_upload,
     upload_virtual_path,
 )
-from deerflow.uploads.lease import UploadIdentity, UploadNameLease
+from deerflow.uploads.lease import UploadIdentity, UploadNameLease, UploadStageLease
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class StagedUpload:
     base_dir: Path
     path: Path
     handle: BinaryIO
+    lease: UploadStageLease
 
 
 @dataclass(slots=True)
@@ -147,24 +148,35 @@ def _validate_upload_directory(base_dir: Path) -> Path:
 def create_upload_staging_file(base_dir: Path) -> StagedUpload:
     """Create a hidden same-directory staging file for a complete payload."""
     base_dir = _validate_upload_directory(Path(base_dir))
-    fd, temp_path_str = tempfile.mkstemp(
-        prefix=UPLOAD_STAGING_PREFIX,
-        suffix=UPLOAD_STAGING_SUFFIX,
-        dir=base_dir,
-    )
-    temp_path = Path(temp_path_str)
-    try:
-        handle = os.fdopen(fd, "wb")
-    except Exception:
-        os.close(fd)
-        temp_path.unlink(missing_ok=True)
-        raise
-    return StagedUpload(base_dir=base_dir, path=temp_path, handle=handle)
+    while True:
+        temp_path = base_dir / f"{UPLOAD_STAGING_PREFIX}{secrets.token_hex(16)}{UPLOAD_STAGING_SUFFIX}"
+        lease = UploadStageLease.acquire(base_dir, temp_path.name)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        try:
+            fd = os.open(temp_path, flags, 0o600)
+        except FileExistsError:
+            lease.release()
+            continue
+        except BaseException:
+            lease.release()
+            raise
+        try:
+            handle = os.fdopen(fd, "wb")
+        except Exception:
+            os.close(fd)
+            temp_path.unlink(missing_ok=True)
+            lease.release()
+            raise
+        return StagedUpload(base_dir=base_dir, path=temp_path, handle=handle, lease=lease)
 
 
 def abort_staged_upload(staged: StagedUpload) -> None:
     """Close and remove a staging file, tolerating repeated cleanup."""
     close_error: BaseException | None = None
+    unlink_error: BaseException | None = None
+    lease_error: BaseException | None = None
     try:
         if not staged.handle.closed:
             staged.handle.close()
@@ -172,17 +184,31 @@ def abort_staged_upload(staged: StagedUpload) -> None:
         close_error = exc
     try:
         staged.path.unlink(missing_ok=True)
-    except BaseException as unlink_error:
-        if close_error is not None:
-            raise close_error from unlink_error
-        raise
+    except BaseException as exc:
+        unlink_error = exc
+    try:
+        staged.lease.release()
+    except BaseException as exc:
+        lease_error = exc
     if close_error is not None:
+        if unlink_error is not None:
+            raise close_error from unlink_error
+        if lease_error is not None:
+            raise close_error from lease_error
         raise close_error
+    if unlink_error is not None:
+        if lease_error is not None:
+            raise unlink_error from lease_error
+        raise unlink_error
+    if lease_error is not None:
+        raise lease_error
 
 
 def _validate_staged_upload(staged: StagedUpload) -> None:
     """Reject a staging path that was replaced or moved outside its directory."""
     _validate_upload_directory(staged.base_dir)
+    if not staged.lease.is_active or staged.lease.stage_dir != staged.base_dir or staged.lease.stage_filename != staged.path.name:
+        raise UnsafeUploadPathError("Upload staging liveness lease is missing")
     if staged.path.parent.resolve() != staged.base_dir.resolve():
         raise UnsafeUploadPathError("Upload staging path escaped its directory")
     try:
@@ -272,6 +298,7 @@ def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) 
             except OSError as exc:
                 _rollback_link_without_masking(candidate, staged_identity)
                 raise AtomicUploadPublishError("Failed to remove upload staging link after publication") from exc
+            staged.lease.release()
 
             try:
                 candidate_stat = os.lstat(candidate)
@@ -370,6 +397,7 @@ def replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Pat
     _validate_staged_upload(staged)
     target = staged.base_dir / normalize_filename(filename)
     os.replace(staged.path, target)
+    staged.lease.release()
     return target
 
 
@@ -429,6 +457,9 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
                 for entry in entries:
                     if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
                         continue
+                    stage_lease = UploadStageLease.try_acquire(uploads_dir, entry.name)
+                    if stage_lease is None:
+                        continue
                     try:
                         os.unlink(entry.path)
                         removed += 1
@@ -436,6 +467,8 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
                         pass
                     except OSError:
                         logger.warning("Failed to remove stale upload staging file: %s", entry.path, exc_info=True)
+                    finally:
+                        stage_lease.release()
         except FileNotFoundError:
             continue
         except OSError:

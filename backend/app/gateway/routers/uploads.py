@@ -15,6 +15,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.uploads.async_helpers import run_upload_lease_io, wait_for_task_completion
 from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
 from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
@@ -180,6 +181,29 @@ def _cleanup_published_uploads(
             logger.warning("Failed to roll back published upload after rejected request: %s", publication.path, exc_info=True)
 
 
+def _cleanup_synced_sandbox_paths(sandbox, virtual_paths: list[str]) -> None:
+    """Best-effort removal of the exact remote copies completed by this request."""
+    if sandbox is None or not virtual_paths:
+        return
+    for virtual_path in reversed(virtual_paths):
+        try:
+            sandbox.remove_file(virtual_path)
+        except Exception:
+            logger.warning("Failed to remove synchronized sandbox upload path: %s", virtual_path, exc_info=True)
+
+
+def _rollback_upload_request(
+    sandbox,
+    synced_sandbox_paths: list[str],
+    publications: list[PublishedUpload],
+    generated_paths: list[os.PathLike[str] | str],
+) -> None:
+    try:
+        _cleanup_synced_sandbox_paths(sandbox, synced_sandbox_paths)
+    finally:
+        _cleanup_published_uploads(publications, generated_paths)
+
+
 def _release_publications(publications: list[PublishedUpload]) -> None:
     for publication in reversed(publications):
         try:
@@ -197,12 +221,7 @@ def _rollback_and_release_publication(publication: PublishedUpload) -> None:
 
 async def _run_file_io_cancellation_safe(function, *args):
     task = asyncio.create_task(run_file_io(function, *args))
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
+    cancelled = await wait_for_task_completion(task)
     result = task.result()
     if cancelled:
         raise asyncio.CancelledError
@@ -210,24 +229,14 @@ async def _run_file_io_cancellation_safe(function, *args):
 
 
 async def _publish_staged_upload_cancellation_safe(staged: StagedUpload, filename: str) -> PublishedUpload:
-    publish_task = asyncio.create_task(run_file_io(publish_staged_upload_leased, staged, filename))
+    publish_task = asyncio.create_task(run_upload_lease_io(publish_staged_upload_leased, staged, filename))
     try:
         return await asyncio.shield(publish_task)
     except asyncio.CancelledError:
-        while not publish_task.done():
-            try:
-                await asyncio.shield(publish_task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
+        await wait_for_task_completion(publish_task)
         if not publish_task.cancelled() and publish_task.exception() is None:
             cleanup_task = asyncio.create_task(run_file_io(_rollback_and_release_publication, publish_task.result()))
-            while not cleanup_task.done():
-                try:
-                    await asyncio.shield(cleanup_task)
-                except asyncio.CancelledError:
-                    continue
+            await wait_for_task_completion(cleanup_task)
             try:
                 cleanup_task.result()
             except Exception:
@@ -240,9 +249,15 @@ def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -
         _make_file_sandbox_readable(file_path)
 
 
-def _sync_upload_to_sandbox(sandbox, file_path: os.PathLike[str] | str, virtual_path: str) -> None:
+def _sync_upload_to_sandbox(
+    sandbox,
+    file_path: os.PathLike[str] | str,
+    virtual_path: str,
+    synced_sandbox_paths: list[str],
+) -> None:
     _make_file_sandbox_writable(file_path)
     sandbox.update_file(virtual_path, Path(file_path).read_bytes())
+    synced_sandbox_paths.append(virtual_path)
 
 
 def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
@@ -333,6 +348,7 @@ async def upload_files(
     publications: list[PublishedUpload] = []
     generated_paths: list[Path] = []
     sandbox_sync_targets = []
+    synced_sandbox_paths: list[str] = []
     skipped_files = []
     total_size = 0
     sandbox_provider = get_sandbox_provider()
@@ -414,7 +430,13 @@ async def upload_files(
 
         if sync_to_sandbox:
             for file_path, virtual_path in sandbox_sync_targets:
-                await _run_file_io_cancellation_safe(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
+                await _run_file_io_cancellation_safe(
+                    _sync_upload_to_sandbox,
+                    sandbox,
+                    file_path,
+                    virtual_path,
+                    synced_sandbox_paths,
+                )
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"
         if skipped_files:
@@ -427,14 +449,32 @@ async def upload_files(
             skipped_files=skipped_files,
         )
     except HTTPException:
-        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            synced_sandbox_paths,
+            publications,
+            generated_paths,
+        )
         raise
     except Exception as exc:
         logger.error("Failed to upload %s: %s", current_filename, exc)
-        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            synced_sandbox_paths,
+            publications,
+            generated_paths,
+        )
         raise HTTPException(status_code=500, detail=f"Failed to upload {current_filename}: {str(exc)}") from exc
     except BaseException:
-        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            synced_sandbox_paths,
+            publications,
+            generated_paths,
+        )
         raise
     finally:
         await _run_file_io_cancellation_safe(_release_publications, publications)

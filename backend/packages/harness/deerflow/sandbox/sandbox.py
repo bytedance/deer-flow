@@ -1,4 +1,5 @@
 import re
+import shlex
 from abc import ABC, abstractmethod
 
 from deerflow.sandbox.search import GrepMatch
@@ -180,3 +181,12 @@ class Sandbox(ABC):
             content: The binary content to write to the file.
         """
         pass
+
+    def remove_file(self, path: str) -> None:
+        """Remove one exact sandbox file using the provider's virtual-path mapping."""
+        resolver = getattr(self, "_resolve_path", None)
+        resolved = resolver(path) if callable(resolver) else path
+        marker = "__DEERFLOW_REMOVE_FILE_OK__"
+        output = self.execute_command(f"rm -f -- {shlex.quote(resolved)} && printf '%s' {marker}")
+        if marker not in str(output):
+            raise OSError(f"Sandbox did not confirm removal of {path}")

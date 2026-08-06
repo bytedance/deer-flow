@@ -2,6 +2,7 @@ import asyncio
 import os
 import stat
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,8 +15,10 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.uploads.layout import conversion_path_for_upload
-from deerflow.uploads.manager import delete_file_safe, publish_upload_bytes_leased
+from deerflow.uploads.lease import UploadNameLease
+from deerflow.uploads.manager import create_upload_staging_file, delete_file_safe, publish_upload_bytes_leased
 
 
 class ChunkedUpload:
@@ -63,6 +66,25 @@ def _fake_owned_conversion(content_by_source: dict[str, str] | None = None):
         return md_path
 
     return fake_convert
+
+
+def test_sandbox_remove_file_uses_provider_virtual_path_resolution():
+    commands: list[str] = []
+
+    class FakeSandbox:
+        @staticmethod
+        def _resolve_path(path: str) -> str:
+            assert path == "/mnt/user-data/uploads/report final.pdf"
+            return "/home/sandbox/uploads/report final.pdf"
+
+        @staticmethod
+        def execute_command(command: str) -> str:
+            commands.append(command)
+            return "__DEERFLOW_REMOVE_FILE_OK__"
+
+    Sandbox.remove_file(FakeSandbox(), "/mnt/user-data/uploads/report final.pdf")
+
+    assert commands == ["rm -f -- '/home/sandbox/uploads/report final.pdf' && printf '%s' __DEERFLOW_REMOVE_FILE_OK__"]
 
 
 def test_cleanup_uses_publication_identity_not_reused_path(tmp_path):
@@ -153,6 +175,116 @@ def test_sandbox_sync_failure_rolls_back_published_generation(tmp_path):
 
     assert exc_info.value.status_code == 500
     assert not (thread_uploads_dir / "notes.txt").exists()
+
+
+def test_partial_sandbox_sync_failure_removes_only_completed_remote_paths(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+    synced_paths: list[str] = []
+
+    def update_file(virtual_path: str, _data: bytes) -> None:
+        if virtual_path.endswith("second.txt"):
+            raise RuntimeError("second sync failed")
+        synced_paths.append(virtual_path)
+
+    sandbox.update_file.side_effect = update_file
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-remote",
+                    request=MagicMock(),
+                    files=[
+                        UploadFile(filename="first.txt", file=BytesIO(b"first")),
+                        UploadFile(filename="second.txt", file=BytesIO(b"second")),
+                    ],
+                    config=SimpleNamespace(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert synced_paths == ["/mnt/user-data/uploads/first.txt"]
+    sandbox.remove_file.assert_called_once_with("/mnt/user-data/uploads/first.txt")
+    assert not (thread_uploads_dir / "first.txt").exists()
+    assert not (thread_uploads_dir / "second.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_remote_sync_still_removes_the_completed_copy(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="remote-1")
+    sandbox = MagicMock()
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+
+    def update_file(_virtual_path: str, _data: bytes) -> None:
+        sync_started.set()
+        assert allow_sync.wait(5)
+
+    sandbox.update_file.side_effect = update_file
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        upload_task = asyncio.create_task(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-remote",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.txt", file=BytesIO(b"payload"))],
+                config=SimpleNamespace(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 5)
+        upload_task.cancel()
+        allow_sync.set()
+        with pytest.raises(asyncio.CancelledError):
+            await upload_task
+
+    sandbox.remove_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt")
+    assert not (thread_uploads_dir / "notes.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_waiting_publication_cannot_starve_lease_release(tmp_path, monkeypatch):
+    import deerflow.utils.file_io as file_io_module
+
+    first = UploadNameLease.acquire(tmp_path, "report.pdf")
+    staged = create_upload_staging_file(tmp_path)
+    staged.handle.write(b"second")
+    single_worker = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(file_io_module, "_FILE_IO_EXECUTOR", single_worker)
+
+    publication_task = asyncio.create_task(uploads._publish_staged_upload_cancellation_safe(staged, "report.pdf"))
+    await asyncio.sleep(0.05)
+    release_task = asyncio.create_task(uploads._run_file_io_cancellation_safe(first.release))
+    second = None
+    try:
+        await asyncio.wait_for(asyncio.shield(release_task), timeout=0.2)
+    finally:
+        if first.is_active:
+            first.release()
+        await release_task
+        second = await asyncio.wait_for(publication_task, timeout=2)
+        second.release()
+        single_worker.shutdown(wait=True)
+
+    assert second.path.name == "report.pdf"
 
 
 def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_path):

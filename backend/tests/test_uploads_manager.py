@@ -17,6 +17,7 @@ from deerflow.uploads.layout import (
     conversion_path_for_upload,
     conversion_virtual_path,
 )
+from deerflow.uploads.lease import UploadNameLease
 from deerflow.uploads.manager import (
     AtomicUploadPublishError,
     PathTraversalError,
@@ -52,6 +53,32 @@ def _delete_upload_in_process(
         errors.put(repr(exc))
     finally:
         finished.set()
+
+
+def _hold_staged_upload_in_process(
+    uploads_dir: str,
+    started: Any,
+    release: Any,
+    staged_paths: Any,
+    errors: Any,
+) -> None:
+    staged = None
+    try:
+        staged = create_upload_staging_file(Path(uploads_dir))
+        staged.handle.write(b"in progress")
+        staged.handle.flush()
+        staged_paths.put(str(staged.path))
+        started.set()
+        if not release.wait(5):
+            raise TimeoutError("parent did not release the staged upload")
+    except BaseException as exc:  # pragma: no cover - surfaced in the parent
+        errors.put(repr(exc))
+    finally:
+        if staged is not None:
+            try:
+                abort_staged_upload(staged)
+            except BaseException as exc:  # pragma: no cover - surfaced in the parent
+                errors.put(repr(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +173,52 @@ class TestValidatePathTraversal:
 
 
 class TestUploadPublication:
+    def test_unrelated_names_that_shared_a_legacy_stripe_do_not_block(self, tmp_path):
+        first = UploadNameLease.acquire(tmp_path, "f0.txt")
+        second = None
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(UploadNameLease.acquire, tmp_path, "f15.txt")
+            second = future.result(timeout=1)
+        finally:
+            first.release()
+            if second is not None:
+                second.release()
+            pool.shutdown()
+
+    def test_windows_lock_retries_until_the_holder_releases(self, monkeypatch):
+        import deerflow.uploads.lease as lease_module
+
+        attempts = 0
+
+        class FakeMsvcrt:
+            LK_NBLCK = 1
+
+            @staticmethod
+            def locking(_fd, mode, _length):
+                nonlocal attempts
+                assert mode == FakeMsvcrt.LK_NBLCK
+                attempts += 1
+                if attempts < 3:
+                    raise OSError(errno.EACCES, "locked")
+
+        class FakeLockFile:
+            @staticmethod
+            def fileno():
+                return 7
+
+            @staticmethod
+            def seek(_offset):
+                return None
+
+        monkeypatch.setattr(lease_module, "fcntl", None)
+        monkeypatch.setattr(lease_module, "msvcrt", FakeMsvcrt, raising=False)
+        monkeypatch.setattr(lease_module.time, "sleep", lambda _seconds: None)
+
+        lease_module._lock_file(FakeLockFile())
+
+        assert attempts == 3
+
     def test_reserved_staging_name_is_rejected_before_stage_creation(self, tmp_path):
         with patch("deerflow.uploads.manager.create_upload_staging_file") as create_stage:
             with pytest.raises(ValueError, match="reserved"):
@@ -282,6 +355,16 @@ class TestUploadPublication:
             abort_staged_upload(staged)
 
         assert not staged.path.exists()
+
+    def test_abort_releases_stage_lease_when_unlink_raises(self, tmp_path):
+        staged = create_upload_staging_file(tmp_path)
+
+        with patch.object(Path, "unlink", autospec=True, side_effect=OSError("unlink failed")):
+            with pytest.raises(OSError, match="unlink failed"):
+                abort_staged_upload(staged)
+
+        assert not staged.lease.is_active
+        staged.path.unlink()
 
     def test_compatibility_wrapper_writes_new_file(self, tmp_path):
         dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
@@ -460,6 +543,50 @@ class TestListFilesInDir:
 
 
 class TestCleanupStaleUploadStagingFiles:
+    def test_skips_stage_held_by_another_process(self, tmp_path):
+        uploads = tmp_path / "threads" / "thread-live" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        context = multiprocessing.get_context("spawn")
+        started = context.Event()
+        release = context.Event()
+        staged_paths = context.Queue()
+        errors = context.Queue()
+        worker = context.Process(
+            target=_hold_staged_upload_in_process,
+            args=(str(uploads), started, release, staged_paths, errors),
+        )
+        worker.start()
+        try:
+            assert started.wait(5)
+            staged_path = Path(staged_paths.get(timeout=1))
+
+            assert cleanup_stale_upload_staging_files(tmp_path) == 0
+            assert staged_path.exists()
+        finally:
+            release.set()
+            worker.join(timeout=5)
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5)
+
+        assert worker.exitcode == 0
+        with pytest.raises(Empty):
+            errors.get_nowait()
+
+    def test_skips_live_stage_and_removes_it_after_lease_is_abandoned(self, tmp_path):
+        uploads = tmp_path / "threads" / "thread-live" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        staged = create_upload_staging_file(uploads)
+        staged.handle.write(b"in progress")
+
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert staged.path.exists()
+
+        staged.handle.close()
+        staged.lease.release()
+        assert cleanup_stale_upload_staging_files(tmp_path) == 1
+        assert not staged.path.exists()
+
     def test_removes_only_stale_staging_files_from_all_upload_layouts(self, tmp_path):
         legacy_uploads = tmp_path / "threads" / "thread-legacy" / "user-data" / "uploads"
         user_uploads = tmp_path / "users" / "owner-1" / "threads" / "thread-owned" / "user-data" / "uploads"

@@ -7,6 +7,7 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from deerflow.uploads.async_helpers import run_upload_lease_io, wait_for_task_completion
 from deerflow.uploads.errors import UnsafeUploadPathError
 from deerflow.uploads.layout import (
     UnsafeConversionPathError,
@@ -118,40 +119,28 @@ async def _prepare_conversion_cancellation_safe(
     publication: PublishedUpload | None,
 ) -> _PreparedConversion:
     prepare_task = asyncio.create_task(
-        asyncio.to_thread(_prepare_conversion, upload_path, publication),
+        run_upload_lease_io(_prepare_conversion, upload_path, publication),
         name=f"prepare-upload-conversion:{upload_path.name}",
     )
-    try:
-        return await asyncio.shield(prepare_task)
-    except asyncio.CancelledError:
-        while not prepare_task.done():
-            try:
-                await asyncio.shield(prepare_task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
+    cancelled = await wait_for_task_completion(prepare_task)
+    if cancelled:
         if not prepare_task.cancelled() and prepare_task.exception() is None:
             cleanup_task = asyncio.create_task(
                 asyncio.to_thread(_discard_prepared_conversion, prepare_task.result()),
                 name=f"discard-upload-conversion:{upload_path.name}",
             )
-            while not cleanup_task.done():
-                try:
-                    await asyncio.shield(cleanup_task)
-                except asyncio.CancelledError:
-                    continue
-        raise
+            await wait_for_task_completion(cleanup_task)
+            cleanup_task.result()
+        raise asyncio.CancelledError
+    return prepare_task.result()
 
 
 async def _run_cleanup_off_thread(function, *args) -> None:
     cleanup_task = asyncio.create_task(asyncio.to_thread(function, *args))
-    while not cleanup_task.done():
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            continue
+    cancelled = await wait_for_task_completion(cleanup_task)
     cleanup_task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def convert_uploaded_file_to_markdown(
@@ -163,16 +152,35 @@ async def convert_uploaded_file_to_markdown(
     prepared = await _prepare_conversion_cancellation_safe(upload_path, publication)
     stage_consumed = False
     try:
-        result = await convert_file_to_markdown(upload_path, output_path=prepared.staged.path)
+        conversion_task = asyncio.create_task(
+            convert_file_to_markdown(upload_path, output_path=prepared.staged.path),
+            name=f"convert-upload:{upload_path.name}",
+        )
+        conversion_cancelled = await wait_for_task_completion(conversion_task)
+        if conversion_cancelled:
+            raise asyncio.CancelledError
+        result = conversion_task.result()
         if result is None:
             await _run_cleanup_off_thread(_abort_stage_without_masking, prepared.staged)
             stage_consumed = True
             return None
-        converted = await asyncio.to_thread(_publish_prepared_conversion, prepared, Path(result))
+        publish_task = asyncio.create_task(
+            asyncio.to_thread(_publish_prepared_conversion, prepared, Path(result)),
+            name=f"publish-upload-conversion:{upload_path.name}",
+        )
+        publish_cancelled = await wait_for_task_completion(publish_task)
+        if publish_cancelled:
+            if not publish_task.cancelled() and publish_task.exception() is None:
+                stage_consumed = True
+            raise asyncio.CancelledError
+        converted = publish_task.result()
         stage_consumed = True
         return converted
     finally:
         if not stage_consumed:
-            await _run_cleanup_off_thread(_abort_stage_without_masking, prepared.staged)
-        if prepared.release_publication:
+            if prepared.release_publication:
+                await _run_cleanup_off_thread(_discard_prepared_conversion, prepared)
+            else:
+                await _run_cleanup_off_thread(_abort_stage_without_masking, prepared.staged)
+        elif prepared.release_publication:
             await _run_cleanup_off_thread(_release_publication_without_masking, prepared.publication)

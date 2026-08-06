@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +16,122 @@ from deerflow.uploads.layout import (
     existing_conversion_path_for_upload,
 )
 from deerflow.uploads.manager import delete_file_safe, publish_upload_bytes, publish_upload_bytes_leased
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_converter_before_cleanup_and_lease_release(tmp_path):
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    upload = publish_upload_bytes(uploads, "report.pdf", b"OLD")
+    converter_started = threading.Event()
+    allow_converter = threading.Event()
+
+    def paused_sync_convert(_source, output_path):
+        converter_started.set()
+        assert allow_converter.wait(5)
+        output_path.write_text("converted", encoding="utf-8")
+        return output_path
+
+    with patch("deerflow.utils.file_conversion._convert_file_to_markdown_sync", side_effect=paused_sync_convert):
+        conversion = asyncio.create_task(convert_uploaded_file_to_markdown(upload))
+        assert await asyncio.to_thread(converter_started.wait, 5)
+        conversion.cancel()
+        deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, upload.name))
+        await asyncio.sleep(0.05)
+        assert not conversion.done()
+        assert not deletion.done()
+        allow_converter.set()
+        with pytest.raises(asyncio.CancelledError):
+            await conversion
+        await deletion
+
+    conversion_dir = uploads.parent / ".upload-conversions"
+    assert not list(conversion_dir.glob(".upload-*.part"))
+    assert not conversion_path_for_upload(upload).exists()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_conversion_publication_worker(tmp_path):
+    import deerflow.uploads.conversion as conversion_module
+
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    upload = publish_upload_bytes(uploads, "report.pdf", b"OLD")
+    publish_started = threading.Event()
+    allow_publish = threading.Event()
+    real_publish = conversion_module._publish_prepared_conversion
+
+    async def fake_convert(_source, output_path=None):
+        output_path.write_text("converted", encoding="utf-8")
+        return output_path
+
+    def paused_publish(prepared, result):
+        publish_started.set()
+        assert allow_publish.wait(5)
+        return real_publish(prepared, result)
+
+    with (
+        patch("deerflow.uploads.conversion.convert_file_to_markdown", side_effect=fake_convert),
+        patch("deerflow.uploads.conversion._publish_prepared_conversion", side_effect=paused_publish),
+    ):
+        conversion = asyncio.create_task(convert_uploaded_file_to_markdown(upload))
+        assert await asyncio.to_thread(publish_started.wait, 5)
+        conversion.cancel()
+        deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, upload.name))
+        await asyncio.sleep(0.05)
+        assert not conversion.done()
+        assert not deletion.done()
+        allow_publish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await conversion
+        await deletion
+
+    assert not conversion_path_for_upload(upload).exists()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_still_releases_standalone_conversion_lease(tmp_path):
+    import deerflow.uploads.conversion as conversion_module
+
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    upload = publish_upload_bytes(uploads, "report.pdf", b"OLD")
+    converter_started = asyncio.Event()
+    allow_converter = asyncio.Event()
+    cleanup_started = threading.Event()
+    allow_cleanup = threading.Event()
+    real_abort = conversion_module._abort_stage_without_masking
+
+    async def paused_convert(_source, output_path=None):
+        converter_started.set()
+        await allow_converter.wait()
+        output_path.write_text("converted", encoding="utf-8")
+        return output_path
+
+    def paused_abort(staged):
+        cleanup_started.set()
+        assert allow_cleanup.wait(5)
+        real_abort(staged)
+
+    with (
+        patch("deerflow.uploads.conversion.convert_file_to_markdown", side_effect=paused_convert),
+        patch("deerflow.uploads.conversion._abort_stage_without_masking", side_effect=paused_abort),
+    ):
+        conversion = asyncio.create_task(convert_uploaded_file_to_markdown(upload))
+        await converter_started.wait()
+        conversion.cancel()
+        allow_converter.set()
+        assert await asyncio.to_thread(cleanup_started.wait, 5)
+        conversion.cancel()
+        deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, upload.name))
+        await asyncio.sleep(0.05)
+        assert not deletion.done()
+        allow_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await conversion
+        await asyncio.wait_for(deletion, timeout=2)
+
+    assert not conversion_path_for_upload(upload).exists()
 
 
 @pytest.mark.asyncio

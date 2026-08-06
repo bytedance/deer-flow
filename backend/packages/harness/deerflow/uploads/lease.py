@@ -1,15 +1,18 @@
 """Cross-process leases and inode identities for published uploads."""
 
+import errno
 import hashlib
+import logging
 import os
 import stat
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
 from deerflow.uploads.errors import UnsafeUploadPathError
-from deerflow.uploads.layout import ensure_upload_lock_dir
+from deerflow.uploads.layout import UPLOAD_CONVERSIONS_DIRNAME, ensure_upload_lock_dir, ensure_upload_stage_lock_dir
 
 try:
     import fcntl
@@ -17,8 +20,49 @@ except ImportError:  # pragma: no cover - Windows only
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
+logger = logging.getLogger(__name__)
 
-_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
+
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass(slots=True)
+class _ThreadLockEntry:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    references: int = 0
+
+
+_THREAD_LOCKS: dict[tuple[int, int, str], _ThreadLockEntry] = {}
+
+
+def _acquire_thread_lock(uploads_dir: Path, filename: str) -> tuple[tuple[int, int, str], _ThreadLockEntry]:
+    directory_stat = os.lstat(uploads_dir)
+    if stat.S_ISLNK(directory_stat.st_mode) or not stat.S_ISDIR(directory_stat.st_mode):
+        raise UnsafeUploadPathError("Unsafe upload lease directory")
+    key = (directory_stat.st_dev, directory_stat.st_ino, filename)
+    with _THREAD_LOCKS_GUARD:
+        entry = _THREAD_LOCKS.get(key)
+        if entry is None:
+            entry = _ThreadLockEntry()
+            _THREAD_LOCKS[key] = entry
+        entry.references += 1
+    try:
+        entry.lock.acquire()
+    except BaseException:
+        with _THREAD_LOCKS_GUARD:
+            entry.references -= 1
+            if entry.references == 0 and _THREAD_LOCKS.get(key) is entry:
+                del _THREAD_LOCKS[key]
+        raise
+    return key, entry
+
+
+def _release_thread_lock(key: tuple[int, int, str], entry: _ThreadLockEntry) -> None:
+    entry.lock.release()
+    with _THREAD_LOCKS_GUARD:
+        entry.references -= 1
+        if entry.references == 0 and _THREAD_LOCKS.get(key) is entry:
+            del _THREAD_LOCKS[key]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +116,15 @@ def _lock_file(lock_file: BinaryIO) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         return
-    lock_file.seek(0)
-    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    while True:
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            time.sleep(0.05)
 
 
 def _unlock_file(lock_file: BinaryIO) -> None:
@@ -84,6 +135,116 @@ def _unlock_file(lock_file: BinaryIO) -> None:
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
+def _try_lock_file(lock_file: BinaryIO) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+        return True
+    lock_file.seek(0)
+    try:
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            return False
+        raise
+    return True
+
+
+def _stage_uploads_dir(stage_dir: Path) -> Path:
+    if stage_dir.name == UPLOAD_CONVERSIONS_DIRNAME:
+        return stage_dir.parent / "uploads"
+    return stage_dir
+
+
+def _stage_lock_path(stage_dir: Path, stage_filename: str) -> Path:
+    digest = hashlib.sha256(f"{stage_dir.name}\0{stage_filename}".encode()).hexdigest()
+    return ensure_upload_stage_lock_dir(_stage_uploads_dir(stage_dir)) / f"{digest}.lock"
+
+
+@dataclass(slots=True)
+class UploadStageLease:
+    """Cross-process liveness lease for one hidden upload staging file."""
+
+    stage_dir: Path
+    stage_filename: str
+    lock_path: Path
+    _lock_file: BinaryIO
+    _identity: UploadIdentity
+    _active: bool = True
+    _state_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @classmethod
+    def acquire(cls, stage_dir: Path, stage_filename: str) -> "UploadStageLease":
+        lock_path = _stage_lock_path(Path(stage_dir), stage_filename)
+        lock_file = _open_lock_file(lock_path)
+        try:
+            _lock_file(lock_file)
+            return cls(
+                stage_dir=Path(stage_dir),
+                stage_filename=stage_filename,
+                lock_path=lock_path,
+                _lock_file=lock_file,
+                _identity=UploadIdentity.from_path(lock_path),
+            )
+        except BaseException:
+            lock_file.close()
+            raise
+
+    @classmethod
+    def try_acquire(cls, stage_dir: Path, stage_filename: str) -> "UploadStageLease | None":
+        lock_path = _stage_lock_path(Path(stage_dir), stage_filename)
+        lock_file = _open_lock_file(lock_path)
+        try:
+            if not _try_lock_file(lock_file):
+                lock_file.close()
+                return None
+            return cls(
+                stage_dir=Path(stage_dir),
+                stage_filename=stage_filename,
+                lock_path=lock_path,
+                _lock_file=lock_file,
+                _identity=UploadIdentity.from_path(lock_path),
+            )
+        except BaseException:
+            lock_file.close()
+            raise
+
+    @property
+    def is_active(self) -> bool:
+        with self._state_lock:
+            return self._active
+
+    def _remove_matching_lock_file(self) -> None:
+        try:
+            if self._identity.matches(self.lock_path):
+                self.lock_path.unlink(missing_ok=True)
+        except BaseException:
+            logger.warning("Failed to remove upload stage liveness file: %s", self.lock_path, exc_info=True)
+
+    def release(self) -> None:
+        with self._state_lock:
+            if not self._active:
+                return
+            if fcntl is not None:
+                self._remove_matching_lock_file()
+            try:
+                _unlock_file(self._lock_file)
+            except BaseException:
+                logger.warning("Failed to unlock upload stage liveness file: %s", self.lock_path, exc_info=True)
+            try:
+                self._lock_file.close()
+            except BaseException:
+                logger.warning("Failed to close upload stage liveness file: %s", self.lock_path, exc_info=True)
+            finally:
+                self._active = False
+            if fcntl is None:
+                self._remove_matching_lock_file()
+
+
 @dataclass(slots=True)
 class UploadNameLease:
     """Exclusive thread-and-process lease for one actual upload filename."""
@@ -92,7 +253,8 @@ class UploadNameLease:
     filename: str
     lock_path: Path
     _lock_file: BinaryIO
-    _stripe: threading.Lock
+    _thread_lock_key: tuple[int, int, str]
+    _thread_lock_entry: _ThreadLockEntry
     _active: bool = True
     _state_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -104,25 +266,26 @@ class UploadNameLease:
         if len(filename.encode("utf-8")) > 255:
             raise UnsafeUploadPathError("Upload lease filename is too long")
 
+        uploads_dir = Path(uploads_dir)
         digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
-        stripe = _LOCK_STRIPES[int(digest[:2], 16) % len(_LOCK_STRIPES)]
-        stripe.acquire()
+        thread_lock_key, thread_lock_entry = _acquire_thread_lock(uploads_dir, filename)
         lock_file: BinaryIO | None = None
         try:
-            lock_path = ensure_upload_lock_dir(Path(uploads_dir)) / f"{digest}.lock"
+            lock_path = ensure_upload_lock_dir(uploads_dir) / f"{digest}.lock"
             lock_file = _open_lock_file(lock_path)
             _lock_file(lock_file)
             return cls(
-                uploads_dir=Path(uploads_dir),
+                uploads_dir=uploads_dir,
                 filename=filename,
                 lock_path=lock_path,
                 _lock_file=lock_file,
-                _stripe=stripe,
+                _thread_lock_key=thread_lock_key,
+                _thread_lock_entry=thread_lock_entry,
             )
         except BaseException:
             if lock_file is not None:
                 lock_file.close()
-            stripe.release()
+            _release_thread_lock(thread_lock_key, thread_lock_entry)
             raise
 
     @property
@@ -132,7 +295,7 @@ class UploadNameLease:
             return self._active
 
     def release(self) -> None:
-        """Release the OS lock and process stripe; repeated calls are harmless."""
+        """Release the OS and exact-name thread locks; repeated calls are harmless."""
         with self._state_lock:
             if not self._active:
                 return
@@ -148,7 +311,7 @@ class UploadNameLease:
                     error = exc
             finally:
                 self._active = False
-                self._stripe.release()
+                _release_thread_lock(self._thread_lock_key, self._thread_lock_entry)
             if error is not None:
                 raise error
 

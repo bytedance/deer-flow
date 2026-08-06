@@ -1,7 +1,13 @@
 """Cancellation-safe async adapters for blocking upload publication APIs."""
 
 import asyncio
+import atexit
+import contextvars
+import functools
 import logging
+import os
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from deerflow.uploads.manager import (
@@ -12,22 +18,39 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 
+_UPLOAD_LEASE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=min(32, (os.cpu_count() or 1) + 4),
+    thread_name_prefix="upload-lease-wait",
+)
+atexit.register(_UPLOAD_LEASE_EXECUTOR.shutdown, wait=False, cancel_futures=True)
+
+
+async def run_upload_lease_io[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run work that may wait for an upload lease outside general I/O pools."""
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    call = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(_UPLOAD_LEASE_EXECUTOR, context.run, call)
+
+
+async def wait_for_task_completion(task: asyncio.Task) -> bool:
+    """Drain *task* despite cancellation and report whether cancellation arrived."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except BaseException:
+            break
+    return cancelled
+
 
 def _rollback_and_release(publication: PublishedUpload) -> None:
     try:
         rollback_published_upload(publication)
     finally:
         publication.release()
-
-
-async def _drain_task(task: asyncio.Task) -> None:
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            continue
-        except BaseException:
-            break
 
 
 async def publish_upload_bytes_leased_async(
@@ -37,19 +60,19 @@ async def publish_upload_bytes_leased_async(
 ) -> PublishedUpload:
     """Publish bytes off-thread without leaking a lease when cancelled."""
     publish_task = asyncio.create_task(
-        asyncio.to_thread(publish_upload_bytes_leased, base_dir, preferred_filename, data),
+        run_upload_lease_io(publish_upload_bytes_leased, base_dir, preferred_filename, data),
         name=f"publish-upload:{preferred_filename}",
     )
     try:
         return await asyncio.shield(publish_task)
     except asyncio.CancelledError:
-        await _drain_task(publish_task)
+        await wait_for_task_completion(publish_task)
         if not publish_task.cancelled() and publish_task.exception() is None:
             cleanup_task = asyncio.create_task(
                 asyncio.to_thread(_rollback_and_release, publish_task.result()),
                 name=f"rollback-cancelled-upload:{preferred_filename}",
             )
-            await _drain_task(cleanup_task)
+            await wait_for_task_completion(cleanup_task)
             try:
                 cleanup_task.result()
             except Exception:
@@ -63,12 +86,7 @@ async def release_published_upload_async(publication: PublishedUpload) -> None:
         asyncio.to_thread(publication.release),
         name=f"release-upload:{publication.path.name}",
     )
-    cancelled = False
-    while not release_task.done():
-        try:
-            await asyncio.shield(release_task)
-        except asyncio.CancelledError:
-            cancelled = True
+    cancelled = await wait_for_task_completion(release_task)
     release_task.result()
     if cancelled:
         raise asyncio.CancelledError

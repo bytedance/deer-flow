@@ -10,6 +10,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 
 UPLOAD_CONVERSIONS_DIRNAME = ".upload-conversions"
 UPLOAD_LOCKS_DIRNAME = ".locks"
+UPLOAD_STAGE_LOCKS_DIRNAME = "stages"
 
 
 class UnsafeConversionPathError(ValueError):
@@ -89,6 +90,23 @@ def ensure_upload_lock_dir(uploads_dir: Path) -> Path:
     if stat.S_ISLNK(lock_stat.st_mode) or not stat.S_ISDIR(lock_stat.st_mode):
         raise UnsafeConversionPathError("Unsafe upload lock directory")
     return lock_dir
+
+
+def ensure_upload_stage_lock_dir(uploads_dir: Path) -> Path:
+    """Create and validate the liveness-lock directory for upload stages."""
+    lock_dir = ensure_upload_lock_dir(uploads_dir)
+    stage_lock_dir = lock_dir / UPLOAD_STAGE_LOCKS_DIRNAME
+    try:
+        stage_lock_dir.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    try:
+        stage_lock_stat = os.lstat(stage_lock_dir)
+    except FileNotFoundError as exc:
+        raise UnsafeConversionPathError("Upload stage lock directory disappeared") from exc
+    if stat.S_ISLNK(stage_lock_stat.st_mode) or not stat.S_ISDIR(stage_lock_stat.st_mode):
+        raise UnsafeConversionPathError("Unsafe upload stage lock directory")
+    return stage_lock_dir
 
 
 def existing_conversion_path_for_upload(upload_path: Path) -> Path | None:
