@@ -636,7 +636,9 @@ Content-Type: multipart/form-data
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-All upload entry points publish complete payloads without replacing an existing name. Concurrent collisions are returned as `document.pdf`, `document_1.pdf`, `document_2.pdf`, and so on. Generated Markdown is stored outside the primary namespace and is not returned by the list endpoint. Deleting `document.pdf` also deletes only `.upload-conversions/document.pdf.md`; an independent `uploads/document.md` is preserved.
+All upload entry points publish complete payloads without replacing an existing name. Concurrent collisions are returned as `document.pdf`, `document_1.pdf`, `document_2.pdf`, and so on. A published filename remains leased through conversion, permission adjustment, sandbox synchronization, and response construction; deletion of that exact filename waits for the active lifecycle, while other filenames remain independent. Basenames matching the internal `.upload-*.part` staging pattern are rejected.
+
+Generated Markdown is stored outside the primary namespace and is not returned by the list endpoint. Normal conversion names are `<actual-primary-filename>.md`; if that component would exceed 255 UTF-8 bytes, the response contains a deterministic UTF-8-safe prefix plus the full SHA-256 digest and `.md`. Clients must consume the returned `markdown_*` fields rather than derive the path. Local and AIO sandboxes mount `.upload-conversions` read-only. Deleting `document.pdf` also deletes only its exact generated conversion; an independent `uploads/document.md` is preserved.
 
 #### List Uploaded Files
 
@@ -675,6 +677,10 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
   "message": "Deleted document.pdf"
 }
 ```
+
+If an upload, conversion, or sandbox synchronization still owns this exact filename, the
+delete waits for that lifecycle to finish before removing the primary and its generated
+conversion. Work on unrelated filenames is not serialized.
 
 ### Thread Cleanup
 

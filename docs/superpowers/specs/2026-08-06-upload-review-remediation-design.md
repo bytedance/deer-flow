@@ -2,7 +2,7 @@
 
 **Issue:** #3750
 **PR:** #4704
-**Status:** Written specification approved; implementation in progress
+**Status:** Implemented; awaiting independent review
 **Scope:** Findings from the independent review of the collision-safe upload implementation
 
 ## Problem
@@ -139,7 +139,7 @@ Normal conversion targets remain `<actual-primary-filename>.md`. If that compone
 exceed 255 UTF-8 bytes, the layout helper uses:
 
 ```text
-<utf8-safe-truncated-primary>.<sha256-prefix>.md
+<utf8-safe-truncated-primary>.<full-sha256>.md
 ```
 
 The digest makes the shortened mapping deterministic and collision-resistant; all response,

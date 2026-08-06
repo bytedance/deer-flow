@@ -1,7 +1,7 @@
 # Upload Collision Safety Design
 
 **Issue:** #3750
-**Status:** Approved
+**Status:** Implemented; awaiting independent review
 **Scope:** Gateway uploads, embedded client uploads, inbound IM attachments, generated Markdown conversions, outline lookup, and upload deletion
 
 ## Problem
@@ -52,6 +52,10 @@ Generated Markdown is stored outside the primary upload namespace:
 <thread>/user-data/.upload-conversions/<actual-primary-filename>.md
 ```
 
+If the normal generated component would exceed 255 UTF-8 bytes, the filename is
+`<utf8-safe-truncated-primary>.<full-sha256>.md`. Every response, outline, deletion, and
+virtual-path caller uses the shared layout helper and therefore receives the same target.
+
 Examples:
 
 ```text
@@ -73,8 +77,8 @@ Candidate suffixes are inserted before the final suffix, matching the current na
 behavior: `archive.tar.gz` becomes `archive.tar_1.gz`, a name without an extension becomes
 `name_1`, and `.env` becomes `.env_1`.
 
-A small upload-layout module will own construction of physical paths, virtual paths, and
-artifact URLs. Callers will not assemble conversion paths or guess sibling names.
+A small upload-layout module owns construction of physical paths, virtual paths, and
+artifact URLs. Callers do not assemble conversion paths or guess sibling names.
 
 ## Atomic Publication
 
@@ -101,7 +105,10 @@ naming mechanism.
 
 The publisher returns the actual filename chosen. Gateway, embedded client, generic IM,
 Feishu, DingTalk, and WeChat download staging all use it instead of implementing their
-own scan-then-write flow.
+own scan-then-write flow. Names matching `.upload-*.part` are rejected before staging.
+Lifecycle-aware callers retain an exclusive per-name lease through later conversion,
+permission, sandbox synchronization, and response work. Stable digest-named lock files
+under `.upload-conversions/.locks/` coordinate both threads and processes.
 
 ## Conversion Publication and Ownership
 
@@ -125,7 +132,8 @@ not fall back to `<stem>.md`, because that would reintroduce ambiguous ownership
 
 ## Deletion
 
-Deleting an upload performs these exact operations:
+Deleting an upload acquires the same actual-name lease, waiting only for work on that
+filename, and then performs these exact operations:
 
 1. Validate and remove `uploads/<actual-primary-filename>` without following symlinks.
 2. Derive and remove `.upload-conversions/<actual-primary-filename>.md`.
@@ -168,8 +176,9 @@ parallel messages cannot overwrite one another before the thread upload copy occ
 ### Sandbox synchronization
 
 The existing primary upload sync remains unchanged. Generated conversion sync uses its
-exact virtual path under `/mnt/user-data/.upload-conversions/`. Mounted providers need no
-copy; non-mounted providers sync the exact file explicitly.
+exact virtual path under `/mnt/user-data/.upload-conversions/`. Local and AIO providers
+mount that namespace explicitly read-only; non-mounted providers sync the exact file
+explicitly.
 
 ## Error Handling
 
@@ -185,7 +194,7 @@ copy; non-mounted providers sync the exact file explicitly.
 - Existing primary upload URLs and virtual paths remain unchanged.
 - New conversions receive a different virtual path. Responses return the exact path;
   clients must consume it instead of deriving a sibling name. Documentation and tests
-  will make this contract explicit.
+  make this contract explicit.
 - Upload listings continue to show only primary uploads.
 - Legacy sibling conversions remain readable as ordinary uploads but are not treated as
   generated assets and are never automatically deleted.

@@ -961,7 +961,9 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
-Uploads from the Web UI, embedded client, and IM channels share one collision-safe storage rule. A completed payload is published only if its candidate name does not exist; concurrent `report.pdf` uploads become `report.pdf`, `report_1.pdf`, `report_2.pdf`, and so on without replacing one another. Optional document conversions are system-owned assets under `/mnt/user-data/.upload-conversions/<actual-upload-name>.md`. They are returned through the upload response but omitted from the primary upload listing. Deleting a primary removes only its exact generated asset and never infers that a user-uploaded sibling such as `uploads/report.md` is disposable.
+Uploads from the Web UI, embedded client, and IM channels share one collision-safe storage rule. A completed payload is published only if its candidate name does not exist; concurrent `report.pdf` uploads become `report.pdf`, `report_1.pdf`, `report_2.pdf`, and so on without replacing one another. The selected name is leased through conversion and sandbox synchronization, so deleting that exact name waits for its active upload lifecycle while unrelated filenames continue concurrently. Internal staging names matching `.upload-*.part` are rejected.
+
+Optional document conversions are system-owned assets under `/mnt/user-data/.upload-conversions/`. Normal targets use `<actual-upload-name>.md`; names that would exceed the filesystem component limit use a deterministic UTF-8-safe prefix plus the full SHA-256 digest. The exact generated path is returned through the upload response and omitted from the primary upload listing. Local and AIO sandboxes expose this namespace read-only. Deleting a primary removes only its exact generated asset and never infers that a user-uploaded sibling such as `uploads/report.md` is disposable.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
@@ -993,7 +995,7 @@ This is the difference between a chatbot with tool access and an agent with an a
 # Paths inside the sandbox container
 /mnt/user-data/
 ├── uploads/               ← your primary files
-├── .upload-conversions/   ← generated Markdown (hidden from upload listings)
+├── .upload-conversions/   ← generated Markdown (read-only; hidden from upload listings)
 ├── workspace/             ← agents' working directory
 └── outputs/               ← final deliverables
 ```

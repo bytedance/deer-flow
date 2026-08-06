@@ -52,7 +52,9 @@ POST /api/threads/{thread_id}/uploads
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
 
-所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。
+所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。系统内部保留 `.upload-*.part` 作为暂存命名空间，用户上传使用该模式的 basename 会在创建暂存文件前被拒绝。
+
+实际发布名会在转换、权限调整、沙箱同步和响应构造期间持有同名租约。删除该名称会等待当前生命周期完成；其他文件名仍可并发处理。跨进程协调使用 `.upload-conversions/.locks/` 下稳定保留的摘要锁文件，该目录属于内部实现，不应由 Agent 或部署脚本修改或清理。
 
 ### 2. 查询上传限制
 ```
@@ -108,7 +110,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
-删除 `document.pdf` 时，只会额外删除它精确拥有的 `.upload-conversions/document.pdf.md`。系统不会推断或删除 `uploads/document.md`；该文件可能是用户独立上传的内容。
+删除 `document.pdf` 时，会先等待该实际文件名当前正在进行的上传、转换或沙箱同步生命周期结束，然后只额外删除它精确拥有的生成资产。系统不会推断或删除 `uploads/document.md`；该文件可能是用户独立上传的内容。其他文件名不会被这次等待阻塞。
 
 ## 支持的文档格式
 
@@ -127,6 +129,8 @@ Collision: report.pdf, report_1.pdf, report_2.pdf
 Deletion:  删除 report.pdf 时只删除 .upload-conversions/report.pdf.md；
            /mnt/user-data/uploads/report.md 永远不会被推断为生成文件或自动删除。
 ```
+
+通常生成名为 `<实际主文件名>.md`。如果这一文件名组件会超过 255 个 UTF-8 字节，系统会使用 UTF-8 安全截断的主文件名前缀、完整 SHA-256 摘要和 `.md`，并在响应中返回精确的 `markdown_*` 路径。客户端和 Agent 不应自行拼接生成路径。Local 与 AIO 沙箱都将 `.upload-conversions` 显式挂载为只读；只有 DeerFlow 宿主进程中的转换代码可以写入生成文件和内部锁。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -177,6 +181,7 @@ read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 上传流程采用“线程目录优先”策略：
 - 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
 - 本地沙箱（`sandbox_id=local`）直接使用线程目录内容
+- Local 与 AIO 的挂载模式会把 `/mnt/user-data/.upload-conversions` 单独映射为只读，即使 `/mnt/user-data` 或主上传目录可写
 - 默认情况下，非本地沙箱通过 `acquire_async` 获取后，再额外同步到 `/mnt/user-data/uploads/*`，确保运行时可见
 - 如果 Gateway 与远端沙箱保证挂载同一份线程 user-data（例如正确对齐的共享 PVC、NFS 或 hostPath），可设置 `sandbox.thread_data_mounts: true`；上传路由会跳过 sandbox acquire 和逐文件同步
 - 不确定挂载关系时应省略该配置并保留自动检测。错误地设为 `true` 会导致文件只存在于 Gateway 存储、沙箱内不可见
