@@ -238,8 +238,17 @@ def publish_staged_upload_leased(staged: StagedUpload, preferred_filename: str) 
     _validate_staged_upload(staged)
     staged_identity = UploadIdentity.from_path(staged.path)
     for candidate_name in _filename_candidates(safe_name):
-        lease = UploadNameLease.acquire(staged.base_dir, candidate_name)
         candidate = staged.base_dir / candidate_name
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            pass
+        else:
+            # A visible entry cannot be published to, so skip it before taking
+            # its lease. This also lets one multi-file request retain the first
+            # generation's lease while choosing a suffix for a duplicate name.
+            continue
+        lease = UploadNameLease.acquire(staged.base_dir, candidate_name)
         linked = False
         try:
             try:

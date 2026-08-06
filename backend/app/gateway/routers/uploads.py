@@ -1,5 +1,6 @@
 """Upload router for handling file uploads."""
 
+import asyncio
 import logging
 import os
 import stat
@@ -18,6 +19,7 @@ from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
 from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
     PathTraversalError,
+    PublishedUpload,
     StagedUpload,
     abort_staged_upload,
     create_upload_staging_file,
@@ -27,7 +29,8 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
-    publish_staged_upload,
+    publish_staged_upload_leased,
+    rollback_published_upload,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -159,14 +162,77 @@ def _get_upload_limits(app_config: AppConfig) -> UploadLimits:
     )
 
 
-def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
-    for path in reversed(paths):
+def _cleanup_published_uploads(
+    publications: list[PublishedUpload],
+    generated_paths: list[os.PathLike[str] | str],
+) -> None:
+    for path in reversed(generated_paths):
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
         except Exception:
-            logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
+            logger.warning("Failed to clean up generated upload path after rejected request: %s", path, exc_info=True)
+    for publication in reversed(publications):
+        try:
+            rollback_published_upload(publication)
+        except Exception:
+            logger.warning("Failed to roll back published upload after rejected request: %s", publication.path, exc_info=True)
+
+
+def _release_publications(publications: list[PublishedUpload]) -> None:
+    for publication in reversed(publications):
+        try:
+            publication.release()
+        except Exception:
+            logger.warning("Failed to release published upload lease: %s", publication.path, exc_info=True)
+
+
+def _rollback_and_release_publication(publication: PublishedUpload) -> None:
+    try:
+        rollback_published_upload(publication)
+    finally:
+        publication.release()
+
+
+async def _run_file_io_cancellation_safe(function, *args):
+    task = asyncio.create_task(run_file_io(function, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _publish_staged_upload_cancellation_safe(staged: StagedUpload, filename: str) -> PublishedUpload:
+    publish_task = asyncio.create_task(run_file_io(publish_staged_upload_leased, staged, filename))
+    try:
+        return await asyncio.shield(publish_task)
+    except asyncio.CancelledError:
+        while not publish_task.done():
+            try:
+                await asyncio.shield(publish_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not publish_task.cancelled() and publish_task.exception() is None:
+            cleanup_task = asyncio.create_task(run_file_io(_rollback_and_release_publication, publish_task.result()))
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+            try:
+                cleanup_task.result()
+            except Exception:
+                logger.warning("Failed to roll back a cancelled upload publication", exc_info=True)
+        raise
 
 
 def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
@@ -203,7 +269,7 @@ async def _write_upload_file_with_limits(
     max_single_file_size: int,
     max_total_size: int,
     total_size: int,
-) -> tuple[os.PathLike[str] | str, int, int]:
+) -> tuple[PublishedUpload, int, int]:
     file_size = 0
     upload_temp: StagedUpload | None = None
     try:
@@ -217,13 +283,13 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail="Total upload size too large")
             await run_file_io(upload_temp.handle.write, chunk)
 
-        file_path = await run_file_io(publish_staged_upload, upload_temp, display_filename)
+        publication = await _publish_staged_upload_cancellation_safe(upload_temp, display_filename)
         upload_temp = None
-    except Exception:
+    except BaseException:
         if upload_temp is not None:
-            await run_file_io(abort_staged_upload, upload_temp)
+            await _run_file_io_cancellation_safe(abort_staged_upload, upload_temp)
         raise
-    return file_path, file_size, total_size
+    return publication, file_size, total_size
 
 
 def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
@@ -264,7 +330,8 @@ async def upload_files(
         raise HTTPException(status_code=400, detail=str(e))
     sandbox_uploads = uploads_dir
     uploaded_files = []
-    written_paths = []
+    publications: list[PublishedUpload] = []
+    generated_paths: list[Path] = []
     sandbox_sync_targets = []
     skipped_files = []
     total_size = 0
@@ -277,19 +344,21 @@ async def upload_files(
         if sandbox is None:
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
+    current_filename = "request"
 
-    for file in files:
-        if not file.filename:
-            continue
+    try:
+        for file in files:
+            if not file.filename:
+                continue
+            current_filename = file.filename
 
-        try:
-            original_filename = normalize_filename(file.filename)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
+            try:
+                original_filename = normalize_filename(file.filename)
+            except ValueError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
 
-        try:
-            file_path, file_size, total_size = await _write_upload_file_with_limits(
+            publication, file_size, total_size = await _write_upload_file_with_limits(
                 file,
                 uploads_dir=uploads_dir,
                 display_filename=original_filename,
@@ -297,9 +366,9 @@ async def upload_files(
                 max_total_size=limits.max_total_size,
                 total_size=total_size,
             )
-            written_paths.append(file_path)
-            safe_filename = Path(file_path).name
-
+            publications.append(publication)
+            file_path = publication.path
+            safe_filename = file_path.name
             virtual_path = upload_virtual_path(safe_filename)
 
             if sync_to_sandbox:
@@ -320,12 +389,12 @@ async def upload_files(
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
                 try:
-                    md_path = await convert_uploaded_file_to_markdown(file_path)
+                    md_path = await convert_uploaded_file_to_markdown(file_path, publication=publication)
                 except Exception:
                     logger.warning("Failed to convert uploaded file: %s", file_path, exc_info=True)
                     md_path = None
                 if md_path:
-                    written_paths.append(md_path)
+                    generated_paths.append(md_path)
                     md_virtual_path = conversion_virtual_path(safe_filename)
 
                     if sync_to_sandbox:
@@ -338,37 +407,37 @@ async def upload_files(
 
             uploaded_files.append(file_info)
 
-        except HTTPException as e:
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise e
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+        # Uploaded files are created with 0o600 permissions (owner read/write only).
+        # Always add group/other read bits before mounted or explicit sandbox use.
+        postprocess_paths = [publication.path for publication in publications] + generated_paths
+        await _run_file_io_cancellation_safe(_make_uploaded_paths_sandbox_readable, postprocess_paths)
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
+        if sync_to_sandbox:
+            for file_path, virtual_path in sandbox_sync_targets:
+                await _run_file_io_cancellation_safe(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
 
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
+        message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+        if skipped_files:
+            message += f"; skipped {len(skipped_files)} unsafe file(s)"
 
-    message = f"Successfully uploaded {len(uploaded_files)} file(s)"
-    if skipped_files:
-        message += f"; skipped {len(skipped_files)} unsafe file(s)"
-
-    return UploadResponse(
-        success=not skipped_files,
-        files=uploaded_files,
-        message=message,
-        skipped_files=skipped_files,
-    )
+        return UploadResponse(
+            success=not skipped_files,
+            files=uploaded_files,
+            message=message,
+            skipped_files=skipped_files,
+        )
+    except HTTPException:
+        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        raise
+    except Exception as exc:
+        logger.error("Failed to upload %s: %s", current_filename, exc)
+        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        raise HTTPException(status_code=500, detail=f"Failed to upload {current_filename}: {str(exc)}") from exc
+    except BaseException:
+        await _run_file_io_cancellation_safe(_cleanup_published_uploads, publications, generated_paths)
+        raise
+    finally:
+        await _run_file_io_cancellation_safe(_release_publications, publications)
 
 
 @router.get("/limits", response_model=UploadLimits)

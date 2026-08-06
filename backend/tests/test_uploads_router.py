@@ -1,6 +1,7 @@
 import asyncio
 import os
 import stat
+import threading
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.uploads.layout import conversion_path_for_upload
+from deerflow.uploads.manager import delete_file_safe, publish_upload_bytes_leased
 
 
 class ChunkedUpload:
@@ -47,7 +49,10 @@ def _symlink_to_or_skip(link_path: Path, target_path: Path) -> None:
 
 
 def _fake_owned_conversion(content_by_source: dict[str, str] | None = None):
-    async def fake_convert(file_path: Path) -> Path:
+    async def fake_convert(file_path: Path, *, publication=None) -> Path:
+        assert publication is not None
+        assert publication.path == file_path
+        assert publication.is_active
         md_path = conversion_path_for_upload(file_path)
         md_path.parent.mkdir(parents=True, exist_ok=True)
         if content_by_source is not None and file_path.name in content_by_source:
@@ -58,6 +63,96 @@ def _fake_owned_conversion(content_by_source: dict[str, str] | None = None):
         return md_path
 
     return fake_convert
+
+
+def test_cleanup_uses_publication_identity_not_reused_path(tmp_path):
+    publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+    try:
+        publication.path.unlink()
+        publication.path.write_bytes(b"new")
+
+        uploads._cleanup_published_uploads([publication], [])
+
+        assert (tmp_path / "report.pdf").read_bytes() == b"new"
+    finally:
+        publication.release()
+
+
+def test_upload_lease_is_held_through_response_postprocessing(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    postprocess_started = threading.Event()
+    allow_postprocess = threading.Event()
+
+    def pause_postprocessing(paths):
+        postprocess_started.set()
+        assert allow_postprocess.wait(5)
+
+    async def run_lifecycle():
+        upload_task = asyncio.create_task(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))],
+                config=SimpleNamespace(),
+            )
+        )
+        assert await asyncio.to_thread(postprocess_started.wait, 5)
+        deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, thread_uploads_dir, "report.pdf"))
+        await asyncio.sleep(0.05)
+        assert not deletion.done()
+        allow_postprocess.set()
+        result = await upload_task
+        await deletion
+        return result
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_uploaded_file_to_markdown",
+            AsyncMock(side_effect=_fake_owned_conversion({"report.pdf": "converted"})),
+        ),
+        patch.object(uploads, "_make_uploaded_paths_sandbox_readable", side_effect=pause_postprocessing),
+    ):
+        result = asyncio.run(run_lifecycle())
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "report.pdf.md"
+    assert not (thread_uploads_dir / "report.pdf").exists()
+    assert not conversion_path_for_upload(thread_uploads_dir / "report.pdf").exists()
+
+
+def test_sandbox_sync_failure_rolls_back_published_generation(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = MagicMock()
+    sandbox.update_file.side_effect = RuntimeError("sync failed")
+    provider.get.return_value = sandbox
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-aio",
+                    request=MagicMock(),
+                    files=[UploadFile(filename="notes.txt", file=BytesIO(b"payload"))],
+                    config=SimpleNamespace(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert not (thread_uploads_dir / "notes.txt").exists()
 
 
 def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_path):
@@ -1057,7 +1152,10 @@ def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suff
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
 
-    async def convert_failing_on_docx(file_path: Path) -> Path | None:
+    async def convert_failing_on_docx(file_path: Path, *, publication=None) -> Path | None:
+        assert publication is not None
+        assert publication.path == file_path
+        assert publication.is_active
         if file_path.suffix.lower() == ".docx":
             return None
         md_path = conversion_path_for_upload(file_path)

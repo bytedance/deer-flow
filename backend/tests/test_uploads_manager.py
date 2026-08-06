@@ -212,6 +212,29 @@ class TestUploadPublication:
         finally:
             publication.release()
 
+    def test_held_existing_name_does_not_block_next_collision_candidate(self, tmp_path):
+        first = publish_upload_bytes_leased(tmp_path, "report.pdf", b"first")
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(publish_upload_bytes_leased, tmp_path, "report.pdf", b"second")
+        second = None
+        timed_out = False
+        try:
+            second = future.result(timeout=1)
+        except TimeoutError:
+            timed_out = True
+        finally:
+            first.release()
+            if second is None:
+                second = future.result(timeout=2)
+            if second is not None:
+                second.release()
+            pool.shutdown()
+
+        assert not timed_out
+        assert second is not None
+        assert second.path == tmp_path / "report_1.pdf"
+        assert second.path.read_bytes() == b"second"
+
     def test_rollback_does_not_remove_reused_path(self, tmp_path):
         publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
         try:
