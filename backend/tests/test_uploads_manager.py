@@ -319,6 +319,28 @@ class TestUploadPublication:
 
         assert (tmp_path / "report.pdf").read_bytes() == b"new"
 
+    def test_rollback_preserves_primary_when_conversion_removal_fails(self, tmp_path):
+        publication = publish_upload_bytes_leased(tmp_path, "report.pdf", b"old")
+        owned_conversion = conversion_path_for_upload(publication.path)
+        owned_conversion.parent.mkdir(exist_ok=True)
+        owned_conversion.write_text("generated", encoding="utf-8")
+        real_unlink = Path.unlink
+
+        def fail_conversion_unlink(path, *args, **kwargs):
+            if path == owned_conversion:
+                raise OSError("cannot unlink conversion")
+            return real_unlink(path, *args, **kwargs)
+
+        try:
+            with patch.object(Path, "unlink", autospec=True, side_effect=fail_conversion_unlink):
+                with pytest.raises(OSError, match="cannot unlink conversion"):
+                    rollback_published_upload(publication)
+        finally:
+            publication.release()
+
+        assert publication.path.read_bytes() == b"old"
+        assert owned_conversion.read_text(encoding="utf-8") == "generated"
+
     def test_staging_unlink_failure_is_not_reported_as_success(self, tmp_path):
         staged = create_upload_staging_file(tmp_path)
         staged.handle.write(b"payload")
@@ -700,3 +722,25 @@ class TestDeleteFileSafe:
         assert not primary.exists()
         assert not owned.exists()
         assert legacy_or_user.read_text(encoding="utf-8") == "user markdown"
+
+    def test_delete_preserves_primary_when_conversion_removal_fails(self, tmp_path):
+        uploads = tmp_path / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        primary = uploads / "report.pdf"
+        primary.write_bytes(b"PDF")
+        owned_conversion = conversion_path_for_upload(primary)
+        owned_conversion.parent.mkdir()
+        owned_conversion.write_text("generated", encoding="utf-8")
+        real_unlink = Path.unlink
+
+        def fail_conversion_unlink(path, *args, **kwargs):
+            if path == owned_conversion:
+                raise OSError("cannot unlink conversion")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", autospec=True, side_effect=fail_conversion_unlink):
+            with pytest.raises(OSError, match="cannot unlink conversion"):
+                delete_file_safe(uploads, "report.pdf")
+
+        assert primary.read_bytes() == b"PDF"
+        assert owned_conversion.read_text(encoding="utf-8") == "generated"

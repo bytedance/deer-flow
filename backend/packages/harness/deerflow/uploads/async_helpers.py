@@ -46,6 +46,21 @@ async def wait_for_task_completion(task: asyncio.Task) -> bool:
     return cancelled
 
 
+async def run_upload_io_cancellation_safe[**P, T](
+    func: Callable[P, T],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Run blocking upload I/O to completion before propagating cancellation."""
+    io_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    cancelled = await wait_for_task_completion(io_task)
+    result = io_task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def _rollback_and_release(publication: PublishedUpload) -> None:
     try:
         rollback_published_upload(publication)

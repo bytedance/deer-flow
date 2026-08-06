@@ -25,8 +25,13 @@ from app.channels.message_bus import (
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.async_helpers import publish_upload_bytes_leased_async, release_published_upload_async
+from deerflow.uploads.async_helpers import (
+    publish_upload_bytes_leased_async,
+    release_published_upload_async,
+    run_upload_io_cancellation_safe,
+)
 from deerflow.uploads.layout import upload_virtual_path
+from deerflow.uploads.manager import make_upload_file_sandbox_readable
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -462,13 +467,15 @@ class FeishuChannel(Channel):
 
             try:
                 sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-                if not getattr(sandbox_provider, "uses_thread_data_mounts", False):
+                if getattr(sandbox_provider, "uses_thread_data_mounts", False):
+                    await run_upload_io_cancellation_safe(make_upload_file_sandbox_readable, publication.path)
+                else:
                     sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
                     sandbox = sandbox_provider.get(sandbox_id)
                     if sandbox is None:
                         logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
                         return f"Failed to obtain the [{type}]"
-                    await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+                    await run_upload_io_cancellation_safe(sandbox.update_file, virtual_path, content)
             except Exception:
                 logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
                 return f"Failed to obtain the [{type}]"

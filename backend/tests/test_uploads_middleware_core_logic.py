@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 from deerflow.config.paths import Paths
-from deerflow.uploads.layout import conversion_path_for_upload
+from deerflow.uploads.layout import conversion_path_for_upload, conversion_virtual_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 THREAD_ID = "thread-abc123"
@@ -650,6 +650,22 @@ class TestBeforeAgent:
         assert "ITEM 1. BUSINESS" in content
         assert "ITEM 2. RISK" in content
         assert "read_file" in content
+
+    def test_long_filename_context_includes_exact_generated_markdown_path(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        filename = f"{'a' * 250}.pdf"
+        primary = uploads_dir / filename
+        primary.write_bytes(b"%PDF fake")
+        _write_conversion(primary, "# Exact generated path\n")
+
+        msg = _human("summarise", files=[{"filename": filename, "size": 9, "path": f"/mnt/user-data/uploads/{filename}"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        expected = conversion_virtual_path(filename)
+        assert expected in result["messages"][-1].content
+        assert result["uploaded_files"][0]["markdown_virtual_path"] == expected
 
     def test_legacy_sibling_markdown_is_not_treated_as_generated(self, tmp_path):
         mw = _middleware(tmp_path)

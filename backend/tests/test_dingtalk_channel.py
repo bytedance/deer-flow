@@ -1736,7 +1736,11 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
 
     monkeypatch.setattr(
         "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: sandbox),
+        lambda: SimpleNamespace(
+            uses_thread_data_mounts=sandbox_id == "local",
+            acquire_async=_acquire_async,
+            get=lambda sid: sandbox,
+        ),
     )
 
 

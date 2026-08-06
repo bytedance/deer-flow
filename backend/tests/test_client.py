@@ -2182,6 +2182,7 @@ class TestUploads:
             assert "artifact_url" in result["files"][0]
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
+            assert (uploads_dir / "test.txt").stat().st_mode & 0o044 == 0o044
 
     def test_upload_files_across_calls_never_overwrite(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"
@@ -2313,6 +2314,7 @@ class TestUploads:
                 md_path = conversion_path_for_upload(path)
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                md_path.chmod(0o600)
                 return md_path
 
             with (
@@ -2332,6 +2334,13 @@ class TestUploads:
             assert (uploads_dir / "a.md").read_bytes() == b"USER"
             assert conversion_path_for_upload(uploads_dir / "a.docx").read_text(encoding="utf-8") == "FROM:a.docx"
             assert conversion_path_for_upload(uploads_dir / "a.pdf").read_text(encoding="utf-8") == "FROM:a.pdf"
+            for path in (
+                uploads_dir / "a.docx",
+                uploads_dir / "a.pdf",
+                conversion_path_for_upload(uploads_dir / "a.docx"),
+                conversion_path_for_upload(uploads_dir / "a.pdf"),
+            ):
+                assert path.stat().st_mode & 0o044 == 0o044
 
     def test_upload_files_failed_conversion_does_not_block_other_conversion(self, client):
         """A failed conversion does not affect another primary's owned asset."""

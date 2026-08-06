@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from deerflow.config.paths import Paths
 from deerflow.tools.builtins.list_uploaded_files_tool import _format_omitted_summary, _list_uploaded_files_impl, _resolve_thread_id
-from deerflow.uploads.layout import conversion_path_for_upload
+from deerflow.uploads.layout import conversion_path_for_upload, conversion_virtual_path
 
 
 def _paths(tmp_path):
@@ -196,6 +196,17 @@ class TestListUploadedFiles:
         assert result["files"][0]["outline"][0]["title"] == "Heading 1"
         assert result["files"][0]["outline"][1]["title"] == "Heading 2"
 
+    def test_long_filename_result_includes_exact_generated_markdown_path(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        filename = f"{'a' * 250}.pdf"
+        primary = uploads_dir / filename
+        primary.write_bytes(b"%PDF")
+        _write_conversion(primary, "# Heading\n")
+
+        result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        assert result["files"][0]["markdown_virtual_path"] == conversion_virtual_path(filename)
+
     def test_include_outline_list(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
         primary_a = uploads_dir / "a.pdf"
@@ -243,6 +254,7 @@ class TestListUploadedFiles:
         result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
 
         files = {item["filename"]: item for item in result["files"]}
+        assert set(files) == {"report.pdf", "report.md"}
         assert "outline" not in files["report.pdf"]
         assert "outline_preview" not in files["report.pdf"]
 

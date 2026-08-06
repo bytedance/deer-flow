@@ -374,6 +374,17 @@ def publish_upload_copy(base_dir: Path, preferred_filename: str, source_path: Pa
         publication.release()
 
 
+def make_upload_file_sandbox_readable(file_path: Path) -> None:
+    """Add group/other read bits to one verified regular upload artifact."""
+    file_path = Path(file_path)
+    file_stat = os.lstat(file_path)
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise UnsafeUploadPathError(f"Unsafe upload file: {file_path.name}")
+    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
+    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
+    os.chmod(file_path, readable_mode, **chmod_kwargs)
+
+
 def rollback_published_upload(publication: PublishedUpload) -> None:
     """Remove only the still-leased upload generation represented by *publication*."""
     if not publication.is_active:
@@ -383,9 +394,9 @@ def rollback_published_upload(publication: PublishedUpload) -> None:
     if not publication.identity.matches(publication.path):
         return
     owned_conversion = existing_conversion_path_for_upload(publication.path)
-    publication.path.unlink()
     if owned_conversion is not None:
         owned_conversion.unlink(missing_ok=True)
+    publication.path.unlink()
 
 
 def replace_system_owned_staged_file(staged: StagedUpload, filename: str) -> Path:
@@ -548,9 +559,9 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
             raise UnsafeUploadPathError(f"Unsafe upload file: {safe_name}")
 
         owned_conversion = existing_conversion_path_for_upload(file_path)
-        file_path.unlink()
         if owned_conversion is not None:
             owned_conversion.unlink(missing_ok=True)
+        file_path.unlink()
     finally:
         lease.release()
 

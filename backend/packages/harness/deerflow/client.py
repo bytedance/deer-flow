@@ -70,6 +70,7 @@ from deerflow.uploads.manager import (
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    make_upload_file_sandbox_readable,
     publish_upload_copy_leased,
     upload_artifact_url,
     upload_virtual_path,
@@ -1553,6 +1554,7 @@ class DeerFlowClient:
                     if dest_name != src_path.name:
                         info["original_filename"] = src_path.name
 
+                    md_path = None
                     if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                         try:
                             if conversion_pool is not None:
@@ -1578,6 +1580,10 @@ class DeerFlowClient:
                             info["markdown_path"] = str(md_path)
                             info["markdown_virtual_path"] = md_virtual_path
                             info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
+
+                    make_upload_file_sandbox_readable(dest)
+                    if md_path is not None:
+                        make_upload_file_sandbox_readable(md_path)
 
                     uploaded_files.append(info)
                 finally:

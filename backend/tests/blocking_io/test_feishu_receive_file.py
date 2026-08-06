@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import suppress
 from io import BytesIO
 from unittest.mock import MagicMock
 
@@ -145,6 +146,49 @@ async def test_receive_file_holds_name_lease_through_remote_sync(tmp_path, monke
     assert not await asyncio.to_thread((uploads / "report.pdf").exists)
 
 
+async def test_receive_file_cancellation_drains_remote_sync_before_releasing_lease(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+    from deerflow.uploads.manager import delete_file_safe
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    provider = _RemoteProvider()
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+
+    def paused_update(path: str, content: bytes) -> None:
+        sync_started.set()
+        assert allow_sync.wait(5)
+        provider.sandbox.updates.append((path, content))
+
+    provider.sandbox.update_file = paused_update
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+    receive = asyncio.create_task(
+        _channel_with_file()._receive_single_file(
+            "message-1",
+            "file-key",
+            "file",
+            "thread-1",
+            user_id="ou-user",
+        )
+    )
+    assert await asyncio.to_thread(sync_started.wait, 5)
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    receive.cancel()
+    deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, "report.pdf"))
+    try:
+        await asyncio.sleep(0.05)
+        assert not receive.done()
+        assert not deletion.done()
+    finally:
+        allow_sync.set()
+        with suppress(asyncio.CancelledError):
+            await receive
+        await deletion
+
+    assert not await asyncio.to_thread((uploads / "report.pdf").exists)
+
+
 async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monkeypatch) -> None:
     from deerflow.config.paths import Paths
 
@@ -163,6 +207,7 @@ async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monke
     assert result == "/mnt/user-data/uploads/report.pdf"
     uploaded = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.pdf"
     assert await asyncio.to_thread(uploaded.read_bytes) == b"DATA"
+    assert (await asyncio.to_thread(uploaded.stat)).st_mode & 0o044 == 0o044
 
 
 async def test_concurrent_same_name_files_preserve_every_payload(tmp_path, monkeypatch) -> None:
