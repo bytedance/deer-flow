@@ -1,5 +1,6 @@
 """Path and URL layout helpers for primary uploads and generated assets."""
 
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -20,9 +21,27 @@ def conversion_dir_for_uploads(uploads_dir: Path) -> Path:
     return uploads_dir.parent / UPLOAD_CONVERSIONS_DIRNAME
 
 
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def conversion_filename_for_upload(filename: str) -> str:
+    """Return a deterministic generated-Markdown component within 255 bytes."""
+    desired = f"{filename}.md"
+    if len(desired.encode("utf-8")) <= 255:
+        return desired
+    digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
+    marker = f".{digest}.md"
+    prefix = _truncate_utf8(filename, 255 - len(marker.encode("utf-8")))
+    return f"{prefix}{marker}"
+
+
 def conversion_path_for_upload(upload_path: Path) -> Path:
     """Return the generated Markdown path owned by one primary upload."""
-    return conversion_dir_for_uploads(upload_path.parent) / f"{upload_path.name}.md"
+    return conversion_dir_for_uploads(upload_path.parent) / conversion_filename_for_upload(upload_path.name)
 
 
 def validate_conversion_dir(uploads_dir: Path) -> Path | None:
@@ -93,7 +112,7 @@ def upload_virtual_path(filename: str) -> str:
 
 def conversion_virtual_path(filename: str) -> str:
     """Build the sandbox virtual path for an upload's generated Markdown."""
-    return f"{VIRTUAL_PATH_PREFIX}/{UPLOAD_CONVERSIONS_DIRNAME}/{filename}.md"
+    return f"{VIRTUAL_PATH_PREFIX}/{UPLOAD_CONVERSIONS_DIRNAME}/{conversion_filename_for_upload(filename)}"
 
 
 def artifact_url_for_virtual_path(thread_id: str, virtual_path: str) -> str:

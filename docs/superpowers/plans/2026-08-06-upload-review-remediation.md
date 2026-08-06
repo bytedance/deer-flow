@@ -322,7 +322,7 @@ def test_long_conversion_filename_fits_component_limit(byte_length, tmp_path):
     assert target.name.endswith(".md")
 ```
 
-Use literal expected output for the 255-byte case: 186 `a` bytes, a dot, the full SHA-256
+Use literal expected output for the 255-byte case: 187 `a` bytes, a dot, the full SHA-256
 of the original filename, and `.md`.
 
 - [ ] **Step 2: Write a strict blocking-I/O regression**

@@ -1,4 +1,3 @@
-from .conversion import convert_uploaded_file_to_markdown
 from .errors import AtomicUploadPublishError, PathTraversalError, UnsafeUploadPathError
 from .layout import (
     UPLOAD_CONVERSIONS_DIRNAME,
@@ -6,6 +5,7 @@ from .layout import (
     UnsafeConversionPathError,
     artifact_url_for_virtual_path,
     conversion_dir_for_uploads,
+    conversion_filename_for_upload,
     conversion_path_for_upload,
     conversion_virtual_path,
     ensure_conversion_dir,
@@ -44,12 +44,22 @@ from .manager import (
     validate_thread_id,
 )
 
+
+def __getattr__(name: str):
+    if name == "convert_uploaded_file_to_markdown":
+        from .conversion import convert_uploaded_file_to_markdown
+
+        return convert_uploaded_file_to_markdown
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "get_uploads_dir",
     "UPLOAD_CONVERSIONS_DIRNAME",
     "UPLOAD_LOCKS_DIRNAME",
     "UnsafeConversionPathError",
     "conversion_dir_for_uploads",
+    "conversion_filename_for_upload",
     "conversion_path_for_upload",
     "conversion_virtual_path",
     "artifact_url_for_virtual_path",

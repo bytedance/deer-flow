@@ -20,6 +20,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.errors import AtomicUploadPublishError, PathTraversalError, UnsafeUploadPathError
 from deerflow.uploads.layout import (
     UPLOAD_CONVERSIONS_DIRNAME,
+    _truncate_utf8,
     artifact_url_for_virtual_path,
     existing_conversion_path_for_upload,
     upload_virtual_path,
@@ -190,13 +191,6 @@ def _validate_staged_upload(staged: StagedUpload) -> None:
         raise UnsafeUploadPathError("Upload staging file disappeared") from exc
     if not stat.S_ISREG(staged_stat.st_mode) or staged_stat.st_nlink != 1:
         raise UnsafeUploadPathError("Upload staging path is not an exclusive regular file")
-
-
-def _truncate_utf8(value: str, max_bytes: int) -> str:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return value
-    return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
 def _filename_candidates(name: str) -> Iterator[str]:
