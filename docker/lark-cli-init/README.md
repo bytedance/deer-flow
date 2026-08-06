@@ -5,8 +5,8 @@ sandbox Pod via an **init container + shared `emptyDir`**, instead of the Gatewa
 downloading Linux binaries from GitHub at install time and mounting them via
 hostPath/PVC.
 
-See the design at
-[`docs/superpowers/specs/2026-07-21-lark-sandbox-init-container-design.md`](../../docs/superpowers/specs/2026-07-21-lark-sandbox-init-container-design.md).
+See the provisioner configuration at
+[`docker/provisioner/README.md`](../provisioner/README.md#lark-cli-sandbox-runtime-pattern-a).
 
 ## What it does
 
