@@ -58,16 +58,18 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-worker configurations before persistence starts.
 
-    Four checks (all must pass for multi-worker):
+    Five checks (all must pass for multi-worker):
 
-    1. Process-local browser sessions must be disabled. Browser tools keep
+    1. The background scheduler must be disabled. Each worker starts its own
+       scheduler and startup recovery can interrupt another worker's runs.
+    2. Process-local browser sessions must be disabled. Browser tools keep
        Chromium and Playwright objects in one worker's memory, while ordinary
        uvicorn dispatch provides no thread-id affinity.
-    2. The DB backend must be Postgres — SQLite write-locks cannot support
+    3. The DB backend must be Postgres — SQLite write-locks cannot support
        concurrent multi-process access.
-    3. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
+    4. ``run_events.backend`` must be ``db``. Memory and JSONL stores are
        process-local, so workers cannot enforce a shared singleton receipt.
-    4. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
+    5. ``run_ownership.heartbeat_enabled`` must be True — without heartbeat,
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
@@ -83,6 +85,12 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
 
     if workers <= 1:
         return
+
+    if config.scheduler.enabled:
+        raise SystemExit(
+            f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. "
+            "Set GATEWAY_WORKERS=1 or scheduler.enabled=false. Multi-pod deployments may enable scheduler on exactly one Gateway pod."
+        )
 
     if _browser_tools_enabled_in_config(config):
         raise SystemExit(browser_multi_worker_error(workers))

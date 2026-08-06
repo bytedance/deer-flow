@@ -1149,6 +1149,8 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+The background scheduler is single-instance: `scheduler.enabled: true` requires `GATEWAY_WORKERS=1`. In multi-pod deployments, enable the scheduler on exactly one Gateway pod and leave it disabled on every other pod.
+
 ## Terminal Workbench (TUI)
 
 `deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.

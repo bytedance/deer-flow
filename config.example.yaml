@@ -2036,10 +2036,9 @@ agent_storage:
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
-# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
-# ignores row-level locks, so multiple workers can double-fire the same task.
-# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
-# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+# The scheduler is single-instance. Gateway startup rejects scheduler.enabled=true
+# with GATEWAY_WORKERS > 1. For multi-pod deployments, enable the scheduler on
+# exactly one Gateway pod and leave it disabled on every other pod.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
