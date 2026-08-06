@@ -1,6 +1,6 @@
-"""OpenViking HTTP memory backend."""
+"""OpenViking automatic-memory backend."""
 
-from .openviking_manager import OpenVikingMemoryManager
+from .manager import OpenVikingMemoryManager
 
 MANAGER_CLASS = OpenVikingMemoryManager
 

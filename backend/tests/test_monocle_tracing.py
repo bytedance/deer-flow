@@ -326,7 +326,14 @@ def test_gateway_lifespan_initializes_monocle():
     async def _noop_langgraph_runtime(_app, _startup_config):
         yield
 
-    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=False,
+            shutdown_flush_timeout_seconds=30.0,
+        ),
+    )
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
@@ -369,7 +376,14 @@ def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
     async def _noop_langgraph_runtime(_app, _startup_config):
         yield
 
-    startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    startup_config = SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(
+            token_counting="char",
+            enabled=False,
+            shutdown_flush_timeout_seconds=30.0,
+        ),
+    )
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 

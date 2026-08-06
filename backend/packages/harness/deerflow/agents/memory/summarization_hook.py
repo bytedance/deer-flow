@@ -12,9 +12,9 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
     """Flush messages about to be summarized into the memory queue.
 
     Thin, backend-agnostic entry: only the ``enabled`` + ``thread_id`` gate
-    and ``user_id`` resolution live here. The backend (via
-    ``manager.add_nowait``) does the filtering, human/AI validation, and
-    correction/reinforcement detection.
+    and ``user_id`` resolution live here. The backend owns message selection,
+    conversion, persistence, and any extraction policy through
+    ``manager.add_nowait``.
     """
     if not get_memory_config().enabled or not event.thread_id:
         return

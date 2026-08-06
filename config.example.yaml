@@ -1699,29 +1699,36 @@ memory:
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
-  # OpenViking HTTP example (replace this DeerMem backend_config block when
-  # manager_class is openviking; OpenViking currently supports middleware mode):
+  # OpenViking example (replace this DeerMem backend_config block when
+  # manager_class is openviking; automatic memory uses middleware mode):
   #
   # backend_config:
   #   base_url: http://openviking:1933
-  #   auth_mode: trusted
-  #   account: deerflow
+  #   owner_user_id: default # DeerFlow user bound to this USER API key
   #   api_key_env: OPENVIKING_API_KEY
-  #   max_connections: 100
-  #   max_keepalive_connections: 20
-  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
+  #   default_peer_id: deerflow # top-level agent when agent_name is unset
+  #   timeout_seconds: 30
+  #   max_seen_message_ids: 512 # hashed cursor fallback for compacted histories
   #   startup_policy: fail_fast
   #   failure_policy:
   #     read: fail_open
-  #     write: log_and_drop
+  #     write: fail_open
+  #   commit:
+  #     mode: pending_tokens # append each turn; archive at thresholds/boundaries
+  #     pending_token_threshold: 8000
+  #     idle_flush_seconds: 1800 # 0 disables adapter-owned idle commits
   #   retrieval:
+  #     search_mode: search
   #     top_k: 8
   #     score_threshold: 0.25
   #     max_injection_chars: 12000
+  #     content_mode: auto
   #
-  # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
-  # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
-  # optional Compose overlay uses the internal http://openviking:1933 address.
+  # Use an ordinary OpenViking USER API key. In API-key mode the server derives
+  # account/user identity from that credential, not from SDK assertion headers.
+  # For a host-installed server used by Docker DeerFlow, set base_url to
+  # http://host.docker.internal:1933 and allow_insecure_http: true. A user-managed
+  # service on the same Compose network can use http://openviking:1933.
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast

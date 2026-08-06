@@ -339,7 +339,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -366,7 +366,7 @@ def test_get_memory_context_propagates_fail_closed_manager_error(monkeypatch):
         memory=SimpleNamespace(
             enabled=True,
             injection_enabled=True,
-            backend_config={"failure_policy": {"read": "fail_closed"}},
+            backend_config={"failure_policy": {"read": "FAIL_CLOSED"}},
         ),
     )
     manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
@@ -388,6 +388,56 @@ def test_get_memory_context_swallows_manager_error_without_fail_closed(monkeypat
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
 
     assert prompt_module._get_memory_context("agent-a", app_config=explicit_config) == ""
+
+
+def test_get_memory_context_never_swallows_authorization_error(monkeypatch):
+    from deerflow.agents.memory import MemoryAuthorizationError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_open"}},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryAuthorizationError("wrong owner")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr(
+        "deerflow.runtime.user_context.get_effective_user_id",
+        lambda: "user-1",
+    )
+
+    with pytest.raises(MemoryAuthorizationError, match="wrong owner"):
+        prompt_module._get_memory_context("agent-a", app_config=explicit_config)
+
+
+@pytest.mark.asyncio
+async def test_aget_memory_context_never_swallows_authorization_error(monkeypatch):
+    from deerflow.agents.memory import MemoryAuthorizationError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_open"}},
+        ),
+    )
+
+    async def fail(*args, **kwargs):
+        raise MemoryAuthorizationError("wrong owner")
+
+    manager = SimpleNamespace(aget_context=fail)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr(
+        "deerflow.runtime.user_context.get_effective_user_id",
+        lambda: "user-1",
+    )
+
+    with pytest.raises(MemoryAuthorizationError, match="wrong owner"):
+        await prompt_module._aget_memory_context(
+            "agent-a",
+            app_config=explicit_config,
+        )
 
 
 def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
@@ -414,12 +464,44 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
         "agent-a",
         app_config=explicit_config,
         user_id="runtime-user",
+        thread_id="thread-1",
     )
 
     assert "<memory>" in context
     assert captured == {
         "agent_name": "agent-a",
         "user_id": "runtime-user",
+    }
+
+
+@pytest.mark.asyncio
+async def test_aget_memory_context_preserves_legacy_backend_signature(monkeypatch):
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True, injection_enabled=True),
+    )
+    captured: dict[str, object] = {}
+
+    async def legacy_aget_context(user_id, *, agent_name=None):
+        captured.update(
+            user_id=user_id,
+            agent_name=agent_name,
+        )
+        return "remember this"
+
+    manager = SimpleNamespace(aget_context=legacy_aget_context)
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    context = await prompt_module._aget_memory_context(
+        "agent-a",
+        app_config=explicit_config,
+        user_id="runtime-user",
+        thread_id="thread-1",
+    )
+
+    assert context == "<memory>\nremember this\n</memory>\n"
+    assert captured == {
+        "user_id": "runtime-user",
+        "agent_name": "agent-a",
     }
 
 

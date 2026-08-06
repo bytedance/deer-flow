@@ -180,10 +180,12 @@ class Mem0Manager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Query-less recall: the contract passes no current query, so inject
         the bucket's most recent memories (top_k). Query-aware recall is
         available via search() in mode="tool"."""
+        del query
         filters = _build_filters(user_id=user_id, agent_name=agent_name, run_id=thread_id)
         if filters is None:
             return ""
@@ -239,12 +241,14 @@ class Mem0Manager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return await asyncio.to_thread(
             self.get_context,
             user_id,
             agent_name=agent_name,
             thread_id=thread_id,
+            query=query,
         )
 
     # ── Tier 2: search ───────────────────────────────────────────────────

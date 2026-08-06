@@ -30,10 +30,10 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
     """Middleware that queues conversation for memory update after agent execution.
 
     This middleware:
-    1. After each agent execution, queues the conversation for memory update
-    2. Only includes user inputs and final assistant responses (ignores tool calls)
-    3. The queue uses debouncing to batch multiple updates together
-    4. Memory is updated asynchronously via LLM summarization
+    1. After each agent execution, passes the conversation to the active backend
+    2. Leaves message selection, conversion, and persistence to that backend
+    3. Propagates the authenticated user, agent, thread, and trace identity
+    4. Uses the backend's async boundary on asynchronous graph execution
     """
 
     state_schema = MemoryMiddlewareState
@@ -97,8 +97,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
         thread_id, messages, user_id, trace_id = add_args
 
-        # Hand raw messages to the manager; the backend filters to user + final-AI
-        # turns, validates, detects correction/reinforcement, and enqueues.
+        # Hand raw messages to the manager. Each backend owns filtering,
+        # conversion, persistence, and any extraction policy.
         get_memory_manager().add(
             thread_id,
             messages,

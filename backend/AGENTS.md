@@ -271,9 +271,9 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   skips redundant sandbox sync when thread data is already mounted);
   `test_channel_outbound_files.py` (locks Feishu, Telegram, and WeCom outbound
   attachment open/read/hash work off the event loop);
-  `test_openviking_memory_backend.py` (locks the OpenViking backend's async
-  add/context/search entrypoints offloading synchronous HTTP and watermark
-  filesystem IO); and
+  `test_openviking_memory_backend.py` (locks both the legacy OpenViking adapter
+  and the official SDK-backed manager's async add/context/search entrypoints
+  offloading synchronous HTTP and capture-cursor filesystem IO); and
   `test_workspace_changes_recorder.py` (locks the offload around the snapshot
   text cache lifecycle — roots resolution, `mkdtemp`, and the `shutil.rmtree`
   on both the capture-failure branch and `record_workspace_changes`' `finally`).
@@ -414,7 +414,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 
 **Lead-only middlewares** (`build_middlewares`, appended after the base):
 
-14. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse
+14. **DynamicContextMiddleware** - Injects the current date and session-scoped memory as a frozen `<system-reminder>` while query-aware memory managers add request-local hidden context before the latest real user message on each turn. Request-local context is cached only in redacted run context across repeated tool-loop model calls, preserving prefix-cache reuse without writing recalled memory into checkpoints or capturing it back into the memory backend
 15. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
 16. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
 17. **DurableContextMiddleware** - Captures `task` delegations into `ThreadState.delegations` (including in-progress dispatches and terminal result summaries) and loaded skill-file references (name/path/description, parsed in-memory - not the body) into `ThreadState.skill_context` before summarization can compact the paired tool-call/result messages, then projects durable context into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request.
@@ -1014,26 +1014,44 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `resolve_runtime_user_id(runtime)`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`. `DynamicContextMiddleware` passes the same resolved identity to the memory read path. On standalone Agent Server runs, server-owned auth identity is also resolved during lead-agent construction, normalized through `make_safe_user_id` for DeerFlow storage, and explicitly reused for custom-agent config/SOUL, user skills, skill policy, and prompt assembly; ordinary client `user_id` values cannot override `langgraph_auth_user_id`. On the embedded Gateway path, `inject_authenticated_user_context` removes client-supplied `langgraph_auth_user` / `langgraph_auth_user_id` from both RunnableConfig sections before graph construction, so those reserved fields cannot impersonate Agent Server auth.
 - The optional `openviking` backend under
   `packages/harness/deerflow/agents/memory/backends/openviking/` is a
-  remote-only HTTP adapter. Select it with
-  `memory.manager_class: openviking` and keep `memory.mode: middleware`. It
-  commits filtered turns to OpenViking Sessions and maps remote memory search
-  results into the shared contract. It hashes `(user_id, agent_name)` into a
-  safe OpenViking trusted-user identity for hard scope isolation and keeps
-  bounded message watermarks below
-  `{storage_path}/openviking/sessions/`. The watermark combines a constant-size
-  ordered-prefix digest for append-only histories with a bounded recent-ID
-  fallback for compaction and separately records submitted and committed
-  progress. Once batch submission succeeds, a later update never resubmits
-  those messages or retries an ambiguous commit; a future batch can commit the
-  still-open Session together with new messages. Schema-v2 recent-ID
-  watermarks migrate without duplicating their anchored history. The shared
-  HTTP client has explicit total/keep-alive connection limits and jittered
-  exponential retry delays, and its configuration representation omits the API
-  key. Session locks are weakly cached, async entrypoints offload synchronous
-  HTTP and file IO, and graceful shutdown rejects new work before draining all
-  in-flight client operations within its timeout. It does not implement
-  DeerMem fact CRUD/import/export and must not import the OpenViking embedded
-  runtime.
+  remote-only adapter built on the pinned `langchain-openviking` package's
+  official recorder and retriever. The package owns the SDK transport; DeerFlow
+  does not import or construct an OpenViking HTTP client. Select it with
+  `memory.manager_class: openviking` and keep
+  `memory.mode: middleware`. DeerFlow owns recall/capture timing, authenticated
+  user and agent mapping, pre-compaction flush, threshold and idle commit
+  policy, shutdown draining, and a bounded cursor containing hashes plus
+  lifecycle metadata below `{storage_path}/openviking/official_sessions/`.
+  OpenViking owns message
+  conversion, 100-message batching, partial-write reporting, Session commits,
+  retrieval, and HTTP transport. One ordinary OpenViking USER credential is
+  bound to the configured `owner_user_id`; requests for another DeerFlow user
+  always fail closed before remote access or model compute, even when
+  `failure_policy.read` is `fail_open`. Compatible top-level agent names keep
+  their lowercase request-scoped peer ID; DeerFlow-valid names outside
+  OpenViking's syntax use a stable collision-resistant fallback. The generated
+  `df-agent-` namespace and configured default peer are reserved so named agents
+  cannot alias another memory partition. Query-aware recall is scoped to the
+  current thread on `search` mode, injected only into the current model request,
+  and both sync and async
+  model hooks enforce the same five-second wall-clock budget while SDK and
+  cursor IO run off the event loop. The cursor `storage_path` must remain
+  persistent across restarts; it restores failed and idle commit intent, while
+  losing it can replay the retained transcript. Graceful shutdown retries failed
+  and already-due commits but does not turn every deployment into a semantic
+  conversation boundary. This lifecycle cursor is single-worker state, not a
+  distributed outbox.
+  The deprecated custom-HTTP adapter is selected only by explicit legacy-only
+  fields such as `auth_mode`, `account`, old pool settings, or old retrieval and
+  failure-policy values. A minimal config containing only shared URL/key fields
+  and no `owner_user_id` fails with migration guidance instead of silently
+  defaulting to trusted mode. The Gateway constructs any enabled memory manager
+  before readiness and aborts startup on construction/configuration failure, so
+  recall and capture cannot observe different initialization outcomes during a
+  run. Disabled memory skips backend construction. Runtime resolution paths
+  still rate-limit repeated initialization tracebacks to one per minute.
+  Neither path implements DeerMem fact CRUD/import/export or imports the
+  embedded OpenViking runtime.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
 - Middleware extraction classifies proposed facts with extraction-only `scope`/`durability`/`authority` labels. `_apply_updates` accepts only `user` + `durable` + `descriptive` new/consolidated facts, accepts only wholly user-scoped summary prose with `authority=descriptive`, and rejects missing labels per item without aborting unrelated updates. Contradiction removals use object entries with `id`, `scope`, `reason`, and optional zero-based `replacementFactIndex`; task/project removals fail closed, and a paired removal runs only when the referenced replacement survives the scope/confidence gates, deduplication, and max-fact trim under another fact ID. The labels are not persisted, so no storage migration is required. Staleness removals retain their independent candidate/cap guardrails, while tool-mode CRUD remains outside this extraction gate. Custom `memory.backend_config.prompts_dir` templates (including per-agent overrides) must carry the same classification fields; an un-migrated template makes the fail-closed gate reject every extraction-driven write, observable only through `rejected_by_scope_gate` and the >60% fact-rejection warning.

@@ -1028,18 +1028,27 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
-DeerFlow also includes an optional `openviking` memory backend. It connects to
-an independent OpenViking server over HTTP, submits completed turns through
-OpenViking Sessions, and recalls remote memories for prompt injection while
-leaving DeerMem as the default. The initial integration supports
-`memory.mode: middleware`. Bounded submitted-message watermarks cover long and
-compacted histories and prevent a failed Session commit from duplicating
-already accepted messages on retry; the shared HTTP client also has explicit
-connection limits and jittered retries. See
-[OpenViking memory backend](docs/OPENVIKING.md) for configuration and Docker
-startup.
+DeerFlow also includes an optional `openviking` memory backend. It uses
+the pinned `langchain-openviking` package's official recorder and retriever to
+append completed turns, archive them at token, idle, and compaction boundaries,
+and recall query-relevant memories for the current thread before each model
+call from the owner's self and current-agent peer scopes. One DeerFlow thread
+remains one OpenViking Session across multiple
+archives. DeerFlow keeps ownership of lifecycle signals and a durable bounded
+capture cursor, while the standalone integration owns message conversion,
+batching, retrieval, and SDK transport behavior. Credential-owner mismatches
+always fail closed before the model call, independent of availability policy. The full
+OpenViking server package is not installed in DeerFlow. Existing trusted-mode
+configurations remain available temporarily through a deprecated compatibility
+path only when they contain an explicit legacy-only setting. Ambiguous configs
+without `owner_user_id` now fail with migration guidance instead of silently
+defaulting to trusted mode. The Gateway resolves an enabled memory manager
+before reporting readiness, so invalid backend configuration fails startup
+instead of failing an agent run after its response has completed. See
+[OpenViking memory backend](docs/OPENVIKING.md) for configuration and legacy
+migration guidance.
 
-Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
+Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. DeerMem stores memory locally by default; external backends follow the storage and access policy of their configured service.
 
 DeerMem remains the default local backend. An opt-in `mem0` backend is also
 available for the hosted mem0 Platform API or API-compatible self-hosted

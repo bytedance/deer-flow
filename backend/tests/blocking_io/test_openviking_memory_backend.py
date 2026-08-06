@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.memory.backends.openviking import OpenVikingMemoryManager
+from deerflow.agents.memory.backends.openviking.adapter import (
+    OpenVikingAdapterMemoryManager,
+)
 from deerflow.agents.memory.backends.openviking.models import OpenVikingCommitResult, OpenVikingSearchHit
-from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
+from deerflow.agents.memory.backends.openviking.openviking_manager import (
+    LegacyOpenVikingMemoryManager,
+)
 
 
 class _BlockingProbeClient:
@@ -58,7 +68,7 @@ class _BlockingProbeClient:
         pass
 
 
-def _manager(tmp_path: Path) -> OpenVikingMemoryManager:
+def _manager(tmp_path: Path) -> LegacyOpenVikingMemoryManager:
     manager = OpenVikingMemoryManager.from_config(
         {
             "base_url": "http://openviking:1933",
@@ -68,6 +78,7 @@ def _manager(tmp_path: Path) -> OpenVikingMemoryManager:
             "startup_policy": "warn",
         }
     )
+    assert isinstance(manager, LegacyOpenVikingMemoryManager)
     manager._client = _BlockingProbeClient(tmp_path / "probe.txt")  # type: ignore[assignment]
     return manager
 
@@ -89,3 +100,123 @@ async def test_async_openviking_operations_do_not_block_event_loop(tmp_path: Pat
             "score": 0.9,
         }
     ]
+
+
+class _OfficialProbeClient:
+    supports_request_actor_peer = True
+
+    def __init__(self, **kwargs: Any):
+        self.kwargs = kwargs
+
+    def initialize(self) -> None:
+        pass
+
+    def health(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        pass
+
+
+class _OfficialProbeRecorder:
+    def __init__(self, *, probe_path: Path, **kwargs: Any):
+        self._probe_path = probe_path
+        self.client = _OfficialProbeClient(
+            url=kwargs.get("url"),
+            api_key=kwargs.get("api_key"),
+            timeout=kwargs.get("timeout"),
+        )
+
+    def record(self, session_id: str, messages: list[Any], peer_id: str | None = None):
+        self._probe_path.write_text(session_id, encoding="utf-8")
+        return object()
+
+    def flush(self, session_id: str) -> None:
+        self._probe_path.write_text(session_id, encoding="utf-8")
+
+    def close(self) -> None:
+        self.client.close()
+
+
+class _OfficialProbeRetriever:
+    def __init__(self, *, probe_path: Path, **kwargs: Any):
+        self._probe_path = probe_path
+        self.limit = kwargs["limit"]
+        self.filter = None
+
+    def invoke(self, query: str) -> list[Document]:
+        self._probe_path.write_text(query, encoding="utf-8")
+        return [
+            Document(
+                page_content="Prefers concise answers.",
+                metadata={
+                    "openviking_uri": "viking://user/memories/preferences/test.md",
+                    "openviking_category": "preferences",
+                    "openviking_score": 0.9,
+                },
+            )
+        ]
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _OfficialProbeCommitPolicy:
+    def __init__(self, *, mode: str, pending_token_threshold: int = 8_000):
+        self.mode = mode
+        self.pending_token_threshold = pending_token_threshold
+
+
+class _OfficialProbePartialWriteError(RuntimeError):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_async_official_openviking_operations_do_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.agents.memory.backends.openviking.adapter as module
+
+    probe_path = tmp_path / "official-probe.txt"
+
+    class Recorder(_OfficialProbeRecorder):
+        def __init__(self, **kwargs: Any):
+            super().__init__(probe_path=probe_path, **kwargs)
+
+    class Retriever(_OfficialProbeRetriever):
+        def __init__(self, **kwargs: Any):
+            super().__init__(probe_path=probe_path, **kwargs)
+
+        def __copy__(self):
+            copied = type(self)(limit=self.limit)
+            copied.filter = copy.deepcopy(self.filter)
+            return copied
+
+    monkeypatch.setattr(
+        module,
+        "_load_official_integration",
+        lambda: {
+            "OpenVikingCommitPolicy": _OfficialProbeCommitPolicy,
+            "OpenVikingPartialWriteError": _OfficialProbePartialWriteError,
+            "OpenVikingRetriever": Retriever,
+            "OpenVikingSessionRecorder": Recorder,
+            "use_actor_peer": lambda _peer_id: nullcontext(),
+        },
+    )
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    manager = OpenVikingMemoryManager.from_config(
+        {
+            "base_url": "http://openviking:1933",
+            "storage_path": str(tmp_path),
+            "owner_user_id": "alice",
+            "startup_policy": "warn",
+        }
+    )
+    assert isinstance(manager, OpenVikingAdapterMemoryManager)
+
+    messages: list[Any] = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
+    await manager.aadd("thread-1", messages, user_id="alice")
+    assert await manager.aget_context("alice", query="answer style") == "- [preferences] Prefers concise answers."
+    assert (await manager.asearch("answer style", user_id="alice"))[0]["content"] == "Prefers concise answers."
+    await asyncio.to_thread(manager.close)

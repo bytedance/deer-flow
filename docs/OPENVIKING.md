@@ -1,47 +1,106 @@
 # OpenViking memory backend
 
-DeerFlow can use a remote OpenViking server as an optional long-term memory
-backend. The integration is a pluggable `MemoryManager`; DeerMem remains the
-default and the agent/Gateway runtime does not import the OpenViking Python
-runtime.
+DeerFlow can use an independent OpenViking server for automatic long-term
+memory. DeerMem remains the default.
 
-## Supported behavior
+The integration follows one ownership rule:
 
-- HTTP connection to an independent OpenViking server.
-- Passive `memory.mode: middleware` capture after each completed turn.
-- OpenViking Session commit and asynchronous memory extraction.
-- Automatic prompt injection from OpenViking memory search.
-- Explicit search through the backend-neutral `MemoryManager.search` API.
-- Hard isolation by hashing each DeerFlow `(user_id, agent_name)` scope into a
-  separate OpenViking trusted user identity.
-- Local bounded message watermarks under DeerFlow's runtime home. An ordered
-  prefix digest handles append-only histories of any length, while a recent-ID
-  window handles history compaction without resubmitting known messages.
+```text
+DeerFlow MemoryManager
+  decides when to recall and capture
+          |
+          v
+OpenViking official LangChain adapters
+  own retrieval, message conversion, batching, commits, and HTTP behavior
+```
 
-The current backend does not implement DeerMem fact CRUD, import/export, or the
-Settings memory document. Keep `mode: middleware`; tool mode is rejected
-because its add/update/delete tools require fact CRUD.
+DeerFlow does not install a second OpenViking lifecycle middleware. This keeps
+pre-compaction capture, shutdown, failure policy, user identity, and thread
+mapping in DeerFlow's existing memory seam.
 
-## OpenViking requirements
+## Capabilities
 
-OpenViking must be configured with:
+- Query-aware recall from the latest real user message, scoped to the current
+  DeerFlow thread when `retrieval.search_mode: search` is used.
+- Each recall searches both the credential owner's self-memory root and the
+  current agent peer's memory root. It does not search other peers, shared
+  resources, or skills through this automatic-memory path.
+- Request-local memory injection. Recalled text is not saved into LangGraph
+  checkpoints or captured back into OpenViking.
+- Append accepted messages after a completed turn. Immediately before
+  summarization removes older messages, append any missing suffix and explicitly
+  flush that conversation segment.
+- Official OpenViking message filtering, conversion, 100-message batching,
+  partial-write progress, commit retry, and retrieval.
+- One shared credential-bound SDK client for recorder and retriever operations.
+- A bounded local cursor containing message hashes and lifecycle metadata, but
+  no message content. It prevents repeated full transcript snapshots from
+  duplicating accepted messages, rebases after history compaction, and restores
+  pending idle or failed commits after a process restart.
+- Stable mapping from one DeerFlow thread to one OpenViking Session. Threshold,
+  idle, and compaction commits create archives inside that same Session; they do
+  not rotate the Session ID.
+- Request-scoped actor peers. The default DeerFlow agent uses
+  `default_peer_id`; compatible top-level agent names keep their lowercase
+  identity, while DeerFlow-valid names outside OpenViking's peer syntax use a
+  stable collision-resistant fallback. The `df-agent-` prefix is reserved for
+  generated IDs, and a named agent matching `default_peer_id` is remapped so it
+  cannot share the unnamed agent's memory partition.
 
-- a VLM provider;
-- an embedding provider;
-- persistent workspace storage;
-- `server.auth_mode: trusted`;
-- a non-empty `server.root_api_key` when exposed beyond localhost.
+The backend supports automatic memory with `memory.mode: middleware`. Explicit
+OpenViking resources and model-invoked operations belong in MCP and are outside
+this integration.
 
-DeerFlow passes trusted `X-OpenViking-Account` and
-`X-OpenViking-User` headers. Do not expose a trusted-mode OpenViking endpoint
-directly to untrusted clients.
+## Authentication and isolation
+
+Use an ordinary OpenViking **USER API key** for memory reads and writes. The key
+is already bound by OpenViking to one account and user. The maintained path
+does not depend on or support root-key trusted-mode impersonation. In
+OpenViking `api_key` mode, the server derives account and user identity from the
+USER credential and ignores any account or user assertion headers inherited by
+the SDK. DeerFlow selects the actor peer inside a request-local scope for every
+recall, capture, and flush operation.
+
+`owner_user_id` binds that credential to exactly one DeerFlow user. If a request
+arrives for another DeerFlow user, the backend fails closed before contacting
+OpenViking. This identity-boundary error is never suppressed by `fail_open`.
+With query-aware recall enabled it is reported before the model call, so an
+invalid request does not spend model compute and then fail during capture. This
+first setup is intended for a personal deployment or one pre-provisioned user
+credential. Automatic provisioning and encrypted per-user credential storage
+for hosted multi-user deployments require a separate integration phase.
+
+The OpenViking SDK may still read optional defaults from `OPENVIKING_*`
+environment variables or `ovcli.conf`. DeerFlow's explicit URL and API key take
+precedence, and request-local actor selection overrides an ambient actor peer
+during memory operations. Operators should nevertheless avoid unrelated
+identity defaults in the DeerFlow process environment and CLI configuration.
+
+OpenViking peers represent top-level DeerFlow agents within the credential-bound
+user. Normal internal subagents do not create separate peers because they do not
+own an independent memory lifecycle.
+
+## Requirements
+
+Run OpenViking as a user-managed local or remote service with its VLM,
+embedding provider, and persistent workspace configured. DeerFlow includes
+`langchain-openviking==0.1.0` and requires `openviking-sdk>=0.1.6,<0.2` for
+request-scoped actor peers. Install the normal backend environment:
+
+```bash
+make install
+```
+
+The automatic-memory path does not require the full `openviking` server package
+inside DeerFlow. The standalone adapter owns its SDK transport and talks to the
+configured OpenViking service over HTTP.
 
 ## Configure DeerFlow
 
-Put the trusted OpenViking key in the repository root `.env`:
+Put the USER API key in the repository root `.env`:
 
 ```dotenv
-OPENVIKING_API_KEY=replace-with-the-same-root-api-key
+OPENVIKING_API_KEY=replace-with-your-user-api-key
 ```
 
 Replace the `memory` section in `config.yaml` with:
@@ -54,170 +113,103 @@ memory:
   manager_class: openviking
   mode: middleware
   backend_config:
-    base_url: http://openviking:1933
-    auth_mode: trusted
-    account: deerflow
+    base_url: https://your-openviking-server.example.com
+    owner_user_id: default
     api_key_env: OPENVIKING_API_KEY
-    max_connections: 100
-    max_keepalive_connections: 20
+    default_peer_id: deerflow
+    timeout_seconds: 30
     max_seen_message_ids: 512
     startup_policy: fail_fast
     failure_policy:
       read: fail_open
-      write: log_and_drop
+      write: fail_open
+    commit:
+      mode: pending_tokens
+      pending_token_threshold: 8000
+      idle_flush_seconds: 1800
     retrieval:
+      search_mode: search
       top_k: 8
       score_threshold: 0.25
       max_injection_chars: 12000
+      content_mode: auto
 ```
 
-For a locally installed DeerFlow process, use
-`http://127.0.0.1:1933`. For a DeerFlow container connecting to OpenViking on
-the host, use `http://host.docker.internal:1933` and set
-`allow_insecure_http: true`.
+For DeerFlow with authentication disabled, the synthetic user ID is `default`.
+For an authenticated personal deployment, set `owner_user_id` to the stable
+DeerFlow user ID associated with the OpenViking USER key.
 
-`max_connections` and `max_keepalive_connections` bound the shared HTTP
-connection pool. `max_seen_message_ids` bounds only the recent-ID fallback used
-when a conversation is compacted or rewritten; append-only histories are
-tracked by a constant-size prefix digest and do not depend on that window.
+Plain HTTP is accepted by default only for `localhost`, `127.0.0.1`, and the
+Compose service name `openviking`. For a trusted private network address, set
+`allow_insecure_http: true` explicitly. Prefer HTTPS for remote services.
 
-## Docker first-time startup
-
-Create the standard DeerFlow local files if they no longer exist:
-
-```bash
-make config
-cp .env.example .env
-cp frontend/.env.example frontend/.env
-```
-
-Set at least the normal DeerFlow secrets in `.env`, including
-`BETTER_AUTH_SECRET`, model provider credentials, and
-`OPENVIKING_API_KEY`.
-
-The production Compose file expects the same path variables normally exported
-by `scripts/deploy.sh`. Export them before using the OpenViking overlay
-directly:
-
-```bash
-export DEER_FLOW_CONFIG_PATH="$PWD/config.yaml"
-export DEER_FLOW_EXTENSIONS_CONFIG_PATH="$PWD/extensions_config.json"
-export DEER_FLOW_HOME="$PWD/backend/.deer-flow"
-export DEER_FLOW_REPO_ROOT="$PWD"
-```
-
-Start only OpenViking:
-
-```bash
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  up -d openviking
-```
-
-Initialize it interactively:
-
-```bash
-docker exec -it deer-flow-openviking openviking-server init
-```
-
-Choose trusted authentication, configure the same root API key stored in
-`OPENVIKING_API_KEY`, and configure VLM and embedding providers. Validate the
-configuration:
-
-```bash
-docker exec -it deer-flow-openviking openviking-server doctor
-docker restart deer-flow-openviking
-curl http://localhost:1933/health
-```
-
-Then start DeerFlow with the same overlay:
-
-```bash
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  up -d --build
-```
-
-Open DeerFlow at <http://localhost:2026> and OpenViking Studio at
-<http://localhost:1933/studio>.
-
-## Routine Docker operations
-
-```bash
-# Logs
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  logs -f gateway openviking
-
-# Stop containers but retain data
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  down
-
-# Restart
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  up -d
-
-# Pull a newer OpenViking image and recreate
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  pull openviking
-docker compose \
-  -f docker/docker-compose.yaml \
-  -f docker/docker-compose.openviking.yaml \
-  up -d openviking
-```
-
-Do not add `-v` to `docker compose down` unless you intentionally want to
-delete Redis and OpenViking persistent volumes.
-
-## Local-process startup
-
-Run OpenViking separately and verify:
-
-```bash
-openviking-server doctor
-openviking-server
-curl http://127.0.0.1:1933/health
-```
-
-Set `base_url: http://127.0.0.1:1933`, then start DeerFlow normally:
+Start DeerFlow through its normal path after the OpenViking server is healthy:
 
 ```bash
 make doctor
 make dev
 ```
 
-The DeerFlow entrypoint is <http://localhost:2026>.
+There is no separate OpenViking setup wizard yet. Configuration remains in
+`config.yaml` and `.env`, matching other memory backends.
+
+`commit.mode` controls the official recorder's post-append policy. `always`
+commits every accepted capture, `pending_tokens` commits at the configured
+token threshold, and `never` disables only that post-append auto-commit.
+Pre-compaction flushes still run in every mode, and `idle_flush_seconds > 0`
+remains an independent lifecycle boundary. Set it to `0` to disable idle
+commits explicitly.
 
 ## Failure behavior
 
-- Invalid backend configuration fails loudly; DeerFlow never silently writes
-  to DeerMem instead.
-- With `read: fail_open`, retrieval failures produce no injected memory and
-  the main agent continues.
-- With `write: log_and_drop`, a failed OpenViking commit is logged without
-  failing an already generated assistant response.
-- Once a message batch is accepted, DeerFlow persists a submitted-message
-  watermark before committing the Session. If commit then fails, later updates
-  do not resubmit those messages or retry the ambiguous commit; a future batch
-  can commit the still-open Session together with new messages.
-- Retried health, session lookup, and search requests use exponential backoff
-  with jitter so concurrent Gateway workers do not retry in lockstep.
-- OpenViking commit is eventually consistent: accepting a commit archives the
-  messages immediately, while summary and memory extraction finish in a
-  background task.
-- Graceful shutdown stops admitting new memory operations, waits up to
-  `shutdown_flush_timeout_seconds` for active reads and writes, and closes the
-  shared HTTP client only after they drain.
+- When memory is enabled, the Gateway resolves the configured manager before
+  reporting readiness. Invalid configuration, missing credentials, and other
+  manager-construction failures therefore abort startup with the original
+  migration guidance instead of disabling recall and failing after a completed
+  agent turn. A disabled memory backend is not constructed or validated.
+- Non-Gateway and runtime re-resolution paths still limit repeated
+  initialization tracebacks to one per minute per process.
+- `startup_policy: fail_fast` makes the backend's startup probe raise for an
+  unhealthy or unauthorized connection. The Gateway currently logs failed
+  memory warm-up and continues serving; `warn` also returns a degraded result
+  without raising.
+- `failure_policy.read: fail_open` continues a turn without recalled memory
+  after an operational retrieval failure. `fail_closed` rejects the read.
+- Identity and authorization failures always fail closed. Availability policy
+  cannot turn an owner mismatch into an anonymous or cross-user memory read.
+- `failure_policy.write: fail_open` logs a write failure while retaining all
+  unconfirmed cursor progress for the next capture. `fail_closed` also fails the
+  host operation.
+- Confirmed partial progress advances the cursor before the error is handled,
+  so a retry starts from the unconfirmed suffix.
+- A successful completed turn appends only its unseen suffix. The official
+  `pending_tokens` policy commits when the configured threshold is reached.
+  The adapter also records a durable idle deadline and commits after that
+  session remains inactive for `idle_flush_seconds`.
+- A failed threshold, idle, or compaction commit is marked pending. The next
+  capture, idle retry, process restart, or graceful shutdown retries it without
+  resubmitting accepted messages.
+- Graceful shutdown stops the idle worker, waits for active operations, retries
+  failed commits and idle deadlines that are already due, and closes the shared
+  client. It deliberately does not commit every future deadline merely because
+  the service is being restarted or deployed.
 
-For deployments where a lost memory update is unacceptable, a durable outbox
-is still required; the initial plugin intentionally does not claim
-at-least-once delivery.
+The cursor protects one running DeerFlow process from duplicate snapshot writes
+and restores idle deadlines when that process restarts. Its `storage_path` must
+be on persistent storage that survives DeerFlow restarts. Losing the cursor can
+make the next capture submit the retained transcript again and loses pending
+lifecycle intent. It is not a distributed outbox. Multiple Gateway replicas
+sharing one credential and thread still require server-side idempotency keys and
+cross-worker claiming before the integration can claim at-least-once delivery.
+
+## Existing trusted configuration
+
+Existing configurations that explicitly contain a legacy-only field continue
+to use the previous implementation and log a migration warning. Examples
+include `auth_mode`, `account`, old connection-pool settings,
+`retrieval.injection_query`, and the old `raise` or `log_and_drop` failure
+policies. A minimal config containing only shared fields such as `base_url` and
+`api_key_env` is ambiguous and now fails with migration guidance instead of
+silently defaulting to trusted mode. Add `owner_user_id` and use a USER API key
+to select the maintained adapter. To keep the deprecated backend temporarily,
+set its legacy `auth_mode` explicitly.
