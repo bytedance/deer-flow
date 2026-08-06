@@ -1702,22 +1702,38 @@ def _status_stub(*, app_configured: bool, app_id: str | None, auth_status: str) 
     )
 
 
-def test_set_lark_app_credentials_switches_app_and_keeps_prior_auth(monkeypatch, tmp_path):
+def test_set_lark_app_credentials_validates_switches_and_revokes_prior_auth(monkeypatch, tmp_path):
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
-    captured: dict[str, object] = {}
+    calls: list[tuple[str, object]] = []
 
-    # Seed an existing OAuth token file so we can prove switching the app does
-    # NOT wipe the previous authorization (data/ is preserved by design).
+    config_dir = lark_cli.lark_cli_config_dir("alice")
     data_dir = lark_cli.lark_cli_data_dir("alice")
+    config_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text('{"apps":[{"appId":"cli_old","appSecret":"old-secret"}]}', encoding="utf-8")
     token_file = data_dir / "token.json"
     token_file.write_text('{"access_token": "old-app-token"}', encoding="utf-8")
 
     monkeypatch.setattr(
         lark_cli,
+        "_validate_lark_app_credentials_with_cli",
+        lambda **kwargs: calls.append(("validate", kwargs)),
+    )
+
+    def _save(user_id, **kwargs):
+        calls.append(("save", {"user_id": user_id, **kwargs}))
+        (config_dir / "config.json").write_text('{"apps":[{"appId":"cli_new","appSecret":"new-secret"}]}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        lark_cli,
         "_save_lark_app_config_with_cli",
-        lambda user_id, **kwargs: captured.update({"user_id": user_id, **kwargs}),
+        _save,
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "_revoke_lark_auth_from_snapshot",
+        lambda snapshot: calls.append(("revoke", (snapshot / "data" / "token.json").read_text(encoding="utf-8"))),
     )
     monkeypatch.setattr(
         lark_cli,
@@ -1728,14 +1744,76 @@ def test_set_lark_app_credentials_switches_app_and_keeps_prior_auth(monkeypatch,
     result = lark_cli.set_lark_app_credentials("alice", config, app_id="  cli_new  ", app_secret="  new-secret  ", brand="lark")
 
     assert result.success is True
-    assert captured == {
-        "user_id": "alice",
-        "app_id": "cli_new",
-        "app_secret": "new-secret",
-        "brand": "lark",
-    }
-    # The previous app's OAuth data is intentionally retained.
-    assert token_file.read_text(encoding="utf-8") == '{"access_token": "old-app-token"}'
+    assert calls == [
+        ("validate", {"app_id": "cli_new", "app_secret": "new-secret", "brand": "lark"}),
+        ("save", {"user_id": "alice", "app_id": "cli_new", "app_secret": "new-secret", "brand": "lark"}),
+        ("revoke", '{"access_token": "old-app-token"}'),
+    ]
+    assert not token_file.exists()
+
+
+def test_set_lark_app_credentials_validation_failure_preserves_active_tree(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    config_dir = lark_cli.lark_cli_config_dir("alice")
+    data_dir = lark_cli.lark_cli_data_dir("alice")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "config.json"
+    token_file = data_dir / "token.json"
+    config_file.write_text("old-config", encoding="utf-8")
+    token_file.write_text("old-token", encoding="utf-8")
+
+    monkeypatch.setattr(
+        lark_cli,
+        "_validate_lark_app_credentials_with_cli",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("invalid credentials")),
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "_save_lark_app_config_with_cli",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("active config must not be touched")),
+    )
+
+    with pytest.raises(ValueError, match="invalid credentials"):
+        lark_cli.set_lark_app_credentials("alice", config, app_id="cli_new", app_secret="bad-secret")
+
+    assert config_file.read_text(encoding="utf-8") == "old-config"
+    assert token_file.read_text(encoding="utf-8") == "old-token"
+
+
+@pytest.mark.parametrize("failure_step", ["save", "revoke"])
+def test_set_lark_app_credentials_failure_restores_active_tree(monkeypatch, tmp_path, failure_step):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    config_dir = lark_cli.lark_cli_config_dir("alice")
+    data_dir = lark_cli.lark_cli_data_dir("alice")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "config.json"
+    token_file = data_dir / "token.json"
+    config_file.write_text("old-config", encoding="utf-8")
+    token_file.write_text("old-token", encoding="utf-8")
+
+    monkeypatch.setattr(lark_cli, "_validate_lark_app_credentials_with_cli", lambda **_kwargs: None)
+
+    def _save(*_args, **_kwargs):
+        config_file.write_text("new-config", encoding="utf-8")
+        if failure_step == "save":
+            raise ValueError("save failed")
+
+    monkeypatch.setattr(lark_cli, "_save_lark_app_config_with_cli", _save)
+    monkeypatch.setattr(
+        lark_cli,
+        "_revoke_lark_auth_from_snapshot",
+        lambda _snapshot: (_ for _ in ()).throw(ValueError("revoke failed")) if failure_step == "revoke" else None,
+    )
+
+    with pytest.raises(ValueError, match=f"{failure_step} failed"):
+        lark_cli.set_lark_app_credentials("alice", config, app_id="cli_new", app_secret="new-secret")
+
+    assert config_file.read_text(encoding="utf-8") == "old-config"
+    assert token_file.read_text(encoding="utf-8") == "old-token"
 
 
 @pytest.mark.parametrize(
@@ -1753,6 +1831,61 @@ def test_set_lark_app_credentials_rejects_missing_fields(monkeypatch, tmp_path, 
 
     with pytest.raises(ValueError):
         lark_cli.set_lark_app_credentials("alice", config, app_id=app_id, app_secret=app_secret)
+
+
+def test_set_lark_app_credentials_rejects_invalid_brand(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    monkeypatch.setattr(
+        lark_cli,
+        "_validate_lark_app_credentials_with_cli",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("invalid brand must fail first")),
+    )
+
+    with pytest.raises(ValueError, match="brand must be feishu or lark"):
+        lark_cli.set_lark_app_credentials("alice", config, app_id="cli_new", app_secret="new-secret", brand="larks")
+
+
+def test_set_lark_app_credentials_serializes_same_user(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    active = 0
+    max_active = 0
+    state_lock = threading.Lock()
+
+    def _validate(**_kwargs):
+        nonlocal active, max_active
+        with state_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with state_lock:
+            active -= 1
+
+    monkeypatch.setattr(lark_cli, "_validate_lark_app_credentials_with_cli", _validate)
+    monkeypatch.setattr(lark_cli, "_save_lark_app_config_with_cli", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(lark_cli, "_revoke_lark_auth_from_snapshot", lambda _snapshot: None)
+    monkeypatch.setattr(
+        lark_cli,
+        "get_lark_integration_status",
+        lambda _user_id, _config, **_kwargs: _status_stub(app_configured=True, app_id="cli_new", auth_status="not_authorized"),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda suffix: lark_cli.set_lark_app_credentials(
+                    "alice",
+                    config,
+                    app_id=f"cli_{suffix}",
+                    app_secret="new-secret",
+                ),
+                ("one", "two"),
+            )
+        )
+
+    assert all(result.success for result in results)
+    assert max_active == 1
 
 
 def test_lark_config_credentials_route_switches_app(monkeypatch, tmp_path):
@@ -1784,3 +1917,16 @@ def test_lark_config_credentials_route_switches_app(monkeypatch, tmp_path):
     assert response.json()["status"]["app_configured"] is True
     assert response.json()["status"]["auth"]["status"] == "not_authorized"
     assert captured == {"app_id": "cli_new", "app_secret": "new-secret", "brand": "feishu"}
+
+
+def test_lark_config_credentials_route_rejects_invalid_brand(tmp_path):
+    config = _config(tmp_path / "skills")
+    app = _make_app(system_role="user", config=config)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/lark/config/credentials",
+            json={"app_id": "cli_new", "app_secret": "new-secret", "brand": "larks"},
+        )
+
+    assert response.status_code == 422

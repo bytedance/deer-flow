@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -126,7 +127,7 @@ class LarkConfigCompleteResponse(BaseModel):
 class LarkConfigCredentialsRequest(BaseModel):
     app_id: str = Field(..., description="Lark/Feishu App ID to switch this user's integration to")
     app_secret: str = Field(..., description="Lark/Feishu App Secret paired with app_id")
-    brand: str = Field(default="feishu", description="Lark brand: feishu or lark")
+    brand: Literal["feishu", "lark"] = Field(default="feishu", description="Lark brand: feishu or lark")
 
 
 class LarkAuthStartResponse(BaseModel):

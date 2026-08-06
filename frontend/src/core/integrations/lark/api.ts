@@ -36,9 +36,12 @@ async function readErrorDetail(response: Response): Promise<string> {
   return data.detail ?? `HTTP ${response.status}: ${response.statusText}`;
 }
 
-export async function loadLarkIntegrationStatus(): Promise<LarkIntegrationStatus> {
+export async function loadLarkIntegrationStatus(
+  signal?: AbortSignal,
+): Promise<LarkIntegrationStatus> {
   const response = await fetch(
     `${getBackendBaseURL()}/api/integrations/lark/status`,
+    { signal },
   );
   if (!response.ok) {
     throw new LarkIntegrationRequestError(

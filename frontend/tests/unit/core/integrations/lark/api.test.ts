@@ -36,6 +36,7 @@ beforeEach(() => {
 
 describe("lark integration api", () => {
   test("loads status", async () => {
+    const controller = new AbortController();
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
         installed: false,
@@ -59,7 +60,9 @@ describe("lark integration api", () => {
       }),
     );
 
-    await expect(loadLarkIntegrationStatus()).resolves.toMatchObject({
+    await expect(
+      loadLarkIntegrationStatus(controller.signal),
+    ).resolves.toMatchObject({
       installed: false,
       version: "v1.0.65",
       sandbox_runtime_mode: "init-container",
@@ -67,6 +70,7 @@ describe("lark integration api", () => {
     });
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/integrations/lark/status",
+      { signal: controller.signal },
     );
   });
 

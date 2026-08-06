@@ -878,8 +878,8 @@ export const zhCN: Translations = {
           "把你的 DeerFlow 账号指向另一个 Lark/飞书 App。只影响你自己的账号，不影响其他用户。",
         changeAppIdLabel: "App ID",
         changeAppSecretLabel: "App Secret",
-        changeAppKeepAuthNote:
-          "会保留旧 App 的授权数据；切换后请重新连接以授权新 App。",
+        changeAppAuthResetNote:
+          "切换时会撤销旧 App 的授权，随后需要授权新 App。",
         changeAppSubmit: "切换 App",
         changeAppReRegister: "在浏览器重新注册",
         changeAppSwitched: "已切换飞书 App。请重新连接以授权新 App。",

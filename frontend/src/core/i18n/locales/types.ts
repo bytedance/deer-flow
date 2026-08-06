@@ -774,7 +774,7 @@ export interface Translations {
         changeAppDescription: string;
         changeAppIdLabel: string;
         changeAppSecretLabel: string;
-        changeAppKeepAuthNote: string;
+        changeAppAuthResetNote: string;
         changeAppSubmit: string;
         changeAppReRegister: string;
         changeAppSwitched: string;

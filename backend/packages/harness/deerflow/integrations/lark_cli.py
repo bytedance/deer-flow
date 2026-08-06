@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from weakref import WeakValueDictionary
 
 try:
     import fcntl
@@ -164,6 +165,8 @@ LARK_SKILL_NAMES: tuple[str, ...] = (
 LARK_SKILL_NAME_SET = frozenset(LARK_SKILL_NAMES)
 _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
+_LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
+_LARK_CREDENTIAL_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -278,6 +281,10 @@ def lark_cli_config_dir(user_id: str) -> Path:
 
 def lark_cli_data_dir(user_id: str) -> Path:
     return get_paths().user_dir(user_id) / "integrations" / INTEGRATION_ID / "data"
+
+
+def _lark_cli_credential_root(user_id: str) -> Path:
+    return get_paths().user_dir(user_id) / "integrations" / INTEGRATION_ID
 
 
 def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None) -> None:
@@ -454,6 +461,21 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
             else:  # pragma: no cover - Windows fallback
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _lark_credential_thread_lock(user_id: str) -> threading.Lock:
+    with _LARK_CREDENTIAL_LOCKS_GUARD:
+        return _LARK_CREDENTIAL_LOCKS.setdefault(user_id, threading.Lock())
+
+
+@contextmanager
+def _lark_credential_lock(user_id: str):
+    """Serialize credential replacement for one user across threads/processes."""
+    root = _lark_cli_credential_root(user_id)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = root.parent / f".{INTEGRATION_ID}.credentials.lock"
+    with _exclusive_install_lock(lock_path, _lark_credential_thread_lock(user_id)):
+        yield
 
 
 def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
@@ -1004,32 +1026,33 @@ def complete_lark_config(
     if not device_code:
         raise ValueError("device_code is required.")
     parsed_brand = _normalize_lark_brand(brand)
-    result = _poll_lark_app_registration(
-        device_code=device_code,
-        brand=parsed_brand,
-        interval=interval or 5,
-        expires_in=expires_in or 300,
-    )
-    if not result.get("client_secret") and _tenant_brand(result) == "lark":
-        # Lark CLI starts polling on the Feishu accounts host for both brands.
-        # For Lark tenants that response can include user_info.tenant_brand and
-        # client_id but omit client_secret; polling the Lark accounts host with
-        # the same device_code returns the complete app credentials.
+    with _lark_credential_lock(user_id):
         result = _poll_lark_app_registration(
             device_code=device_code,
-            brand="lark",
+            brand=parsed_brand,
             interval=interval or 5,
             expires_in=expires_in or 300,
         )
+        if not result.get("client_secret") and _tenant_brand(result) == "lark":
+            # Lark CLI starts polling on the Feishu accounts host for both brands.
+            # For Lark tenants that response can include user_info.tenant_brand and
+            # client_id but omit client_secret; polling the Lark accounts host with
+            # the same device_code returns the complete app credentials.
+            result = _poll_lark_app_registration(
+                device_code=device_code,
+                brand="lark",
+                interval=interval or 5,
+                expires_in=expires_in or 300,
+            )
 
-    app_id = str(result.get("client_id") or "").strip()
-    app_secret = str(result.get("client_secret") or "").strip()
-    final_brand = _tenant_brand(result) or parsed_brand
-    if not app_id or not app_secret:
-        raise ValueError("Lark app registration succeeded but did not return app credentials.")
+        app_id = str(result.get("client_id") or "").strip()
+        app_secret = str(result.get("client_secret") or "").strip()
+        final_brand = _tenant_brand(result) or parsed_brand
+        if not app_id or not app_secret:
+            raise ValueError("Lark app registration succeeded but did not return app credentials.")
 
-    _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=final_brand)
-    status = get_lark_integration_status(user_id, config)
+        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=final_brand)
+        status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
@@ -1045,26 +1068,33 @@ def set_lark_app_credentials(
     app_secret: str,
     brand: str = "feishu",
 ) -> LarkConfigCompleteResult:
-    """Switch this user's Lark/Feishu app to an existing app's credentials.
-
-    Unlike :func:`complete_lark_config` (which drives the browser device-flow to
-    create/register an app), this binds a Lark app the user already owns by
-    persisting its ``app_id``/``app_secret`` directly through ``lark-cli config
-    init``. ``config init`` replaces the current app entry, so switching is a
-    per-user operation that does not touch any other user's credentials.
-
-    OAuth tokens under the user's ``data`` directory are intentionally left in
-    place: switching only rebinds the app credentials, and a stale token from a
-    previous app simply fails the next live verification, prompting a reconnect.
-    """
+    """Atomically switch this user's app and revoke the previous OAuth token."""
     app_id = app_id.strip()
     app_secret = app_secret.strip()
     if not app_id:
         raise ValueError("app_id is required.")
     if not app_secret:
         raise ValueError("app_secret is required.")
-    parsed_brand = _normalize_lark_brand(brand)
-    _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+    parsed_brand = brand.strip().lower()
+    if parsed_brand not in {"feishu", "lark"}:
+        raise ValueError("brand must be feishu or lark.")
+
+    with _lark_credential_lock(user_id):
+        _validate_lark_app_credentials_with_cli(app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+        ensure_lark_cli_credential_tree(user_id)
+        root = _lark_cli_credential_root(user_id)
+        with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
+            snapshot = Path(temp_dir) / "credentials"
+            _snapshot_lark_credential_tree(root, snapshot)
+            try:
+                _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+                _clear_directory_contents(lark_cli_data_dir(user_id))
+                _revoke_lark_auth_from_snapshot(snapshot)
+            except Exception:
+                _restore_lark_credential_tree(root, snapshot)
+                ensure_lark_cli_credential_tree(user_id)
+                raise
+
     status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
@@ -1125,14 +1155,15 @@ def complete_lark_auth(
     if not LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS <= wait_timeout_seconds <= LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS:
         raise ValueError(f"wait_timeout_seconds must be between {LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS} and {LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS}.")
 
-    path = _require_lark_cli_path()
-    _run_lark_cli_json(
-        [path, "auth", "login", "--device-code", device_code, "--json"],
-        user_id=user_id,
-        timeout=wait_timeout_seconds,
-        allow_empty_success=True,
-    )
-    status = get_lark_integration_status(user_id, config, verify_auth=True)
+    with _lark_credential_lock(user_id):
+        path = _require_lark_cli_path()
+        _run_lark_cli_json(
+            [path, "auth", "login", "--device-code", device_code, "--json"],
+            user_id=user_id,
+            timeout=wait_timeout_seconds,
+            allow_empty_success=True,
+        )
+        status = get_lark_integration_status(user_id, config, verify_auth=True)
     return LarkAuthCompleteResult(
         success=status.auth.status == "authenticated",
         status=status,
@@ -1328,28 +1359,121 @@ def _tenant_brand(result: dict[str, Any]) -> str | None:
     return brand if brand in {"feishu", "lark"} else None
 
 
-def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+def _lark_cli_env_for_directories(*, config_dir: Path, data_dir: Path) -> dict[str, str]:
+    env = {
+        **os.environ,
+        "LARKSUITE_CLI_CONFIG_DIR": str(config_dir),
+        "LARKSUITE_CLI_DATA_DIR": str(data_dir),
+        "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
+        "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
+    }
+    managed_bin = _lark_cli_managed_bin_dir()
+    if _lark_cli_managed_path() is not None:
+        env["PATH"] = f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    return env
+
+
+def _run_lark_config_init(*, app_id: str, app_secret: str, brand: str, env: dict[str, str]) -> None:
     path = _require_lark_cli_path()
     try:
-        try:
-            result = subprocess.run(
-                [path, "config", "init", "--app-id", app_id, "--app-secret-stdin", "--brand", _normalize_lark_brand(brand)],
-                input=app_secret + "\n",
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=lark_cli_env(user_id),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("Timed out while saving Lark connection setup.") from exc
-    finally:
-        ensure_lark_cli_credential_tree(user_id)
+        result = subprocess.run(
+            [path, "config", "init", "--app-id", app_id, "--app-secret-stdin", "--brand", brand],
+            input=app_secret + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Timed out while saving Lark connection setup.") from exc
     if result.returncode != 0:
         raw = (result.stderr or result.stdout or "").strip()
         parsed = _parse_json_object(raw)
         message = _auth_error_message(parsed) if parsed else raw
         raise ValueError(message or f"lark-cli config init exited with code {result.returncode}")
+
+
+def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+    try:
+        _run_lark_config_init(
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=brand,
+            env=lark_cli_env(user_id),
+        )
+    finally:
+        ensure_lark_cli_credential_tree(user_id)
+
+
+def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, brand: str) -> None:
+    with tempfile.TemporaryDirectory(prefix=".validating-lark-app-") as temp_dir:
+        root = Path(temp_dir)
+        config_dir = root / "config"
+        data_dir = root / "data"
+        config_dir.mkdir(mode=0o700)
+        data_dir.mkdir(mode=0o700)
+        _run_lark_config_init(
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=brand,
+            env=_lark_cli_env_for_directories(config_dir=config_dir, data_dir=data_dir),
+        )
+
+
+def _snapshot_lark_credential_tree(root: Path, snapshot: Path) -> None:
+    shutil.copytree(root, snapshot, symlinks=False)
+
+
+def _clear_directory_contents(directory: Path) -> None:
+    if directory.is_symlink():
+        raise ValueError(f"Lark CLI credential path must not be a symlink: {directory}")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for child in directory.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _copy_directory_contents(source: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for child in source.iterdir():
+        destination = target / child.name
+        if child.is_dir() and not child.is_symlink():
+            shutil.copytree(child, destination, symlinks=False)
+        else:
+            shutil.copy2(child, destination, follow_symlinks=False)
+
+
+def _restore_lark_credential_tree(root: Path, snapshot: Path) -> None:
+    for name in ("config", "data"):
+        target = root / name
+        _clear_directory_contents(target)
+        _copy_directory_contents(snapshot / name, target)
+
+
+def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
+    data_dir = snapshot / "data"
+    if not any(path.is_file() for path in data_dir.rglob("*")):
+        return
+    path = _require_lark_cli_path()
+    try:
+        result = subprocess.run(
+            [path, "auth", "logout", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_lark_cli_env_for_directories(config_dir=snapshot / "config", data_dir=data_dir),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Timed out while revoking the previous Lark authorization.") from exc
+    if result.returncode != 0:
+        raw = (result.stderr or result.stdout or "").strip()
+        parsed = _parse_json_object(raw)
+        message = _auth_error_message(parsed) if parsed else raw
+        raise ValueError(message or f"lark-cli auth logout exited with code {result.returncode}")
 
 
 def _run_lark_cli_json(

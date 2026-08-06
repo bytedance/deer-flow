@@ -916,8 +916,8 @@ export const enUS: Translations = {
           "Point your DeerFlow account at a different Lark/Feishu app. This only affects your account; other users are not changed.",
         changeAppIdLabel: "App ID",
         changeAppSecretLabel: "App Secret",
-        changeAppKeepAuthNote:
-          "The previous app's authorization is kept; after switching, reconnect to authorize the new app.",
+        changeAppAuthResetNote:
+          "Switching revokes the previous app's authorization. You will authorize the new app next.",
         changeAppSubmit: "Switch app",
         changeAppReRegister: "Re-register in browser",
         changeAppSwitched:
