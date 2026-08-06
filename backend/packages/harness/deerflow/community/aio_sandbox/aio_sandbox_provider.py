@@ -43,7 +43,7 @@ from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATIO
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider, SandboxReconciliationResult
+from deerflow.sandbox.sandbox_provider import SandboxProvider, SandboxReconciliationIdentity, SandboxReconciliationResult
 from deerflow.uploads.layout import UPLOAD_CONVERSIONS_DIRNAME, ensure_conversion_dir
 
 from .aio_sandbox import AioSandbox
@@ -2572,20 +2572,23 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return sandbox
 
     def reconciliation_provider_key(self) -> str:
-        """Bind durable journals to this provider's concrete backend namespace."""
+        """Return the provider type; the backend namespace is stored separately."""
         provider_type = type(self)
-        backend = self._backend
-        backend_type = type(backend)
-        namespace_parts = [
-            f"{provider_type.__module__}.{provider_type.__qualname__}",
-            f"{backend_type.__module__}.{backend_type.__qualname__}",
-        ]
-        if isinstance(backend, RemoteSandboxBackend):
-            namespace_parts.append(backend.provisioner_url)
-        elif isinstance(backend, LocalContainerBackend):
-            namespace_parts.extend([backend.runtime, backend._container_prefix])
-        namespace = "\0".join(namespace_parts).encode("utf-8")
-        return f"{namespace_parts[0]}:{hashlib.sha256(namespace).hexdigest()}"
+        return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+    def prepare_sandbox_reconciliation_identity(
+        self,
+        sandbox_id: str,
+    ) -> SandboxReconciliationIdentity | None:
+        """Snapshot a backend-issued namespace and immutable incarnation."""
+        discovery = self._backend.discover_for_reconciliation(sandbox_id)
+        if discovery.status != "found" or discovery.info is None or not discovery.backend_namespace or not discovery.incarnation_id:
+            return None
+        return SandboxReconciliationIdentity(
+            provider_key=self.reconciliation_provider_key(),
+            backend_namespace=discovery.backend_namespace,
+            incarnation_id=discovery.incarnation_id,
+        )
 
     def reconnect_sandbox_for_reconciliation(
         self,
@@ -2593,15 +2596,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         *,
         thread_id: str,
         user_id: str | None,
+        identity: SandboxReconciliationIdentity,
     ) -> SandboxReconciliationResult:
         """Reconnect to exactly *sandbox_id* without acquiring or creating."""
-        active = self.get(sandbox_id)
-        if active is not None:
-            return SandboxReconciliationResult.found(active)
+        if identity.provider_key != self.reconciliation_provider_key():
+            return SandboxReconciliationResult.unknown()
         discovery = self._backend.discover_for_reconciliation(sandbox_id)
+        if not discovery.backend_namespace or discovery.backend_namespace != identity.backend_namespace:
+            return SandboxReconciliationResult.unknown()
         if discovery.status == "absent":
             return SandboxReconciliationResult.absent()
-        if discovery.status != "found" or discovery.info is None:
+        if discovery.status != "found" or not discovery.incarnation_id:
+            return SandboxReconciliationResult.unknown()
+        if discovery.incarnation_id != identity.incarnation_id:
+            # The expected immutable instance is gone. Never redirect the old
+            # journal to a replacement that reused the deterministic raw ID.
+            return SandboxReconciliationResult.absent()
+        if discovery.info is None:
+            # The exact Pod/container still exists but has no access endpoint.
             return SandboxReconciliationResult.unknown()
         info = discovery.info
         if info.sandbox_id != sandbox_id:
@@ -2611,6 +2623,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         if info.user_id is not None and info.user_id != effective_user_id:
             return SandboxReconciliationResult.unknown()
+        # Do not borrow an active-cache entry by deterministic raw ID. The
+        # backend snapshot above is the authority for this exact incarnation;
+        # a cache entry can be replaced independently during lifecycle races.
         return SandboxReconciliationResult.found(
             AioSandbox(sandbox_id, info.sandbox_url),
             close_after=True,

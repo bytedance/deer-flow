@@ -51,14 +51,34 @@ def test_list_running_delegates_to_provisioner_list(monkeypatch):
     assert backend.list_running() == [sandbox_info]
 
 
-def test_reconciliation_discovery_confirms_provisioner_absence(monkeypatch):
+def test_reconciliation_discovery_does_not_trust_legacy_route_404(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(status_code=404))
 
     result = backend.discover_for_reconciliation("old-id")
 
-    assert result.status == "absent"
+    assert result.status == "unknown"
     assert result.info is None
+
+
+def test_reconciliation_discovery_accepts_pod_authoritative_absence(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "old-id",
+                "status": "absent",
+                "backend_namespace": "namespace-uid-1",
+            }
+        ),
+    )
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "absent"
+    assert result.backend_namespace == "namespace-uid-1"
 
 
 def test_reconciliation_discovery_preserves_transport_uncertainty(monkeypatch):
@@ -75,7 +95,7 @@ def test_reconciliation_discovery_preserves_transport_uncertainty(monkeypatch):
     assert result.info is None
 
 
-def test_reconciliation_discovery_accepts_exact_legacy_mount_contract(monkeypatch):
+def test_reconciliation_discovery_accepts_exact_old_mount_contract(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     monkeypatch.setattr(
         requests,
@@ -83,6 +103,9 @@ def test_reconciliation_discovery_accepts_exact_legacy_mount_contract(monkeypatc
         lambda *_args, **_kwargs: _StubResponse(
             payload={
                 "sandbox_id": "old-id",
+                "status": "found",
+                "backend_namespace": "namespace-uid-1",
+                "incarnation_id": "pod-uid-1",
                 "sandbox_url": "http://sandbox-old",
                 "thread_id": "thread-1",
                 "user_id": "alice",
@@ -97,6 +120,8 @@ def test_reconciliation_discovery_accepts_exact_legacy_mount_contract(monkeypatc
     assert result.info is not None
     assert result.info.sandbox_id == "old-id"
     assert result.info.mount_contract_version == 1
+    assert result.backend_namespace == "namespace-uid-1"
+    assert result.incarnation_id == "pod-uid-1"
 
 
 def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monkeypatch):

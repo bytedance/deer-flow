@@ -10,6 +10,7 @@ import os
 import secrets
 import shutil
 import stat
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -32,6 +33,9 @@ from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
+_uncertain_remote_journal_lock = threading.Lock()
+_uncertain_remote_journal_reservations: set[tuple[str, str, str]] = set()
+
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
 UPLOAD_DELETION_TRANSACTION_PREFIX = ".upload-delete-"
@@ -51,6 +55,37 @@ class RemoteDeletionCommitRequiredError(RuntimeError):
 
 class RemoteDeletionCompensatedError(RuntimeError):
     """Remote deletion failed but its side effects were fully compensated."""
+
+
+def _retain_uncertain_remote_journal_reservation(journal_path: Path, filename: str) -> None:
+    """Reserve a remote pathname while journal-unlink durability is unknown."""
+    base_dir = journal_path.parent.parent.parent / "uploads"
+    reservation = (
+        os.path.abspath(base_dir),
+        portable_name_coordination_key(filename),
+        os.path.abspath(journal_path),
+    )
+    with _uncertain_remote_journal_lock:
+        _uncertain_remote_journal_reservations.add(reservation)
+
+
+def _release_uncertain_remote_journal_reservation(journal_path: Path) -> None:
+    journal_key = os.path.abspath(journal_path)
+    with _uncertain_remote_journal_lock:
+        matches = {reservation for reservation in _uncertain_remote_journal_reservations if reservation[2] == journal_key}
+        _uncertain_remote_journal_reservations.difference_update(matches)
+
+
+def _uncertain_remote_journal_reserves_name(base_dir: Path, coordination_key: str) -> bool:
+    base_key = os.path.abspath(base_dir)
+    with _uncertain_remote_journal_lock:
+        return any(reservation_base == base_key and reservation_name == coordination_key for reservation_base, reservation_name, _journal in _uncertain_remote_journal_reservations)
+
+
+def _transaction_has_uncertain_remote_journal(transaction_dir: Path) -> bool:
+    transaction_key = os.path.abspath(transaction_dir)
+    with _uncertain_remote_journal_lock:
+        return any(os.path.dirname(journal_key) == transaction_key for _base, _name, journal_key in _uncertain_remote_journal_reservations)
 
 
 @dataclass(slots=True)
@@ -307,6 +342,8 @@ def _pending_remote_deletion_reserves_name(base_dir: Path, coordination_key: str
     Callers hold the candidate's name lease while scanning, so reconciliation
     cannot remove the journal between this check and publication.
     """
+    if _uncertain_remote_journal_reserves_name(base_dir, coordination_key):
+        return True
     conversion_dir = base_dir.parent / UPLOAD_CONVERSIONS_DIRNAME
     try:
         conversion_dir_stat = os.lstat(conversion_dir)
@@ -1039,6 +1076,8 @@ def _finish_deletion_transaction(staged_path: Path) -> None:
 
 def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
     """Restore a crash-abandoned tombstone whose basename records its target."""
+    if _transaction_has_uncertain_remote_journal(transaction_dir):
+        return False
     metadata = _deletion_transaction_metadata(transaction_dir.name)
     if metadata is None:
         logger.warning("Refusing malformed upload deletion transaction name: %s", transaction_dir)
@@ -1162,10 +1201,6 @@ def _recover_stale_deletion_transaction(transaction_dir: Path) -> bool:
         )
         return False
     if not primary_entries:
-        if remote_journal_entries:
-            # sandbox_sync reconciles this durable remote cleanup before the
-            # transaction and its commit marker can be removed.
-            return False
         if recover_on_crash and not commit_entries and not conversion_entries:
             if restore_entries:
                 Path(restore_entries[0].path).unlink()

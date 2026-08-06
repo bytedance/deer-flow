@@ -28,6 +28,7 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.sandbox_provider import SandboxReconciliationIdentity
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.layout import conversion_path_for_upload
@@ -2671,10 +2672,36 @@ class TestUploads:
         conversion = conversion_path_for_upload(primary)
         conversion.parent.mkdir()
         conversion.write_text("generated", encoding="utf-8")
-        provider = MagicMock(uses_thread_data_mounts=False)
-        provider.acquire.return_value = "remote-1"
         sandbox = MagicMock()
-        provider.get.return_value = sandbox
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            @staticmethod
+            def refresh_thread_data_mount_capabilities() -> bool:
+                return False
+
+            @staticmethod
+            def acquire(_thread_id: str, *, user_id: str | None = None) -> str:
+                return "remote-1"
+
+            @staticmethod
+            def get(sandbox_id: str):
+                return sandbox if sandbox_id == "remote-1" else None
+
+            @staticmethod
+            def reconciliation_provider_key() -> str:
+                return "tests.ClientExplicitSyncProvider"
+
+            def prepare_sandbox_reconciliation_identity(self, sandbox_id: str) -> SandboxReconciliationIdentity:
+                assert sandbox_id == "remote-1"
+                return SandboxReconciliationIdentity(
+                    provider_key=self.reconciliation_provider_key(),
+                    backend_namespace="tests.backend",
+                    incarnation_id="tests.incarnation",
+                )
+
+        provider = Provider()
 
         with (
             patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),

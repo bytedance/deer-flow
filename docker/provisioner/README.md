@@ -128,6 +128,29 @@ Get status and URL of a specific sandbox.
 
 **Status Values**: `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`, `NotFound`
 
+### `GET /api/reconciliation/sandboxes/{sandbox_id}`
+
+Return the Kubernetes Namespace UID and the exact Pod UID used by durable
+Gateway cleanup. This endpoint is Pod-authoritative: a missing Service with a
+live Pod returns `status: "found"` and `sandbox_url: null`; only a missing Pod in
+the same Namespace UID returns `status: "absent"`. The Gateway therefore cannot
+redirect an old deletion journal to a replacement Pod that reused the same
+deterministic `sandbox_id`.
+
+**Response**:
+```json
+{
+  "sandbox_id": "abc-123",
+  "status": "found",
+  "backend_namespace": "namespace-uid",
+  "incarnation_id": "pod-uid",
+  "sandbox_url": "http://host.docker.internal:32123",
+  "user_id": "user-789",
+  "thread_id": "thread-456",
+  "mount_contract_version": 2
+}
+```
+
 ### `DELETE /api/sandboxes/{sandbox_id}`
 Destroy a sandbox Pod + Service.
 

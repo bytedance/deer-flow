@@ -25,14 +25,27 @@ class SandboxDiscoveryResult:
 
     status: Literal["found", "absent", "unknown"]
     info: SandboxInfo | None = None
+    backend_namespace: str | None = None
+    incarnation_id: str | None = None
 
     @classmethod
-    def found(cls, info: SandboxInfo) -> SandboxDiscoveryResult:
-        return cls(status="found", info=info)
+    def found(
+        cls,
+        info: SandboxInfo | None,
+        *,
+        backend_namespace: str,
+        incarnation_id: str,
+    ) -> SandboxDiscoveryResult:
+        return cls(
+            status="found",
+            info=info,
+            backend_namespace=backend_namespace,
+            incarnation_id=incarnation_id,
+        )
 
     @classmethod
-    def absent(cls) -> SandboxDiscoveryResult:
-        return cls(status="absent")
+    def absent(cls, *, backend_namespace: str) -> SandboxDiscoveryResult:
+        return cls(status="absent", backend_namespace=backend_namespace)
 
     @classmethod
     def unknown(cls) -> SandboxDiscoveryResult:
@@ -197,16 +210,13 @@ class SandboxBackend(ABC):
     def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
         """Discover one exact old instance without creating a replacement.
 
-        The base contract cannot distinguish a definite absence from a
-        transient discovery failure, so only a positive lookup is conclusive.
-        Backends with authoritative lookup APIs should override this method.
+        The base contract has neither a backend namespace nor an immutable
+        instance identity, so no ordinary discovery result is safe for a
+        durable mutation. Backends with authoritative identity APIs override
+        this method.
         """
-        try:
-            info = self.discover(sandbox_id)
-        except BaseException:
-            logger.warning("Sandbox discovery failed during reconciliation", exc_info=True)
-            return SandboxDiscoveryResult.unknown()
-        return SandboxDiscoveryResult.found(info) if info is not None else SandboxDiscoveryResult.unknown()
+        del sandbox_id
+        return SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.

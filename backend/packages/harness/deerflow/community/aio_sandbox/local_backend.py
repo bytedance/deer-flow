@@ -408,6 +408,9 @@ class LocalContainerBackend(SandboxBackend):
 
     def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
         """Resolve an exact deterministic container, preserving uncertainty."""
+        backend_namespace = self._reconciliation_backend_namespace()
+        if backend_namespace is None:
+            return SandboxDiscoveryResult.unknown()
         container_name = f"{self._container_prefix}-{sandbox_id}"
         try:
             running = self._is_container_running(container_name)
@@ -415,9 +418,51 @@ class LocalContainerBackend(SandboxBackend):
             logger.warning("Could not verify container %s during reconciliation", container_name, exc_info=True)
             return SandboxDiscoveryResult.unknown()
         if not running:
-            return SandboxDiscoveryResult.absent()
+            return SandboxDiscoveryResult.absent(backend_namespace=backend_namespace)
         info = self.discover(sandbox_id)
-        return SandboxDiscoveryResult.found(info) if info is not None else SandboxDiscoveryResult.unknown()
+        incarnation_id = self._container_incarnation(container_name)
+        if info is None or incarnation_id is None:
+            return SandboxDiscoveryResult.unknown()
+        info.container_id = incarnation_id
+        return SandboxDiscoveryResult.found(
+            info,
+            backend_namespace=backend_namespace,
+            incarnation_id=incarnation_id,
+        )
+
+    def _reconciliation_backend_namespace(self) -> str | None:
+        """Return the Docker daemon identity that owns deterministic names."""
+        if self._runtime != "docker":
+            return None
+        try:
+            result = subprocess.run(
+                [self._runtime, "info", "--format", "{{.ID}}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        daemon_id = result.stdout.strip()
+        if result.returncode != 0 or not daemon_id or daemon_id == "<no value>":
+            return None
+        return f"docker:{daemon_id}"
+
+    def _container_incarnation(self, container_name: str) -> str | None:
+        """Return Docker's immutable container ID for one exact name."""
+        try:
+            result = subprocess.run(
+                [self._runtime, "inspect", "-f", "{{.Id}}", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        incarnation_id = result.stdout.strip()
+        if result.returncode != 0 or not incarnation_id or incarnation_id == "<no value>":
+            return None
+        return incarnation_id
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running containers matching the configured prefix.

@@ -11,6 +11,8 @@ run in K8s and are accessed by the backend via the configured Service mode.
 Endpoints:
     POST   /api/sandboxes              — Create a sandbox Pod + Service
     DELETE /api/sandboxes/{sandbox_id} — Destroy a sandbox Pod + Service
+    GET    /api/reconciliation/sandboxes/{sandbox_id}
+                                        — Get Namespace/Pod immutable identity
     GET    /api/sandboxes/{sandbox_id} — Get sandbox status & URL
     GET    /api/sandboxes              — List all sandboxes
     GET    /health                     — Provisioner health check
@@ -38,6 +40,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import urllib3
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -526,6 +529,17 @@ class SandboxResponse(BaseModel):
     mount_contract_version: int | None = None
 
 
+class SandboxReconciliationResponse(BaseModel):
+    sandbox_id: str
+    status: Literal["found", "absent"]
+    backend_namespace: str
+    incarnation_id: str | None = None
+    sandbox_url: str | None = None
+    user_id: str | None = None
+    thread_id: str | None = None
+    mount_contract_version: int | None = None
+
+
 # ── K8s resource helpers ─────────────────────────────────────────────────
 
 
@@ -615,18 +629,21 @@ def _set_mount_contract_metadata(
 def _validate_existing_sandbox_contract(
     sandbox_id: str,
     *,
+    existing_pod: k8s_client.V1Pod | None = None,
     expected_pod: k8s_client.V1Pod | None = None,
     user_id: str | None = None,
     thread_id: str | None = None,
 ) -> tuple[str, str]:
     """Fail closed unless an existing Pod proves its tenant and mount contract."""
-    try:
-        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-    except ApiException as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Existing sandbox '{sandbox_id}' has no verifiable Pod contract",
-        ) from exc
+    pod = existing_pod
+    if pod is None:
+        try:
+            pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+        except ApiException as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Existing sandbox '{sandbox_id}' has no verifiable Pod contract",
+            ) from exc
 
     labels = pod.metadata.labels or {}
     annotations = pod.metadata.annotations or {}
@@ -1474,6 +1491,68 @@ def destroy_sandbox(sandbox_id: str):
         )
 
     return {"ok": True, "sandbox_id": sandbox_id}
+
+
+@app.get(
+    "/api/reconciliation/sandboxes/{sandbox_id}",
+    response_model=SandboxReconciliationResponse,
+)
+def reconcile_sandbox_identity(sandbox_id: str):
+    """Return Pod-authoritative backend and immutable instance identity.
+
+    The ordinary GET is access-oriented and returns 404 when its Service is
+    missing. Durable reconciliation must instead distinguish that partial
+    cleanup state from true Pod absence and must bind a deterministic raw ID to
+    the exact Pod UID that existed when the journal was prepared.
+    """
+    try:
+        namespace = core_v1.read_namespace(K8S_NAMESPACE)
+        backend_namespace = getattr(namespace.metadata, "uid", None)
+    except ApiException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not verify sandbox backend namespace: {exc.reason}",
+        ) from exc
+    if not isinstance(backend_namespace, str) or not backend_namespace:
+        raise HTTPException(
+            status_code=503,
+            detail="Sandbox backend namespace has no immutable UID",
+        )
+
+    try:
+        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        if exc.status == 404:
+            return SandboxReconciliationResponse(
+                sandbox_id=sandbox_id,
+                status="absent",
+                backend_namespace=backend_namespace,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not verify sandbox Pod: {exc.reason}",
+        ) from exc
+
+    incarnation_id = getattr(pod.metadata, "uid", None)
+    if not isinstance(incarnation_id, str) or not incarnation_id:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Sandbox '{sandbox_id}' Pod has no immutable UID",
+        )
+    user_id, thread_id = _validate_existing_sandbox_contract(
+        sandbox_id,
+        existing_pod=pod,
+    )
+    return SandboxReconciliationResponse(
+        sandbox_id=sandbox_id,
+        status="found",
+        backend_namespace=backend_namespace,
+        incarnation_id=incarnation_id,
+        sandbox_url=_sandbox_access_url(sandbox_id, tolerate_read_errors=True),
+        user_id=user_id,
+        thread_id=thread_id,
+        mount_contract_version=MOUNT_CONTRACT_VERSION,
+    )
 
 
 @app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)

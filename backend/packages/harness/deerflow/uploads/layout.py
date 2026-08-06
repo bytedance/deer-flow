@@ -63,6 +63,7 @@ def ensure_conversion_dir(uploads_dir: Path) -> Path:
     try:
         conversion_dir.mkdir(mode=0o755)
     except FileExistsError:
+        # Validation below rejects an existing non-directory or symlink.
         pass
     validated = validate_conversion_dir(uploads_dir)
     if validated is None:

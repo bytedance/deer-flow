@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox.sandbox_provider import SandboxReconciliationIdentity, SandboxReconciliationResult
 from deerflow.uploads.layout import conversion_path_for_upload
 from deerflow.uploads.lease import UploadNameLease
 from deerflow.uploads.manager import create_upload_staging_file, delete_file_safe, publish_upload_bytes_leased
@@ -40,6 +41,49 @@ def _mounted_provider() -> MagicMock:
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
     return provider
+
+
+class _ExplicitSyncProvider:
+    uses_thread_data_mounts = False
+
+    def __init__(self, sandbox) -> None:
+        self.sandbox = sandbox
+
+    @staticmethod
+    def refresh_thread_data_mount_capabilities() -> bool:
+        return False
+
+    async def acquire_async(self, _thread_id: str, *, user_id: str | None = None) -> str:
+        return "remote-1"
+
+    def get(self, sandbox_id: str):
+        return self.sandbox if sandbox_id == "remote-1" else None
+
+    @staticmethod
+    def reconciliation_provider_key() -> str:
+        return "tests.ExplicitSyncProvider"
+
+    def prepare_sandbox_reconciliation_identity(self, sandbox_id: str) -> SandboxReconciliationIdentity:
+        assert sandbox_id == "remote-1"
+        return SandboxReconciliationIdentity(
+            provider_key=self.reconciliation_provider_key(),
+            backend_namespace="tests.backend",
+            incarnation_id="tests.incarnation",
+        )
+
+    def reconnect_sandbox_for_reconciliation(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str | None,
+        identity: SandboxReconciliationIdentity,
+    ) -> SandboxReconciliationResult:
+        del thread_id, user_id
+        expected = self.prepare_sandbox_reconciliation_identity(sandbox_id)
+        if identity != expected:
+            return SandboxReconciliationResult.unknown()
+        return SandboxReconciliationResult.found(self.sandbox)
 
 
 def _symlink_to_or_skip(link_path: Path, target_path: Path) -> None:
@@ -1379,11 +1423,8 @@ def test_delete_uploaded_file_removes_explicitly_synced_remote_paths(tmp_path):
     conversion = conversion_path_for_upload(primary)
     conversion.parent.mkdir()
     conversion.write_text("generated", encoding="utf-8")
-    provider = MagicMock()
-    provider.uses_thread_data_mounts = False
-    provider.acquire_async = AsyncMock(return_value="remote-1")
     sandbox = MagicMock()
-    provider.get.return_value = sandbox
+    provider = _ExplicitSyncProvider(sandbox)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -1412,9 +1453,6 @@ def test_delete_uploaded_file_preserves_host_when_remote_delete_fails(tmp_path):
     thread_uploads_dir.mkdir(parents=True)
     primary = thread_uploads_dir / "notes.txt"
     primary.write_bytes(b"notes")
-    provider = MagicMock()
-    provider.uses_thread_data_mounts = False
-    provider.acquire_async = AsyncMock(return_value="remote-1")
     sandbox = MagicMock()
 
     def fail_remote_delete(_virtual_path):
@@ -1422,7 +1460,7 @@ def test_delete_uploaded_file_preserves_host_when_remote_delete_fails(tmp_path):
         raise OSError("remote unavailable")
 
     sandbox.remove_file.side_effect = fail_remote_delete
-    provider.get.return_value = sandbox
+    provider = _ExplicitSyncProvider(sandbox)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -1450,12 +1488,9 @@ def test_delete_uploaded_file_compensates_partial_remote_delete_before_restoring
     conversion = conversion_path_for_upload(primary)
     conversion.parent.mkdir()
     conversion.write_text("generated", encoding="utf-8")
-    provider = MagicMock()
-    provider.uses_thread_data_mounts = False
-    provider.acquire_async = AsyncMock(return_value="remote-1")
     sandbox = MagicMock()
     sandbox.remove_file.side_effect = [None, OSError("conversion unavailable")]
-    provider.get.return_value = sandbox
+    provider = _ExplicitSyncProvider(sandbox)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
@@ -1488,13 +1523,10 @@ def test_delete_uploaded_file_commits_host_delete_when_remote_compensation_fails
     conversion = conversion_path_for_upload(primary)
     conversion.parent.mkdir()
     conversion.write_text("generated", encoding="utf-8")
-    provider = MagicMock()
-    provider.uses_thread_data_mounts = False
-    provider.acquire_async = AsyncMock(return_value="remote-1")
     sandbox = MagicMock()
     sandbox.remove_file.side_effect = [None, OSError("conversion unavailable")]
     sandbox.update_file.side_effect = OSError("remote rollback unavailable")
-    provider.get.return_value = sandbox
+    provider = _ExplicitSyncProvider(sandbox)
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),

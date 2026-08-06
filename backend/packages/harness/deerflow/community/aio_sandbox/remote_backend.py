@@ -342,33 +342,52 @@ class RemoteSandboxBackend(SandboxBackend):
         return self._provisioner_discover(sandbox_id)
 
     def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
-        """Look up an exact provisioner object without mount-version filtering."""
+        """Ask the Provisioner for a Pod-authoritative instance identity."""
         try:
             resp = requests.get(
-                f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
+                f"{self._provisioner_url}/api/reconciliation/sandboxes/{sandbox_id}",
                 headers=self._auth_headers(),
                 timeout=10,
             )
             if resp.status_code == 404:
-                return SandboxDiscoveryResult.absent()
+                # A rolling old Provisioner has no authoritative endpoint. Its
+                # ordinary sandbox GET conflates a missing Service with a
+                # missing Pod and therefore cannot prove absence.
+                return SandboxDiscoveryResult.unknown()
             resp.raise_for_status()
             data = resp.json()
             if not isinstance(data, dict):
                 raise ValueError("Provisioner reconciliation response is not an object")
             returned_id = data.get("sandbox_id")
-            if returned_id is not None and returned_id != sandbox_id:
+            if returned_id != sandbox_id:
                 raise ValueError("Provisioner reconciliation returned a different sandbox ID")
+            backend_namespace = data.get("backend_namespace")
+            if not isinstance(backend_namespace, str) or not backend_namespace:
+                raise ValueError("Provisioner reconciliation response has no backend namespace")
+            status = data.get("status")
+            if status == "absent":
+                return SandboxDiscoveryResult.absent(
+                    backend_namespace=backend_namespace,
+                )
+            if status != "found":
+                raise ValueError("Provisioner reconciliation returned an invalid status")
+            incarnation_id = data.get("incarnation_id")
+            if not isinstance(incarnation_id, str) or not incarnation_id:
+                raise ValueError("Provisioner reconciliation response has no incarnation ID")
             sandbox_url = data.get("sandbox_url")
-            if not isinstance(sandbox_url, str) or not sandbox_url:
-                raise ValueError("Provisioner reconciliation response has no sandbox URL")
-            return SandboxDiscoveryResult.found(
-                SandboxInfo(
+            info = None
+            if isinstance(sandbox_url, str) and sandbox_url:
+                info = SandboxInfo(
                     sandbox_id=sandbox_id,
                     sandbox_url=sandbox_url,
                     user_id=data.get("user_id"),
                     thread_id=data.get("thread_id"),
                     mount_contract_version=data.get("mount_contract_version"),
                 )
+            return SandboxDiscoveryResult.found(
+                info,
+                backend_namespace=backend_namespace,
+                incarnation_id=incarnation_id,
             )
         except (requests.RequestException, ValueError, TypeError):
             logger.warning("Provisioner reconciliation lookup failed for %s", sandbox_id, exc_info=True)

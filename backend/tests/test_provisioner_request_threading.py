@@ -86,7 +86,10 @@ class _RecordingCoreV1:
         self.created_pods: list[str] = []
         self.created_pod_specs: dict[str, object] = {}
         self.existing_pod_specs: dict[str, object] = {}
+        self.missing_pods: set[str] = set()
+        self.pod_read_counts: dict[str, int] = {}
         self.created_services: list[str] = []
+        self.namespace_uid = "namespace-uid-1"
 
     def _record_k8s_call(self) -> None:
         thread_id = threading.get_ident()
@@ -115,11 +118,20 @@ class _RecordingCoreV1:
     def read_namespaced_pod(self, _name: str, _namespace: str):
         self._record_k8s_call()
         sandbox_id = _name.removeprefix("sandbox-")
+        self.pod_read_counts[sandbox_id] = self.pod_read_counts.get(sandbox_id, 0) + 1
+        if sandbox_id in self.missing_pods:
+            raise ApiException(status=404)
         pod = self.existing_pod_specs.get(sandbox_id) or self.created_pod_specs.get(sandbox_id)
         if pod is not None:
+            if not getattr(pod.metadata, "uid", None):
+                pod.metadata.uid = f"pod-uid-{sandbox_id}"
             pod.status = SimpleNamespace(phase="Running")
             return pod
         return SimpleNamespace(status=SimpleNamespace(phase="Running"))
+
+    def read_namespace(self, _namespace: str):
+        self._record_k8s_call()
+        return SimpleNamespace(metadata=SimpleNamespace(uid=self.namespace_uid))
 
     def create_namespaced_pod(self, _namespace: str, pod) -> None:
         self._record_k8s_call()
@@ -173,6 +185,7 @@ def test_sandbox_business_route_handlers_are_sync(provisioner_module) -> None:
     for handler in (
         provisioner_module.create_sandbox,
         provisioner_module.destroy_sandbox,
+        provisioner_module.reconcile_sandbox_identity,
         provisioner_module.get_sandbox,
         provisioner_module.list_sandboxes,
     ):
@@ -225,6 +238,104 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     if expected_created_sandbox is not None:
         assert fake_core_v1.created_pods == [expected_created_sandbox]
         assert fake_core_v1.created_services == [expected_created_sandbox]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_reports_pod_absence_authoritatively(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.missing_pods.add("sandbox-gone")
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-gone",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sandbox_id": "sandbox-gone",
+        "status": "absent",
+        "backend_namespace": "namespace-uid-1",
+        "incarnation_id": None,
+        "sandbox_url": None,
+        "user_id": None,
+        "thread_id": None,
+        "mount_contract_version": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_keeps_live_pod_when_service_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.existing_pod_specs["sandbox-partial"] = provisioner_module._build_pod(
+        "sandbox-partial",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-partial",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "found"
+    assert payload["backend_namespace"] == "namespace-uid-1"
+    assert payload["incarnation_id"] == "pod-uid-sandbox-partial"
+    assert payload["sandbox_url"] is None
+    assert payload["user_id"] == "alice"
+    assert payload["thread_id"] == "thread-1"
+    assert fake_core_v1.pod_read_counts["sandbox-partial"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_returns_service_url_for_live_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.existing_pod_specs["sandbox-live"] = provisioner_module._build_pod(
+        "sandbox-live",
+        "thread-1",
+        user_id="alice",
+    )
+    fake_core_v1.service_sandboxes.add("sandbox-live")
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-live",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "found"
+    assert payload["incarnation_id"] == "pod-uid-sandbox-live"
+    assert payload["sandbox_url"] == provisioner_module._sandbox_url(
+        "sandbox-live",
+        node_port=32123,
+    )
+    assert fake_core_v1.pod_read_counts["sandbox-live"] == 1
 
 
 def test_existing_sandbox_rejects_cross_tenant_reuse(

@@ -15,6 +15,7 @@ from typing import Any
 
 from deerflow.config.paths import get_paths
 from deerflow.sandbox.sandbox_provider import (
+    SandboxReconciliationIdentity,
     SandboxReconciliationResult,
     sandbox_provider_sandbox_uses_thread_data_mounts,
     sandbox_provider_uses_thread_data_mounts,
@@ -30,6 +31,8 @@ from deerflow.uploads.manager import (
     RemoteDeletionCompensatedError,
     _deletion_transaction_metadata,
     _normalize_existing_filename,
+    _release_uncertain_remote_journal_reservation,
+    _retain_uncertain_remote_journal_reservation,
     _staged_deletion_remote_journal,
     cleanup_stale_upload_staging_files,
     make_upload_file_sandbox_readable,
@@ -72,12 +75,70 @@ def _remove_remote_paths(sandbox: Any, virtual_paths: tuple[str, ...]) -> None:
 
 
 def _unlink_journal_durably(journal_path: Path) -> None:
-    journal_path.unlink(missing_ok=True)
-    directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        os.fsync(directory_descriptor)
-    finally:
-        os.close(directory_descriptor)
+        journal_data = _read_remote_delete_journal(journal_path)
+    except FileNotFoundError:
+        # A prior unlink whose directory fsync failed may still be absent from
+        # the live namespace yet reappear after a crash. Only a successful
+        # unlink + parent fsync below may release an in-memory reservation.
+        return
+    filename = journal_data.get("filename")
+    if not isinstance(filename, str):
+        raise ValueError("remote deletion journal has no filename")
+    journal_payload = json.dumps(
+        journal_data,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    _retain_uncertain_remote_journal_reservation(journal_path, filename)
+    try:
+        journal_path.unlink(missing_ok=True)
+        directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+        _release_uncertain_remote_journal_reservation(journal_path)
+    except BaseException:
+        # If unlink became visible but its directory fsync failed, allowing the
+        # basename reservation to disappear in this process would let a new
+        # generation reuse the remote path before a crash resurrected the old
+        # journal. Recreate the same journal entry before propagating. Even if
+        # the recreation's directory fsync also fails, its visible entry keeps
+        # publication reserved for the remainder of this process; after a crash
+        # either a journal survives (reserved) or neither journal does (nothing
+        # can replay against a later generation).
+        try:
+            descriptor = os.open(journal_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass
+        except BaseException:
+            logger.error("Failed to restore a remote deletion journal after durable unlink failed: %s", journal_path, exc_info=True)
+        else:
+            restored = False
+            try:
+                view = memoryview(journal_payload)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("Failed to restore remote deletion journal")
+                    view = view[written:]
+                os.fsync(descriptor)
+                restored = True
+            except BaseException:
+                logger.error("Failed to rewrite a remote deletion journal after durable unlink failed: %s", journal_path, exc_info=True)
+            finally:
+                os.close(descriptor)
+            if restored:
+                try:
+                    directory_descriptor = os.open(journal_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                except BaseException:
+                    logger.error("Failed to persist a restored remote deletion journal directory entry: %s", journal_path, exc_info=True)
+        raise
 
 
 def _read_remote_delete_journal(journal_path: Path) -> dict[str, Any]:
@@ -115,6 +176,8 @@ class _SandboxDeletionHook:
     thread_id: str | None = None
     user_id: str | None = None
     provider_key: str | None = None
+    backend_namespace: str | None = None
+    incarnation_id: str | None = None
     _journal_path: Path | None = None
     _prepared_targets: tuple[tuple[str, bytes | None], ...] | None = None
 
@@ -132,8 +195,8 @@ class _SandboxDeletionHook:
         conversion_path: Path | None,
     ) -> None:
         """Persist enough context to retry an interrupted remote deletion."""
-        if not self.sandbox_id or not self.thread_id or not self.provider_key:
-            raise RuntimeError("Durable remote deletion requires sandbox, thread, and provider identities")
+        if not self.sandbox_id or not self.thread_id or not self.provider_key or not self.backend_namespace or not self.incarnation_id:
+            raise RuntimeError("Durable remote deletion requires provider, backend, sandbox, and incarnation identities")
         targets = (
             (upload_virtual_path(filename), primary_path.read_bytes()),
             (
@@ -144,11 +207,13 @@ class _SandboxDeletionHook:
         journal_path = _staged_deletion_remote_journal(primary_path)
         payload = json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "sandbox_id": self.sandbox_id,
                 "thread_id": self.thread_id,
                 "user_id": self.user_id,
                 "provider_key": self.provider_key,
+                "backend_namespace": self.backend_namespace,
+                "incarnation_id": self.incarnation_id,
                 "filename": filename,
                 "virtual_paths": [path for path, _bytes in targets],
             },
@@ -267,6 +332,8 @@ def _deletion_hook_for_sandbox(
     thread_id: str | None = None,
     user_id: str | None = None,
     provider_key: str | None = None,
+    backend_namespace: str | None = None,
+    incarnation_id: str | None = None,
 ) -> _SandboxDeletionHook:
     return _SandboxDeletionHook(
         sandbox=sandbox,
@@ -274,6 +341,8 @@ def _deletion_hook_for_sandbox(
         thread_id=thread_id,
         user_id=user_id,
         provider_key=provider_key,
+        backend_namespace=backend_namespace,
+        incarnation_id=incarnation_id,
     )
 
 
@@ -288,7 +357,7 @@ def _declared_callable(instance: Any, name: str) -> Callable[..., Any] | None:
 
 
 def _sandbox_provider_reconciliation_key(sandbox_provider: Any) -> str:
-    """Return the durable namespace that owns a provider's raw sandbox IDs."""
+    """Return the stable provider type key recorded by durable journals."""
     key_factory = _declared_callable(sandbox_provider, "reconciliation_provider_key")
     if key_factory is None:
         provider_type = type(sandbox_provider)
@@ -300,12 +369,36 @@ def _sandbox_provider_reconciliation_key(sandbox_provider: Any) -> str:
     return key
 
 
+def _prepare_sandbox_reconciliation_identity(
+    sandbox_provider: Any,
+    sandbox_id: str,
+) -> SandboxReconciliationIdentity:
+    identity_factory = _declared_callable(
+        sandbox_provider,
+        "prepare_sandbox_reconciliation_identity",
+    )
+    identity = identity_factory(sandbox_id) if identity_factory is not None else None
+    if not isinstance(identity, SandboxReconciliationIdentity):
+        raise RuntimeError("The active sandbox provider cannot establish a restart-safe backend and incarnation identity for upload deletion")
+    if identity.provider_key != _sandbox_provider_reconciliation_key(sandbox_provider):
+        raise ValueError("Sandbox reconciliation identity does not match its provider")
+    for field in (
+        identity.provider_key,
+        identity.backend_namespace,
+        identity.incarnation_id,
+    ):
+        if not isinstance(field, str) or not field or len(field.encode("utf-8")) > 512:
+            raise ValueError("Sandbox reconciliation identity fields must be non-empty strings of at most 512 bytes")
+    return identity
+
+
 def _reconnect_sandbox_for_reconciliation(
     sandbox_provider: Any,
     sandbox_id: str,
     *,
     thread_id: str,
     user_id: str | None,
+    identity: SandboxReconciliationIdentity,
 ) -> SandboxReconciliationResult:
     """Resolve one exact old sandbox without creating or redirecting it."""
     resolver = _declared_callable(sandbox_provider, "reconnect_sandbox_for_reconciliation")
@@ -314,10 +407,10 @@ def _reconnect_sandbox_for_reconciliation(
             sandbox_id,
             thread_id=thread_id,
             user_id=user_id,
+            identity=identity,
         )
     else:
-        sandbox = sandbox_provider.get(sandbox_id)
-        result = SandboxReconciliationResult.found(sandbox) if sandbox is not None else SandboxReconciliationResult.unknown()
+        result = SandboxReconciliationResult.unknown()
     if not isinstance(result, SandboxReconciliationResult):
         raise TypeError("Sandbox reconciliation returned an invalid result")
     if result.status == "found" and result.sandbox is None:
@@ -387,13 +480,15 @@ def reconcile_pending_remote_deletions(
         try:
             try:
                 data = _read_remote_delete_journal(journal_path)
-                if data.get("version") != 2:
+                if data.get("version") != 3:
                     raise ValueError("unsupported journal version")
                 filename = data.get("filename")
                 thread_id = data.get("thread_id")
                 user_id = data.get("user_id")
                 sandbox_id = data.get("sandbox_id")
                 provider_key = data.get("provider_key")
+                backend_namespace = data.get("backend_namespace")
+                incarnation_id = data.get("incarnation_id")
                 virtual_paths = data.get("virtual_paths")
                 expected_paths = [
                     upload_virtual_path(filename) if isinstance(filename, str) else None,
@@ -409,6 +504,12 @@ def reconcile_pending_remote_deletions(
                     or not isinstance(provider_key, str)
                     or not provider_key
                     or len(provider_key.encode("utf-8")) > 512
+                    or not isinstance(backend_namespace, str)
+                    or not backend_namespace
+                    or len(backend_namespace.encode("utf-8")) > 512
+                    or not isinstance(incarnation_id, str)
+                    or not incarnation_id
+                    or len(incarnation_id.encode("utf-8")) > 512
                     or virtual_paths != expected_paths
                 ):
                     raise ValueError("invalid remote deletion journal fields")
@@ -424,6 +525,11 @@ def reconcile_pending_remote_deletions(
                         provider_key,
                     )
                     continue
+                identity = SandboxReconciliationIdentity(
+                    provider_key=provider_key,
+                    backend_namespace=backend_namespace,
+                    incarnation_id=incarnation_id,
+                )
                 name_lease = UploadNameLease.try_acquire(
                     uploads_dir,
                     filename,
@@ -437,6 +543,7 @@ def reconcile_pending_remote_deletions(
                         sandbox_id,
                         thread_id=thread_id,
                         user_id=user_id,
+                        identity=identity,
                     )
                     if result.status == "unknown":
                         logger.warning(
@@ -496,12 +603,18 @@ def prepare_upload_deletion(
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
+    identity = _prepare_sandbox_reconciliation_identity(
+        sandbox_provider,
+        sandbox_id,
+    )
     return _deletion_hook_for_sandbox(
         sandbox,
         sandbox_id=sandbox_id,
         thread_id=thread_id,
         user_id=user_id,
-        provider_key=_sandbox_provider_reconciliation_key(sandbox_provider),
+        provider_key=identity.provider_key,
+        backend_namespace=identity.backend_namespace,
+        incarnation_id=identity.incarnation_id,
     )
 
 
@@ -526,12 +639,19 @@ async def prepare_upload_deletion_async(
     sandbox = sandbox_provider.get(sandbox_id)
     if sandbox is None:
         raise RuntimeError(f"Sandbox {sandbox_id!r} not found after acquire")
+    identity = await asyncio.to_thread(
+        _prepare_sandbox_reconciliation_identity,
+        sandbox_provider,
+        sandbox_id,
+    )
     return _deletion_hook_for_sandbox(
         sandbox,
         sandbox_id=sandbox_id,
         thread_id=thread_id,
         user_id=user_id,
-        provider_key=_sandbox_provider_reconciliation_key(sandbox_provider),
+        provider_key=identity.provider_key,
+        backend_namespace=identity.backend_namespace,
+        incarnation_id=identity.incarnation_id,
     )
 
 

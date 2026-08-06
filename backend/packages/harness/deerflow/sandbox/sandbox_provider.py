@@ -31,6 +31,15 @@ class SandboxReconciliationResult:
         return cls(status="unknown")
 
 
+@dataclass(frozen=True, slots=True)
+class SandboxReconciliationIdentity:
+    """Backend and immutable instance identity persisted by durable operations."""
+
+    provider_key: str
+    backend_namespace: str
+    incarnation_id: str
+
+
 class SandboxProvider(ABC):
     """Abstract base class for sandbox providers"""
 
@@ -66,9 +75,23 @@ class SandboxProvider(ABC):
         pass
 
     def reconciliation_provider_key(self) -> str:
-        """Return a stable, non-secret backend namespace for durable journals."""
+        """Return a stable, non-secret provider type key for durable journals."""
         provider_type = type(self)
         return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+    def prepare_sandbox_reconciliation_identity(
+        self,
+        sandbox_id: str,
+    ) -> SandboxReconciliationIdentity | None:
+        """Return a restart-safe identity, or ``None`` to disable durable mutation.
+
+        A provider must override this only when it can distinguish both its
+        backing deployment/account and an immutable sandbox incarnation. The
+        fail-closed default prevents a deterministic raw ID from being rebound
+        to a different backend or replacement instance after restart.
+        """
+        del sandbox_id
+        return None
 
     def reconnect_sandbox_for_reconciliation(
         self,
@@ -76,18 +99,16 @@ class SandboxProvider(ABC):
         *,
         thread_id: str,
         user_id: str | None,
+        identity: SandboxReconciliationIdentity,
     ) -> SandboxReconciliationResult:
         """Resolve exactly *sandbox_id* without creating or redirecting it.
 
         Providers that can discover an old instance or prove it terminally
-        absent should override this method.  The conservative default only
-        trusts an already-active exact ID; a cache miss remains ``unknown``.
+        absent should override this method. The conservative default always
+        remains ``unknown``.
         """
-        del thread_id, user_id
-        sandbox = self.get(sandbox_id)
-        if sandbox is None:
-            return SandboxReconciliationResult.unknown()
-        return SandboxReconciliationResult.found(sandbox)
+        del sandbox_id, thread_id, user_id, identity
+        return SandboxReconciliationResult.unknown()
 
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
