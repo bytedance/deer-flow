@@ -9,6 +9,8 @@ DeerFlow 后端提供了完整的文件上传功能，支持多文件上传，�
 - ✅ 支持多文件同时上传
 - ✅ 可选地转换文档为 Markdown（PDF、PPT、Excel、Word）
 - ✅ 文件存储在线程隔离的目录中
+- ✅ 跨请求、跨进程的同名文件不会互相覆盖
+- ✅ 生成的 Markdown 与用户上传命名空间隔离
 - ✅ Agent 自动感知当前消息中附带的文件
 - ✅ 支持文件列表查询和删除
 
@@ -35,10 +37,10 @@ POST /api/threads/{thread_id}/uploads
       "path": ".deer-flow/threads/{thread_id}/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf",
-      "markdown_file": "document.md",
-      "markdown_path": ".deer-flow/threads/{thread_id}/user-data/uploads/document.md",
-      "markdown_virtual_path": "/mnt/user-data/uploads/document.md",
-      "markdown_artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.md"
+      "markdown_file": "document.pdf.md",
+      "markdown_path": ".deer-flow/threads/{thread_id}/user-data/.upload-conversions/document.pdf.md",
+      "markdown_virtual_path": "/mnt/user-data/.upload-conversions/document.pdf.md",
+      "markdown_artifact_url": "/api/threads/{thread_id}/artifacts/mnt/user-data/.upload-conversions/document.pdf.md"
     }
   ],
   "message": "Successfully uploaded 1 file(s)"
@@ -49,6 +51,8 @@ POST /api/threads/{thread_id}/uploads
 - `path`: 实际文件系统路径（相对于 `backend/` 目录）
 - `virtual_path`: Agent 在沙箱中使用的虚拟路径
 - `artifact_url`: 前端通过 HTTP 访问文件的 URL
+
+所有上传入口都先完整写入同目录暂存文件，再以“不替换已有条目”的原子操作发布。同名碰撞依次命名为 `document.pdf`、`document_1.pdf`、`document_2.pdf`；响应中的 `filename` 和各路径字段始终使用实际发布名。
 
 ### 2. 查询上传限制
 ```
@@ -89,6 +93,8 @@ GET /api/threads/{thread_id}/uploads/list
 }
 ```
 
+列表只包含 `uploads/` 下的用户主文件；系统生成的 `.upload-conversions/` 资产不会出现在该接口中。
+
 ### 4. 删除文件
 ```
 DELETE /api/threads/{thread_id}/uploads/{filename}
@@ -102,6 +108,8 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
+删除 `document.pdf` 时，只会额外删除它精确拥有的 `.upload-conversions/document.pdf.md`。系统不会推断或删除 `uploads/document.md`；该文件可能是用户独立上传的内容。
+
 ## 支持的文档格式
 
 以下格式在显式启用 `uploads.auto_convert_documents: true` 时会自动转换为 Markdown：
@@ -110,7 +118,15 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件保存在系统拥有的 `.upload-conversions/` 目录中，文件名包含完整的实际主文件名。例如：
+
+```text
+Primary:   /mnt/user-data/uploads/report.pdf
+Generated: /mnt/user-data/.upload-conversions/report.pdf.md
+Collision: report.pdf, report_1.pdf, report_2.pdf
+Deletion:  删除 report.pdf 时只删除 .upload-conversions/report.pdf.md；
+           /mnt/user-data/uploads/report.md 永远不会被推断为生成文件或自动删除。
+```
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -149,13 +165,14 @@ Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接�
 read_file(path="/mnt/user-data/uploads/document.pdf")
 
 # 读取转换后的 Markdown（推荐）
-read_file(path="/mnt/user-data/uploads/document.md")
+read_file(path="/mnt/user-data/.upload-conversions/document.pdf.md")
 ```
 
 **路径映射关系：**
 - Agent 使用：`/mnt/user-data/uploads/document.pdf`（虚拟路径）
 - 实际存储：`backend/.deer-flow/threads/{thread_id}/user-data/uploads/document.pdf`
 - 前端访问：`/api/threads/{thread_id}/artifacts/mnt/user-data/uploads/document.pdf`（HTTP URL）
+- 转换结果：`/mnt/user-data/.upload-conversions/document.pdf.md`（以上传响应的 `markdown_virtual_path` 为准，不要自行推导）
 
 上传流程采用“线程目录优先”策略：
 - 先写入 `backend/.deer-flow/threads/{thread_id}/user-data/uploads/` 作为权威存储
@@ -222,12 +239,13 @@ print(response.json())
 backend/.deer-flow/threads/
 └── {thread_id}/
     └── user-data/
-        └── uploads/
-            ├── document.pdf          # 原始文件
-            ├── document.md           # 转换后的 Markdown
-            ├── presentation.pptx
-            ├── presentation.md
-            └── ...
+        ├── uploads/
+        │   ├── document.pdf          # 用户主文件
+        │   ├── document.md           # 用户独立上传，绝不按名称推断归属
+        │   └── presentation.pptx
+        └── .upload-conversions/
+            ├── document.pdf.md       # document.pdf 的生成结果
+            └── presentation.pptx.md  # presentation.pptx 的生成结果
 ```
 
 ## 限制
@@ -243,7 +261,8 @@ backend/.deer-flow/threads/
 
 1. **Upload Router** (`app/gateway/routers/uploads.py`)
    - 处理文件上传、列表、删除请求
-   - 使用 markitdown 转换文档
+   - 流式写入暂存文件，并通过共享上传管理器原子发布
+   - 使用 markitdown 转换文档；生成文件发布到系统拥有的隔离目录
 
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
    - 读取当前消息的 `additional_kwargs.files`

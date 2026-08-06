@@ -961,6 +961,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
+Uploads from the Web UI, embedded client, and IM channels share one collision-safe storage rule. A completed payload is published only if its candidate name does not exist; concurrent `report.pdf` uploads become `report.pdf`, `report_1.pdf`, `report_2.pdf`, and so on without replacing one another. Optional document conversions are system-owned assets under `/mnt/user-data/.upload-conversions/<actual-upload-name>.md`. They are returned through the upload response but omitted from the primary upload listing. Deleting a primary removes only its exact generated asset and never infers that a user-uploaded sibling such as `uploads/report.md` is disposable.
+
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
@@ -990,9 +992,10 @@ This is the difference between a chatbot with tool access and an agent with an a
 ```
 # Paths inside the sandbox container
 /mnt/user-data/
-├── uploads/          ← your files
-├── workspace/        ← agents' working directory
-└── outputs/          ← final deliverables
+├── uploads/               ← your primary files
+├── .upload-conversions/   ← generated Markdown (hidden from upload listings)
+├── workspace/             ← agents' working directory
+└── outputs/               ← final deliverables
 ```
 
 ### Agentic Browser Control

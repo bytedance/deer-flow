@@ -30,6 +30,8 @@ Gateway (`app/gateway/routers/skills.py`, `uploads.py`) and Client (`deerflow/cl
 
 **The same traversal check is written twice** — any security fix must be applied to both locations.
 
+The final shared design below supersedes this historical baseline: both adapters now use the same atomic no-replace publisher and owned conversion layout.
+
 ## 2. Design Principles
 
 ### Dependency Direction
@@ -91,11 +93,15 @@ class SkillAlreadyExistsError(ValueError)
 get_uploads_dir(thread_id: str) -> Path      # Pure path, no side effects
 ensure_uploads_dir(thread_id: str) -> Path   # Creates directory (for write paths)
 
-# Filename safety
+# Filename safety and atomic primary publication
 normalize_filename(filename: str) -> str
   # Path.name extraction + rejects ".." / "." / backslash / >255 bytes
-deduplicate_filename(name: str, seen: set) -> str
-  # _N suffix increment for dedup, mutates seen in place
+create_upload_staging_file(base_dir: Path) -> StagedUpload
+publish_staged_upload(staged, preferred_filename) -> Path
+publish_upload_bytes(base_dir, preferred_filename, data) -> Path
+publish_upload_copy(base_dir, preferred_filename, source_path) -> Path
+  # Complete same-directory staging + atomic hard-link no-replace publication.
+  # Collisions retry name.ext, name_1.ext, name_2.ext across requests/processes.
 
 # Path safety
 validate_path_traversal(path: Path, base: Path) -> None
@@ -107,13 +113,15 @@ list_files_in_dir(directory: Path) -> dict
   # follow_symlinks=False to prevent metadata leakage
   # Non-existent directory returns empty list
 delete_file_safe(base_dir: Path, filename: str) -> dict
-  # Validates traversal first, then unlinks
+  # Deletes the primary and only its exact owned conversion
 
 # URL helpers
 upload_artifact_url(thread_id, filename) -> str   # Percent-encoded for HTTP safety
 upload_virtual_path(filename) -> str               # Sandbox-internal path
 enrich_file_listing(result, thread_id) -> dict     # Adds URLs, stringifies sizes
 ```
+
+`deerflow.uploads.layout` owns primary/conversion physical paths, sandbox virtual paths, and artifact URLs. Generated Markdown is published through `deerflow.uploads.conversion` at `user-data/.upload-conversions/<actual-primary-filename>.md`; it is outside the primary listing namespace and never inferred from an `uploads/<stem>.md` sibling.
 
 ## 4. Changes
 
@@ -127,8 +135,9 @@ enrich_file_listing(result, thread_id) -> dict     # Adds URLs, stringifies size
 **`app/gateway/routers/uploads.py`**:
 - Remove inline `get_uploads_dir` (replaced by `ensure_uploads_dir`/`get_uploads_dir`)
 - `upload_files` uses `normalize_filename()` instead of inline safety checks
+- Streamed bytes are completed in shared staging and `publish_staged_upload()` returns the actual collision-safe name
 - `list_uploaded_files` uses `list_files_in_dir()` + enrichment
-- `delete_uploaded_file` uses `delete_file_safe()` + companion markdown cleanup
+- `delete_uploaded_file` uses `delete_file_safe()` for exact owned-conversion cleanup
 
 ### 4.2 Client Slimming
 
@@ -136,7 +145,7 @@ enrich_file_listing(result, thread_id) -> dict     # Adds URLs, stringifies size
 - Remove `_get_uploads_dir` static method
 - Remove ~50 lines of inline zip handling in `install_skill`
 - `install_skill` delegates to `install_skill_from_archive()`
-- `upload_files` uses `deduplicate_filename()` + `ensure_uploads_dir()`
+- `upload_files` uses `publish_upload_copy()` + `ensure_uploads_dir()`
 - `list_uploads` uses `get_uploads_dir()` + `list_files_in_dir()`
 - `delete_upload` uses `get_uploads_dir()` + `delete_file_safe()`
 - `update_mcp_config` / `update_skill` now reset `_agent_config_key = None`
@@ -164,6 +173,8 @@ Read paths no longer have `mkdir` side effects — non-existent directories retu
 | Listing symlink leak | `follow_symlinks=True` (default) | `follow_symlinks=False` |
 | 409 status routing | `"already exists" in str(e)` | `SkillAlreadyExistsError` type match |
 | Artifact URL encoding | Raw filename in URL | `urllib.parse.quote()` |
+| Concurrent same-name writes | Scan/claim then replace | Atomic no-replace publication with `_N` retry |
+| Generated Markdown ownership | Guessed `uploads/<stem>.md` sibling | Exact `.upload-conversions/<full-primary-name>.md` asset |
 
 ## 6. Alternatives Considered
 

@@ -620,10 +620,10 @@ Content-Type: multipart/form-data
       "path": ".deer-flow/threads/abc123/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.pdf",
-      "markdown_file": "document.md",
-      "markdown_path": ".deer-flow/threads/abc123/user-data/uploads/document.md",
-      "markdown_virtual_path": "/mnt/user-data/uploads/document.md",
-      "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.md"
+      "markdown_file": "document.pdf.md",
+      "markdown_path": ".deer-flow/threads/abc123/user-data/.upload-conversions/document.pdf.md",
+      "markdown_virtual_path": "/mnt/user-data/.upload-conversions/document.pdf.md",
+      "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/document.pdf.md"
     }
   ],
   "message": "Successfully uploaded 1 file(s)"
@@ -635,6 +635,8 @@ Content-Type: multipart/form-data
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
+
+All upload entry points publish complete payloads without replacing an existing name. Concurrent collisions are returned as `document.pdf`, `document_1.pdf`, `document_2.pdf`, and so on. Generated Markdown is stored outside the primary namespace and is not returned by the list endpoint. Deleting `document.pdf` also deletes only `.upload-conversions/document.pdf.md`; an independent `uploads/document.md` is preserved.
 
 #### List Uploaded Files
 

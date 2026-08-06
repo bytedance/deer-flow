@@ -103,6 +103,8 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
+    assert "`/mnt/user-data/.upload-conversions/<full-upload-filename>.md`" in prompt
+    assert "never infer an `uploads/<stem>.md` sibling" in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

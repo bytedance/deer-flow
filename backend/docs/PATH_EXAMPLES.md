@@ -102,18 +102,18 @@ async function uploadAndProcess(threadId: string, file: File) {
   //   path: ".deer-flow/threads/abc123/user-data/uploads/report.pdf",
   //   virtual_path: "/mnt/user-data/uploads/report.pdf",
   //   artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.pdf",
-  //   markdown_file: "report.md",
-  //   markdown_path: ".deer-flow/threads/abc123/user-data/uploads/report.md",
-  //   markdown_virtual_path: "/mnt/user-data/uploads/report.md",
-  //   markdown_artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.md"
+  //   markdown_file: "report.pdf.md",
+  //   markdown_path: ".deer-flow/threads/abc123/user-data/.upload-conversions/report.pdf.md",
+  //   markdown_virtual_path: "/mnt/user-data/.upload-conversions/report.pdf.md",
+  //   markdown_artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/report.pdf.md"
   // }
 
   // 2. 发送消息给 Agent
   await sendMessage(threadId, "请分析刚上传的 PDF 文件");
 
-  // Agent 会自动看到文件列表，包含：
+  // Agent 的当前上传上下文包含主文件：
   // - report.pdf (虚拟路径: /mnt/user-data/uploads/report.pdf)
-  // - report.md (虚拟路径: /mnt/user-data/uploads/report.md)
+  // 转换结果必须使用上传响应返回的 markdown_virtual_path，不要推导同目录文件名。
 
   // 3. 前端可以直接访问转换后的 Markdown
   const mdResponse = await fetch(fileInfo.markdown_artifact_url);
@@ -135,6 +135,8 @@ async function uploadAndProcess(threadId: string, file: File) {
 | 服务器后端代码直接访问 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
 | Agent 工具调用 | `virtual_path` | `/mnt/user-data/uploads/file.pdf` |
 | 前端下载/预览 | `artifact_url` | `/api/threads/abc123/artifacts/mnt/user-data/uploads/file.pdf` |
+| Agent 读取生成 Markdown | `markdown_virtual_path` | `/mnt/user-data/.upload-conversions/file.pdf.md` |
+| 前端读取生成 Markdown | `markdown_artifact_url` | `/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/file.pdf.md` |
 | 备份脚本 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
 | 日志记录 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
 
@@ -172,10 +174,8 @@ async function listUploadedFiles(threadId) {
     console.log(`下载: ${file.artifact_url}?download=true`);
     console.log(`预览: ${file.artifact_url}`);
 
-    // 如果是文档，还有 Markdown 版本
-    if (file.markdown_artifact_url) {
-      console.log(`Markdown: ${file.markdown_artifact_url}`);
-    }
+    // 列表接口只返回主文件。markdown_* 字段仅在本次上传响应中返回，
+    // 调用方如需保留转换链接，应保存该响应元数据。
   });
 
   return data.files;
@@ -204,7 +204,6 @@ interface UploadedFile {
   artifact_url: string;
   extension: string;
   modified: number;
-  markdown_artifact_url?: string;
 }
 
 function FileUploadList({ threadId }: { threadId: string }) {
@@ -254,9 +253,6 @@ function FileUploadList({ threadId }: { threadId: string }) {
             <span>{file.filename}</span>
             <a href={file.artifact_url} target="_blank">预览</a>
             <a href={`${file.artifact_url}?download=true`}>下载</a>
-            {file.markdown_artifact_url && (
-              <a href={file.markdown_artifact_url} target="_blank">Markdown</a>
-            )}
             <button onClick={() => handleDelete(file.filename)}>删除</button>
           </li>
         ))}
@@ -285,5 +281,8 @@ function FileUploadList({ threadId }: { threadId: string }) {
 
 4. **Markdown 转换**
    - 转换成功时，会返回额外的 `markdown_*` 字段
+   - 生成文件位于 `.upload-conversions/<完整主文件名>.md`，不会出现在主文件列表中
+   - 同名主文件按 `file.pdf`、`file_1.pdf`、`file_2.pdf` 原子发布，不会覆盖
+   - 删除主文件只删除其精确生成资产，不会删除用户上传的 `uploads/file.md`
    - 建议优先使用 Markdown 版本（更易处理）
    - 原始文件始终保留
