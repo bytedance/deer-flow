@@ -30,11 +30,16 @@ API key**. OpenViking derives the account and user from that credential.
 DeerFlow does not configure trusted account/user headers and must not receive a
 root key for normal memory traffic.
 
-The OpenViking SDK can read optional defaults from `OPENVIKING_*` environment
-variables or `ovcli.conf`. DeerFlow's explicit URL and API key take precedence,
-and request-local actor selection overrides an ambient actor peer during memory
-operations. Operators should still avoid unrelated identity defaults in the
-DeerFlow process environment and OpenViking CLI configuration.
+The supported server configuration is OpenViking `api_key` mode, where the USER
+key determines the account and user. DeerFlow supplies its URL and API key
+explicitly, overrides any ambient actor peer during memory operations, and does
+not inherit arbitrary HTTP headers from `ovcli.conf`.
+
+Before enabling this backend, remove legacy `OPENVIKING_ACCOUNT` and
+`OPENVIKING_USER` values from DeerFlow's repository-root `.env` and service
+environment, and remove `account` and `user` defaults from
+`~/.openviking/ovcli.conf`. Those settings belong to trusted-mode
+configurations and are outside this adapter's supported setup.
 
 `owner_user_id` binds the configured key to one DeerFlow identity. Use
 `default` when DeerFlow authentication is disabled. In an authenticated
@@ -45,11 +50,13 @@ key from silently sharing memory across users.
 Multi-user credential provisioning and storage are intentionally outside this
 first adapter PR.
 
-Existing trusted-mode configurations are not migrated automatically. Replace
-`auth_mode`, `account`, and the root key with `owner_user_id` and a USER key.
-Because the credential-bound user and Session mapping differ from the old
-trusted-user mapping, previously captured trusted-mode data remains in its old
-OpenViking namespace rather than being silently reassigned.
+Existing trusted-mode configurations are not migrated automatically. Configure
+the OpenViking server in `api_key` mode, replace `auth_mode`, `account`, and the
+root key with `owner_user_id` and a USER key, and remove the legacy ambient
+identity settings listed above. Because the credential-bound user and Session
+mapping differ from the old trusted-user mapping, previously captured
+trusted-mode data remains in its old OpenViking namespace rather than being
+silently reassigned.
 
 ## Configure DeerFlow
 

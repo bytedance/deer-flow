@@ -67,6 +67,8 @@ class OpenVikingMemoryManager(MemoryManager):
             url=self._config.base_url,
             api_key=self._config.api_key,
             timeout=self._config.timeout_seconds,
+            # An explicit mapping disables the SDK's ovcli.conf header fallback.
+            extra_headers={},
             commit_policy=commit_policy,
         )
         # The recorder owns one recovery-aware SDK client. Retrieval borrows the

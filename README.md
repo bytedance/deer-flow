@@ -1032,7 +1032,8 @@ DeerFlow also includes an optional `openviking` memory backend. It uses the
 official `langchain-openviking` package to capture completed turns into stable
 OpenViking Sessions and recall memory for prompt injection while leaving
 DeerMem as the default. The initial integration supports one DeerFlow user with
-one credential-bound OpenViking USER API key in `memory.mode: middleware`.
+one credential-bound OpenViking USER API key in `memory.mode: middleware` and
+does not inherit arbitrary HTTP headers from `ovcli.conf`.
 See [OpenViking memory backend](docs/OPENVIKING.md) for its configuration,
 behavior, and current boundaries.
 

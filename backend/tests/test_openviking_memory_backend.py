@@ -70,12 +70,14 @@ class _Recorder:
         url: str,
         api_key: str,
         timeout: float,
+        extra_headers: dict[str, str],
     ) -> None:
         self.commit_policy = commit_policy
         self.connection = {
             "url": url,
             "api_key": api_key,
             "timeout": timeout,
+            "extra_headers": extra_headers,
         }
         self._client = _Client(**self.connection)
         self.calls: list[tuple[str, list[Any], str | None, str | None]] = []
@@ -264,6 +266,7 @@ def test_manager_uses_official_recorder_retriever_and_commit_always(
         "url": "http://openviking:1933",
         "api_key": "user-key",
         "timeout": 30.0,
+        "extra_headers": {},
     }
 
 

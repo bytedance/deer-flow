@@ -1027,7 +1027,9 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
   Bounded hash-only cursors live below `{storage_path}/openviking/sessions/`;
   session locks are weakly cached, async entrypoints offload synchronous SDK
   and file IO, and graceful shutdown drains active operations before closing
-  the recorder-owned client. Do not reintroduce a backend-local HTTP client,
+  the recorder-owned client. The recorder receives an explicit empty
+  `extra_headers` mapping so `ovcli.conf` cannot add arbitrary transport
+  headers. Do not reintroduce a backend-local HTTP client,
   explicitly configured trusted identity headers, root-key data access, or
   imports of the OpenViking embedded runtime. Multi-user provisioning,
   query-aware refresh policy and new lifecycle scheduling are separate changes,
