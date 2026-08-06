@@ -111,6 +111,24 @@ def normalize_filename(filename: str) -> str:
     return safe
 
 
+def _normalize_existing_filename(filename: str) -> str:
+    """Validate an exact existing basename without applying new-upload policy.
+
+    POSIX deployments may contain names accepted by older DeerFlow versions
+    that are not portable to Windows. They remain deletable after upgrade.
+    """
+    if not filename:
+        raise ValueError("Filename is empty")
+    if "\0" in filename:
+        raise ValueError(f"Filename contains NUL byte: {filename!r}")
+    safe = Path(filename).name
+    if not safe or safe in {".", ".."}:
+        raise ValueError(f"Filename is unsafe: {filename!r}")
+    if is_upload_staging_file(safe):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
+    return safe
+
+
 def claim_unique_filename(name: str, seen: set[str]) -> str:
     """Generate a unique filename by appending ``_N`` suffix on collision.
 
@@ -233,13 +251,31 @@ def _filename_candidates(name: str) -> Iterator[str]:
     counter = 1
     while True:
         marker = f"_{counter}"
-        max_stem_bytes = 255 - len(marker.encode("utf-8")) - len(suffix.encode("utf-8"))
+        marker_bytes = len(marker.encode("utf-8"))
+        suffix_bytes = len(suffix.encode("utf-8"))
+        max_stem_bytes = 255 - marker_bytes - suffix_bytes
         if max_stem_bytes < 1:
-            raise AtomicUploadPublishError("Filename suffix leaves no room for collision marker")
-        candidate_stem = _truncate_utf8(stem, max_stem_bytes)
+            # Path.suffix can consume almost the entire component (for example
+            # ``a.`` plus 253 extension bytes). In that pathological case,
+            # treat the complete basename as the collision stem and truncate
+            # its tail so the marker always fits.
+            candidate_source = name
+            candidate_suffix = ""
+            max_stem_bytes = 255 - marker_bytes
+        else:
+            candidate_source = stem
+            candidate_suffix = suffix
+        if max_stem_bytes < 1:
+            raise AtomicUploadPublishError("Filename leaves no room for collision marker")
+        candidate_stem = _truncate_utf8(candidate_source, max_stem_bytes)
+        if not candidate_stem and candidate_suffix:
+            candidate_source = name
+            candidate_suffix = ""
+            max_stem_bytes = 255 - marker_bytes
+            candidate_stem = _truncate_utf8(candidate_source, max_stem_bytes)
         if not candidate_stem:
             raise AtomicUploadPublishError("Filename stem leaves no room for collision marker")
-        yield f"{candidate_stem}{marker}{suffix}"
+        yield f"{candidate_stem}{marker}{candidate_suffix}"
         counter += 1
 
 
@@ -593,7 +629,7 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
-    safe_name = normalize_filename(filename)
+    safe_name = _normalize_existing_filename(filename)
     if safe_name != filename:
         raise PathTraversalError("Path traversal detected")
     try:

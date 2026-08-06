@@ -1276,6 +1276,27 @@ def test_delete_uploaded_file_removes_owned_conversion_and_preserves_user_markdo
     assert user_markdown.read_text(encoding="utf-8") == "user"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
+def test_delete_uploaded_file_accepts_listed_legacy_posix_filename(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    legacy = thread_uploads_dir / "CON"
+    legacy.write_bytes(b"legacy")
+
+    with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.delete_uploaded_file,
+                "thread-legacy",
+                legacy.name,
+                request=MagicMock(),
+            )
+        )
+
+    assert result == {"success": True, "message": "Deleted CON"}
+    assert not legacy.exists()
+
+
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():
     class BrokenConfig:
         def __getattribute__(self, name):

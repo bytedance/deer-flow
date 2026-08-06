@@ -566,6 +566,17 @@ class TestUploadPublication:
         assert result.read_bytes() == b"new contents"
         assert os.stat(dest).st_nlink == 1
 
+    @pytest.mark.parametrize("filename", ["a." + "x" * 253, "é." + "x" * 251])
+    def test_max_length_filename_with_long_suffix_still_gets_collision_candidate(self, tmp_path, filename):
+        first = publish_upload_bytes(tmp_path, filename, b"first")
+        second = publish_upload_bytes(tmp_path, filename, b"second")
+
+        assert first.name == filename
+        assert second.name.endswith("_1")
+        assert len(second.name.encode("utf-8")) <= 255
+        assert first.read_bytes() == b"first"
+        assert second.read_bytes() == b"second"
+
     def test_existing_symlink_is_preserved_and_skipped(self, tmp_path):
         outside = tmp_path / "outside.txt"
         outside.write_bytes(b"protected")
@@ -834,6 +845,18 @@ class TestDeleteFileSafe:
     def test_delete_nonexistent_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             delete_file_safe(tmp_path, "nope.txt")
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
+    @pytest.mark.parametrize("filename", ["CON", "report?.pdf", "trailing "])
+    def test_delete_accepts_listed_legacy_posix_filename(self, tmp_path, filename):
+        legacy = tmp_path / filename
+        legacy.write_bytes(b"legacy")
+
+        assert filename in {entry["filename"] for entry in list_files_in_dir(tmp_path)["files"]}
+        result = delete_file_safe(tmp_path, filename)
+
+        assert result == {"success": True, "message": f"Deleted {filename}"}
+        assert not legacy.exists()
 
     def test_delete_from_nonexistent_directory_raises_file_not_found(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="ghost.txt"):

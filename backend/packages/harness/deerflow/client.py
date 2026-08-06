@@ -1626,9 +1626,19 @@ class DeerFlowClient:
             raise
         finally:
             for publication in reversed(publications):
-                publication.release()
+                try:
+                    publication.release()
+                except Exception:
+                    logger.warning(
+                        "Failed to release committed embedded upload lease: %s",
+                        publication.path,
+                        exc_info=True,
+                    )
             if conversion_pool is not None:
-                conversion_pool.shutdown(wait=True)
+                try:
+                    conversion_pool.shutdown(wait=True)
+                except Exception:
+                    logger.warning("Failed to shut down embedded upload conversion pool", exc_info=True)
 
     def list_uploads(self, thread_id: str) -> dict:
         """List files in a thread's uploads directory.

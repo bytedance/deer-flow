@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import json
+import os
 import tempfile
 import threading
 import zipfile
@@ -2124,6 +2125,61 @@ class TestMemoryManagement:
 
 
 class TestUploads:
+    @pytest.mark.asyncio
+    async def test_release_failure_does_not_strand_later_leases_or_conversion_pool(self, client, tmp_path):
+        from deerflow.uploads.lease import UploadNameLease
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "one.pdf"
+        second = tmp_path / "two.txt"
+        first.write_bytes(b"PDF")
+        second.write_bytes(b"text")
+        real_executor = concurrent.futures.ThreadPoolExecutor
+        created_executors = []
+
+        class TrackingExecutor(real_executor):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.shutdown_called = False
+                created_executors.append(self)
+
+            def shutdown(self, *args, **kwargs):
+                self.shutdown_called = True
+                return super().shutdown(*args, **kwargs)
+
+        async def no_conversion(_path, *, publication=None):
+            assert publication is not None
+            return None
+
+        real_release = UploadNameLease.release
+        injected = False
+
+        def release_with_one_error(lease):
+            nonlocal injected
+            real_release(lease)
+            if lease.filename == "two.txt" and not injected:
+                injected = True
+                raise OSError("injected release failure")
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=no_conversion),
+            patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor),
+            patch.object(UploadNameLease, "release", autospec=True, side_effect=release_with_one_error),
+        ):
+            result = client.upload_files("thread-release", [first, second])
+
+        assert result["success"] is True
+        assert injected
+        assert len(created_executors) == 1
+        assert created_executors[0].shutdown_called
+        for filename in ["one.pdf", "two.txt"]:
+            lease = UploadNameLease.try_acquire(uploads_dir, filename)
+            assert lease is not None
+            lease.release()
+
     def test_delete_waits_for_client_conversion_and_metadata(self, client, tmp_path):
         uploads_dir = tmp_path / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)
@@ -2567,6 +2623,19 @@ class TestUploads:
             with patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)):
                 with pytest.raises(FileNotFoundError):
                     client.delete_upload("thread-1", "nope.txt")
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
+    def test_delete_upload_accepts_legacy_posix_filename(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        legacy = uploads_dir / "report?.pdf"
+        legacy.write_bytes(b"legacy")
+
+        with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir):
+            result = client.delete_upload("thread-1", legacy.name)
+
+        assert result["success"] is True
+        assert not legacy.exists()
 
     def test_delete_upload_path_traversal(self, client):
         with tempfile.TemporaryDirectory() as tmp:
