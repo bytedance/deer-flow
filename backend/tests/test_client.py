@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import json
 import tempfile
+import threading
 import zipfile
 from enum import Enum
 from pathlib import Path
@@ -2122,6 +2123,44 @@ class TestMemoryManagement:
 
 
 class TestUploads:
+    def test_delete_waits_for_client_conversion_and_metadata(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"PDF")
+        conversion_started = threading.Event()
+        allow_conversion = threading.Event()
+
+        async def paused_convert(path: Path, *, publication=None) -> Path:
+            assert publication is not None
+            assert publication.path == path
+            assert publication.is_active
+            conversion_started.set()
+            await asyncio.to_thread(allow_conversion.wait)
+            md_path = conversion_path_for_upload(path)
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            md_path.write_text("converted", encoding="utf-8")
+            return md_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=paused_convert),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            upload = pool.submit(client.upload_files, "thread-1", [source])
+            assert conversion_started.wait(5)
+            deletion = pool.submit(client.delete_upload, "thread-1", "report.pdf")
+            assert not deletion.done()
+            allow_conversion.set()
+            result = upload.result(timeout=5)
+            deletion.result(timeout=5)
+
+        assert result["files"][0]["markdown_file"] == "report.pdf.md"
+        assert not (uploads_dir / "report.pdf").exists()
+        assert not conversion_path_for_upload(uploads_dir / "report.pdf").exists()
+
     def test_upload_files(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2213,7 +2252,8 @@ class TestUploads:
             created_executors = []
             real_executor_cls = concurrent.futures.ThreadPoolExecutor
 
-            async def fake_convert(path: Path) -> Path:
+            async def fake_convert(path: Path, *, publication=None) -> Path:
+                assert publication is not None
                 md_path = conversion_path_for_upload(path)
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"converted {path.name}")
@@ -2268,7 +2308,8 @@ class TestUploads:
             markdown = tmp_path / "a.md"
             markdown.write_bytes(b"USER")
 
-            async def fake_convert(path: Path) -> Path:
+            async def fake_convert(path: Path, *, publication=None) -> Path:
+                assert publication is not None
                 md_path = conversion_path_for_upload(path)
                 md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
@@ -2304,7 +2345,8 @@ class TestUploads:
             docx.write_bytes(b"DOCX")
             pdf.write_bytes(b"PDF")
 
-            async def convert_failing_on_docx(path: Path) -> Path | None:
+            async def convert_failing_on_docx(path: Path, *, publication=None) -> Path | None:
+                assert publication is not None
                 if path.suffix.lower() == ".docx":
                     return None
                 md_path = conversion_path_for_upload(path)

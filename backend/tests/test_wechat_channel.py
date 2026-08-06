@@ -1058,6 +1058,29 @@ def test_stage_downloaded_file_renames_around_planted_symlink(tmp_path: Path):
     assert victim.read_bytes() == b"victim"
 
 
+def test_wechat_invalid_platform_filename_uses_safe_fallback(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    for filename in ["a" * 256 + ".pdf", r"folder\report.pdf", ".upload-user.part"]:
+        safe = channel._normalize_inbound_filename(
+            filename,
+            default_prefix="wechat-file",
+            message_id="m1",
+            index=0,
+        )
+        assert safe == "wechat-file-m1-0.bin"
+        assert channel._stage_downloaded_file(safe, b"payload") is not None
+
+
+def test_wechat_plain_filename_value_error_becomes_attachment_failure(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    with mock.patch("app.channels.wechat.publish_upload_bytes", side_effect=ValueError("invalid filename")):
+        assert channel._stage_downloaded_file("report.pdf", b"payload") is None
+
+
 def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch, tmp_path: Path):
     from app.channels.wechat import WechatChannel
 

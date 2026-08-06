@@ -106,6 +106,45 @@ async def test_receive_file_remote_sandbox_does_not_block_event_loop(tmp_path, m
     assert provider.sandbox.update_thread_id != loop_thread_id
 
 
+async def test_receive_file_holds_name_lease_through_remote_sync(tmp_path, monkeypatch) -> None:
+    from deerflow.config.paths import Paths
+    from deerflow.uploads.manager import delete_file_safe
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    provider = _RemoteProvider()
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+
+    def paused_update(path: str, content: bytes) -> None:
+        sync_started.set()
+        assert allow_sync.wait(5)
+        provider.sandbox.updates.append((path, content))
+
+    provider.sandbox.update_file = paused_update
+    monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+    monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+    receive = asyncio.create_task(
+        _channel_with_file()._receive_single_file(
+            "message-1",
+            "file-key",
+            "file",
+            "thread-1",
+            user_id="ou-user",
+        )
+    )
+    assert await asyncio.to_thread(sync_started.wait, 5)
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+    deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, "report.pdf"))
+    await asyncio.sleep(0.05)
+    assert not deletion.done()
+    allow_sync.set()
+
+    assert await receive == "/mnt/user-data/uploads/report.pdf"
+    await deletion
+    assert not await asyncio.to_thread((uploads / "report.pdf").exists)
+
+
 async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monkeypatch) -> None:
     from deerflow.config.paths import Paths
 

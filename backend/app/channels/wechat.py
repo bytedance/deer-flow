@@ -27,7 +27,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
-from deerflow.uploads.manager import UnsafeUploadPathError, publish_upload_bytes
+from deerflow.uploads.manager import normalize_filename, publish_upload_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -1152,7 +1152,7 @@ class WechatChannel(Channel):
         try:
             download_dir.mkdir(parents=True, exist_ok=True)
             return publish_upload_bytes(download_dir, filename, content)
-        except (OSError, UnsafeUploadPathError):
+        except (OSError, ValueError):
             logger.exception("[WeChat] failed to persist inbound media file %s", filename)
             return None
 
@@ -1316,11 +1316,15 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _normalize_inbound_filename(raw_filename: Any, *, default_prefix: str, message_id: str, index: int) -> str:
+        fallback = _safe_media_filename(default_prefix, ".bin", message_id=message_id, index=index)
         if isinstance(raw_filename, str) and raw_filename.strip():
             candidate = Path(raw_filename.strip()).name
             if candidate:
-                return candidate
-        return _safe_media_filename(default_prefix, ".bin", message_id=message_id, index=index)
+                try:
+                    return normalize_filename(candidate)
+                except ValueError:
+                    pass
+        return fallback
 
     def _ensure_success(self, data: dict[str, Any], operation: str) -> None:
         ret = data.get("ret", 0)

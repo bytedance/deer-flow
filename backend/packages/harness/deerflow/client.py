@@ -64,12 +64,13 @@ from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
 from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
+    PublishedUpload,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
-    publish_upload_copy,
+    publish_upload_copy_leased,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1527,46 +1528,60 @@ class DeerFlowClient:
                 # creating a new ThreadPoolExecutor per converted file.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        def _convert_in_thread(path: Path):
-            return asyncio.run(convert_uploaded_file_to_markdown(path))
+        def _convert_in_thread(publication: PublishedUpload) -> Path | None:
+            return asyncio.run(
+                convert_uploaded_file_to_markdown(
+                    publication.path,
+                    publication=publication,
+                )
+            )
 
         try:
             for src_path in resolved_files:
-                dest = publish_upload_copy(uploads_dir, src_path.name, src_path)
-                dest_name = dest.name
+                publication = publish_upload_copy_leased(uploads_dir, src_path.name, src_path)
+                try:
+                    dest = publication.path
+                    dest_name = dest.name
 
-                info: dict[str, Any] = {
-                    "filename": dest_name,
-                    "size": dest.stat().st_size,
-                    "path": str(dest),
-                    "virtual_path": upload_virtual_path(dest_name),
-                    "artifact_url": upload_artifact_url(thread_id, dest_name),
-                }
-                if dest_name != src_path.name:
-                    info["original_filename"] = src_path.name
+                    info: dict[str, Any] = {
+                        "filename": dest_name,
+                        "size": dest.stat().st_size,
+                        "path": str(dest),
+                        "virtual_path": upload_virtual_path(dest_name),
+                        "artifact_url": upload_artifact_url(thread_id, dest_name),
+                    }
+                    if dest_name != src_path.name:
+                        info["original_filename"] = src_path.name
 
-                if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    try:
-                        if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest).result()
-                        else:
-                            md_path = asyncio.run(convert_uploaded_file_to_markdown(dest))
-                    except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
-                        md_path = None
+                    if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                        try:
+                            if conversion_pool is not None:
+                                md_path = conversion_pool.submit(_convert_in_thread, publication).result()
+                            else:
+                                md_path = asyncio.run(
+                                    convert_uploaded_file_to_markdown(
+                                        dest,
+                                        publication=publication,
+                                    )
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Failed to convert %s to markdown",
+                                src_path.name,
+                                exc_info=True,
+                            )
+                            md_path = None
 
-                    if md_path is not None:
-                        md_virtual_path = conversion_virtual_path(dest_name)
-                        info["markdown_file"] = md_path.name
-                        info["markdown_path"] = str(md_path)
-                        info["markdown_virtual_path"] = md_virtual_path
-                        info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
+                        if md_path is not None:
+                            md_virtual_path = conversion_virtual_path(dest_name)
+                            info["markdown_file"] = md_path.name
+                            info["markdown_path"] = str(md_path)
+                            info["markdown_virtual_path"] = md_virtual_path
+                            info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
 
-                uploaded_files.append(info)
+                    uploaded_files.append(info)
+                finally:
+                    publication.release()
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)

@@ -17,6 +17,7 @@ network leg is httpx-async and not the subject here.
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -78,3 +79,42 @@ async def test_receive_file_rejects_symlinked_upload_directory(tmp_path, monkeyp
 
     assert result == ""
     assert not await asyncio.to_thread((outside / "a.pdf").exists)
+
+
+async def test_receive_file_holds_name_lease_through_remote_sync(tmp_path, monkeypatch) -> None:
+    from app.channels.dingtalk import DingTalkChannel
+    from app.channels.message_bus import MessageBus
+    from deerflow.config.paths import Paths
+    from deerflow.uploads.manager import delete_file_safe
+
+    paths = await asyncio.to_thread(Paths, str(tmp_path))
+    monkeypatch.setattr("app.channels.dingtalk.get_paths", lambda: paths)
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+
+    class PausedSandbox:
+        def update_file(self, path, content):
+            sync_started.set()
+            assert allow_sync.wait(5)
+
+    async def acquire_async(thread_id, user_id=None):
+        return "remote"
+
+    monkeypatch.setattr(
+        "app.channels.dingtalk.get_sandbox_provider",
+        lambda: SimpleNamespace(acquire_async=acquire_async, get=lambda sandbox_id: PausedSandbox()),
+    )
+    channel = DingTalkChannel(MessageBus(), config={})
+    channel._download_by_code = AsyncMock(return_value=b"DATA")
+
+    receive = asyncio.create_task(channel._receive_single_file("dc", "file", "a.pdf", "t1", user_id="default"))
+    assert await asyncio.to_thread(sync_started.wait, 5)
+    uploads = paths.sandbox_uploads_dir("t1", user_id="default")
+    deletion = asyncio.create_task(asyncio.to_thread(delete_file_safe, uploads, "a.pdf"))
+    await asyncio.sleep(0.05)
+    assert not deletion.done()
+    allow_sync.set()
+
+    assert await receive == "/mnt/user-data/uploads/a.pdf"
+    await deletion
+    assert not await asyncio.to_thread((uploads / "a.pdf").exists)
