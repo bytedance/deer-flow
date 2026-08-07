@@ -749,6 +749,7 @@ export const enUS: Translations = {
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
       account: "Account",
+      users: "User management",
       appearance: "Appearance",
       channels: "Channels",
       integrations: "Integrations",
@@ -1086,6 +1087,57 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+    },
+    users: {
+      title: "User management",
+      description:
+        "Grant or revoke administrator access for existing DeerFlow accounts.",
+      adminRequired:
+        "A signed-in administrator account is required to manage users.",
+      searchPlaceholder: "Search users by email",
+      empty: "No users found.",
+      noResults: "No users match your search.",
+      loadFailed: "Failed to load users.",
+      retry: "Try again",
+      currentUser: "You",
+      localAccount: "Local account",
+      ssoAccount: (provider) => `SSO · ${provider}`,
+      roles: {
+        admin: "Admin",
+        user: "User",
+      },
+      actions: {
+        promote: "Promote",
+        demote: "Demote",
+        changing: "Changing...",
+        promoteUser: (email) => `Promote ${email} to admin`,
+        demoteUser: (email) => `Demote ${email} to user`,
+      },
+      confirm: {
+        title: "Change user role?",
+        promote: (email) =>
+          `Grant administrator access to ${email}? They will be able to manage server-wide DeerFlow settings and other users.`,
+        demote: (email) =>
+          `Remove administrator access from ${email}? They will keep their account as a regular user.`,
+        sessionWarning:
+          "When the role changes, the affected user's active sessions are invalidated and they must sign in again.",
+      },
+      blocked: {
+        lastAdmin: "The last administrator cannot be demoted.",
+      },
+      success: {
+        promoted: (email) => `${email} is now an administrator.`,
+        demoted: (email) => `${email} is now a regular user.`,
+      },
+      errors: {
+        forbidden: "You no longer have permission to manage users.",
+        lastAdmin: "The last administrator cannot be demoted.",
+        notFound: "This user no longer exists. The list has been refreshed.",
+        conflict:
+          "The user's role changed elsewhere. Review the refreshed list and try again.",
+        network: "Network error. Please try again.",
+        unknown: "Failed to change the user role. Please try again.",
+      },
     },
     account: {
       profileTitle: "Profile",

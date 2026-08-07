@@ -9,6 +9,7 @@ import {
   PlugZapIcon,
   SparklesIcon,
   UserIcon,
+  UsersIcon,
   WrenchIcon,
 } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -21,6 +22,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { canManageAdminUsers } from "@/core/admin-users";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -84,6 +87,11 @@ const ToolSettingsPage = dynamic(
     import("./tool-settings-page").then((module) => module.ToolSettingsPage),
   { loading: SettingsPageLoading },
 );
+const UsersSettingsPage = dynamic(
+  () =>
+    import("./users-settings-page").then((module) => module.UsersSettingsPage),
+  { loading: SettingsPageLoading },
+);
 const AboutSettingsPage = dynamic(
   () =>
     import("./about-settings-page").then((module) => module.AboutSettingsPage),
@@ -92,6 +100,7 @@ const AboutSettingsPage = dynamic(
 
 export type SettingsSection =
   | "account"
+  | "users"
   | "appearance"
   | "channels"
   | "integrations"
@@ -108,6 +117,8 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const { user } = useAuth();
+  const canManageUsers = canManageAdminUsers(user);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(defaultSection);
 
@@ -126,6 +137,15 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.account,
         icon: UserIcon,
       },
+      ...(canManageUsers
+        ? [
+            {
+              id: "users",
+              label: t.settings.sections.users,
+              icon: UsersIcon,
+            },
+          ]
+        : []),
       {
         id: "appearance",
         label: t.settings.sections.appearance,
@@ -157,6 +177,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
     ],
     [
       t.settings.sections.account,
+      t.settings.sections.users,
       t.settings.sections.appearance,
       t.settings.sections.channels,
       t.settings.sections.integrations,
@@ -165,6 +186,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.skills,
       t.settings.sections.notification,
       t.settings.sections.about,
+      canManageUsers,
     ],
   );
   return (
@@ -210,6 +232,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
               {activeSection === "account" && <AccountSettingsPage />}
+              {activeSection === "users" && <UsersSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}

@@ -761,6 +761,54 @@ The authenticated auth endpoints are:
 - `GET /api/v1/auth/me` returns the current user.
 - `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
 
+### Administrator user management
+
+Signed-in administrators can list existing local and OIDC users:
+
+```http
+GET /api/v1/admin/users?offset=0&limit=50
+```
+
+The response is paginated as `{users, total}`:
+
+```json
+{
+  "users": [
+    {
+      "id": "user-uuid",
+      "email": "user@example.com",
+      "system_role": "user",
+      "created_at": "2026-07-31T06:30:00Z",
+      "needs_setup": false,
+      "oauth_provider": null
+    }
+  ],
+  "total": 1
+}
+```
+
+An administrator changes one user's role with:
+
+```http
+PATCH /api/v1/admin/users/{id}/role
+Content-Type: application/json
+X-CSRF-Token: <csrf_token cookie value>
+
+{"system_role": "admin"}
+```
+
+The response contains the updated `user`, its `previous_role`, and a
+`sessions_invalidated` flag. Only an actual role transition increments the
+target user's `token_version`; the target's old cookie is rejected at the next
+authentication boundary and the user must sign in again. An already-established
+long-lived connection is not actively terminated.
+
+Both endpoints require an authenticated administrator and are unavailable when
+authentication is disabled. Regular users cannot use them to promote themselves,
+and role updates transactionally reject demoting the last administrator. Role
+changes emit keyed security-event log messages; they do not create persistent
+audit rows and require no schema migration.
+
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
 User isolation is enforced from the authenticated user context:

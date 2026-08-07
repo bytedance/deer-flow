@@ -295,6 +295,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
 
+When authentication is enabled, signed-in administrators can manage existing local and OIDC accounts under `Settings > Users`, including promoting regular users and demoting administrators. Regular users cannot promote themselves, and DeerFlow transactionally prevents demoting the last administrator. A real role change invalidates the affected user's existing session at the next authentication boundary, so that user must sign in again; already-established long-lived connections are not interrupted.
+
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 > [!IMPORTANT]

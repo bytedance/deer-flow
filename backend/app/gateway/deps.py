@@ -253,6 +253,7 @@ async def _flush_recovered_stream_cleanups(
 
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.models import User
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
@@ -673,17 +674,17 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
         )
 
-    # Token version mismatch → password was changed, token is stale
+    # Token version mismatch → credentials or authorization changed.
     if user.token_version != payload.ver:
         raise HTTPException(
             status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
+            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Session revoked (account changed)").model_dump(),
         )
 
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
+async def require_admin_user(request: Request, *, detail: object) -> User:
     """Require the authenticated caller to be an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
@@ -703,6 +704,7 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
 
     if getattr(user, "system_role", None) != "admin":
         raise HTTPException(status_code=403, detail=detail)
+    return user
 
 
 async def get_optional_user_from_request(request: Request):
