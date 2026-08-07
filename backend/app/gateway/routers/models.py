@@ -93,6 +93,11 @@ async def list_models(
     visible_models = config.models
     fail_closed = config.authorization.fail_closed
 
+    app_profile = getattr(request.state, "app_profile", None)
+    if isinstance(app_profile, dict):
+        allowed_models = set(app_profile.get("models", []))
+        visible_models = [model for model in config.models if model.name in allowed_models]
+
     user = await get_optional_user_from_request(request)
     if user is not None:
         try:

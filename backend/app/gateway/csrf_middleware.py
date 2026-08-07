@@ -21,6 +21,13 @@ from app.gateway.auth_disabled import is_auth_disabled
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_TOKEN_LENGTH = 64  # bytes
+_APP_KEY_HEADER_NAME = "X-DeerFlow-App-Key"
+_APP_KEY_CSRF_EXEMPT_REQUESTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/runs/stream"),
+        ("POST", "/api/runs/wait"),
+    }
+)
 
 
 def is_secure_request(request: Request) -> bool:
@@ -46,6 +53,12 @@ def should_check_csrf(request: Request) -> bool:
         return False
 
     path = request.url.path.rstrip("/")
+    # App Key authentication is header-based, so a cross-site browser request
+    # cannot forge it without an allowed CORS preflight. Let the inner auth
+    # middleware validate the key and retain the exact route boundary there.
+    # Do not exempt any other endpoint merely because an App Key is present.
+    if request.headers.get(_APP_KEY_HEADER_NAME) and (request.method, path) in _APP_KEY_CSRF_EXEMPT_REQUESTS:
+        return False
     # Exempt /api/v1/auth/me endpoint
     if path == "/api/v1/auth/me":
         return False

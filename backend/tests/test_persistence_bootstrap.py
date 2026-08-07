@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0010_run_cancel_request"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 
@@ -143,6 +143,10 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
             "channel_credentials",
             "channel_conversations",
             "channel_oauth_states",
+            "app_profiles",
+            "app_credentials",
+            "app_capabilities",
+            "app_key_audits",
             "alembic_version",
         }:
             assert required in tables, f"missing table: {required}"

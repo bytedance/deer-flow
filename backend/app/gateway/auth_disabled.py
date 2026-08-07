@@ -15,6 +15,7 @@ AUTH_DISABLED_USER_EMAIL = "default@test.local"
 AUTH_SOURCE_SESSION = "session"
 AUTH_SOURCE_INTERNAL = "internal"
 AUTH_SOURCE_AUTH_DISABLED = "auth_disabled"
+AUTH_SOURCE_APP_KEY = "app_key"
 
 _PRODUCTION_ENV_VARS: tuple[str, ...] = ("DEER_FLOW_ENV", "ENVIRONMENT")
 _PRODUCTION_ENV_VALUES: frozenset[str] = frozenset({"prod", "production"})

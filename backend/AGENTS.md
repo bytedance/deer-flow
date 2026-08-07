@@ -1092,6 +1092,15 @@ Focused regression coverage for the updater lives in `backend/tests/test_memory_
 
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
+**App-Key control plane:** platform-admin routes under `/api/v1/app-keys` use
+`require_admin_user()` rather than the general route permission list. Profiles,
+hashed credentials, capability allowlists, and audit events live in
+`deerflow.persistence.app_keys`; credential validation is intentionally a direct
+database lookup in the initial release, with no process-local or Redis cache.
+`CSRFMiddleware` exempts only header-authenticated `POST /api/runs/stream` and
+`POST /api/runs/wait`; the Auth middleware still validates the key and exact
+allowlist, so no other state-changing route inherits the exemption.
+
 DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the four `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
 
 **Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; users do not run `alembic` manually in production.

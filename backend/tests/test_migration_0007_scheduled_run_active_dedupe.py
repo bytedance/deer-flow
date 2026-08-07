@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import _get_head_revision
 from deerflow.persistence.engine import close_engine, init_engine
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 
@@ -169,7 +170,7 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0010_run_cancel_request"
+        assert version_row[0] == _get_head_revision()
 
         # Sanity: the invariant the index enforces now holds — at most one
         # active row per task_id.

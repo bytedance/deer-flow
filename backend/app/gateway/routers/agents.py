@@ -5,7 +5,7 @@ import logging
 import re
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from deerflow.config.agents_api_config import get_agents_api_config
@@ -202,7 +202,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     summary="List Custom Agents",
     description="List all custom agents available in the agents directory, including their soul content.",
 )
-async def list_agents() -> AgentsListResponse:
+async def list_agents(request: Request = None) -> AgentsListResponse:
     """List all custom agents.
 
     Returns:
@@ -217,6 +217,10 @@ async def list_agents() -> AgentsListResponse:
         # _agent_config_to_response are filesystem IO (file backend) or DB round
         # trips (db backend) and must stay off the event loop.
         agents = list_custom_agents(user_id=user_id)
+        app_profile = getattr(request.state, "app_profile", None) if request is not None else None
+        if isinstance(app_profile, dict):
+            allowed_agents = set(app_profile.get("agents", []))
+            agents = [agent for agent in agents if agent.name in allowed_agents]
         return AgentsListResponse(agents=[_agent_config_to_response(a, include_soul=True, user_id=user_id) for a in agents])
 
     try:
