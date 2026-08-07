@@ -1721,6 +1721,8 @@ class TestDeleteFileSafe:
         )
         marker_path = upload_manager_module._staged_deletion_commit_marker(staged_path)
         upload_manager_module._mark_staged_deletion_committed(staged_path)
+        replacement_marker = marker_path.with_name(".replacement-marker")
+        replacement_marker.write_bytes(b"replacement")
         original_marker_stat = os.lstat(marker_path)
         real_open = upload_manager_module.os.open
         replaced = False
@@ -1729,8 +1731,7 @@ class TestDeleteFileSafe:
             nonlocal replaced
             if Path(path) == marker_path and not (flags & os.O_CREAT) and not replaced:
                 replaced = True
-                marker_path.unlink()
-                marker_path.write_bytes(b"replacement")
+                os.replace(replacement_marker, marker_path)
             return real_open(path, flags, *args)
 
         try:
@@ -1894,9 +1895,10 @@ class TestDeleteFileSafe:
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old")
+        replacement = uploads / ".replacement"
+        replacement.write_bytes(b"replacement")
         stale_identity = UploadIdentity.from_path(primary)
-        primary.unlink()
-        primary.write_bytes(b"replacement")
+        os.replace(replacement, primary)
         assert not stale_identity.matches(primary)
         real_fsync_directory = upload_manager_module._fsync_directory_durably
         failed = False
@@ -1932,11 +1934,12 @@ class TestDeleteFileSafe:
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old")
-        stale_identity = UploadIdentity.from_path(primary)
-        primary.unlink()
         peer = uploads / "other.bin"
         peer.write_bytes(b"replacement")
-        os.link(peer, primary)
+        replacement_link = uploads / ".replacement-link"
+        os.link(peer, replacement_link)
+        stale_identity = UploadIdentity.from_path(primary)
+        os.replace(replacement_link, primary)
         assert not stale_identity.matches(primary)
         real_fsync_directory = upload_manager_module._fsync_directory_durably
         failed = False
@@ -1977,11 +1980,12 @@ class TestDeleteFileSafe:
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old")
-        stale_identity = UploadIdentity.from_path(primary)
-        primary.unlink()
         peer = uploads / "other.bin"
         peer.write_bytes(b"replacement")
-        os.link(peer, primary)
+        replacement_link = uploads / ".replacement-link"
+        os.link(peer, replacement_link)
+        stale_identity = UploadIdentity.from_path(primary)
+        os.replace(replacement_link, primary)
         assert not stale_identity.matches(primary)
 
         with patch.object(
@@ -2017,11 +2021,12 @@ class TestDeleteFileSafe:
         uploads.mkdir(parents=True)
         primary = uploads / "report.pdf"
         primary.write_bytes(b"old")
-        stale_identity = UploadIdentity.from_path(primary)
-        primary.unlink()
         peer = uploads / "other.bin"
         peer.write_bytes(b"replacement")
-        os.link(peer, primary)
+        replacement_link = uploads / ".replacement-link"
+        os.link(peer, replacement_link)
+        stale_identity = UploadIdentity.from_path(primary)
+        os.replace(replacement_link, primary)
         assert not stale_identity.matches(primary)
 
         with patch.object(
