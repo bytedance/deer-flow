@@ -11,6 +11,8 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 
+DYNAMIC_MEMORY_CONTEXT_KEY = "__dynamic_memory_context"
+
 
 @pytest.mark.parametrize("value", ["secret", "", None, {"nested": True}])
 def test_validate_run_metadata_rejects_auth_token_key_by_presence(value):
@@ -70,6 +72,23 @@ def test_redact_config_secrets_hides_legacy_config_metadata_without_mutating_sou
     assert redacted is not source
     assert redacted["metadata"] is not source["metadata"]
     assert redacted["context"] is not source["context"]
+
+
+def test_redact_config_secrets_hides_temporary_recalled_memory_cache():
+    source = {
+        "context": {
+            DYNAMIC_MEMORY_CONTEXT_KEY: {
+                "key": "message:digest",
+                "content": "<memory>private recalled text</memory>",
+            },
+            "thread_id": "thread-1",
+        }
+    }
+
+    redacted = redact_config_secrets(source)
+
+    assert redacted == {"context": {"thread_id": "thread-1"}}
+    assert "private recalled text" in source["context"][DYNAMIC_MEMORY_CONTEXT_KEY]["content"]
 
 
 def test_run_response_hides_historical_auth_token_without_mutating_record():

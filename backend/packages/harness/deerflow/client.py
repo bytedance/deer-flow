@@ -1457,6 +1457,8 @@ class DeerFlowClient:
             "enabled": config.enabled,
             "mode": config.mode,
             "injection_enabled": config.injection_enabled,
+            "session_injection_enabled": config.session_injection_enabled,
+            "turn_injection_enabled": config.turn_injection_enabled,
             "shutdown_flush_timeout_seconds": config.shutdown_flush_timeout_seconds,
             "manager_class": config.manager_class,
             "backend_config": config.backend_config,

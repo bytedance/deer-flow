@@ -14,6 +14,7 @@ Each test resets the singleton + restores config so they are order-independent.
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 from pydantic import PrivateAttr
@@ -43,6 +44,17 @@ class _MinimalBackend(MemoryManager):
     def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
         # Consumes nothing from host_hooks -- a truly minimal backend.
         return cls(backend_config=backend_config or {}, mode=mode)
+
+
+class _QueryAwareBackend(_MinimalBackend):
+    """Opt-in backend that records the optional recall query."""
+
+    supports_query_aware_context: ClassVar[bool] = True
+    _context_calls: list = PrivateAttr(default_factory=list)
+
+    def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None) -> str:
+        self._context_calls.append((user_id, agent_name, thread_id, query))
+        return f"ctx:{query}"
 
 
 @pytest.fixture(autouse=True)
@@ -189,6 +201,23 @@ def test_async_defaults_delegate_to_sync():
     # asearch delegates to search -> raises (default) just like search.
     with pytest.raises(NotImplementedError):
         asyncio.run(manager.asearch("q"))
+
+
+def test_query_aware_context_propagates_optional_query_sync_and_async():
+    manager = _QueryAwareBackend(backend_config={})
+
+    assert manager.get_context("u", agent_name="lead", thread_id="t", query="first question") == "ctx:first question"
+    assert asyncio.run(manager.aget_context("u", agent_name="lead", thread_id="t", query="second question")) == "ctx:second question"
+    assert manager._context_calls == [
+        ("u", "lead", "t", "first question"),
+        ("u", "lead", "t", "second question"),
+    ]
+
+
+def test_async_query_is_not_forwarded_to_capability_off_older_backend():
+    manager = _MinimalBackend(backend_config={})
+
+    assert asyncio.run(manager.aget_context("u", agent_name="lead", thread_id="t", query="ignored")) == "ctx:u"
 
 
 def test_callbacks_field_optional_and_noop_default():
