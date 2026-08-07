@@ -5,7 +5,6 @@ on demand via the ``list_uploaded_files`` tool.
 """
 
 import logging
-from collections import Counter
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -15,11 +14,12 @@ from langchain_core.messages import HumanMessage
 from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.uploads.manager import is_upload_staging_file
+from deerflow.uploads.summary import format_extension_counts
 from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.utils.input_sanitization import neutralize_untrusted_tags
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
@@ -33,9 +33,7 @@ def _extension_label(file: dict) -> str:
 
 
 def _format_omitted_file_types(files: list[dict]) -> str:
-    counts = Counter(_extension_label(file) for file in files)
-    parts = [f"{count} {extension}" for extension, count in sorted(counts.items())]
-    return neutralize_untrusted_tags(", ".join(parts))
+    return format_extension_counts(_extension_label(file) for file in files)
 
 
 class UploadsMiddlewareState(AgentState):

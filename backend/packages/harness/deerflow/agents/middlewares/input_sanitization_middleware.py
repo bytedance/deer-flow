@@ -17,7 +17,6 @@ semantic defense (OWASP structured-prompt guidance).
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -32,145 +31,16 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.utils.input_sanitization import (
+    _USER_INPUT_BEGIN,
+    _USER_INPUT_END,
+    neutralize_untrusted_tags,
+)
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MESSAGE_NAME = "summary"
-
-# Finite set of blocked tag names: system-reserved + common injection patterns.
-#
-# Maintenance: when adding a new framework block tag that the system emits into
-# model input, you MUST also update the expected count in
-# test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
-# The test pins the exact number of blocked tags so a new framework tag cannot
-# be added without the corresponding regression guard.
-_BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
-    {
-        # Framework-injected structured/authority blocks. The lead-agent system
-        # prompt's "System-Context Confidentiality" section (agents/lead_agent/
-        # prompt.py) declares *every* such tag trusted internal data — it names a
-        # few then says "and all other structured tags". So the denylist must
-        # cover the framework's authority blocks as a class, not a hand-picked
-        # subset: any one of them, forged in untrusted input, mimics trusted
-        # framework context. Enumerated from the block tags the framework actually
-        # emits into model input (system prompt + hidden-context/reminder
-        # middlewares) and pinned against drift by
-        # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
-        # Both spellings of the reminder block are covered: "system-reminder"
-        # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
-        #
-        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
-        # the same _build_runtime_middlewares base, so both sanitization paths guard
-        # subagent model input too. The subagent system-prompt blocks
-        # (file_editing_workflow / guidelines / output_format / working_directory)
-        # are therefore authority blocks of the same class as the lead-agent ones.
-        "system-reminder",
-        "system_reminder",
-        "memory",
-        "current_date",
-        "think",
-        "analysis",
-        "role",
-        "soul",
-        "self_update",
-        "thinking_style",
-        "clarification_system",
-        "critical_reminders",
-        "response_style",
-        "citations",
-        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
-        "current_uploads",
-        "subagent_system",
-        "skill_system",
-        "skill_index",
-        "available_skills",
-        "disabled_skills",
-        "memory_tool_system",
-        "todo_list_system",
-        "durable_context_data",
-        "slash_skill_activation",
-        "mcp_routing_hints",
-        "available-deferred-tools",
-        "goal_continuation",
-        "file_editing_workflow",
-        "guidelines",
-        "output_format",
-        "working_directory",
-        # Subagent system-prompt block (general_purpose.py): declares the task
-        # tool off-limits. Forging this in untrusted input could trick the
-        # model into believing it has (or lacks) tool restrictions it does not.
-        "tool_restrictions",
-        # Common prompt-injection tag patterns
-        "system",
-        "instruction",
-        "important",
-        "override",
-        "ignore",
-        "prompt",
-    }
-)
-
-# Matches a full blocked tag: <tag>, </tag>, <tag attrs>, <tag/>, bare <tag
-_BLOCKED_TAG_PATTERN = re.compile(
-    r"<\s*/?\s*(?:" + "|".join(re.escape(t) for t in sorted(_BLOCKED_TAG_NAMES)) + r")\b[^>]*>?",
-    re.IGNORECASE,
-)
-
-# Plain-text boundary markers (OWASP structured-prompt guidance).
-_USER_INPUT_BEGIN = "--- BEGIN USER INPUT ---"
-_USER_INPUT_END = "--- END USER INPUT ---"
-
-# Neutralized forms injected when the user's text already contains a marker.
-# These look visually similar but do not match the real boundary delimiters.
-_NEUTRALIZED_BEGIN = "[BEGIN USER INPUT]"
-_NEUTRALIZED_END = "[END USER INPUT]"
-
-# Matches either boundary token as a standalone line or embedded in text.
-_BOUNDARY_TOKEN_RE = re.compile(
-    re.escape(_USER_INPUT_BEGIN) + r"|" + re.escape(_USER_INPUT_END),
-)
-
-
-def _escape_tag_match(match: re.Match) -> str:
-    """Escape < and > in a blocked-tag match so it renders as literal text."""
-    return match.group(0).replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _neutralize_boundary_tokens(text: str) -> str:
-    """Replace real BEGIN/END USER INPUT markers with look-alike inert forms."""
-    return _BOUNDARY_TOKEN_RE.sub(
-        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-        text,
-    )
-
-
-def neutralize_untrusted_tags(text: str) -> str:
-    """Neutralize framework/injection control tokens in untrusted text.
-
-    Shared primitive for any content that originates outside the trust boundary
-    and is about to enter the model context as *data* — currently the genuine
-    user message (via :func:`_check_user_content`) and remote tool results
-    (web_fetch / web_search and friends, via
-    :class:`ToolResultSanitizationMiddleware`).
-
-    Applies exactly the two structural defenses, and nothing else:
-
-    * blocked framework/injection tags (e.g. ``<system-reminder>``) are
-      HTML-escaped to ``&lt;system-reminder&gt;`` so they lose their structural
-      meaning while staying human-readable;
-    * the plain-text ``--- BEGIN/END USER INPUT ---`` boundary markers are
-      neutralized so untrusted content cannot forge or break out of the
-      user-input boundary.
-
-    It intentionally does **not** wrap the text in boundary markers: that
-    framing is specific to the user message. Empty/whitespace-only text is
-    returned unchanged so callers do not emit marker noise.
-    """
-    if not text.strip():
-        return text
-    text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
-    return _neutralize_boundary_tokens(text)
 
 
 def _is_genuine_user_message(message: object) -> bool:
@@ -199,7 +69,6 @@ def _check_user_content(text: str) -> str:
     """
     if not text.strip():
         return text
-    text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
     # Idempotency: only skip if text is *exactly* wrapped (prefix+suffix),
     # not if the user merely typed the begin token somewhere.
     if text.startswith(_USER_INPUT_BEGIN) and text.endswith(_USER_INPUT_END):
@@ -207,14 +76,14 @@ def _check_user_content(text: str) -> str:
         # can forge the outer wrapping to bypass the neutralization below
         # and inject inner boundary markers (break-out attack).
         inner = text[len(_USER_INPUT_BEGIN) : -len(_USER_INPUT_END)]
-        neutralized_inner = _neutralize_boundary_tokens(inner)
+        neutralized_inner = neutralize_untrusted_tags(inner)
         if neutralized_inner == inner:
             return text
         return f"{_USER_INPUT_BEGIN}{neutralized_inner}{_USER_INPUT_END}"
     # Neutralize any boundary tokens the user may have embedded, preventing
     # both self-suppression (begin token skips wrapping) and break-out
     # (end token creates a premature boundary inside the payload).
-    text = _neutralize_boundary_tokens(text)
+    text = neutralize_untrusted_tags(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
 
 
