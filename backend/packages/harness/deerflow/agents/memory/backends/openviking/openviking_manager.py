@@ -547,6 +547,8 @@ class OpenVikingMemoryManager(MemoryManager):
         session_id: str,
     ) -> None:
         detail = f"{message} (session={session_id})"
+        if _is_access_error(exc):
+            raise MemoryAccessError(detail) from exc
         if self._config.write_failure_policy == "raise":
             raise MemoryManagerError(detail) from exc
         logger.error(detail, exc_info=True)
@@ -580,7 +582,14 @@ def _is_access_error(exc: BaseException) -> bool:
         from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
     except ImportError:
         return False
-    return isinstance(exc, (UnauthenticatedError, PermissionDeniedError))
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, (UnauthenticatedError, PermissionDeniedError)):
+            return True
+        seen.add(id(current))
+        current = current.__cause__
+    return False
 
 
 def _format_documents(documents: list[Any], *, max_chars: int) -> str:

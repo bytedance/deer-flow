@@ -939,14 +939,23 @@ def memory_read_failures_are_fatal(
     manager_class: str,
     backend_config: dict[str, Any] | None,
 ) -> bool:
-    """Resolve strict-read capability without constructing a new manager."""
+    """Resolve strict-read capability without constructing a new manager.
 
-    manager = _memory_manager
-    if manager is not None:
-        return manager.read_failures_are_fatal
-    return _resolve_manager_class(manager_class).read_failures_are_fatal_for_config(
-        backend_config,
-    )
+    Policy resolution runs while handling a caller-owned read timeout. If the
+    backend class or configuration cannot be resolved, fail closed rather than
+    replacing the original timeout with a secondary factory/config exception.
+    """
+
+    try:
+        manager = _memory_manager
+        if manager is not None:
+            return manager.read_failures_are_fatal
+        return _resolve_manager_class(manager_class).read_failures_are_fatal_for_config(
+            backend_config,
+        )
+    except Exception:
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
 
 
 def reset_memory_manager() -> None:

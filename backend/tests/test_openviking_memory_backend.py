@@ -513,6 +513,101 @@ def test_access_denial_always_fails_closed(
     assert exc_info.value.__cause__ is access_error
 
 
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_write_access_denial_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    access_error: Exception,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    manager._recorder.failures.append(access_error)
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="alice",
+            agent_name="research",
+        )
+
+    assert exc_info.value.__cause__ is access_error
+
+
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_partial_write_access_denial_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    access_error: Exception,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    partial_error = _PartialWriteError(1)
+    partial_error.__cause__ = access_error
+    manager._recorder.failures.append(partial_error)
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        manager.add(
+            "thread-1",
+            [
+                HumanMessage("private", id="h1"),
+                AIMessage("noted", id="a1"),
+            ],
+            user_id="alice",
+            agent_name="research",
+        )
+
+    assert exc_info.value.__cause__ is partial_error
+    assert partial_error.__cause__ is access_error
+
+
+def test_transient_write_failure_still_logs_and_drops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": "log_and_drop"},
+    )
+    manager._recorder.failures.append(ConnectionError("server down"))
+
+    manager.add(
+        "thread-1",
+        [HumanMessage("remember this", id="h1")],
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert "capture cursor was not advanced" in caplog.text
+
+
 def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
