@@ -84,6 +84,105 @@ test("ignores reconnect metadata storage access failures", () => {
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
 });
 
+test("does not retry run creation after an ambiguous gateway failure", async () => {
+  const sessionStorage = makeSessionStorage();
+  let attempts = 0;
+  const fetchFn = rs.fn(async () => {
+    attempts += 1;
+    const status = attempts === 1 ? 504 : 400;
+    return new Response(JSON.stringify({ detail: "request failed" }), {
+      status,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const consume = async () => {
+    for await (const entry of getAPIClient(true).runs.stream(
+      "thread-no-retry",
+      "lead_agent",
+      { input: { messages: [] } },
+    )) {
+      void entry;
+    }
+  };
+
+  await expect(consume()).rejects.toThrow("HTTP 504");
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+});
+
+test("reconnects an interrupted run stream with GET without recreating the run", async () => {
+  const sessionStorage = makeSessionStorage();
+  const encoder = new TextEncoder();
+  let interruptStream: (() => void) | undefined;
+  const interruptedBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode('id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n'),
+      );
+      interruptStream = () => {
+        controller.error(new TypeError("connection interrupted"));
+      };
+    },
+  });
+  const requests: Array<{
+    method: string | undefined;
+    lastEventId: string | null;
+  }> = [];
+  const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    requests.push({
+      method: init?.method,
+      lastEventId: headers.get("Last-Event-ID"),
+    });
+    if (requests.length === 1) {
+      return new Response(interruptedBody, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
+          Location:
+            "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+        },
+      });
+    }
+    return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  rs.stubGlobal("setTimeout", (callback: () => void) => {
+    callback();
+    return 0;
+  });
+
+  const received: Array<{ id?: string; event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.stream(
+    "thread-reconnect",
+    "lead_agent",
+    { input: { messages: [] } },
+  )) {
+    received.push(entry);
+    if ("id" in entry && entry.id === "1-0") {
+      interruptStream?.();
+    }
+  }
+
+  expect(received).toEqual([
+    { id: "1-0", event: "custom", data: { phase: "started" } },
+    { id: "2-0", event: "end", data: null },
+  ]);
+  expect(requests).toEqual([
+    { method: "POST", lastEventId: null },
+    { method: "GET", lastEventId: "1-0" },
+  ]);
+});
+
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
