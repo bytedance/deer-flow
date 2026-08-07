@@ -1,93 +1,239 @@
+"""Tests for the official-package OpenViking memory backend."""
+
 from __future__ import annotations
 
+import copy
 import gc
 import json
 import threading
 import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.documents import Document
+from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.agents.memory.backends.openviking.client import OpenVikingAuthenticationError, OpenVikingHttpClient, OpenVikingUnavailableError
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
-from deerflow.agents.memory.backends.openviking.models import (
-    OpenVikingCommitResult,
-    OpenVikingIdentity,
-    OpenVikingMessage,
-    OpenVikingSearchHit,
+from deerflow.agents.memory.backends.openviking.openviking_manager import (
+    OpenVikingMemoryManager,
+    _canonical_peer_id,
+    _session_id,
 )
-from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
-from deerflow.agents.memory.manager import _scan_backends, reset_memory_manager
+from deerflow.agents.memory.manager import (
+    MemoryManagerError,
+    _scan_backends,
+    reset_memory_manager,
+)
+
+
+class _CommitPolicy:
+    def __init__(self, *, mode: str, pending_token_threshold: int = 8_000):
+        self.mode = mode
+        self.pending_token_threshold = pending_token_threshold
+
+
+class _PartialWriteError(RuntimeError):
+    def __init__(
+        self,
+        consumed: int,
+        *,
+        commit_pending: bool = False,
+    ) -> None:
+        super().__init__("partial")
+        self.input_messages_consumed = consumed
+        self.commit_pending = commit_pending
+
+
+class _Client:
+    supports_request_actor_peer = True
+
+    def __init__(self, **kwargs: Any):
+        self.kwargs = kwargs
+        self.closed = False
+        self.healthy = True
+
+    def health(self) -> bool:
+        return self.healthy
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _Recorder:
+    def __init__(
+        self,
+        *,
+        commit_policy: _CommitPolicy,
+        url: str,
+        api_key: str,
+        timeout: float,
+        extra_headers: dict[str, str],
+    ) -> None:
+        self.commit_policy = commit_policy
+        self.connection = {
+            "url": url,
+            "api_key": api_key,
+            "timeout": timeout,
+            "extra_headers": extra_headers,
+        }
+        self._client = _Client(**self.connection)
+        self.calls: list[tuple[str, list[Any], str | None, str | None]] = []
+        self.flushes: list[tuple[str, str | None]] = []
+        self.failures: list[BaseException] = []
+        self.closed = False
+
+    @property
+    def client(self) -> _Client:
+        return self._client
+
+    def record(
+        self,
+        session_id: str,
+        messages: list[Any],
+        peer_id: str | None = None,
+    ) -> object:
+        self.calls.append((session_id, list(messages), peer_id, _ACTOR_PEER.get()))
+        if self.failures:
+            raise self.failures.pop(0)
+        return object()
+
+    def flush(self, session_id: str) -> None:
+        self.flushes.append((session_id, _ACTOR_PEER.get()))
+        if self.failures:
+            raise self.failures.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+        self._client.close()
+
+
+class _Retriever:
+    def __init__(self, *, client: _Client, **kwargs: Any):
+        self.client = client
+        self.kwargs = kwargs
+        self.limit = kwargs["limit"]
+        self.filter = None
+        self.session_id = kwargs.get("session_id")
+        self.target_uri = kwargs.get("target_uri", "")
+        self.calls: list[dict[str, Any]] = []
+
+    def __copy__(self) -> _Retriever:
+        copied = type(self)(client=self.client, **self.kwargs)
+        copied.calls = self.calls
+        copied.limit = self.limit
+        copied.filter = copy.deepcopy(self.filter)
+        copied.session_id = self.session_id
+        copied.target_uri = copy.deepcopy(self.target_uri)
+        return copied
+
+    def invoke(self, query: str) -> list[Document]:
+        self.calls.append(
+            {
+                "query": query,
+                "actor_peer": _ACTOR_PEER.get(),
+                "limit": self.limit,
+                "filter": copy.deepcopy(self.filter),
+                "session_id": self.session_id,
+                "target_uri": copy.deepcopy(self.target_uri),
+                "search_mode": getattr(self, "search_mode", "find"),
+            }
+        )
+        return [
+            Document(
+                page_content="Prefers concise answers.",
+                metadata={
+                    "openviking_uri": ("viking://user/memories/preferences/style.md"),
+                    "openviking_category": "preferences",
+                    "openviking_score": 0.91,
+                },
+            )
+        ]
+
+
+_ACTOR_PEER: ContextVar[str | None] = ContextVar(
+    "test_actor_peer",
+    default=None,
+)
+
+
+@contextmanager
+def _use_actor_peer(peer_id: str | None):
+    token = _ACTOR_PEER.set(peer_id)
+    try:
+        yield
+    finally:
+        _ACTOR_PEER.reset(token)
+
+
+@pytest.fixture
+def official_integration(monkeypatch: pytest.MonkeyPatch) -> None:
+    import deerflow.agents.memory.backends.openviking.openviking_manager as module
+
+    monkeypatch.setattr(
+        module,
+        "_load_official_integration",
+        lambda: {
+            "OpenVikingCommitPolicy": _CommitPolicy,
+            "OpenVikingPartialWriteError": _PartialWriteError,
+            "OpenVikingRetriever": _Retriever,
+            "OpenVikingSessionRecorder": _Recorder,
+            "use_actor_peer": _use_actor_peer,
+        },
+    )
 
 
 def _backend_config(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "base_url": "http://openviking:1933",
         "storage_path": str(tmp_path),
-        "auth_mode": "trusted",
-        "account": "deerflow",
+        "owner_user_id": "alice",
         "startup_policy": "warn",
-        "retrieval": {"top_k": 4, "max_injection_chars": 1000},
+        "retrieval": {
+            "top_k": 4,
+            "max_injection_chars": 1_000,
+            "injection_query": "profile preferences and prior decisions",
+        },
     }
     config.update(overrides)
     return config
 
 
-def test_config_parses_nested_fields_and_rejects_unknown(tmp_path: Path) -> None:
-    config = OpenVikingConfig.from_backend_config(
-        _backend_config(
-            tmp_path,
-            retrieval={"top_k": 7, "score_threshold": 0.4, "max_injection_chars": 2048},
-            failure_policy={"read": "raise", "write": "raise"},
-        )
-    )
-
-    assert config.search_top_k == 7
-    assert config.score_threshold == 0.4
-    assert config.read_failure_policy == "raise"
-
-    with pytest.raises(ValueError, match="Unknown OpenViking"):
-        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, typo=True))
+def _manager(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **overrides: Any,
+) -> OpenVikingMemoryManager:
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    return OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
 
 
-def test_config_rejects_dev_auth_without_explicit_opt_in(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="allow_insecure_dev"):
-        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, auth_mode="dev"))
+def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENVIKING_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="USER API key"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
 
-
-def test_config_repr_does_not_expose_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENVIKING_API_KEY", "super-secret-api-key")
-
+    monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
     config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
 
-    assert "super-secret-api-key" not in repr(config)
+    assert config.owner_user_id == "alice"
+    assert config.content_mode == "overview"
+    assert config.injection_query == "profile preferences and prior decisions"
+    assert "secret" not in repr(config)
 
-
-def test_config_parses_and_validates_connection_limits(tmp_path: Path) -> None:
-    config = OpenVikingConfig.from_backend_config(
-        _backend_config(
-            tmp_path,
-            max_connections=48,
-            max_keepalive_connections=12,
-        )
-    )
-
-    assert config.max_connections == 48
-    assert config.max_keepalive_connections == 12
-
-    with pytest.raises(ValueError, match="max_connections"):
-        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_connections=0))
-    with pytest.raises(ValueError, match="max_keepalive_connections"):
-        OpenVikingConfig.from_backend_config(
-            _backend_config(
-                tmp_path,
-                max_connections=10,
-                max_keepalive_connections=11,
-            )
-        )
+    with pytest.raises(ValueError, match="trusted mode is no longer supported"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, auth_mode="trusted"))
+    with pytest.raises(ValueError, match="Unknown OpenViking"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, typo=True))
+    with pytest.raises(ValueError, match="reserved prefix"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, default_peer_id="df-agent-default"))
+    with pytest.raises(ValueError, match="custom HTTP client fields"):
+        OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_connections=10))
 
 
 def test_backend_is_discovered_by_registered_name() -> None:
@@ -95,341 +241,391 @@ def test_backend_is_discovered_by_registered_name() -> None:
     assert _scan_backends()["openviking"] is OpenVikingMemoryManager
 
 
-def test_http_client_sends_trusted_identity_and_maps_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENVIKING_API_KEY", "secret")
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.url.path == "/api/v1/search/find":
-            return httpx.Response(
-                200,
-                json={
-                    "status": "ok",
-                    "result": {
-                        "memories": [
-                            {
-                                "uri": "viking://user/memories/preferences/editor.md",
-                                "context_type": "memory",
-                                "category": "preferences",
-                                "score": 0.91,
-                                "abstract": "Uses Vim.",
-                                "overview": None,
-                            }
-                        ],
-                        "resources": [],
-                        "skills": [],
-                        "total": 1,
-                    },
-                },
-            )
-        raise AssertionError(f"unexpected path: {request.url.path}")
-
-    config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
-    client = OpenVikingHttpClient(config, transport=httpx.MockTransport(handler))
-    identity = OpenVikingIdentity(account="deerflow", user="df_user")
-
-    hits = client.search(identity, "editor preference", top_k=3)
-
-    assert [hit.abstract for hit in hits] == ["Uses Vim."]
-    assert requests[0].headers["X-OpenViking-Account"] == "deerflow"
-    assert requests[0].headers["X-OpenViking-User"] == "df_user"
-    assert requests[0].headers["X-API-Key"] == "secret"
-    assert json.loads(requests[0].content)["target_uri"] == "viking://user/memories"
-    assert json.loads(requests[0].content)["context_type"] == "memory"
-
-
-def test_http_client_maps_authentication_error(tmp_path: Path) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            401,
-            json={"status": "error", "error": {"code": "UNAUTHENTICATED", "message": "bad key"}},
-        )
-
-    config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path))
-    client = OpenVikingHttpClient(config, transport=httpx.MockTransport(handler))
-
-    with pytest.raises(OpenVikingAuthenticationError) as exc_info:
-        client.ensure_session(OpenVikingIdentity(account="deerflow", user="df_user"), "session")
-    assert exc_info.value.code == "UNAUTHENTICATED"
-
-
-def test_http_client_configures_connection_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-
-    class _RecordingClient:
-        def __init__(self, **kwargs: Any) -> None:
-            captured.update(kwargs)
-
-    monkeypatch.setattr(httpx, "Client", _RecordingClient)
-    config = OpenVikingConfig.from_backend_config(
-        _backend_config(
-            tmp_path,
-            max_connections=32,
-            max_keepalive_connections=8,
-        )
+def test_official_loader_uses_standalone_package() -> None:
+    from deerflow.agents.memory.backends.openviking.openviking_manager import (
+        _load_official_integration,
     )
 
-    OpenVikingHttpClient(config)
+    integration = _load_official_integration()
 
-    limits = captured["limits"]
-    assert limits.max_connections == 32
-    assert limits.max_keepalive_connections == 8
-
-
-def test_http_client_adds_jitter_to_retry_delay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    attempts = 0
-    jitter_ranges: list[tuple[float, float]] = []
-    sleeps: list[float] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            return httpx.Response(503)
-        return httpx.Response(200, json={"status": "ok"})
-
-    def fake_uniform(lower: float, upper: float) -> float:
-        jitter_ranges.append((lower, upper))
-        return 0.02
-
-    monkeypatch.setattr("random.uniform", fake_uniform)
-    monkeypatch.setattr("time.sleep", sleeps.append)
-    config = OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_retries=1))
-    client = OpenVikingHttpClient(config, transport=httpx.MockTransport(handler))
-
-    assert client.health() is True
-    assert jitter_ranges == [(0.0, 0.05)]
-    assert sleeps == [pytest.approx(0.07)]
+    assert integration["OpenVikingSessionRecorder"].__module__.startswith("langchain_openviking")
+    assert integration["OpenVikingRetriever"].__module__.startswith("langchain_openviking")
 
 
-class _FakeClient:
-    def __init__(self) -> None:
-        self.ensured: list[tuple[OpenVikingIdentity, str]] = []
-        self.added: list[tuple[OpenVikingIdentity, str, list[OpenVikingMessage]]] = []
-        self.committed: list[tuple[OpenVikingIdentity, str]] = []
-        self.searches: list[tuple[OpenVikingIdentity, str, int, str | None]] = []
-        self.closed = False
+def test_manager_uses_official_recorder_retriever_and_commit_always(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
 
-    def ensure_session(self, identity: OpenVikingIdentity, session_id: str) -> None:
-        self.ensured.append((identity, session_id))
+    assert manager._recorder.commit_policy.mode == "always"
+    assert manager._retriever.client is manager._recorder.client
+    assert manager._retriever.kwargs["content_mode"] == "overview"
+    assert manager._recorder.connection == {
+        "url": "http://openviking:1933",
+        "api_key": "user-key",
+        "timeout": 30.0,
+        "extra_headers": {},
+    }
 
-    def add_messages(
-        self,
-        identity: OpenVikingIdentity,
-        session_id: str,
-        messages: list[OpenVikingMessage],
-    ) -> int:
-        self.added.append((identity, session_id, messages))
-        return len(messages)
 
-    def commit_session(self, identity: OpenVikingIdentity, session_id: str) -> OpenVikingCommitResult:
-        self.committed.append((identity, session_id))
-        return OpenVikingCommitResult(
-            status="accepted",
-            task_id="task-1",
-            archive_uri="viking://user/sessions/session/history/archive_001",
-            archived=True,
+def test_context_preserves_existing_fixed_query_behavior(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    context = manager.get_context(
+        "alice",
+        agent_name="research",
+        thread_id="thread-1",
+    )
+
+    assert context == "- [preferences] Prefers concise answers."
+    assert manager._retriever.calls == [
+        {
+            "query": "profile preferences and prior decisions",
+            "actor_peer": "research",
+            "limit": 4,
+            "filter": None,
+            "session_id": _session_id("alice", "research", "thread-1"),
+            "target_uri": [
+                "viking://user/memories",
+                "viking://user/peers/research/memories",
+            ],
+            "search_mode": "search",
+        }
+    ]
+
+
+def test_context_without_thread_uses_existing_find_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    context = manager.get_context(
+        "alice",
+        agent_name="research",
+    )
+
+    assert context == "- [preferences] Prefers concise answers."
+    assert manager._retriever.calls == [
+        {
+            "query": "profile preferences and prior decisions",
+            "actor_peer": "research",
+            "limit": 4,
+            "filter": None,
+            "session_id": None,
+            "target_uri": [
+                "viking://user/memories",
+                "viking://user/peers/research/memories",
+            ],
+            "search_mode": "find",
+        }
+    ]
+
+
+def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+        manager.get_context("bob", agent_name="research")
+    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="bob",
+            agent_name="research",
         )
 
-    def search(
-        self,
-        identity: OpenVikingIdentity,
-        query: str,
-        *,
-        top_k: int,
-        category: str | None = None,
-        session_id: str | None = None,
-    ) -> list[OpenVikingSearchHit]:
-        self.searches.append((identity, query, top_k, category))
-        return [
-            OpenVikingSearchHit(
-                uri="viking://user/memories/preferences/editor.md",
-                context_type="memory",
-                category="preferences",
-                score=0.9,
-                abstract="User prefers concise answers.",
-                overview=None,
-                match_reason="",
-            )
-        ]
-
-    def health(self) -> bool:
-        return True
-
-    def close(self) -> None:
-        self.closed = True
+    assert manager._retriever.calls == []
+    assert manager._recorder.calls == []
 
 
-def _manager(tmp_path: Path, **overrides: Any) -> tuple[OpenVikingMemoryManager, _FakeClient]:
-    manager = OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
-    fake = _FakeClient()
-    manager._client = fake  # type: ignore[assignment]
-    return manager, fake
-
-
-def test_manager_filters_messages_commits_and_deduplicates(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path)
+def test_manager_records_only_unseen_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
     messages = [
-        SystemMessage("system"),
-        HumanMessage("Remember that I prefer Vim.", id="human-1"),
-        AIMessage("", tool_calls=[{"name": "search", "args": {}, "id": "call-1", "type": "tool_call"}]),
-        ToolMessage("tool output", tool_call_id="call-1"),
-        AIMessage("I will remember that.", id="ai-1"),
+        HumanMessage("Remember Vim.", id="h1"),
+        AIMessage("I will remember.", id="a1"),
     ]
 
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    messages.append(HumanMessage("Also concise.", id="h2"))
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
 
-    assert len(client.added) == 1
-    assert [(message.role, message.content) for message in client.added[0][2]] == [
-        ("user", "Remember that I prefer Vim."),
-        ("assistant", "I will remember that."),
+    assert len(manager._recorder.calls) == 2
+    assert manager._recorder.calls[0][1] == messages[:2]
+    assert manager._recorder.calls[1][1] == messages[2:]
+    assert all(call[2:] == ("research", "research") for call in manager._recorder.calls)
+
+
+def test_partial_write_progress_is_not_resubmitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    messages = [
+        HumanMessage("one", id="h1"),
+        AIMessage("two", id="a1"),
+        HumanMessage("three", id="h2"),
     ]
-    assert len(client.committed) == 1
-    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    state = json.loads(watermark.read_text(encoding="utf-8"))
-    assert state["last_commit_task_id"] == "task-1"
-    assert state["submitted_message_ids"] == state["committed_message_ids"]
+    manager._recorder.failures.append(_PartialWriteError(2))
+
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert manager._recorder.calls[0][1] == messages
+    assert manager._recorder.calls[1][1] == messages[2:]
 
 
-def test_manager_does_not_resubmit_messages_after_failed_commit(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path)
-    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
-    original_commit = client.commit_session
-    commit_attempts = 0
+def test_pending_commit_is_retried_without_resubmitting_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    messages = [HumanMessage("one", id="h1"), AIMessage("two", id="a1")]
+    manager._recorder.failures.append(_PartialWriteError(len(messages), commit_pending=True))
 
-    def fail_once(identity: OpenVikingIdentity, session_id: str) -> OpenVikingCommitResult:
-        nonlocal commit_attempts
-        commit_attempts += 1
-        if commit_attempts == 1:
-            raise OpenVikingUnavailableError("session.commit", "temporary failure")
-        return original_commit(identity, session_id)
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
 
-    client.commit_session = fail_once  # type: ignore[method-assign]
-
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    failed_state = json.loads(watermark.read_text(encoding="utf-8"))
-    assert failed_state["submitted_message_ids"] == ["df_h1", "df_a1"]
-    assert failed_state["committed_message_ids"] == []
-
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 1
-    assert commit_attempts == 1
-
-    messages.append(HumanMessage("new information", id="h2"))
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 2
-    assert [message.message_id for message in client.added[1][2]] == ["df_h2"]
-    assert commit_attempts == 2
-    recovered_state = json.loads(watermark.read_text(encoding="utf-8"))
-    assert recovered_state["submitted_message_ids"] == recovered_state["committed_message_ids"]
-    assert recovered_state["last_commit_task_id"] == "task-1"
+    session_id = _session_id("alice", "research", "thread-1")
+    assert manager._recorder.flushes == [(session_id, "research")]
+    assert len(manager._recorder.calls) == 1
 
 
-def test_manager_does_not_resubmit_history_beyond_recent_id_window(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path, max_seen_message_ids=16)
-    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
+def test_search_maps_documents_without_custom_http_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
 
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 1
-
-    messages.append(HumanMessage("message 20", id="h20"))
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 2
-    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
-    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    state = json.loads(watermark.read_text(encoding="utf-8"))
-    assert state["schema_version"] == 3
-    assert state["submitted_prefix_count"] == 21
-    assert len(state["submitted_message_ids"]) == 16
-
-
-def test_manager_rebases_watermark_after_history_compaction(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path, max_seen_message_ids=16)
-    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    compacted = [*messages[-8:], HumanMessage("message 20", id="h20")]
-    manager.add("thread-1", compacted, user_id="alice", agent_name="research")
-    manager.add("thread-1", compacted, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 2
-    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
-    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    state = json.loads(watermark.read_text(encoding="utf-8"))
-    assert state["submitted_prefix_count"] == 9
-
-
-def test_manager_migrates_legacy_recent_id_watermark(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path, max_seen_message_ids=16)
-    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    watermark = next((tmp_path / "openviking" / "sessions").glob("*.json"))
-    legacy_state = json.loads(watermark.read_text(encoding="utf-8"))
-    legacy_state["schema_version"] = 2
-    legacy_state.pop("submitted_prefix_count", None)
-    legacy_state.pop("submitted_prefix_digest", None)
-    legacy_state.pop("committed_prefix_count", None)
-    legacy_state.pop("committed_prefix_digest", None)
-    watermark.write_text(json.dumps(legacy_state), encoding="utf-8")
-
-    messages.append(HumanMessage("message 20", id="h20"))
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-
-    assert len(client.added) == 2
-    assert [message.message_id for message in client.added[1][2]] == ["df_h20"]
-
-
-def test_manager_identity_is_stable_and_agent_isolated(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path)
-    messages = [HumanMessage("hello", id="h1"), AIMessage("hi", id="a1")]
-
-    manager.add("thread-1", messages, user_id="alice", agent_name="research")
-    manager.add("thread-1", messages, user_id="alice", agent_name="coding")
-
-    identities = [entry[0].user for entry in client.added]
-    session_ids = [entry[1] for entry in client.added]
-    assert identities[0] != identities[1]
-    assert session_ids[0] != session_ids[1]
-    assert all(value.startswith("df_") for value in identities)
-
-
-def test_manager_search_and_context_map_remote_results(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path)
-
-    results = manager.search("answer style", user_id="alice", agent_name="research")
-    context = manager.get_context("alice", agent_name="research")
+    results = manager.search(
+        "answer style",
+        top_k=3,
+        user_id="alice",
+        agent_name="research",
+        category="preferences",
+    )
 
     assert results == [
         {
-            "id": "viking://user/memories/preferences/editor.md",
-            "content": "User prefers concise answers.",
+            "id": "viking://user/memories/preferences/style.md",
+            "content": "Prefers concise answers.",
             "category": "preferences",
-            "confidence": 0.9,
-            "source": "viking://user/memories/preferences/editor.md",
-            "score": 0.9,
+            "confidence": 0.91,
+            "source": "viking://user/memories/preferences/style.md",
+            "score": 0.91,
         }
     ]
-    assert context == "- [preferences] User prefers concise answers."
-    assert client.searches[1][1] == manager._config.injection_query
+    assert manager._retriever.calls[0]["filter"] == {
+        "op": "must",
+        "field": "category",
+        "conds": ["preferences"],
+    }
+    assert manager._retriever.calls[0]["search_mode"] == "find"
 
 
-def test_manager_rejects_tool_mode(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="middleware"):
-        OpenVikingMemoryManager.from_config(_backend_config(tmp_path), mode="tool")
+def test_capture_keeps_tool_history_but_drops_hidden_injected_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    messages = [
+        HumanMessage("question", id="h1"),
+        AIMessage(
+            "",
+            id="a-tool",
+            tool_calls=[
+                {
+                    "name": "search",
+                    "args": {"query": "OpenViking"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        HumanMessage(
+            "injected memory",
+            id="hidden",
+            additional_kwargs={"hide_from_ui": True},
+        ),
+        AIMessage("answer", id="a1"),
+    ]
+
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert manager._recorder.calls[0][1] == [
+        messages[0],
+        messages[1],
+        messages[3],
+    ]
 
 
-def test_manager_session_locks_do_not_accumulate(tmp_path: Path) -> None:
-    manager, _ = _manager(tmp_path)
+def test_compacted_history_rebases_without_replaying_known_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        max_seen_message_ids=16,
+    )
+    messages = [HumanMessage(f"message {index}", id=f"h{index}") for index in range(20)]
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    compacted = [
+        *messages[-8:],
+        HumanMessage("new", id="h20"),
+    ]
+
+    manager.add(
+        "thread-1",
+        compacted,
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert manager._recorder.calls[1][1] == [compacted[-1]]
+
+
+def test_failed_write_does_not_advance_capture_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    manager._recorder.failures.append(RuntimeError("unavailable"))
+    messages = [HumanMessage("retry me", id="h1")]
+
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+    manager.add(
+        "thread-1",
+        messages,
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert [call[1] for call in manager._recorder.calls] == [
+        messages,
+        messages,
+    ]
+
+
+def test_corrupt_cursor_fails_closed_instead_of_replaying_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    session_id = _session_id("alice", "research", "thread-1")
+    cursor = manager._state_path(session_id)
+    cursor.parent.mkdir(parents=True)
+    cursor.write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(MemoryManagerError, match="refusing unsafe replay"):
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="alice",
+            agent_name="research",
+        )
+
+    assert manager._recorder.calls == []
+
+
+def test_peer_mapping_is_stable_and_namespaces_are_disjoint() -> None:
+    assert _canonical_peer_id(None, "deerflow") == "deerflow"
+    assert _canonical_peer_id("Research", "deerflow") == "research"
+    assert _canonical_peer_id("deerflow", "deerflow").startswith("df-agent-")
+    assert _canonical_peer_id("-research", "deerflow").startswith("df-agent-")
+    assert _canonical_peer_id("df-agent-custom", "deerflow").startswith("df-agent-")
+    assert (
+        len(
+            {
+                _canonical_peer_id(None, "deerflow"),
+                _canonical_peer_id("deerflow", "deerflow"),
+                _canonical_peer_id("-research", "deerflow"),
+                _canonical_peer_id("df-agent-custom", "deerflow"),
+            }
+        )
+        == 4
+    )
+
+
+def test_session_locks_do_not_accumulate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
     lock = manager._session_lock("session-1")
     lock_ref = weakref.ref(lock)
 
@@ -441,67 +637,104 @@ def test_manager_session_locks_do_not_accumulate(tmp_path: Path) -> None:
     assert len(manager._session_locks) == 0
 
 
-@pytest.mark.asyncio
-async def test_manager_async_methods_offload_sync_operations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager, _ = _manager(tmp_path)
-    event_loop_thread = threading.get_ident()
-    worker_threads: list[int] = []
+def test_shutdown_uses_existing_manager_lifecycle_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
 
-    def fake_add(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> None:
-        worker_threads.append(threading.get_ident())
-
-    def fake_get_context(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> str:
-        worker_threads.append(threading.get_ident())
-        return "context"
-
-    def fake_search(self: OpenVikingMemoryManager, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-        worker_threads.append(threading.get_ident())
-        return [{"id": "memory-1"}]
-
-    monkeypatch.setattr(OpenVikingMemoryManager, "add", fake_add)
-    monkeypatch.setattr(OpenVikingMemoryManager, "get_context", fake_get_context)
-    monkeypatch.setattr(OpenVikingMemoryManager, "search", fake_search)
-
-    await manager.aadd("thread-1", [], user_id="alice")
-    assert await manager.aget_context("alice") == "context"
-    assert await manager.asearch("query", user_id="alice") == [{"id": "memory-1"}]
-
-    assert len(worker_threads) == 3
-    assert all(thread_id != event_loop_thread for thread_id in worker_threads)
+    assert manager.shutdown_flush(1.0) is True
+    assert manager._recorder.closed is True
+    assert manager._recorder.client.closed is True
+    assert manager.shutdown_flush(1.0) is True
 
 
-def test_manager_shutdown_waits_for_in_flight_write(tmp_path: Path) -> None:
-    manager, client = _manager(tmp_path)
-    write_started = threading.Event()
-    release_write = threading.Event()
-    original_add = client.add_messages
+def test_shutdown_timeout_closes_resources_after_active_write_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    original_record = manager._recorder.record
 
-    def blocking_add(
-        identity: OpenVikingIdentity,
-        session_id: str,
-        messages: list[OpenVikingMessage],
-    ) -> int:
-        write_started.set()
-        assert release_write.wait(2)
-        return original_add(identity, session_id, messages)
+    def blocking_record(*args: Any, **kwargs: Any) -> object:
+        started.set()
+        assert release.wait(2.0)
+        return original_record(*args, **kwargs)
 
-    client.add_messages = blocking_add  # type: ignore[method-assign]
-    write_thread = threading.Thread(
+    manager._recorder.record = blocking_record
+    writer = threading.Thread(
         target=manager.add,
         args=("thread-1", [HumanMessage("hello", id="h1")]),
-        kwargs={"user_id": "alice"},
+        kwargs={"user_id": "alice", "agent_name": "research"},
     )
-    write_thread.start()
-    assert write_started.wait(1)
+    writer.start()
+    assert started.wait(1.0)
 
-    assert manager.shutdown_flush(0.01) is False
-    assert client.closed is False
-    manager.add("thread-2", [HumanMessage("ignored", id="h2")], user_id="alice")
-    assert len(client.ensured) == 1
+    assert manager.shutdown_flush(0.0) is False
+    assert manager._recorder.closed is False
 
-    release_write.set()
-    write_thread.join(2)
-    assert not write_thread.is_alive()
+    release.set()
+    writer.join(2.0)
 
-    assert manager.shutdown_flush(1) is True
-    assert client.closed is True
+    assert not writer.is_alive()
+    assert manager._recorder.closed is True
+    assert manager._recorder.client.closed is True
+    assert manager.shutdown_flush(1.0) is True
+
+
+@pytest.mark.asyncio
+async def test_async_operations_run_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    event_loop_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    original_add = OpenVikingMemoryManager.add
+
+    def recording_add(
+        self: OpenVikingMemoryManager,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        worker_threads.append(threading.get_ident())
+        original_add(self, *args, **kwargs)
+
+    monkeypatch.setattr(OpenVikingMemoryManager, "add", recording_add)
+
+    await manager.aadd(
+        "thread-1",
+        [HumanMessage("hello", id="h1")],
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert worker_threads
+    assert worker_threads[0] != event_loop_thread
+
+
+def test_capture_cursor_contains_no_message_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    manager.add(
+        "thread-1",
+        [HumanMessage("very private text", id="h1")],
+        user_id="alice",
+        agent_name="research",
+    )
+
+    cursor = next((tmp_path / "openviking" / "sessions").glob("*.json"))
+    serialized = cursor.read_text(encoding="utf-8")
+    state = json.loads(serialized)
+
+    assert "very private text" not in serialized
+    assert state["submitted_prefix_count"] == 1

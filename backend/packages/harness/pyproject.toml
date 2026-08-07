@@ -22,6 +22,7 @@ dependencies = [
     "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.2.2",
+    "langchain-openviking==0.1.0",
     "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
     "langgraph>=1.2.9,<1.3",
