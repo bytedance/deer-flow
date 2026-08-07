@@ -330,7 +330,18 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
     onRequest: injectCsrfHeader,
   });
 
-  const originalRunStream = client.runs.stream.bind(client.runs);
+  // Creating a run is not idempotent. Retrying an ambiguous gateway failure
+  // can create the same run more than once after the backend accepted the
+  // original request. Keep the default retries for reads and SSE joins, but
+  // disable them for the initial POST /runs/stream request.
+  const runCreationClient = new LangGraphClient({
+    apiUrl,
+    callerOptions: { maxRetries: 0 },
+    onRequest: injectCsrfHeader,
+  });
+  const originalRunStream = runCreationClient.runs.stream.bind(
+    runCreationClient.runs,
+  );
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   // Preserve the SDK's lazy AsyncIterable contract. Its StreamManager consumes
   // this return value with `for await`, so run creation still starts on first

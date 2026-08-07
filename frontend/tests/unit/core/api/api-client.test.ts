@@ -84,6 +84,36 @@ test("ignores reconnect metadata storage access failures", () => {
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
 });
 
+test("does not retry run creation after an ambiguous gateway failure", async () => {
+  const sessionStorage = makeSessionStorage();
+  let attempts = 0;
+  const fetchFn = rs.fn(async () => {
+    attempts += 1;
+    const status = attempts === 1 ? 504 : 400;
+    return new Response(JSON.stringify({ detail: "request failed" }), {
+      status,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const consume = async () => {
+    for await (const entry of getAPIClient(true).runs.stream(
+      "thread-no-retry",
+      "lead_agent",
+      { input: { messages: [] } },
+    )) {
+      void entry;
+    }
+  };
+
+  await expect(consume()).rejects.toThrow("HTTP 504");
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+});
+
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
   const sessionStorage = makeSessionStorage();
   sessionStorage.setItem("lg:stream:thread-1", "run-1");
