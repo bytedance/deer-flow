@@ -1087,6 +1087,46 @@ input_polish:
 
 
 # ============================================================================
+# Extensions Configuration (lives in extensions_config.json, not here)
+# ============================================================================
+# Extension middlewares let downstream integrators insert custom
+# AgentMiddleware subclasses into the agent middleware chain without forking
+# the agent-assembly code.
+#
+# NOTE: extensions are configured in extensions_config.json at the repo root
+# (next to this file), NOT in config.yaml — the `extensions` section of the
+# app config is populated from that JSON file at load time. Example
+# extensions_config.json:
+#
+#   {
+#     "mcpServers": { ... },
+#     "skills": { ... },
+#     "enabled": true,
+#     "middlewares": [
+#       "my_package.middleware:MyCustomMiddleware"
+#     ]
+#   }
+#
+# Each middleware path uses module:Attribute colon-form (e.g.
+# "my_package.middleware:MyCustomMiddleware") and is resolved at agent-build
+# time via resolve_class. The resolved class must be an AgentMiddleware
+# subclass and is instantiated with no arguments. Loading fails closed: if
+# the declared module itself is not installed the entry is logged at INFO
+# and skipped (optional-dependency pattern); any other failure — malformed
+# path, missing attribute, transitive import error, non-middleware class,
+# or constructor error — aborts agent startup with an actionable error so a
+# typo cannot silently disable a configured middleware. Set
+# "enabled": false to turn off extension middleware loading entirely.
+#
+# SECURITY: middleware entries are imported and instantiated inside the
+# agent process. Treat extensions_config.json as trusted, operator-owned
+# code declaration — the same trust model as mcpServers commands and
+# mcpInterceptors. The Gateway config API (PUT /api/mcp/config) is
+# admin-only and writes only mcpServers/skills; it never modifies
+# middlewares.
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.

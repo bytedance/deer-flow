@@ -359,6 +359,128 @@ def _assemble_from_features(
 
 
 # ---------------------------------------------------------------------------
+# Public: config-declared extension middleware loading
+# ---------------------------------------------------------------------------
+
+
+def _declared_module_missing(module_path: str, exc: ImportError) -> bool:
+    """Return ``True`` when *exc* means the declared module itself is not installed.
+
+    Walks the exception chain looking for the underlying
+    :class:`ModuleNotFoundError` and compares its ``name`` against the declared
+    module path. Only a missing declared module (or a missing parent package of
+    it) qualifies as the optional-dependency pattern; a transitive dependency
+    missing while importing an installed module, a malformed path, or a missing
+    attribute does not — ``resolve_variable`` wraps all of those as
+    ``ImportError`` too, and treating them as an absent optional package would
+    let a typo silently disable a configured middleware.
+    """
+    err: BaseException | None = exc
+    while err is not None:
+        if isinstance(err, ModuleNotFoundError):
+            name = err.name
+            return bool(name) and (module_path == name or module_path.startswith(name + "."))
+        err = err.__cause__
+    return False
+
+
+def load_extension_middlewares(app_config) -> list[AgentMiddleware]:
+    """Resolve and instantiate middleware classes declared in extensions config.
+
+    Reads ``app_config.extensions.middlewares`` — a list of ``module:Attribute``
+    colon-paths such as ``"my_package.middleware:MyCustomMiddleware"`` — resolves
+    each via :func:`deerflow.reflection.resolvers.resolve_class` (validating it
+    is an :class:`AgentMiddleware` subclass), instantiates it, and returns the
+    list.
+
+    In production the ``extensions`` section of :class:`AppConfig` is populated
+    from ``extensions_config.json`` (see ``AppConfig.from_file``), so this is
+    where operators declare middlewares — the ``extensions`` key of
+    ``config.yaml`` is not read.
+
+    Respects ``app_config.extensions.enabled`` — returns an empty list when
+    ``enabled`` is ``False``.
+
+    Security: each entry is imported and instantiated inside the agent
+    process, so a middleware path is operator-declared code execution by
+    design — the same trust model as ``mcpServers`` commands and
+    ``mcpInterceptors`` in the same file. ``extensions_config.json`` must
+    only be writable by trusted operators; the Gateway config API
+    (``PUT /api/mcp/config``) is admin-gated and only rewrites
+    ``mcpServers``/``skills``, preserving ``middlewares`` verbatim.
+
+    Error handling (fail closed):
+    * The declared module itself is not installed (the underlying
+      ``ModuleNotFoundError`` names the declared module or one of its parent
+      packages) → logged at INFO and skipped (optional-dependency pattern).
+    * Anything else — a duplicate path, a malformed path (missing ``:``), a
+      missing attribute, an installed module failing with an internal/transitive
+      import error, a resolved object that is not an ``AgentMiddleware``
+      subclass, or a constructor failure — raises, aborting agent construction
+      with an actionable error. Declared middlewares can be deterministic guards
+      (domain allowlists, tool-call gating), so starting the agent without
+      one would silently change production behavior; a broken entry must be
+      fixed or removed rather than skipped.
+
+    Returns an empty list when ``app_config.extensions.middlewares`` is empty,
+    ``app_config.extensions.enabled`` is ``False``, or ``app_config.extensions``
+    is absent.
+    """
+    try:
+        extensions = getattr(app_config, "extensions", None)
+    except Exception:
+        return []
+
+    if extensions is None:
+        return []
+
+    enabled: bool = getattr(extensions, "enabled", True)
+    if not enabled:
+        return []
+
+    paths: list[str] = getattr(extensions, "middlewares", None) or []
+    if not paths:
+        return []
+
+    from deerflow.reflection.resolvers import resolve_class
+
+    instances: list[AgentMiddleware] = []
+    seen_paths: set[str] = set()
+    for path in paths:
+        stripped = path.strip()
+        if stripped in seen_paths:
+            # LangChain's create_agent rejects duplicate middleware names with a
+            # bare AssertionError; fail here with an actionable message instead.
+            raise ValueError(f"Duplicate extension middleware path {stripped!r} declared in extensions config — declare each middleware once.")
+        seen_paths.add(stripped)
+        module_path = stripped.split(":", 1)[0]
+        try:
+            cls = resolve_class(stripped, AgentMiddleware)
+        except ImportError as exc:
+            if _declared_module_missing(module_path, exc):
+                # Optional dependency: the declared module itself is not installed.
+                logger.info("Extension middleware %r skipped: module %r is not installed — treated as an optional dependency.", path, module_path)
+                continue
+            # Malformed path, missing attribute, or an installed module whose
+            # import failed — misconfiguration or a broken dependency, not an
+            # absent optional package. Fail agent construction loudly instead
+            # of silently starting without the configured middleware.
+            raise
+
+        try:
+            instance = cls()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to instantiate extension middleware {path!r} ({cls.__module__}.{cls.__qualname__}): {exc}") from exc
+
+        instances.append(instance)
+
+    if instances:
+        logger.info("Loaded %d extension middleware(s) from config: %s", len(instances), [type(m).__name__ for m in instances])
+
+    return instances
+
+
+# ---------------------------------------------------------------------------
 # Internal: extra middleware insertion with @Next/@Prev
 # ---------------------------------------------------------------------------
 

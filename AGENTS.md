@@ -78,9 +78,12 @@ kept out of the API-writable `extensions_config.json`). See the Extension System
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored and may be edited at runtime via the
-Gateway API. Config schema and resolution order are documented in
-[backend/AGENTS.md](backend/AGENTS.md).
+servers + skills + extension middlewares). Both real files are gitignored and may be
+edited at runtime via the Gateway API. Treat both as trusted operator input: several
+keys declare code the process will execute (`mcpServers` commands, `mcpInterceptors`,
+extension `middlewares`), and the Gateway config API only exposes admin-gated edits to
+`mcpServers`/`skills` — it never writes the code-declaring keys. Config schema and
+resolution order are documented in [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
 - `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
