@@ -7,6 +7,7 @@ State-changing operations require CSRF protection.
 import os
 import secrets
 from collections.abc import Awaitable, Callable
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
@@ -150,20 +151,48 @@ def _forwarded_param(request: Request, name: str) -> str | None:
     return None
 
 
+def _trusted_proxy_networks() -> list:
+    nets = []
+    for entry in os.getenv("AUTH_TRUSTED_PROXIES", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            nets.append(ip_network(entry, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _trust_forwarded_headers(request: Request) -> bool:
+    peer_host = getattr(getattr(request, "client", None), "host", None)
+    if not peer_host:
+        return False
+    try:
+        peer_ip = ip_address(peer_host)
+    except ValueError:
+        return False
+    return any(peer_ip in net for net in _trusted_proxy_networks())
+
+
 def _request_scheme(request: Request) -> str:
     """Resolve the original request scheme from trusted proxy headers."""
-    scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or request.url.scheme
+    scheme = request.url.scheme
+    if _trust_forwarded_headers(request):
+        scheme = _forwarded_param(request, "proto") or _first_header_value(request.headers.get("x-forwarded-proto")) or scheme
     return scheme.lower()
 
 
 def _request_origin(request: Request) -> str | None:
     """Build the origin for the URL the browser is targeting."""
     scheme = _request_scheme(request)
-    host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or request.headers.get("host") or request.url.netloc
+    host = request.headers.get("host") or request.url.netloc
 
-    forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
-    if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
-        host = f"{host}:{forwarded_port}"
+    if _trust_forwarded_headers(request):
+        host = _forwarded_param(request, "host") or _first_header_value(request.headers.get("x-forwarded-host")) or host
+        forwarded_port = _first_header_value(request.headers.get("x-forwarded-port"))
+        if forwarded_port and ":" not in host.rsplit("]", 1)[-1]:
+            host = f"{host}:{forwarded_port}"
 
     return _normalize_origin(f"{scheme}://{host}")
 

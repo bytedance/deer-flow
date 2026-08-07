@@ -360,12 +360,12 @@ async def test_oidc_discover_accepts_issuer_with_trailing_slash_difference(monke
 
 
 def _redirect_request(headers: dict, scheme: str = "http", netloc: str = "localhost:8001"):
-    from unittest.mock import MagicMock
+    from types import SimpleNamespace
 
-    req = MagicMock()
+    req = SimpleNamespace()
     req.headers = headers
-    req.url.scheme = scheme
-    req.url.netloc = netloc
+    req.url = SimpleNamespace(scheme=scheme, netloc=netloc)
+    req.client = SimpleNamespace(host="testclient")
     return req
 
 
@@ -378,9 +378,10 @@ def test_oidc_redirect_uri_prefers_configured_value():
     assert _resolve_oidc_redirect_uri(req, "keycloak", cfg) == "https://app.example.com/api/v1/auth/callback/keycloak"
 
 
-def test_oidc_redirect_uri_fallback_uses_forwarded_headers_not_raw_host():
+def test_oidc_redirect_uri_fallback_uses_forwarded_headers_from_trusted_proxy(monkeypatch):
     from app.gateway.routers.auth import _resolve_oidc_redirect_uri
 
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     cfg = _provider_config()
     # Raw Host is attacker-controlled; proxy-set X-Forwarded-* must win.
     req = _redirect_request(
@@ -390,10 +391,29 @@ def test_oidc_redirect_uri_fallback_uses_forwarded_headers_not_raw_host():
             "x-forwarded-proto": "https",
         }
     )
+    req.client.host = "10.0.0.2"
 
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "https://app.example.com/api/v1/auth/callback/keycloak"
+
+
+def test_oidc_redirect_uri_fallback_ignores_forwarded_headers_from_untrusted_peer(monkeypatch):
+    from app.gateway.routers.auth import _resolve_oidc_redirect_uri
+
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    cfg = _provider_config()
+    req = _redirect_request(
+        {
+            "host": "localhost:8001",
+            "x-forwarded-host": "attacker.example.com",
+            "x-forwarded-proto": "https",
+        }
+    )
+
+    result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
+
+    assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
 
 
 def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
