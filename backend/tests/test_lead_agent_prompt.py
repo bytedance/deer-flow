@@ -394,25 +394,25 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     }
 
 
-def test_get_memory_context_propagates_fail_closed_manager_error(monkeypatch):
-    from deerflow.agents.memory import MemoryManagerError
+def test_get_memory_context_propagates_required_read_error_without_backend_config(monkeypatch):
+    from deerflow.agents.memory import MemoryReadError
 
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(
             enabled=True,
             injection_enabled=True,
-            backend_config={"failure_policy": {"read": "fail_closed"}},
+            backend_config={},
         ),
     )
-    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryReadError("down")))
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
 
-    with pytest.raises(MemoryManagerError, match="down"):
+    with pytest.raises(MemoryReadError, match="down"):
         prompt_module._get_memory_context("agent-a", app_config=explicit_config)
 
 
-def test_get_memory_context_swallows_manager_error_without_fail_closed(monkeypatch):
+def test_get_memory_context_swallows_ordinary_manager_error(monkeypatch):
     from deerflow.agents.memory import MemoryManagerError
 
     explicit_config = SimpleNamespace(

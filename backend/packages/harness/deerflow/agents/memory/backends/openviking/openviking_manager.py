@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryAccessError, MemoryManager, MemoryManagerError, MemoryReadError
 
 from .config import OpenVikingConfig
 from .session import (
@@ -118,6 +118,13 @@ class OpenVikingMemoryManager(MemoryManager):
             user_id=user_id,
         )
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        return OpenVikingConfig.from_backend_config(backend_config).read_failure_policy == "raise"
+
     def add_nowait(
         self,
         thread_id: str,
@@ -176,9 +183,11 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(self._config.injection_query)
-            except Exception:
+            except Exception as exc:
+                if _is_access_error(exc):
+                    raise MemoryAccessError("OpenViking context retrieval was denied") from exc
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking context retrieval failed") from exc
                 logger.warning(
                     "OpenViking context retrieval failed; continuing without injected memory",
                     exc_info=True,
@@ -232,9 +241,11 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(query.strip())
-            except Exception:
+            except Exception as exc:
+                if _is_access_error(exc):
+                    raise MemoryAccessError("OpenViking memory search was denied") from exc
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking memory search failed") from exc
                 logger.warning(
                     "OpenViking memory search failed; returning no results",
                     exc_info=True,
@@ -450,7 +461,7 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> str:
         resolved_user = str(user_id or "default")
         if resolved_user != self._config.owner_user_id:
-            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+            raise MemoryAccessError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
         return _canonical_peer_id(agent_name, self._config.default_peer_id)
 
     def _actor_peer_scope(
@@ -562,6 +573,14 @@ def _load_official_integration() -> dict[str, Any]:
         "OpenVikingSessionRecorder": OpenVikingSessionRecorder,
         "use_actor_peer": use_actor_peer,
     }
+
+
+def _is_access_error(exc: BaseException) -> bool:
+    try:
+        from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
+    except ImportError:
+        return False
+    return isinstance(exc, (UnauthenticatedError, PermissionDeniedError))
 
 
 def _format_documents(documents: list[Any], *, max_chars: int) -> str:

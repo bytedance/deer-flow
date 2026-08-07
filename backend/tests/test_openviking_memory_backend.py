@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 import gc
 import json
+import socket
 import threading
 import weakref
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any
 import pytest
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
+from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
 
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
 from deerflow.agents.memory.backends.openviking.openviking_manager import (
@@ -23,10 +26,13 @@ from deerflow.agents.memory.backends.openviking.openviking_manager import (
     _session_id,
 )
 from deerflow.agents.memory.manager import (
+    MemoryAccessError,
     MemoryManagerError,
+    MemoryReadError,
     _scan_backends,
     reset_memory_manager,
 )
+from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
 
 class _CommitPolicy:
@@ -210,6 +216,14 @@ def _manager(
     return OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
 
 
+@pytest.fixture
+def unreachable_openviking_url() -> Iterator[str]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
+        reserved_socket.bind(("127.0.0.1", 0))
+        host, port = reserved_socket.getsockname()
+        yield f"http://{host}:{port}"
+
+
 def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -239,6 +253,28 @@ def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
 def test_backend_is_discovered_by_registered_name() -> None:
     reset_memory_manager()
     assert _scan_backends()["openviking"] is OpenVikingMemoryManager
+
+
+@pytest.mark.parametrize(
+    ("read_policy", "expected"),
+    [
+        pytest.param("fail_open", False, id="fail_open"),
+        pytest.param("raise", True, id="raise"),
+    ],
+)
+def test_read_failure_capability_matches_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+    expected: bool,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"read": read_policy},
+    )
+
+    assert manager.read_failures_are_fatal is expected
 
 
 def test_official_loader_uses_standalone_package() -> None:
@@ -329,6 +365,154 @@ def test_context_without_thread_uses_existing_find_path(
     ]
 
 
+def test_unreachable_context_read_raise_aborts_dynamic_context_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "raise"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    with pytest.raises(MemoryReadError) as exc_info:
+        middleware.before_agent(state, None)
+
+    assert exc_info.value.__cause__ is not None
+
+
+def test_unreachable_context_read_fail_open_returns_no_injected_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "fail_open"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    assert manager.get_context("alice", agent_name="research") == ""
+    update = middleware.before_agent(state, None)
+    assert update is not None
+    assert all(not str(message.id).endswith("__memory") for message in update["messages"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+async def test_unreachable_async_context_read_honors_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+    read_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": read_policy},
+    )
+
+    if read_policy == "raise":
+        with pytest.raises(MemoryReadError) as exc_info:
+            await manager.aget_context("alice", agent_name="research")
+        assert exc_info.value.__cause__ is not None
+    else:
+        assert await manager.aget_context("alice", agent_name="research") == ""
+
+
+@pytest.mark.asyncio
+async def test_unreachable_context_read_raise_aborts_async_dynamic_context_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "raise"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    with pytest.raises(MemoryReadError) as exc_info:
+        await middleware.abefore_agent(state, None)
+
+    assert exc_info.value.__cause__ is not None
+
+
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+def test_access_denial_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    access_error: Exception,
+    read_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"read": read_policy},
+    )
+
+    def raise_access_error(self: _Retriever, query: str) -> list[Document]:
+        raise access_error
+
+    monkeypatch.setattr(
+        _Retriever,
+        "invoke",
+        raise_access_error,
+    )
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        manager.get_context("alice", agent_name="research")
+
+    assert exc_info.value.__cause__ is access_error
+
+
 def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,9 +520,9 @@ def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
 
-    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
         manager.get_context("bob", agent_name="research")
-    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
         manager.add(
             "thread-1",
             [HumanMessage("private", id="h1")],

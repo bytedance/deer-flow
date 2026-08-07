@@ -24,6 +24,7 @@ from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.memory import MemoryReadError
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
@@ -148,6 +149,37 @@ async def test_abefore_agent_returns_none_on_timeout() -> None:
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     journal.record_memory_context.assert_not_called()
+
+
+async def test_abefore_agent_propagates_strict_memory_timeout() -> None:
+    """A strict backend must not degrade after the middleware timeout."""
+    mw = DynamicContextMiddleware()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_inject(state, runtime=None):
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch.object(mw, "_read_failures_are_fatal", return_value=True),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
+        runtime = SimpleNamespace(context={})
+        with pytest.raises(MemoryReadError) as exc_info:
+            await mw.abefore_agent(state, runtime)
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert started.is_set()
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 1)
 
 
 async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:

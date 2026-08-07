@@ -15,9 +15,14 @@ from typing import Any, ClassVar, Literal
 from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import (
+    MemoryAccessError,
+    MemoryManager,
+    MemoryManagerError,
+    MemoryReadError,
+)
 
-from .client import Mem0APIError, Mem0Client
+from .client import Mem0APIError, Mem0AuthError, Mem0Client
 from .config import Mem0Config
 from .message_filtering import extract_message_text, filter_messages_for_memory
 
@@ -106,15 +111,24 @@ class Mem0Manager(MemoryManager):
         """Release the underlying HTTP connection pool."""
         self._client.close()
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        return Mem0Config.from_backend_config(backend_config).read_policy == "fail_closed"
+
     # ── Error policies ───────────────────────────────────────────────────
     def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
         try:
             return fn()
+        except Mem0AuthError as e:
+            raise MemoryAccessError("mem0 memory access was denied") from e
         except Mem0APIError as e:
             if self._config.read_policy == "fail_open":
                 logger.warning("mem0 read failed (%s); continuing without memory", e)
                 return fallback
-            raise MemoryManagerError(f"mem0 read failed: {e}") from e
+            raise MemoryReadError(f"mem0 read failed: {e}") from e
 
     def _write_or_drop(self, fn: Any) -> None:
         try:
