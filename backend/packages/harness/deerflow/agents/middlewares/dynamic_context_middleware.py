@@ -1,10 +1,9 @@
-"""Middleware to inject dynamic context (memory, current date) as a system-reminder.
+"""Middleware to inject dynamic context (memory, current date) around model calls.
 
 The system prompt is kept fully static for maximum prefix-cache reuse across users
-and sessions.  The current date is always injected.  Per-user memory is also injected
-when ``memory.injection_enabled`` is True in the app config.  Both are delivered once
-per conversation as a dedicated <system-reminder> SystemMessage inserted before the
-first user message (frozen-snapshot pattern).
+and sessions. The current date is always injected. When enabled, a baseline memory
+snapshot is persisted once per conversation and query-aware memory is injected only
+into the current model request for each real user turn.
 
 When a conversation spans midnight the middleware detects the date change and injects
 a lightweight date-update reminder as a separate SystemMessage before the current turn.
@@ -33,17 +32,26 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.memory.context import aload_memory_context, load_memory_context
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.secret_context import DYNAMIC_MEMORY_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
+from deerflow.utils.messages import (
+    INJECTED_USER_MESSAGE_ID_SUFFIX,
+    get_original_user_content_text,
+    is_real_user_message,
+    strip_injected_user_message_id_suffix,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -63,6 +71,7 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
+_TURN_MEMORY_MESSAGE_KEY = "dynamic_turn_memory"
 
 # ``INJECTED_USER_MESSAGE_ID_SUFFIX`` / ``strip_injected_user_message_id_suffix``
 # are defined in ``deerflow.utils.messages`` and re-exported here, where the
@@ -230,24 +239,124 @@ class DynamicContextMiddleware(AgentMiddleware):
         memory stays at role:user — preventing untrusted content from gaining
         system privilege (OWASP LLM01).
         """
-        from deerflow.agents.lead_agent.prompt import _get_memory_context
-
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = (
-            _get_memory_context(
+        memory_config = self._app_config.memory if self._app_config else None
+        session_injection_enabled = memory_config.injection_enabled and getattr(memory_config, "session_injection_enabled", True) if memory_config is not None else True
+        thread_id = runtime.context.get("thread_id") if runtime is not None and isinstance(runtime.context, dict) else None
+        if session_injection_enabled:
+            context_kwargs = {
+                "app_config": self._app_config,
+                "user_id": resolve_runtime_user_id(runtime),
+            }
+            if thread_id is not None:
+                context_kwargs["thread_id"] = thread_id
+            memory_context = load_memory_context(
                 self._agent_name,
-                app_config=self._app_config,
-                user_id=resolve_runtime_user_id(runtime),
+                **context_kwargs,
             )
-            if injection_enabled
-            else ""
-        )
+        else:
+            memory_context = ""
         current_date = _format_current_date()
         date_reminder = _format_current_date_reminder(current_date)
 
         memory_block = memory_context.strip() if memory_context else None
 
         return date_reminder, memory_block
+
+    def _turn_recall_enabled(self) -> bool:
+        if self._app_config is None:
+            return False
+        memory_config = self._app_config.memory
+        return memory_config.enabled and memory_config.injection_enabled and getattr(memory_config, "turn_injection_enabled", False)
+
+    @staticmethod
+    def _latest_real_user_message(messages: list) -> tuple[int, HumanMessage, str] | None:
+        for index in reversed(range(len(messages))):
+            message = messages[index]
+            if not is_real_user_message(message):
+                continue
+            query = get_original_user_content_text(message.content, message.additional_kwargs).strip()
+            return (index, message, query) if query else None
+        return None
+
+    @staticmethod
+    def _turn_cache(request: ModelRequest) -> dict | None:
+        context = getattr(request.runtime, "context", None)
+        return context if isinstance(context, dict) else None
+
+    @staticmethod
+    def _turn_cache_key(message: HumanMessage, query: str, target_index: int) -> str:
+        message_identity = str(message.id) if message.id is not None else f"index:{target_index}"
+        query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
+        return f"{message_identity}:{query_digest}"
+
+    @staticmethod
+    def _inject_turn_memory(
+        request: ModelRequest,
+        target_index: int,
+        target: HumanMessage,
+        memory_context: str,
+    ) -> ModelRequest:
+        stripped = memory_context.strip()
+        if not stripped:
+            return request
+        messages = list(request.messages)
+        messages.insert(
+            target_index,
+            HumanMessage(
+                content=stripped,
+                id=f"{target.id or 'turn'}__turn_memory",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                    _TURN_MEMORY_MESSAGE_KEY: True,
+                    **provenance_kwargs(ContentKind.MEMORY, "dynamic_turn_memory"),
+                },
+            ),
+        )
+        return request.override(messages=messages)
+
+    def _prepare_turn_request(self, request: ModelRequest) -> tuple[ModelRequest, tuple[int, HumanMessage, str, str, dict] | None]:
+        if not self._turn_recall_enabled():
+            return request, None
+        target = self._latest_real_user_message(list(request.messages))
+        if target is None:
+            return request, None
+        target_index, user_message, query = target
+        context = self._turn_cache(request)
+        if context is None:
+            return request, None
+        cache_key = self._turn_cache_key(user_message, query, target_index)
+        cached = context.get(DYNAMIC_MEMORY_CONTEXT_KEY)
+        if isinstance(cached, dict) and cached.get("key") == cache_key and isinstance(cached.get("content"), str):
+            return self._inject_turn_memory(request, target_index, user_message, cached["content"]), None
+        return request, (target_index, user_message, query, cache_key, context)
+
+    def _load_turn_memory(self, request: ModelRequest, query: str) -> str:
+        context = self._turn_cache(request) or {}
+        return load_memory_context(
+            self._agent_name,
+            app_config=self._app_config,
+            user_id=resolve_runtime_user_id(request.runtime),
+            thread_id=context.get("thread_id"),
+            query=query,
+        )
+
+    async def _aload_turn_memory(self, request: ModelRequest, query: str) -> str:
+        context = self._turn_cache(request) or {}
+        return await aload_memory_context(
+            self._agent_name,
+            app_config=self._app_config,
+            user_id=resolve_runtime_user_id(request.runtime),
+            thread_id=context.get("thread_id"),
+            query=query,
+        )
+
+    @staticmethod
+    def _store_turn_memory(context: dict, cache_key: str, memory_context: str) -> None:
+        context[DYNAMIC_MEMORY_CONTEXT_KEY] = {
+            "key": cache_key,
+            "content": memory_context,
+        }
 
     def _build_date_update_reminder(self) -> str:
         return _format_current_date_reminder(_format_current_date())
@@ -399,6 +508,34 @@ class DynamicContextMiddleware(AgentMiddleware):
             return None
         self._record_effective_memory(state, result, runtime)
         return result
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        prepared, pending = self._prepare_turn_request(request)
+        if pending is None:
+            return handler(prepared)
+        target_index, user_message, query, cache_key, context = pending
+        memory_context = self._load_turn_memory(request, query)
+        self._store_turn_memory(context, cache_key, memory_context)
+        return handler(self._inject_turn_memory(request, target_index, user_message, memory_context))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        prepared, pending = self._prepare_turn_request(request)
+        if pending is None:
+            return await handler(prepared)
+        target_index, user_message, query, cache_key, context = pending
+        memory_context = await self._aload_turn_memory(request, query)
+        self._store_turn_memory(context, cache_key, memory_context)
+        return await handler(self._inject_turn_memory(request, target_index, user_message, memory_context))
 
     @staticmethod
     def _effective_memory_message(state, update: dict | None, runtime: Runtime) -> HumanMessage | None:

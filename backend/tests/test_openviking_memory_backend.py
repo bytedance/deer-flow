@@ -7,6 +7,7 @@ import gc
 import json
 import threading
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -298,6 +299,82 @@ def test_context_preserves_existing_fixed_query_behavior(
             "search_mode": "search",
         }
     ]
+
+
+def test_context_uses_supplied_query_and_request_local_thread_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    shared_retriever_state = {
+        "search_mode": getattr(manager._retriever, "search_mode", "find"),
+        "session_id": manager._retriever.session_id,
+        "target_uri": copy.deepcopy(manager._retriever.target_uri),
+    }
+
+    context = manager.get_context(
+        "alice",
+        agent_name="research",
+        thread_id="thread-1",
+        query="What answer style do I prefer?",
+    )
+
+    assert context == "- [preferences] Prefers concise answers."
+    assert manager._retriever.calls == [
+        {
+            "query": "What answer style do I prefer?",
+            "actor_peer": "research",
+            "limit": 4,
+            "filter": None,
+            "session_id": _session_id("alice", "research", "thread-1"),
+            "target_uri": [
+                "viking://user/memories",
+                "viking://user/peers/research/memories",
+            ],
+            "search_mode": "search",
+        }
+    ]
+    assert getattr(manager._retriever, "search_mode", "find") == shared_retriever_state["search_mode"]
+    assert manager._retriever.session_id == shared_retriever_state["session_id"]
+    assert manager._retriever.target_uri == shared_retriever_state["target_uri"]
+
+
+def test_concurrent_context_requests_keep_query_peer_and_thread_isolated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+
+    requests = [
+        ("research", "thread-a", "question-a"),
+        ("writing", "thread-b", "question-b"),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda args: manager.get_context(
+                    "alice",
+                    agent_name=args[0],
+                    thread_id=args[1],
+                    query=args[2],
+                ),
+                requests,
+            )
+        )
+
+    assert results == [
+        "- [preferences] Prefers concise answers.",
+        "- [preferences] Prefers concise answers.",
+    ]
+    calls_by_query = {call["query"]: call for call in manager._retriever.calls}
+    assert calls_by_query["question-a"]["actor_peer"] == "research"
+    assert calls_by_query["question-a"]["session_id"] == _session_id("alice", "research", "thread-a")
+    assert calls_by_query["question-b"]["actor_peer"] == "writing"
+    assert calls_by_query["question-b"]["session_id"] == _session_id("alice", "writing", "thread-b")
+    assert manager._retriever.session_id is None
+    assert manager._retriever.target_uri == ""
 
 
 def test_context_without_thread_uses_existing_find_path(

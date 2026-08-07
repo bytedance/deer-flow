@@ -547,6 +547,8 @@ def test_memory_status_route_returns_501_for_unsupported_backend() -> None:
         enabled=True,
         mode="middleware",
         injection_enabled=True,
+        session_injection_enabled=True,
+        turn_injection_enabled=False,
         shutdown_flush_timeout_seconds=30.0,
         manager_class="minimal",
         backend_config={},

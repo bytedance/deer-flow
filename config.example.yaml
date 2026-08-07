@@ -1806,7 +1806,9 @@ summarization:
 #
 # Shared fields (host level, backend-agnostic):
 #   enabled             - Master switch for the memory mechanism (call-site gate)
-#   injection_enabled   - Whether to inject memory into the system prompt (call-site gate)
+#   injection_enabled   - Master switch for automatic memory injection
+#   session_injection_enabled - Persist a baseline memory snapshot at session start (default: true)
+#   turn_injection_enabled - Recall against each latest user query when the backend supports it (default: false)
 #   shutdown_flush_timeout_seconds - Hard budget (s) to drain pending updates on Gateway graceful shutdown (default: 30)
 #   manager_class       - Backend selector: registered name (deermem/mem0/noop/openviking) or dotted path
 #   backend_config      - Backend-private config dict (passthrough; each backend self-interprets)
@@ -1839,7 +1841,14 @@ summarization:
 #                                    (default: 3650, range: 90-36500)
 memory:
   enabled: true
-  injection_enabled: true # Whether to inject memory into system prompt
+  # Master injection gate. When true, at least one sub-control must be true;
+  # set this false to disable all automatic memory injection.
+  injection_enabled: true
+  # Preserve the existing frozen baseline snapshot at session start.
+  session_injection_enabled: true
+  # Opt in to request-only recall using the latest real user question. The
+  # active backend must advertise query-aware context support (OpenViking does).
+  turn_injection_enabled: false
   # Hard budget (seconds) to drain pending memory updates on Gateway graceful
   # shutdown. Each pending item does one LLM call, so large IM batches may need
   # more. Must fit inside the pod's K8s terminationGracePeriodSeconds (channel
