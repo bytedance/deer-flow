@@ -49,7 +49,7 @@ def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
     if app_config is None:
         try:
             app_config = get_app_config()
-        except FileNotFoundError:
+        except (FileNotFoundError, RuntimeError):
             return False
     return bool(getattr(getattr(app_config, "token_usage", None), "enabled", False))
 
@@ -285,10 +285,10 @@ async def task_tool(
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config)
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config)
     if config is None:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
@@ -298,7 +298,7 @@ async def task_tool(
             error=error,
         )
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config)
         if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
