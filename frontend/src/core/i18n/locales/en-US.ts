@@ -774,6 +774,9 @@ export const enUS: Translations = {
       importInvalidFile:
         "Failed to read the selected memory file. Please choose a valid JSON export.",
       importSuccess: "Memory imported",
+      importAgentConfirmTitle: "Import into this agent's memory?",
+      importAgentConfirmDescription:
+        "Facts in this backup will overwrite this agent's facts. Its summaries are user-global and will replace the shared summaries seen by Main memory and every other agent.",
       manualFactSource: "Manual",
       addFact: "Add fact",
       addFactTitle: "Add memory fact",
@@ -808,6 +811,13 @@ export const enUS: Translations = {
       filterFacts: "Facts",
       filterSummaries: "Summaries",
       noMatches: "No matching memory found.",
+      agentScopeLabel: "Agent",
+      agentScopeDefault: "Main memory",
+      clearAgent: "Clear agent facts",
+      clearAgentConfirmTitle: "Clear this agent's facts?",
+      clearAgentConfirmDescription:
+        "This will remove all facts saved for this agent. Shared summaries and other agents' facts are preserved. This action cannot be undone.",
+      clearAgentSuccess: "Agent facts cleared",
       markdown: {
         overview: "Overview",
         userContext: "User context",

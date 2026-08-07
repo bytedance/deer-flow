@@ -7,6 +7,19 @@ import type {
   UserMemory,
 } from "./types";
 
+/**
+ * Build a memory endpoint URL with the optional agent fact-bucket selector.
+ * Facts are bucketed per custom agent on the backend; ``agentName`` selects
+ * the bucket (null/empty selects the default bucket). Summaries are
+ * user-global and shared across agents either way.
+ */
+function memoryUrl(path: string, agentName?: string | null): string {
+  const base = `${getBackendBaseURL()}${path}`;
+  return agentName
+    ? `${base}?agent_name=${encodeURIComponent(agentName)}`
+    : base;
+}
+
 async function readMemoryResponse(
   response: Response,
   fallbackMessage: string,
@@ -80,21 +93,28 @@ async function readMemoryResponse(
   return response.json() as Promise<UserMemory>;
 }
 
-export async function loadMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory`);
+export async function loadMemory(
+  agentName?: string | null,
+): Promise<UserMemory> {
+  const response = await fetch(memoryUrl("/api/memory", agentName));
   return readMemoryResponse(response, "Failed to fetch memory");
 }
 
-export async function clearMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory`, {
+export async function clearMemory(
+  agentName?: string | null,
+): Promise<UserMemory> {
+  const response = await fetch(memoryUrl("/api/memory", agentName), {
     method: "DELETE",
   });
   return readMemoryResponse(response, "Failed to clear memory");
 }
 
-export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
+export async function deleteMemoryFact(
+  factId: string,
+  agentName?: string | null,
+): Promise<UserMemory> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+    memoryUrl(`/api/memory/facts/${encodeURIComponent(factId)}`, agentName),
     {
       method: "DELETE",
     },
@@ -102,13 +122,18 @@ export async function deleteMemoryFact(factId: string): Promise<UserMemory> {
   return readMemoryResponse(response, "Failed to delete memory fact");
 }
 
-export async function exportMemory(): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/export`);
+export async function exportMemory(
+  agentName?: string | null,
+): Promise<UserMemory> {
+  const response = await fetch(memoryUrl("/api/memory/export", agentName));
   return readMemoryResponse(response, "Failed to export memory");
 }
 
-export async function importMemory(memory: UserMemory): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/import`, {
+export async function importMemory(
+  memory: UserMemory,
+  agentName?: string | null,
+): Promise<UserMemory> {
+  const response = await fetch(memoryUrl("/api/memory/import", agentName), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -120,8 +145,9 @@ export async function importMemory(memory: UserMemory): Promise<UserMemory> {
 
 export async function createMemoryFact(
   input: MemoryFactInput,
+  agentName?: string | null,
 ): Promise<UserMemory> {
-  const response = await fetch(`${getBackendBaseURL()}/api/memory/facts`, {
+  const response = await fetch(memoryUrl("/api/memory/facts", agentName), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -134,9 +160,10 @@ export async function createMemoryFact(
 export async function updateMemoryFact(
   factId: string,
   input: MemoryFactPatchInput,
+  agentName?: string | null,
 ): Promise<UserMemory> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/memory/facts/${encodeURIComponent(factId)}`,
+    memoryUrl(`/api/memory/facts/${encodeURIComponent(factId)}`, agentName),
     {
       method: "PATCH",
       headers: {

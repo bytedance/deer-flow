@@ -1,9 +1,15 @@
-"""Memory API router for retrieving and managing global memory data."""
+"""Memory API router for retrieving and managing memory data.
+
+Facts are bucketed per custom agent: the optional ``agent_name`` query parameter
+selects which bucket the data endpoints read/write (omitted selects the default
+bucket). User/history summaries are user-global and shared across agents, so
+they are returned unchanged regardless of ``agent_name``.
+"""
 
 import asyncio
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -13,6 +19,15 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
+
+# Public custom-agent name grammar (mirrors ``app.gateway.routers.agents`` and
+# ``deerflow.config.agents_config``). Gates the optional ``agent_name`` query
+# parameter at the wire boundary so malformed names get a clean 422 before they
+# reach the backend-neutral manager. The reserved ``__default__`` bucket sentinel
+# is deliberately outside this grammar: it never travels the wire -- omitting
+# ``agent_name`` selects the default bucket.
+_AGENT_NAME_QUERY_PATTERN = r"^[A-Za-z0-9-]+$"
+_AGENT_NAME_QUERY_DESCRIPTION = "Optional custom-agent name selecting which agent's fact bucket to read/write; omitted selects the default bucket. Summaries are user-global and shared across agents."
 
 
 def _resolve_memory_user_id(request: Request) -> str:
@@ -149,7 +164,7 @@ def _unsupported_501(manager: object, label: str) -> HTTPException:
     )
 
 
-async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -> dict[str, Any]:
+async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str, *, agent_name: str | None = None) -> dict[str, Any]:
     """Read the full memory doc; 501 if the backend doesn't expose one.
 
     ``get_memory`` is tier-2 (default ``raise NotImplementedError``); a minimal
@@ -158,9 +173,11 @@ async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -
     route reads through here so an unsupported backend gets a clean 501 instead
     of a raw 500. ``label`` is the operation name in the 501 detail (the
     endpoint's verb, e.g. "get memory" / "export memory" / "reload memory").
+    ``agent_name`` selects the fact bucket (None = default); summaries are
+    user-global either way.
     """
     try:
-        return await asyncio.to_thread(manager.get_memory, user_id=user_id)
+        return await asyncio.to_thread(manager.get_memory, user_id=user_id, agent_name=agent_name)
     except NotImplementedError:
         raise _unsupported_501(manager, label) from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
@@ -206,10 +223,18 @@ class MemoryStatusResponse(BaseModel):
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Get Memory Data",
-    description="Retrieve the current global memory data including user context, history, and facts.",
+    description="Retrieve the current memory data: user-global context/history summaries plus the selected agent's facts (default bucket when agent_name is omitted).",
 )
-async def get_memory(http_request: Request) -> MemoryResponse:
-    """Get the current global memory data.
+async def get_memory(
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
+    """Get the current memory data.
+
+    Args:
+        http_request: The incoming request (used to resolve the memory owner).
+        agent_name: Optional custom-agent fact bucket; omitted reads the
+            default bucket. Summaries are user-global either way.
 
     Returns:
         The current memory data with user context, history, and facts.
@@ -243,7 +268,7 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         ```
     """
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory", agent_name=agent_name)
     return MemoryResponse(**memory_data)
 
 
@@ -254,7 +279,10 @@ async def get_memory(http_request: Request) -> MemoryResponse:
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
 )
-async def reload_memory(http_request: Request) -> MemoryResponse:
+async def reload_memory(
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Reload memory data from file.
 
     This forces a reload of the memory data from the storage file,
@@ -266,7 +294,7 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     user_id = _resolve_memory_user_id(http_request)
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.reload_memory, user_id=user_id)
+        memory_data = await asyncio.to_thread(manager.reload_memory, user_id=user_id, agent_name=agent_name)
     except NotImplementedError:
         # Non-DeerMem backends have no reload concept; fall back to get_memory
         # (read-only refresh, so degrading is safe and still useful -- vs fact
@@ -274,7 +302,7 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
         # would hide data loss). If get_memory is also unsupported (a minimal
         # backend with no full doc), surface 501 rather than a raw 500: reads
         # degrade only when there is a doc to degrade to.
-        memory_data = await _get_memory_or_501(manager, user_id, "reload memory")
+        memory_data = await _get_memory_or_501(manager, user_id, "reload memory", agent_name=agent_name)
     except (MemoryConflictError, MemoryCorruptionError) as exc:
         raise _map_memory_manager_error(exc) from exc
     return MemoryResponse(**memory_data)
@@ -285,13 +313,20 @@ async def reload_memory(http_request: Request) -> MemoryResponse:
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Clear All Memory Data",
-    description="Delete all saved memory data and reset the memory structure to an empty state.",
+    description="Delete saved memory data and reset it to an empty state. With agent_name, only that agent's facts are cleared and shared summaries are preserved; without it, all of the user's memory is cleared.",
 )
-async def clear_memory(http_request: Request) -> MemoryResponse:
-    """Clear all persisted memory data."""
+async def clear_memory(
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
+    """Clear persisted memory data.
+
+    With ``agent_name``, clears only that agent's fact bucket and preserves the
+    user-global summaries; without it, clears all memory owned by the user.
+    """
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.clear_memory, user_id=_resolve_memory_user_id(http_request))
+        memory_data = await asyncio.to_thread(manager.clear_memory, user_id=_resolve_memory_user_id(http_request), agent_name=agent_name)
     except NotImplementedError:
         raise _unsupported_501(manager, "clear memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
@@ -307,9 +342,13 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Create Memory Fact",
-    description="Create a single saved memory fact manually.",
+    description="Create a single saved memory fact manually in the selected agent's fact bucket (default bucket when agent_name is omitted).",
 )
-async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
+async def create_memory_fact_endpoint(
+    request: FactCreateRequest,
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Create a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
@@ -318,6 +357,7 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
             content=request.content,
             category=request.category,
             confidence=request.confidence,
+            agent_name=agent_name,
             user_id=_resolve_memory_user_id(http_request),
         )
     except NotImplementedError:
@@ -340,13 +380,17 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Delete Memory Fact",
-    description="Delete a single saved memory fact by its fact id.",
+    description="Delete a single saved memory fact by its fact id from the selected agent's fact bucket (default bucket when agent_name is omitted).",
 )
-async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
+async def delete_memory_fact_endpoint(
+    fact_id: str,
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Delete a single fact from memory by fact id."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.delete_fact, fact_id, user_id=_resolve_memory_user_id(http_request))
+        memory_data = await asyncio.to_thread(manager.delete_fact, fact_id, agent_name=agent_name, user_id=_resolve_memory_user_id(http_request))
     except NotImplementedError:
         raise _unsupported_501(manager, "delete fact") from None
     except KeyError as exc:
@@ -364,9 +408,14 @@ async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> Me
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Patch Memory Fact",
-    description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
+    description="Partially update a single saved memory fact by its fact id within the selected agent's fact bucket (default bucket when agent_name is omitted) while preserving omitted fields.",
 )
-async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
+async def update_memory_fact_endpoint(
+    fact_id: str,
+    request: FactPatchRequest,
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Partially update a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
@@ -376,6 +425,7 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
             content=request.content,
             category=request.category,
             confidence=request.confidence,
+            agent_name=agent_name,
             user_id=_resolve_memory_user_id(http_request),
         )
     except NotImplementedError:
@@ -397,12 +447,15 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Export Memory Data",
-    description="Export the current global memory data as JSON for backup or transfer.",
+    description="Export the current memory data as JSON for backup or transfer: user-global summaries plus the selected agent's facts (default bucket when agent_name is omitted).",
 )
-async def export_memory(http_request: Request) -> MemoryResponse:
+async def export_memory(
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Export the current memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory", agent_name=agent_name)
     return MemoryResponse(**memory_data)
 
 
@@ -411,15 +464,20 @@ async def export_memory(http_request: Request) -> MemoryResponse:
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Import Memory Data",
-    description="Import and overwrite the current global memory data from a JSON payload.",
+    description="Import and overwrite the current memory data from a JSON payload; facts land in the selected agent's fact bucket (default bucket when agent_name is omitted) while summaries remain user-global.",
 )
-async def import_memory(request: MemoryResponse, http_request: Request) -> MemoryResponse:
+async def import_memory(
+    request: MemoryResponse,
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryResponse:
     """Import and persist memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
         memory_data = await asyncio.to_thread(
             manager.import_memory,
             request.model_dump(exclude_none=True),
+            agent_name=agent_name,
             user_id=_resolve_memory_user_id(http_request),
         )
     except NotImplementedError:
@@ -488,7 +546,10 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
     summary="Get Memory Status",
     description="Retrieve both memory configuration and current data in a single request.",
 )
-async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
+async def get_memory_status(
+    http_request: Request,
+    agent_name: str | None = Query(default=None, pattern=_AGENT_NAME_QUERY_PATTERN, description=_AGENT_NAME_QUERY_DESCRIPTION),
+) -> MemoryStatusResponse:
     """Get the memory system status including configuration and data.
 
     Returns:
@@ -496,7 +557,7 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
     """
     config = get_memory_config()
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory status")
+    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "get memory status", agent_name=agent_name)
 
     return MemoryStatusResponse(
         config=MemoryConfigResponse(

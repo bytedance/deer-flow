@@ -8,7 +8,7 @@ import {
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useDeferredValue, useId, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -21,8 +21,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useAgents, useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -273,9 +281,24 @@ function upperFirst(str: string) {
   return str.charAt(0).toUpperCase() + str.slice(1);
 }
 
+// Radix Select items cannot carry an empty-string value, so the "main memory"
+// (default fact bucket) option uses a sentinel that cannot collide with a real
+// agent name -- underscores are outside the custom-agent name grammar. The
+// sentinel is mapped back to null before anything reaches the memory API.
+const MAIN_MEMORY_SCOPE = "__main__";
+
 export function MemorySettingsPage() {
   const { t } = useI18n();
-  const { memory, isLoading, error } = useMemory();
+  const { enabled: agentsApiEnabled } = useAgentsApiEnabled();
+  const {
+    agents,
+    isLoading: agentsLoading,
+    error: agentsError,
+  } = useAgents({
+    enabled: agentsApiEnabled,
+  });
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const { memory, isLoading, error } = useMemory(selectedAgent);
   const clearMemory = useClearMemory();
   const createMemoryFact = useCreateMemoryFact();
   const deleteMemoryFact = useDeleteMemoryFact();
@@ -302,6 +325,31 @@ export function MemorySettingsPage() {
   const factConfidenceInputId = useId();
   const factConfidenceHintId = useId();
 
+  // Bucket-selection guard:
+  // - When the agents API is unavailable the selector is hidden, so never
+  //   keep operating on a scope the user can no longer see or change.
+  // - If the selected agent is deleted elsewhere while this page is open,
+  //   fall back to the default bucket -- but ONLY on a settled, successful
+  //   agents fetch: a transient listAgents failure also yields an empty
+  //   list, and treating that as "agent gone" would silently drop the
+  //   selection (the facts only appear to vanish) with no way back while
+  //   the failure persists.
+  useEffect(() => {
+    if (!agentsApiEnabled) {
+      setSelectedAgent(null);
+      return;
+    }
+    if (
+      !agentsLoading &&
+      !agentsError &&
+      selectedAgent !== null &&
+      !agents.some((agent) => agent.name === selectedAgent)
+    ) {
+      setSelectedAgent(null);
+    }
+  }, [agentsApiEnabled, agentsLoading, agentsError, agents, selectedAgent]);
+
+  const isAgentScoped = selectedAgent !== null;
   const clearAllLabel = t.settings.memory.clearAll ?? "Clear all memory";
   const clearAllConfirmTitle =
     t.settings.memory.clearAllConfirmTitle ?? "Clear all memory?";
@@ -348,6 +396,29 @@ export function MemorySettingsPage() {
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
+  // An agent-scoped import still replaces the user-global summaries (only
+  // facts are bucketed), so the confirmation must say so explicitly instead
+  // of the generic "overwrite your current memory" copy.
+  const importConfirmTitle = isAgentScoped
+    ? t.settings.memory.importAgentConfirmTitle
+    : t.settings.memory.importConfirmTitle;
+  const importConfirmDescription = isAgentScoped
+    ? t.settings.memory.importAgentConfirmDescription
+    : t.settings.memory.importConfirmDescription;
+  const agentScopeLabel = t.settings.memory.agentScopeLabel;
+  const agentScopeDefault = t.settings.memory.agentScopeDefault;
+  const clearLabel = isAgentScoped
+    ? t.settings.memory.clearAgent
+    : clearAllLabel;
+  const clearConfirmTitle = isAgentScoped
+    ? t.settings.memory.clearAgentConfirmTitle
+    : clearAllConfirmTitle;
+  const clearConfirmDescription = isAgentScoped
+    ? t.settings.memory.clearAgentConfirmDescription
+    : clearAllConfirmDescription;
+  const clearSuccess = isAgentScoped
+    ? t.settings.memory.clearAgentSuccess
+    : clearAllSuccess;
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
   const filteredSectionGroups = sectionGroups
@@ -388,7 +459,7 @@ export function MemorySettingsPage() {
   async function handleExportMemory() {
     try {
       setIsExporting(true);
-      const exportedMemory = await exportMemory();
+      const exportedMemory = await exportMemory(selectedAgent);
       const fileName = `deerflow-memory-${(exportedMemory.lastUpdated || new Date().toISOString()).replace(/[:.]/g, "-")}.json`;
       const blob = new Blob([JSON.stringify(exportedMemory, null, 2)], {
         type: "application/json",
@@ -439,7 +510,10 @@ export function MemorySettingsPage() {
     }
 
     try {
-      await importMemoryMutation.mutateAsync(pendingImport.memory);
+      await importMemoryMutation.mutateAsync({
+        memory: pendingImport.memory,
+        agentName: selectedAgent,
+      });
       toast.success(importSuccess);
       setPendingImport(null);
     } catch (err) {
@@ -449,8 +523,8 @@ export function MemorySettingsPage() {
 
   async function handleClearMemory() {
     try {
-      await clearMemory.mutateAsync();
-      toast.success(clearAllSuccess);
+      await clearMemory.mutateAsync(selectedAgent);
+      toast.success(clearSuccess);
       setClearDialogOpen(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -461,7 +535,10 @@ export function MemorySettingsPage() {
     if (!factToDelete) return;
 
     try {
-      await deleteMemoryFact.mutateAsync(factToDelete.id);
+      await deleteMemoryFact.mutateAsync({
+        factId: factToDelete.id,
+        agentName: selectedAgent,
+      });
       toast.success(factDeleteSuccess);
       setFactToDelete(null);
     } catch (err) {
@@ -514,10 +591,14 @@ export function MemorySettingsPage() {
         await updateMemoryFact.mutateAsync({
           factId: factToEdit.id,
           input: patchInput,
+          agentName: selectedAgent,
         });
         toast.success(editFactSuccess);
       } else {
-        await createMemoryFact.mutateAsync(input);
+        await createMemoryFact.mutateAsync({
+          input,
+          agentName: selectedAgent,
+        });
         toast.success(addFactSuccess);
       }
       setFactEditorOpen(false);
@@ -556,8 +637,35 @@ export function MemorySettingsPage() {
             ) : null}
 
             <div className="flex flex-col gap-3">
-              {/* Row 1: search + filter tabs */}
+              {/* Row 1: agent scope + search + filter tabs */}
               <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
+                {agentsApiEnabled ? (
+                  <Select
+                    value={selectedAgent ?? MAIN_MEMORY_SCOPE}
+                    onValueChange={(value) =>
+                      setSelectedAgent(
+                        value === MAIN_MEMORY_SCOPE ? null : value,
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      className="w-full shrink-0 sm:w-56"
+                      aria-label={agentScopeLabel}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={MAIN_MEMORY_SCOPE}>
+                        {agentScopeDefault}
+                      </SelectItem>
+                      {agents.map((agent) => (
+                        <SelectItem key={agent.name} value={agent.name}>
+                          {agent.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : null}
                 <Input
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
@@ -623,7 +731,7 @@ export function MemorySettingsPage() {
                   onClick={() => setClearDialogOpen(true)}
                   disabled={clearMemory.isPending}
                 >
-                  {clearMemory.isPending ? t.common.loading : clearAllLabel}
+                  {clearMemory.isPending ? t.common.loading : clearLabel}
                 </Button>
               </div>
             </div>
@@ -752,8 +860,8 @@ export function MemorySettingsPage() {
       <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{clearAllConfirmTitle}</DialogTitle>
-            <DialogDescription>{clearAllConfirmDescription}</DialogDescription>
+            <DialogTitle>{clearConfirmTitle}</DialogTitle>
+            <DialogDescription>{clearConfirmDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -768,7 +876,7 @@ export function MemorySettingsPage() {
               onClick={() => void handleClearMemory()}
               disabled={clearMemory.isPending}
             >
-              {clearMemory.isPending ? t.common.loading : clearAllLabel}
+              {clearMemory.isPending ? t.common.loading : clearLabel}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -940,10 +1048,8 @@ export function MemorySettingsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t.settings.memory.importConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {t.settings.memory.importConfirmDescription}
-            </DialogDescription>
+            <DialogTitle>{importConfirmTitle}</DialogTitle>
+            <DialogDescription>{importConfirmDescription}</DialogDescription>
           </DialogHeader>
           {pendingImport ? (
             <div className="bg-muted rounded-md border p-3 text-sm">
