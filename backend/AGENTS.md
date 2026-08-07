@@ -312,6 +312,12 @@ Memory backend async boundary:
 - Startup warmup remains best-effort by default. Backends with a strict startup
   policy raise `MemoryManagerError` and expose `startup_failures_are_fatal` so
   the Gateway's caller-owned warmup timeout cannot silently degrade them.
+  OpenViking validates its USER key with a bounded, non-semantic filesystem
+  listing; semantic SDK authentication/permission exceptions are treated as
+  caller access failures only when that same probe is denied. Otherwise the
+  original semantic failure follows the backend's read/write availability
+  policy, because upstream embedding/VLM credentials can surface the same SDK
+  exception classes.
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
