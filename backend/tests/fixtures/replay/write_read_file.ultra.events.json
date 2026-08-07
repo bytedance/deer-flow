@@ -14,6 +14,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "viewed_images"
@@ -24,6 +25,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "thread_data",
@@ -35,6 +37,20 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
+        "messages",
+        "skill_context",
+        "thread_data",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "thread_data",
@@ -59,18 +75,7 @@
       "keys": [
         "artifacts",
         "delegations",
-        "messages",
-        "skill_context",
-        "thread_data",
-        "uploaded_files",
-        "viewed_images"
-      ]
-    },
-    {
-      "event": "values",
-      "keys": [
-        "artifacts",
-        "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "thread_data",
@@ -84,6 +89,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "thread_data",
@@ -97,6 +103,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
@@ -111,6 +118,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
@@ -125,6 +133,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
@@ -139,6 +148,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
@@ -153,6 +163,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
@@ -167,6 +178,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "sandbox",
         "skill_context",
