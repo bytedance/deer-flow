@@ -1028,16 +1028,14 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 Most agents forget everything the moment a conversation ends. DeerFlow remembers.
 
-DeerFlow also includes an optional `openviking` memory backend. It connects to
-an independent OpenViking server over HTTP, submits completed turns through
-OpenViking Sessions, and recalls remote memories for prompt injection while
-leaving DeerMem as the default. The initial integration supports
-`memory.mode: middleware`. Bounded submitted-message watermarks cover long and
-compacted histories and prevent a failed Session commit from duplicating
-already accepted messages on retry; the shared HTTP client also has explicit
-connection limits and jittered retries. See
-[OpenViking memory backend](docs/OPENVIKING.md) for configuration and Docker
-startup.
+DeerFlow also includes an optional `openviking` memory backend. It uses the
+official `langchain-openviking` package to capture completed turns into stable
+OpenViking Sessions and recall memory for prompt injection while leaving
+DeerMem as the default. The initial integration supports one DeerFlow user with
+one credential-bound OpenViking USER API key in `memory.mode: middleware` and
+does not inherit arbitrary HTTP headers from `ovcli.conf`.
+See [OpenViking memory backend](docs/OPENVIKING.md) for its configuration,
+behavior, and current boundaries.
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
 

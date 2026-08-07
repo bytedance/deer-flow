@@ -4,7 +4,8 @@ Each subfolder under `agents/memory/backends/` is a pluggable memory backend. Sw
 
 - `deermem/` - the default backend (deer-flow's own: structured facts + JSON storage).
 - `noop/` - an empty backend and the **template** to copy when adding a new one.
-- `openviking/` - optional remote OpenViking backend over HTTP (middleware mode).
+- `openviking/` - optional remote backend using the official
+  `langchain-openviking` package (single-user middleware mode).
 
 This guide tells you **which files to touch** when you change, swap, or add a memory system. Paths are relative to `backend/` unless noted.
 

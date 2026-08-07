@@ -936,6 +936,7 @@ dependencies = [
     { name = "langchain-google-genai" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
+    { name = "langchain-openviking" },
     { name = "langfuse" },
     { name = "langgraph" },
     { name = "langgraph-api" },
@@ -1015,6 +1016,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.2.2" },
     { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = ">=0.3.0" },
     { name = "langchain-openai", specifier = ">=1.2.1" },
+    { name = "langchain-openviking", specifier = "==0.1.0" },
     { name = "langfuse", specifier = ">=3.4.1" },
     { name = "langgraph", specifier = ">=1.2.9,<1.3" },
     { name = "langgraph-api", specifier = ">=0.8.1" },
@@ -2098,6 +2100,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-openviking"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "openviking-sdk" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/c0/418dba42bddb5093d20d5e36c3e8d9ceff0b27ce92a6bc2f16fb33535fac/langchain_openviking-0.1.0.tar.gz", hash = "sha256:dc4ee47a122527881eae1fbbe6f9ca857cc0269cd60f08c8d3fd3fff94996e9e", size = 48694, upload-time = "2026-08-03T10:45:28.614Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/22/87f547ab4a84fa4094462e1e1cfdbadf28a539b5cd0efdb147b754d3b88a/langchain_openviking-0.1.0-py3-none-any.whl", hash = "sha256:ea32f08fa4bed81743e0d11e5f2f52e940c1464de74408d45bd574c081a4dffb", size = 55506, upload-time = "2026-08-03T10:45:27.421Z" },
+]
+
+[[package]]
 name = "langchain-protocol"
 version = "0.0.18"
 source = { registry = "https://pypi.org/simple" }
@@ -3072,6 +3088,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9e/de/911ac9e309052aca1b20b2d5549d3db45d1011e1a610e552c6ccdd1b64f8/opentelemetry_semantic_conventions-0.62b1.tar.gz", hash = "sha256:c5cc6e04a7f8c7cdd30be2ed81499fa4e75bfbd52c9cb70d40af1f9cd3619802", size = 145750, upload-time = "2026-04-24T13:15:52.236Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/a6/83dc2ab6fa397ee66fba04fe2e74bdf7be3b3870005359ceb7689103c058/opentelemetry_semantic_conventions-0.62b1-py3-none-any.whl", hash = "sha256:cf506938103d331fbb78eded0d9788095f7fd59016f2bda813c3324e5a74a93c", size = 231620, upload-time = "2026-04-24T13:15:35.454Z" },
+]
+
+[[package]]
+name = "openviking-sdk"
+version = "0.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/65/021ba0a777750d536b70e7ca5c14888d9e906627b80a9332b2c644082480/openviking_sdk-0.1.6.tar.gz", hash = "sha256:7ecfdebdbe3538556584e4348f19f1c990831c739404ee4e06e251f3d8a6641d", size = 40041, upload-time = "2026-08-03T07:15:38.963Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/86/e0a9ff16d5b5eb38871450110b0ba64bff7a46020c617c482d4ce0ea3e7a/openviking_sdk-0.1.6-py3-none-any.whl", hash = "sha256:61e55f51f2733b80950488bb57299c5fd1bface388242ebff02c245ab6e04bd5", size = 25058, upload-time = "2026-08-03T07:15:37.776Z" },
 ]
 
 [[package]]
