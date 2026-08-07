@@ -649,6 +649,14 @@ export const enUS: Translations = {
     browserBack: "Go back in browser",
     browserScreenshot: "Capture browser screenshot",
     browserClose: "Close browser",
+    details: "Tool details",
+    toolName: "Tool",
+    toolCallId: "Call ID",
+    input: "Input",
+    result: "Result",
+    error: "Error",
+    payloadTruncated: (limit: number) =>
+      `Truncated after ${limit.toLocaleString("en-US")} characters.`,
   },
 
   humanInput: {

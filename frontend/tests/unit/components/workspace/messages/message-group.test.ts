@@ -514,6 +514,61 @@ describe("MessageGroup", () => {
     expect(html).not.toContain("Later source");
     expect(html).not.toContain("https://later.example");
   });
+
+  it("gates generic tool details behind Debug display mode", () => {
+    const messages = [
+      {
+        id: "ai-mcp",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-mcp",
+            name: "mcp_execute",
+            args: { run_id: "run-123" },
+          },
+        ],
+      } as Message,
+      {
+        id: "tool-mcp",
+        type: "tool",
+        name: "mcp_execute",
+        tool_call_id: "call-mcp",
+        content: '{"status":"completed"}',
+      } as Message,
+    ];
+
+    expect(renderGroup(messages)).not.toContain("Tool details");
+    expect(renderGroup(messages, { showTokenDebugSummaries: true })).toContain(
+      "Tool details",
+    );
+  });
+
+  it("keeps specialized tool renderers unchanged in Debug display mode", () => {
+    const html = renderGroup(
+      [
+        {
+          id: "ai-bash",
+          type: "ai",
+          content: "",
+          tool_calls: [
+            {
+              id: "call-bash",
+              name: "bash",
+              args: {
+                description: "Inspect files",
+                command: "ls",
+              },
+            },
+          ],
+        } as Message,
+      ],
+      { showTokenDebugSummaries: true },
+    );
+
+    expect(html).toContain("Inspect files");
+    expect(html).not.toContain("Tool details");
+  });
 });
 
 /** Asserts every needle is present and that they appear in the given order. */
