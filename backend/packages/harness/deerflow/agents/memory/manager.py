@@ -68,6 +68,14 @@ class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
 
 
+class MemoryReadError(MemoryManagerError):
+    """A required memory read failed, so callers must not continue without it."""
+
+
+class MemoryAccessError(MemoryManagerError):
+    """Memory access was denied or resolved to an incompatible identity."""
+
+
 class MemoryConflictError(MemoryManagerError):
     """The requested write lost an optimistic-concurrency race."""
 
@@ -148,6 +156,27 @@ class MemoryManager(BaseModel):
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        """Return the strict-read capability encoded by backend config."""
+
+        del backend_config
+        return False
+
+    @property
+    def read_failures_are_fatal(self) -> bool:
+        """Whether caller-owned timeouts must abort instead of degrading.
+
+        Backends that require memory context override the class-level config
+        resolver so this remains available before or after manager creation.
+        The default preserves DeerMem, noop, and third-party backend behavior.
+        """
+
+        return type(self).read_failures_are_fatal_for_config(self.backend_config)
+
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
         """Cross-field invariants every backend must satisfy at instantiation.
@@ -217,6 +246,12 @@ class MemoryManager(BaseModel):
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+
+        Backends configured to tolerate read failures return an empty string.
+        Backends configured to require memory context raise
+        :class:`MemoryReadError`, which callers must propagate, and expose
+        ``read_failures_are_fatal`` so caller-owned timeouts preserve the same
+        policy before a backend call returns.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -819,6 +854,20 @@ def get_memory_manager() -> MemoryManager:
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
+
+
+def memory_read_failures_are_fatal(
+    manager_class: str,
+    backend_config: dict[str, Any] | None,
+) -> bool:
+    """Resolve strict-read capability without constructing a new manager."""
+
+    manager = _memory_manager
+    if manager is not None:
+        return manager.read_failures_are_fatal
+    return _resolve_manager_class(manager_class).read_failures_are_fatal_for_config(
+        backend_config,
+    )
 
 
 def reset_memory_manager() -> None:
