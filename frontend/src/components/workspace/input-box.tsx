@@ -150,6 +150,8 @@ import {
   isGoalObjectiveTooLong,
   MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
+  shouldGenerateFollowupsAfterStream,
+  shouldShowFollowups,
   type SlashSuggestion,
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
@@ -419,7 +421,7 @@ export function InputBox({
   const wasStreamingRef = useRef(false);
   // Set when the user stops a streaming turn. Such a turn ends on a
   // half-finished response, so we must NOT generate follow-up suggestions for it.
-  const stoppedByUserRef = useRef(false);
+  const followupsInterruptedByUserRef = useRef(false);
   const messagesRef = useRef(thread.messages);
 
   const clearVoiceRestartTimer = useCallback(() => {
@@ -1151,15 +1153,17 @@ export function InputBox({
     ],
   );
 
-  const handleStopStreaming = useCallback(() => {
-    // Mark the in-progress turn as user-interrupted so the next
-    // streaming->ready transition does not suggest follow-ups for it.
-    stoppedByUserRef.current = true;
-    setFollowups([]);
-    setFollowupsHidden(true);
-    setFollowupsLoading(false);
+  const handleStop = useCallback(() => {
+    if (status === "streaming") {
+      // Mark the in-progress turn as user-interrupted so the next
+      // streaming->ready transition does not suggest follow-ups for it.
+      followupsInterruptedByUserRef.current = true;
+      setFollowups([]);
+      setFollowupsHidden(true);
+      setFollowupsLoading(false);
+    }
     onStop?.();
-  }, [onStop]);
+  }, [onStop, status]);
 
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
@@ -1213,7 +1217,7 @@ export function InputBox({
         return handleCompactCommand();
       }
       if (submitAction.kind === "stop") {
-        handleStopStreaming();
+        handleStop();
         return;
       }
       if (submitAction.kind === "empty") {
@@ -1228,7 +1232,7 @@ export function InputBox({
       abortVoiceInput,
       handleCompactCommand,
       handleGoalCommand,
-      handleStopStreaming,
+      handleStop,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1953,17 +1957,16 @@ export function InputBox({
     });
   }, []);
 
-  const showFollowups =
-    !disabled &&
-    !isWelcomeMode &&
-    !showSkillSuggestions &&
-    !selectedSlashSkill &&
-    !followupsHidden &&
-    // Never show stale follow-up chips while a turn is streaming: a message
-    // sent before the previous response finished would otherwise leave the
-    // old chips (and the lone close button) overlapping the input box.
-    status !== "streaming" &&
-    (followupsLoading || followups.length > 0);
+  const showFollowups = shouldShowFollowups({
+    disabled: disabled ?? false,
+    isWelcomeMode: isWelcomeMode ?? false,
+    hasSkillSuggestions: showSkillSuggestions,
+    hasSelectedSlashSkill: selectedSlashSkill !== null,
+    hidden: followupsHidden,
+    loading: followupsLoading,
+    count: followups.length,
+    status,
+  });
 
   useEffect(() => {
     onFollowupsVisibilityChange?.(showFollowups);
@@ -1981,14 +1984,24 @@ export function InputBox({
     const streaming = status === "streaming";
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
-    if (!wasStreaming || streaming) {
+    if (streaming) {
+      setFollowups([]);
+      setFollowupsHidden(true);
+      setFollowupsLoading(false);
       return;
     }
 
-    // The turn was interrupted by the user, so skip generating follow-ups for
-    // this half-finished response.
-    if (stoppedByUserRef.current) {
-      stoppedByUserRef.current = false;
+    const interruptedByUser = followupsInterruptedByUserRef.current;
+    if (wasStreaming && interruptedByUser) {
+      followupsInterruptedByUserRef.current = false;
+    }
+    if (
+      !shouldGenerateFollowupsAfterStream({
+        wasStreaming,
+        status,
+        interruptedByUser,
+      })
+    ) {
       return;
     }
 
@@ -2713,7 +2726,7 @@ export function InputBox({
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();
-                  handleStopStreaming();
+                  handleStop();
                 }
               }}
             />

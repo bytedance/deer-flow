@@ -1,3 +1,5 @@
+import type { ChatStatus } from "ai";
+
 import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
@@ -5,6 +7,52 @@ export {
 } from "@/core/suggestions/placeholders";
 
 export const MAX_SKILL_SUGGESTIONS = 6;
+
+export type FollowupVisibilityState = {
+  disabled: boolean;
+  isWelcomeMode: boolean;
+  hasSkillSuggestions: boolean;
+  hasSelectedSlashSkill: boolean;
+  hidden: boolean;
+  loading: boolean;
+  count: number;
+  status: ChatStatus;
+};
+
+export function shouldShowFollowups({
+  disabled,
+  isWelcomeMode,
+  hasSkillSuggestions,
+  hasSelectedSlashSkill,
+  hidden,
+  loading,
+  count,
+  status,
+}: FollowupVisibilityState): boolean {
+  return (
+    status === "ready" &&
+    !disabled &&
+    !isWelcomeMode &&
+    !hasSkillSuggestions &&
+    !hasSelectedSlashSkill &&
+    !hidden &&
+    (loading || count > 0)
+  );
+}
+
+export type FollowupStreamTransition = {
+  wasStreaming: boolean;
+  status: ChatStatus;
+  interruptedByUser: boolean;
+};
+
+export function shouldGenerateFollowupsAfterStream({
+  wasStreaming,
+  status,
+  interruptedByUser,
+}: FollowupStreamTransition): boolean {
+  return wasStreaming && status === "ready" && !interruptedByUser;
+}
 
 // Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
 // max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so

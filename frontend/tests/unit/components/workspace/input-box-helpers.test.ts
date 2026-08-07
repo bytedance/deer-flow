@@ -19,6 +19,8 @@ import {
   parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
+  shouldGenerateFollowupsAfterStream,
+  shouldShowFollowups,
   type SlashSuggestion,
 } from "@/components/workspace/input-box-helpers";
 import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
@@ -459,5 +461,76 @@ describe("findSuggestionTemplatePlaceholder", () => {
 
   it("returns null when no placeholder is present", () => {
     expect(findSuggestionTemplatePlaceholder("no placeholder here")).toBeNull();
+  });
+});
+
+describe("shouldShowFollowups", () => {
+  const visibleState = {
+    disabled: false,
+    isWelcomeMode: false,
+    hasSkillSuggestions: false,
+    hasSelectedSlashSkill: false,
+    hidden: false,
+    loading: false,
+    count: 1,
+    status: "ready",
+  } as const;
+
+  it("shows available follow-up suggestions while the composer is idle", () => {
+    expect(shouldShowFollowups(visibleState)).toBe(true);
+  });
+
+  it("hides stale follow-up suggestions while a run is streaming", () => {
+    expect(shouldShowFollowups({ ...visibleState, status: "streaming" })).toBe(
+      false,
+    );
+  });
+
+  it("keeps follow-up suggestions hidden after a run error", () => {
+    expect(shouldShowFollowups({ ...visibleState, status: "error" })).toBe(
+      false,
+    );
+  });
+});
+
+describe("shouldGenerateFollowupsAfterStream", () => {
+  it("generates suggestions after a normally completed stream", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        status: "ready",
+        interruptedByUser: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("waits while the stream is still active", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        status: "streaming",
+        interruptedByUser: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips suggestions for a user-interrupted response", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        status: "ready",
+        interruptedByUser: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("skips suggestions after a failed stream", () => {
+    expect(
+      shouldGenerateFollowupsAfterStream({
+        wasStreaming: true,
+        status: "error",
+        interruptedByUser: false,
+      }),
+    ).toBe(false);
   });
 });
