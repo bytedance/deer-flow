@@ -122,7 +122,9 @@ class NoopMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
+        del query
         return ""
 
     def search(

@@ -111,7 +111,7 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
     memory = "<memory>\nUser prefers Python.\n</memory>\n"
 
     with (
-        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=memory),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.load_memory_context", return_value=memory),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
