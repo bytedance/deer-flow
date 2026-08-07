@@ -99,6 +99,41 @@ tool_search:
 
 OAuth 流程对 Lead Agent 是透明的——它只是调用工具，DeerFlow 处理认证。
 
+## 可选的身份钩子（identity hooks）
+
+部分外部身份或记忆提供方（例如 [Lithtrix](https://docs.lithtrix.ai/integrations/deerflow)）适合在研究线程开始时预取上下文。DeerFlow 可以可选地自动调用配置的 MCP 工具——无需将提供方代码导入 harness。
+
+在 `extensions_config.json` 中添加 `identityHooks` 块（可选；缺失或 `enabled: false` 时不做任何事）：
+
+```json
+{
+  "identityHooks": {
+    "enabled": true,
+    "mcpServerRef": "lithtrix",
+    "sessionStart": [
+      { "tool": "lithtrix_memory_context", "args": { "limit": 10 } },
+      { "tool": "lithtrix_commons_read", "args": { "page": 1, "per_page": 20 } }
+    ]
+  }
+}
+```
+
+- `mcpServerRef` 必须指向 `mcpServers` 中**已启用**的条目。
+- `tool` 是 MCP 服务器 `list_tools` 返回的原始工具名（在添加 `<server>_` 前缀供 agent 绑定之前）。
+- `args` 原样传给 MCP 工具；钩子失败仅记录日志，不阻塞研究。
+
+**v1 范围：** 仅 `sessionStart`。会话结束写入仍由 agent 驱动（例如通过 skill），待写入路径参数模板设计完成后再支持钩子。
+
+**Lithtrix 参考集成（3 个文件）：**
+
+| 文件 | 用途 |
+|------|------|
+| `extensions_config.json` | `mcpServers.lithtrix` + 可选 `identityHooks`；仅 `"skills": {}` |
+| `skills/public/use-lithtrix/SKILL.md` | 未启用钩子时给 agent 的说明 |
+| `.env`（gitignore） | `LITHTRIX_API_KEY`、`LITHTRIX_API_URL` — 见 `docs/examples/lithtrix/.env.example` |
+
+示例片段：`docs/examples/lithtrix/extensions_config.snippet.json`。Skill 从 `skills/public/<name>/SKILL.md` 自动发现——**不要**添加 `skills.<name>.path` 键。
+
 ## 管理 MCP 服务器
 
 MCP 服务器可以通过多种方式管理：

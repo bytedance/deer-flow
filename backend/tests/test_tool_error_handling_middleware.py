@@ -97,6 +97,11 @@ def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
         "deerflow.agents.middlewares.sandbox_audit_middleware",
         _module("deerflow.agents.middlewares.sandbox_audit_middleware", SandboxAuditMiddleware=FakeMiddleware),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
 
 
 def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
@@ -143,6 +148,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     )
     monkeypatch.setitem(
         sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
         _module(
             "deerflow.agents.middlewares.input_sanitization_middleware",
@@ -154,7 +164,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
-    # 9 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
+    # 8 baseline (InputSanitization, ToolOutputBudget, ToolResultSanitization,
     # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
     # ToolErrorHandling)
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
@@ -162,6 +172,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    # IdentityHooksMiddleware is lead-only (gated with UploadsMiddleware).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware

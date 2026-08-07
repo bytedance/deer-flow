@@ -14,6 +14,10 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Optional identity hooks
+
+For external identity or memory providers, DeerFlow can optionally fire MCP tool calls at thread start via an `identityHooks` block in `extensions_config.json`. See the frontend docs subsection **Optional identity hooks** in `frontend/src/content/en/harness/mcp.mdx` for schema, Lithtrix reference integration (`skills/public/use-lithtrix/SKILL.md`, `docs/examples/lithtrix/`), and v1 scope (`sessionStart` only; failures are non-fatal).
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such
