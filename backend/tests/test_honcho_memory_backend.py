@@ -10,7 +10,7 @@ import pytest
 
 from deerflow.agents.memory.backends.honcho.client import HonchoClient, HonchoRequestError
 from deerflow.agents.memory.backends.honcho.config import HonchoConfig, sanitize_id
-from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager
+from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager, _stable_id
 from deerflow.agents.memory.manager import MemoryManagerError
 
 
@@ -118,6 +118,20 @@ class TestHonchoClient:
         with pytest.raises(HonchoRequestError):
             c.get_or_create_peer("ws1", "alice")
 
+    def test_non_json_200_response_wraps_as_honcho_request_error(self):
+        """A 200 with a non-JSON body (e.g. a maintenance page from a proxy in
+        front of Honcho) must not let a bare JSONDecodeError escape -- it has
+        to surface through the same HonchoRequestError contract as any other
+        transport failure so callers have exactly one exception type to
+        handle."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>maintenance</html>")
+
+        c = _client_with_handler(handler)
+        with pytest.raises(HonchoRequestError):
+            c.get_or_create_peer("ws1", "alice")
+
     def test_api_key_header(self):
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.headers.get("Authorization") == "Bearer sk-h"
@@ -134,12 +148,15 @@ class _FakeClient:
         self.calls: list[tuple[str, tuple]] = []
         self.representation_text = "ajayr likes concise answers"
         self.raise_on: str | None = None
+        # Which exception type _maybe_raise raises; default matches the real
+        # HonchoClient's contract. Tests override this to a non-HonchoRequestError
+        # (e.g. RuntimeError) to prove the manager's boundary excepts are broad,
+        # not narrowly typed to the client's own exception class.
+        self.raise_exc_cls: type[BaseException] = HonchoRequestError
 
     def _maybe_raise(self, name):
         if self.raise_on == name:
-            from deerflow.agents.memory.backends.honcho.client import HonchoRequestError
-
-            raise HonchoRequestError(name)
+            raise self.raise_exc_cls(name)
 
     def get_or_create_peer(self, ws, pid):
         self._maybe_raise("peer")
@@ -194,15 +211,34 @@ class TestHonchoManagerWrite:
         mgr.add("t-1", [_msg("human", "hello")], user_id=None)
         assert fake.calls == []
 
+    def test_add_with_empty_string_user_is_noop(self):
+        mgr, fake = _manager()
+        mgr.add("t-1", [_msg("human", "hello")], user_id="")
+        assert fake.calls == []
+
     def test_add_prefix_workspace_for_unmapped_user(self):
         mgr, fake = _manager()
         mgr.add("t-2", [_msg("human", "x")], user_id="bob@example.com")
-        assert fake.calls[0] == ("peer", ("deerflow-u-bob-example-com", "bob-example-com"))
+        # Computed via the same _stable_id formula the manager uses, not
+        # hardcoded, so this test doesn't silently drift from the real
+        # collision-resistant derivation (see TestHonchoIdentityDerivation).
+        expected_peer = _stable_id("bob@example.com")
+        assert fake.calls[0] == ("peer", (f"deerflow-u-{expected_peer}", expected_peer))
 
     def test_add_swallows_backend_errors(self):
         mgr, fake = _manager()
         fake.raise_on = "messages"
         mgr.add("t-3", [_msg("human", "x")], user_id="u1")  # must not raise
+
+    def test_add_swallows_non_honcho_exceptions(self):
+        """The boundary except is broad (except Exception), not narrowly typed
+        to HonchoRequestError -- any client failure (e.g. a bug surfacing as a
+        bare RuntimeError, or the non-JSON-response case in TestHonchoClient)
+        must not escape add() and crash MemoryMiddleware.after_agent."""
+        mgr, fake = _manager()
+        fake.raise_on = "messages"
+        fake.raise_exc_cls = RuntimeError
+        mgr.add("t-6", [_msg("human", "x")], user_id="u1")  # must not raise
 
     def test_add_truncates_long_content(self):
         mgr, fake = _manager(message_char_limit=10)
@@ -226,6 +262,11 @@ class TestHonchoManagerRead:
         mgr, _ = _manager()
         assert mgr.get_context(None) == ""
 
+    def test_get_context_with_empty_string_user_is_empty(self):
+        mgr, fake = _manager()
+        assert mgr.get_context("") == ""
+        assert fake.calls == []
+
     def test_get_context_truncates(self):
         mgr, fake = _manager(max_injection_chars=10)
         fake.representation_text = "y" * 100
@@ -239,6 +280,19 @@ class TestHonchoManagerRead:
     def test_get_context_fail_closed_raises_contract_error(self):
         mgr, fake = _manager(failure_policy={"read": "fail_closed"})
         fake.raise_on = "representation"
+        with pytest.raises(MemoryManagerError):
+            mgr.get_context("u1")
+
+    def test_get_context_fail_open_swallows_non_honcho_exceptions(self):
+        mgr, fake = _manager()
+        fake.raise_on = "representation"
+        fake.raise_exc_cls = RuntimeError
+        assert mgr.get_context("u1") == ""
+
+    def test_get_context_fail_closed_wraps_non_honcho_exceptions(self):
+        mgr, fake = _manager(failure_policy={"read": "fail_closed"})
+        fake.raise_on = "representation"
+        fake.raise_exc_cls = RuntimeError
         with pytest.raises(MemoryManagerError):
             mgr.get_context("u1")
 
@@ -261,6 +315,15 @@ class TestHonchoManagerRead:
         assert doc["facts"] == []
         assert doc["user"]["workContext"]["summary"]
         assert doc["lastUpdated"]
+
+    def test_get_memory_without_user_is_empty_with_no_calls(self):
+        mgr, fake = _manager()
+        doc = mgr.get_memory(user_id=None)
+        assert doc["facts"] == []
+        assert doc["user"] == {}
+        assert doc["history"] == {}
+        assert doc["lastUpdated"]
+        assert fake.calls == []
 
 
 class TestHonchoManagerAsync:
@@ -285,6 +348,48 @@ class TestHonchoManagerLifecycle:
     def test_tool_mode_accepted(self):
         mgr = HonchoMemoryManager.from_config({"base_url": "http://honcho.test"}, mode="tool")
         assert mgr.mode == "tool"
+
+    def test_requires_passive_writes_in_tool_mode(self):
+        """Honcho's only write path is passive add(); fact CRUD is intentionally
+        unsupported, so tool mode must keep MemoryMiddleware writes flowing to
+        Honcho's deriver alongside model-directed search(). Mirrors mem0's
+        identical ClassVar (mem0_manager.py)."""
+        assert HonchoMemoryManager.requires_passive_writes_in_tool_mode is True
+
+
+class TestHonchoIdentityDerivation:
+    """Pins the collision-resistant default (non-override) identity derivation.
+
+    ``sanitize_id`` alone is lossy: distinct raw ids can sanitize to the same
+    string, which would merge two different users' memory into one Honcho
+    workspace/peer if used bare. ``_stable_id`` (workspace/peer default path)
+    must keep such inputs apart.
+    """
+
+    def test_default_workspace_and_peer_resist_sanitize_collisions(self):
+        mgr, _ = _manager()
+        raw_a = "user.name@example.com"
+        raw_b = "user-name@example.com"
+        # Precondition: these two distinct raw ids really do collide under
+        # plain sanitize_id -- otherwise this test would not exercise the bug
+        # the collision-resistant derivation fixes.
+        assert sanitize_id(raw_a) == sanitize_id(raw_b)
+
+        ws_a, ws_b = mgr._workspace(raw_a), mgr._workspace(raw_b)
+        peer_a, peer_b = mgr._user_peer(raw_a), mgr._user_peer(raw_b)
+        assert ws_a != ws_b
+        assert peer_a != peer_b
+
+    def test_user_peer_never_empty_for_degenerate_raw_id(self):
+        mgr, _ = _manager()
+        # "!!!" sanitizes to "" (every character stripped); the default
+        # derivation must still produce a non-empty, usable peer/workspace id.
+        assert sanitize_id("!!!") == ""
+        peer = mgr._user_peer("!!!")
+        assert peer != ""
+        ws = mgr._workspace("!!!")
+        assert ws is not None
+        assert ws != mgr._config.workspace_prefix
 
 
 class TestFactoryDiscovery:

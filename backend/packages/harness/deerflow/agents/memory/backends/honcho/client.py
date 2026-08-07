@@ -40,7 +40,10 @@ class HonchoClient:
         except httpx.HTTPError as exc:
             raise HonchoRequestError(f"Honcho request failed: POST {path}: {exc}") from exc
         if response.content:
-            return response.json()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise HonchoRequestError(f"Honcho returned non-JSON response: POST {path}: {exc}") from exc
         return None
 
     def get_or_create_peer(self, workspace: str, peer_id: str) -> None:

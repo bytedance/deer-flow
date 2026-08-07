@@ -7,10 +7,19 @@ writes); Honcho's own server-side deriver performs fact extraction and
 representation building asynchronously, so this backend makes **no LLM calls**.
 
 Multi-user isolation: every operation resolves a workspace from ``user_id``
-(``workspace_overrides`` exact match, else ``workspace_prefix + sanitize_id``).
-Honcho scopes all queries to one workspace, so users cannot see each other's
-memory by construction. A missing ``user_id`` fails closed: the call becomes a
-no-op / empty read, never a shared fallback workspace.
+(``workspace_overrides`` exact match, else ``workspace_prefix + _stable_id``).
+``_stable_id`` appends an 8-hex-char SHA-256 suffix to ``sanitize_id``'s output
+because ``sanitize_id`` alone is lossy -- it collapses every run of non
+``[a-zA-Z0-9_-]`` characters to a single ``-``, so distinct raw ids can collide
+(``"user.name@x"`` and ``"user-name@x"`` both sanitize to ``"user-name-x"``).
+Reusing the lossy form bare for the default (non-override) workspace/peer
+derivation would silently merge two different people's memory into one
+workspace; the hash suffix makes the default path collision-resistant while
+staying readable. ``workspace_overrides`` / ``user_peer_overrides`` match on
+the raw, un-sanitized key and are unaffected. Honcho scopes all queries to one
+workspace, so users cannot see each other's memory by construction. A missing
+``user_id`` fails closed: the call becomes a no-op / empty read, never a
+shared fallback workspace.
 
 Portability golden rule: the only ``from deerflow`` import is the contract line
 below. Everything else arrives via ``backend_config``.
@@ -19,6 +28,7 @@ below. Everything else arrives via ``backend_config``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any, ClassVar, Literal
 
@@ -27,7 +37,7 @@ from pydantic import PrivateAttr
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
 from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
 
-from .client import HonchoClient, HonchoRequestError
+from .client import HonchoClient
 from .config import HonchoConfig, sanitize_id
 
 logger = logging.getLogger(__name__)
@@ -56,6 +66,22 @@ def _content_to_text(content: Any) -> str:
     return str(content or "")
 
 
+def _stable_id(raw: str) -> str:
+    """Readable-but-collision-resistant id for the default (non-override) path.
+
+    ``sanitize_id`` alone is lossy (every run of disallowed characters
+    collapses to one ``-``), so two distinct raw ids can sanitize to the same
+    string. Appending an 8-hex-char SHA-256 suffix of the *original* raw id
+    keeps the result readable while making distinct inputs resolve to
+    distinct outputs. The digest is always 8 hex characters, so the result is
+    never empty even when ``sanitize_id`` strips a degenerate raw id (e.g.
+    ``"!!!"``) down to ``""``.
+    """
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    readable = sanitize_id(raw)[:48].rstrip("-")
+    return f"{readable}-{digest}" if readable else digest
+
+
 class HonchoMemoryManager(MemoryManager):
     """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
 
@@ -63,6 +89,13 @@ class HonchoMemoryManager(MemoryManager):
     _client: Any = PrivateAttr(default=None)
 
     supports_search: ClassVar[bool] = True
+    # Honcho's server-side deriver extracts facts/representation from add()
+    # writes asynchronously; this backend implements no fact CRUD hooks
+    # (create_fact/delete_fact/update_fact are unsupported), so tool mode
+    # must retain passive writes (MemoryMiddleware -> add()) to keep feeding
+    # the deriver, while search() supplies the query-aware retrieval tool
+    # mode expects. Mirrors mem0_manager.py's identical rationale.
+    requires_passive_writes_in_tool_mode: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
         self._config = HonchoConfig.from_backend_config(self.backend_config)
@@ -90,13 +123,10 @@ class HonchoMemoryManager(MemoryManager):
         override = self._config.workspace_overrides.get(user_id)
         if override:
             return override
-        safe = sanitize_id(user_id)
-        if not safe:
-            return None
-        return f"{self._config.workspace_prefix}{safe}"
+        return f"{self._config.workspace_prefix}{_stable_id(user_id)}"
 
     def _user_peer(self, user_id: str) -> str:
-        return self._config.user_peer_overrides.get(user_id) or sanitize_id(user_id)
+        return self._config.user_peer_overrides.get(user_id) or _stable_id(user_id)
 
     # ── Tier 1: write ────────────────────────────────────────────────────
     def add(
@@ -133,7 +163,9 @@ class HonchoMemoryManager(MemoryManager):
             self._client.get_or_create_session(workspace, session_id)
             self._client.set_session_peers(workspace, session_id, [user_peer, assistant_peer])
             self._client.add_messages(workspace, session_id, outgoing)
-        except HonchoRequestError as exc:
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
             logger.warning("honcho memory: write failed for thread %s: %s", thread_id, exc)
 
     # ── Tier 1: read ─────────────────────────────────────────────────────
@@ -149,7 +181,9 @@ class HonchoMemoryManager(MemoryManager):
             return ""
         try:
             representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
-        except HonchoRequestError as exc:
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
             if self._config.read_fail_closed:
                 raise MemoryManagerError(f"honcho memory recall failed: {exc}") from exc
             logger.warning("honcho memory: recall failed (fail-open): %s", exc)
@@ -171,7 +205,9 @@ class HonchoMemoryManager(MemoryManager):
             return []
         try:
             results = self._client.search(workspace, query, limit=top_k)
-        except HonchoRequestError as exc:
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
             logger.warning("honcho memory: search failed: %s", exc)
             return []
         return [
@@ -203,7 +239,9 @@ class HonchoMemoryManager(MemoryManager):
             return empty
         try:
             representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
-        except HonchoRequestError as exc:
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
             logger.warning("honcho memory: get_memory failed: %s", exc)
             return empty
         now = _now_iso()
