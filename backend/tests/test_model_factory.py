@@ -211,7 +211,7 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
 def test_thinking_disabled_openai_gateway_format(monkeypatch):
     """When thinking is configured via extra_body (OpenAI-compatible gateway),
-    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=minimal."""
+    disabling must inject extra_body.thinking.type=disabled and reasoning_effort=low."""
     wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
     cfg = _make_app_config(
         [
@@ -237,7 +237,7 @@ def test_thinking_disabled_openai_gateway_format(monkeypatch):
     factory_module.create_chat_model(name="openai-gw", thinking_enabled=False)
 
     assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
-    assert captured.get("reasoning_effort") == "minimal"
+    assert captured.get("reasoning_effort") == "low"
     assert "thinking" not in captured  # must NOT set the direct thinking param
 
 
@@ -476,8 +476,8 @@ def test_reasoning_effort_preserved_when_supported(monkeypatch):
     factory_module.create_chat_model(name="effort-model", thinking_enabled=False)
 
     # When supports_reasoning_effort=True, it should NOT be cleared to None
-    # The disable path sets it to "minimal"; supports_reasoning_effort=True keeps it
-    assert captured.get("reasoning_effort") == "minimal"
+    # The disable path sets it to "low"; supports_reasoning_effort=True keeps it
+    assert captured.get("reasoning_effort") == "low"
 
 
 # ---------------------------------------------------------------------------
@@ -1108,8 +1108,8 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
     # Must not raise TypeError
     factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
 
-    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
-    assert captured.get("reasoning_effort") == "minimal"
+    # thinking-disabled path overrides the configured reasoning_effort to "low"
+    assert captured.get("reasoning_effort") == "low"
 
 
 # ---------------------------------------------------------------------------
