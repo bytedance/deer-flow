@@ -78,7 +78,13 @@ test.describe("Agent chat", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
-  for (const { name, toolGroups, browserControlEnabled, expectedVisible } of [
+  for (const {
+    name,
+    toolGroups,
+    browserControlEnabled,
+    expectedVisible,
+    mock,
+  } of [
     {
       name: "shows Browser Live for an explicit browser tool group",
       toolGroups: ["browser"],
@@ -102,6 +108,13 @@ test.describe("Agent chat", () => {
       toolGroups: ["browser"],
       browserControlEnabled: false,
       expectedVisible: false,
+    },
+    {
+      name: "hides Browser Live in mock custom-agent chats",
+      toolGroups: ["browser"],
+      browserControlEnabled: true,
+      expectedVisible: false,
+      mock: true,
     },
   ]) {
     test(name, async ({ page }) => {
@@ -129,12 +142,24 @@ test.describe("Agent chat", () => {
         ],
       });
 
-      await page.goto(
-        `/workspace/agents/${agent.name}/chats/${MOCK_THREAD_ID}`,
+      const featuresLoaded = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/features" &&
+          response.status() === 200,
       );
-      await expect(page.getByText("Ready to browse")).toBeVisible({
-        timeout: 15_000,
-      });
+      await page.goto(
+        `/workspace/agents/${agent.name}/chats/${MOCK_THREAD_ID}${mock ? "?mock=true" : ""}`,
+      );
+      await featuresLoaded;
+      if (mock) {
+        await expect(
+          page.locator("header span", { hasText: agent.name }),
+        ).toBeVisible({ timeout: 15_000 });
+      } else {
+        await expect(page.getByText("Ready to browse")).toBeVisible({
+          timeout: 15_000,
+        });
+      }
 
       const browserTrigger = page.getByTestId("browser-trigger");
       if (expectedVisible) {
