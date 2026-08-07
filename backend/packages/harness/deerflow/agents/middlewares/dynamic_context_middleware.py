@@ -345,7 +345,12 @@ class DynamicContextMiddleware(AgentMiddleware):
         except TimeoutError as exc:
             from deerflow.agents.memory import MemoryReadError
 
-            if await asyncio.to_thread(self._read_failures_are_fatal):
+            try:
+                read_failures_are_fatal = await asyncio.to_thread(self._read_failures_are_fatal)
+            except Exception:
+                logger.exception("DynamicContextMiddleware: could not resolve memory read failure policy; treating the injection timeout as fatal")
+                read_failures_are_fatal = True
+            if read_failures_are_fatal:
                 raise MemoryReadError("Required memory context retrieval timed out") from exc
             logger.warning(
                 "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",

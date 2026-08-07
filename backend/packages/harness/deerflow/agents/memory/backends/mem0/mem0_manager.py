@@ -133,6 +133,8 @@ class Mem0Manager(MemoryManager):
     def _write_or_drop(self, fn: Any) -> None:
         try:
             fn()
+        except Mem0AuthError as e:
+            raise MemoryAccessError("mem0 memory access was denied") from e
         except Mem0APIError as e:
             if self._config.write_policy == "log_and_drop":
                 logger.warning("mem0 write failed (%s); dropping update", e)
