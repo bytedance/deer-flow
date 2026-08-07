@@ -332,8 +332,9 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
 
   // Creating a run is not idempotent. Retrying an ambiguous gateway failure
   // can create the same run more than once after the backend accepted the
-  // original request. Keep the default retries for reads and SSE joins, but
-  // disable them for the initial POST /runs/stream request.
+  // original request. Disable request-level retries for this stream client;
+  // the SDK's independent SSE recovery still resumes established streams with
+  // GET requests to the server-provided Location.
   const runCreationClient = new LangGraphClient({
     apiUrl,
     callerOptions: { maxRetries: 0 },
