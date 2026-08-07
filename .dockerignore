@@ -45,6 +45,20 @@ npm-debug.log
 Thumbs.db
 
 # Project specific
+config.yaml
+config.yml
+configure.yml
+mcp_config.json
+extensions_config.json
+config.yaml.bak
+backend/config.yaml
+backend/config.yml
+backend/configure.yml
+backend/mcp_config.json
+backend/extensions_config.json
+backend/config.yaml.bak
+.deer-flow/
+backend/.deer-flow/
 conf.yaml
 web/
 docs/
