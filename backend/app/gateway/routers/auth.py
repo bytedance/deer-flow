@@ -459,6 +459,14 @@ _SETUP_STATUS_CACHE_TTL_SECONDS = 60
 _MAX_TRACKED_SETUP_STATUS_IPS = 10000
 _SETUP_STATUS_INFLIGHT: dict[str, asyncio.Task[dict]] = {}
 _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
+# Serializes the count-then-create in initialize_admin so two concurrent
+# requests cannot both observe "no admin exists" and create separate admin
+# accounts (TOCTOU); the email uniqueness constraint only blocks same-email
+# races. NOTE: an asyncio.Lock only serializes within a single process — for
+# GATEWAY_WORKERS > 1 deployments the partial unique index uq_users_admin_role
+# (migration 0011) is the cross-process backstop; the loser surfaces as
+# IntegrityError -> ValueError and is re-counted to 409 here.
+_INITIALIZE_ADMIN_GUARD = asyncio.Lock()
 
 
 @router.get("/setup-status")
@@ -538,26 +546,27 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
-
-    try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
-    except ValueError:
+    async with _INITIALIZE_ADMIN_GUARD:
         admin_count = await get_local_provider().count_admin_users()
-        if admin_count == 0:
+        if admin_count > 0:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
             )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+
+        try:
+            user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        except ValueError:
+            admin_count = await get_local_provider().count_admin_users()
+            if admin_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            )
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)

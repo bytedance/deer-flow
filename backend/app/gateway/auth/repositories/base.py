@@ -15,6 +15,18 @@ class UserNotFoundError(LookupError):
     """
 
 
+class AdminRoleTakenError(ValueError):
+    """Raised when an insert would create a second admin row.
+
+    The partial unique index ``uq_users_admin_role`` enforces at most one
+    admin. Subclass of :class:`ValueError` so callers that already catch
+    ``ValueError`` from ``create_user`` keep working, while specific call
+    sites (e.g. OIDC provisioning) can pin to this class to distinguish an
+    admin-slot conflict from an email collision — the latter otherwise
+    surfaces as the misleading "Email already registered" message.
+    """
+
+
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 

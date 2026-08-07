@@ -44,12 +44,18 @@ def _persistence_engine(tmp_path):
     import asyncio
 
     from app.gateway import deps
+    from app.gateway.routers import auth as auth_router
     from deerflow.persistence.engine import close_engine, init_engine
 
     url = f"sqlite+aiosqlite:///{tmp_path}/auth_types.db"
     asyncio.run(init_engine("sqlite", url=url, sqlite_dir=str(tmp_path)))
     deps._cached_local_provider = None
     deps._cached_repo = None
+    # _INITIALIZE_ADMIN_GUARD binds to the first loop that contends on it
+    # (the throwaway asyncio.run loop in the concurrency test); reset it so a
+    # future test contending from a different loop does not hit
+    # "Lock ... is bound to a different event loop".
+    auth_router._INITIALIZE_ADMIN_GUARD = asyncio.Lock()
     try:
         yield
     finally:
@@ -1157,3 +1163,157 @@ def test_oidc_callback_access_and_csrf_cookie_stay_session_only():
     assert "secure" in csrf_cookies[0]
     assert "max-age" not in access_cookies[0]
     assert "max-age" not in csrf_cookies[0]
+
+
+def test_initialize_concurrent_requests_create_single_admin() -> None:
+    """Two racing /initialize requests must yield exactly one admin.
+
+    End-to-end invariant: whichever mechanism arbitrates — the in-process
+    ``_INITIALIZE_ADMIN_GUARD`` within one worker, or the
+    ``uq_users_admin_role`` partial unique index across workers — exactly
+    one request wins with 201, the other gets 409, and exactly one admin
+    row exists afterwards.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway import deps
+    from app.gateway.routers import auth
+
+    async def _scenario() -> list:
+        request = SimpleNamespace()
+        response = SimpleNamespace()
+
+        async def _initialize(email: str):
+            body = auth.InitializeAdminRequest(email=email, password="Tr0ub4dor3a", remember_me=False)
+            return await auth.initialize_admin(request, response, body)
+
+        with (
+            patch("app.gateway.routers.auth.create_access_token", return_value="token"),
+            patch("app.gateway.routers.auth.set_session_cookie"),
+        ):
+            return await asyncio.gather(
+                _initialize("admin-race-a@example.com"),
+                _initialize("admin-race-b@example.com"),
+                return_exceptions=True,
+            )
+
+    results = asyncio.run(_scenario())
+    statuses = sorted(r.status_code if isinstance(r, HTTPException) else 201 for r in results)
+    assert statuses == [201, 409], statuses
+
+    provider = asyncio.run(deps.get_local_provider().count_admin_users())
+    assert provider == 1
+
+
+def test_admin_role_unique_index_backstops_second_admin() -> None:
+    """DB-level backstop: the partial unique index uq_users_admin_role rejects
+    a second admin row even without the in-process lock (cross-worker
+    scenario with GATEWAY_WORKERS > 1)."""
+    import asyncio
+
+    from app.gateway import deps
+
+    async def _scenario() -> str:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="admin-db-a@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        try:
+            await provider.create_user(
+                email="admin-db-b@example.com",
+                password="Tr0ub4dor3a",
+                system_role="admin",
+                needs_setup=False,
+            )
+            return "second-created"
+        except ValueError:
+            return "rejected"
+
+    assert asyncio.run(_scenario()) == "rejected"
+
+
+def test_admin_role_taken_raises_distinct_error() -> None:
+    """A second admin insert must surface as AdminRoleTakenError, not the
+    misleading "Email already registered" (regression caught in review: the
+    partial unique index fires on the OIDC provisioning path too)."""
+    import asyncio
+
+    from app.gateway import deps
+    from app.gateway.auth.repositories.base import AdminRoleTakenError
+
+    async def _scenario() -> str:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="admin-slot@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        try:
+            await provider.create_oauth_user(
+                email="second-admin@example.com",
+                oauth_provider="oidc-test",
+                oauth_id="sub-2",
+                system_role="admin",
+            )
+            return "second-created"
+        except AdminRoleTakenError:
+            return "admin-role-taken"
+        except ValueError:
+            return "email-collision"
+
+    assert asyncio.run(_scenario()) == "admin-role-taken"
+
+
+def test_oidc_provisioning_falls_back_to_regular_user_when_admin_slot_taken(caplog) -> None:
+    """OIDC first sign-in for an email listed in admin_emails must not be
+    locked out with a 409 when the single admin slot is already held — it
+    falls back to a regular user and logs a warning."""
+    import asyncio
+
+    from app.gateway import deps
+    from app.gateway.auth.oidc import OIDCIdentity
+    from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+    from deerflow.config.auth_config import OIDCProviderConfig
+
+    provider_config = OIDCProviderConfig(
+        display_name="test-idp",
+        issuer="https://idp.example.com",
+        client_id="cid",
+        auto_create_users=True,
+        admin_emails=["boss@example.com", "second-boss@example.com"],
+    )
+
+    async def _scenario() -> dict:
+        provider = deps.get_local_provider()
+        await provider.create_user(
+            email="boss@example.com",
+            password="Tr0ub4dor3a",
+            system_role="admin",
+            needs_setup=False,
+        )
+        return await get_or_provision_oidc_user(
+            provider_id="oidc-test",
+            provider_config=provider_config,
+            identity=OIDCIdentity(
+                provider="oidc-test",
+                subject="sub-boss-2",
+                email="second-boss@example.com",
+                email_verified=True,
+                name=None,
+                claims={},
+            ),
+            local_provider=provider,
+        )
+
+    with caplog.at_level("WARNING", logger="app.gateway.auth.user_provisioning"):
+        result = asyncio.run(_scenario())
+    assert result["created"] is True
+    assert result["user"].system_role == "user"
+    assert any("admin role is already taken" in record.getMessage() for record in caplog.records)

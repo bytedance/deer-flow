@@ -56,4 +56,15 @@ class UserRow(Base):
             unique=True,
             sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
         ),
+        # Cross-process backstop for the initialize_admin TOCTOU: the
+        # in-process asyncio.Lock only serializes within a single worker, so
+        # this partial unique index enforces at most one admin row at the DB
+        # level (mirrored in migration 0011 for legacy databases).
+        Index(
+            "uq_users_admin_role",
+            "system_role",
+            unique=True,
+            sqlite_where=text("system_role = 'admin'"),
+            postgresql_where=text("system_role = 'admin'"),
+        ),
     )
