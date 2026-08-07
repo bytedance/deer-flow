@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryAccessError, MemoryManager, MemoryManagerError, MemoryReadError
 
 from .config import OpenVikingConfig
 from .session import (
@@ -118,6 +118,17 @@ class OpenVikingMemoryManager(MemoryManager):
             user_id=user_id,
         )
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        return OpenVikingConfig.from_backend_config(backend_config).read_failure_policy == "raise"
+
+    @property
+    def startup_failures_are_fatal(self) -> bool:
+        return self._config.startup_policy == "fail_fast"
+
     def add_nowait(
         self,
         thread_id: str,
@@ -176,9 +187,11 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(self._config.injection_query)
-            except Exception:
+            except Exception as exc:
+                if self._semantic_error_proves_user_access_denial(exc):
+                    raise MemoryAccessError("OpenViking context retrieval was denied") from exc
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking context retrieval failed") from exc
                 logger.warning(
                     "OpenViking context retrieval failed; continuing without injected memory",
                     exc_info=True,
@@ -232,9 +245,11 @@ class OpenVikingMemoryManager(MemoryManager):
             try:
                 with self._actor_peer_scope(peer_id):
                     documents = retriever.invoke(query.strip())
-            except Exception:
+            except Exception as exc:
+                if self._semantic_error_proves_user_access_denial(exc):
+                    raise MemoryAccessError("OpenViking memory search was denied") from exc
                 if self._config.read_failure_policy == "raise":
-                    raise
+                    raise MemoryReadError("OpenViking memory search failed") from exc
                 logger.warning(
                     "OpenViking memory search failed; returning no results",
                     exc_info=True,
@@ -267,21 +282,36 @@ class OpenVikingMemoryManager(MemoryManager):
             return False
         try:
             try:
-                health = getattr(self._client, "health", None)
-                healthy = bool(health()) if callable(health) else True
-            except Exception:
+                with self._actor_peer_scope(None):
+                    health = getattr(self._client, "health", None)
+                    if not callable(health):
+                        raise MemoryManagerError("OpenViking client does not support health checks")
+                    if not bool(health()):
+                        raise MemoryManagerError("OpenViking health check returned an unhealthy response")
+            except Exception as exc:
                 if self._config.startup_policy == "fail_fast":
-                    raise
+                    if isinstance(exc, MemoryManagerError):
+                        raise
+                    raise MemoryManagerError("OpenViking startup health validation failed") from exc
                 logger.warning(
-                    "OpenViking startup validation failed; memory will run in degraded mode",
+                    "OpenViking startup health validation failed; memory will run in degraded mode",
                     exc_info=True,
                 )
                 return False
-            if not healthy and self._config.startup_policy == "fail_fast":
-                raise MemoryManagerError("OpenViking health check returned an unhealthy response")
-            if not healthy:
-                logger.warning("OpenViking health check returned unhealthy; memory will run in degraded mode")
-            return healthy
+
+            try:
+                self._verify_user_access()
+            except Exception as exc:
+                if self._config.startup_policy == "fail_fast":
+                    if _access_error_from_chain(exc) is not None:
+                        raise MemoryAccessError("OpenViking startup USER-key access validation was denied") from exc
+                    raise MemoryManagerError("OpenViking startup USER-key access validation failed") from exc
+                logger.warning(
+                    "OpenViking startup USER-key access validation failed; memory will run in degraded mode",
+                    exc_info=True,
+                )
+                return False
+            return True
         finally:
             self._end_operation()
 
@@ -450,14 +480,38 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> str:
         resolved_user = str(user_id or "default")
         if resolved_user != self._config.owner_user_id:
-            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+            raise MemoryAccessError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
         return _canonical_peer_id(agent_name, self._config.default_peer_id)
 
     def _actor_peer_scope(
         self,
-        peer_id: str,
+        peer_id: str | None,
     ) -> AbstractContextManager[None]:
         return self._use_actor_peer(peer_id)
+
+    def _verify_user_access(self) -> None:
+        with self._actor_peer_scope(None):
+            self._client.ls(
+                "viking://user/memories",
+                node_limit=1,
+            )
+
+    def _semantic_error_proves_user_access_denial(
+        self,
+        exc: BaseException,
+    ) -> bool:
+        if _access_error_from_chain(exc) is None:
+            return False
+        try:
+            self._verify_user_access()
+        except Exception as verification_exc:
+            if _access_error_from_chain(verification_exc) is not None:
+                return True
+            logger.warning(
+                "OpenViking could not verify USER-key access after an ambiguous semantic authentication or permission failure; applying the configured availability policy",
+                exc_info=True,
+            )
+        return False
 
     def _session_lock(self, session_id: str) -> threading.RLock:
         with self._session_locks_guard:
@@ -536,6 +590,8 @@ class OpenVikingMemoryManager(MemoryManager):
         session_id: str,
     ) -> None:
         detail = f"{message} (session={session_id})"
+        if self._semantic_error_proves_user_access_denial(exc):
+            raise MemoryAccessError(detail) from exc
         if self._config.write_failure_policy == "raise":
             raise MemoryManagerError(detail) from exc
         logger.error(detail, exc_info=True)
@@ -562,6 +618,21 @@ def _load_official_integration() -> dict[str, Any]:
         "OpenVikingSessionRecorder": OpenVikingSessionRecorder,
         "use_actor_peer": use_actor_peer,
     }
+
+
+def _access_error_from_chain(exc: BaseException) -> BaseException | None:
+    try:
+        from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
+    except ImportError:
+        return None
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, (UnauthenticatedError, PermissionDeniedError)):
+            return current
+        seen.add(id(current))
+        current = current.__cause__
+    return None
 
 
 def _format_documents(documents: list[Any], *, max_chars: int) -> str:

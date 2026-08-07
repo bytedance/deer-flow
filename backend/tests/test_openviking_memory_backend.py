@@ -5,16 +5,21 @@ from __future__ import annotations
 import copy
 import gc
 import json
+import socket
 import threading
 import weakref
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
+from openviking_sdk.errors import PermissionDeniedError, UnauthenticatedError
 
 from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
 from deerflow.agents.memory.backends.openviking.openviking_manager import (
@@ -23,10 +28,13 @@ from deerflow.agents.memory.backends.openviking.openviking_manager import (
     _session_id,
 )
 from deerflow.agents.memory.manager import (
+    MemoryAccessError,
     MemoryManagerError,
+    MemoryReadError,
     _scan_backends,
     reset_memory_manager,
 )
+from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
 
 class _CommitPolicy:
@@ -54,9 +62,28 @@ class _Client:
         self.kwargs = kwargs
         self.closed = False
         self.healthy = True
+        self.ls_calls: list[dict[str, Any]] = []
+        self.ls_failures: list[BaseException] = []
 
     def health(self) -> bool:
         return self.healthy
+
+    def ls(
+        self,
+        uri: str,
+        *,
+        node_limit: int = 1000,
+    ) -> list[Any]:
+        self.ls_calls.append(
+            {
+                "uri": uri,
+                "node_limit": node_limit,
+                "actor_peer": _ACTOR_PEER.get(),
+            }
+        )
+        if self.ls_failures:
+            raise self.ls_failures.pop(0)
+        return []
 
     def close(self) -> None:
         self.closed = True
@@ -210,6 +237,110 @@ def _manager(
     return OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
 
 
+@contextmanager
+def _authenticated_openviking_server(
+    *,
+    ls_status: int = 200,
+    ls_error_code: str | None = None,
+    find_status: int = 200,
+    find_error_code: str | None = None,
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            requests.append(
+                {
+                    "method": "GET",
+                    "path": parsed.path,
+                    "api_key": self.headers.get("X-API-Key"),
+                    "actor_peer": self.headers.get("X-OpenViking-Actor-Peer"),
+                    "query": parse_qs(parsed.query),
+                }
+            )
+            if parsed.path == "/health":
+                self._send_json(200, {"status": "ok"})
+                return
+            if parsed.path == "/api/v1/fs/ls":
+                if ls_error_code is not None:
+                    self._send_error(ls_status, ls_error_code)
+                    return
+                self._send_json(ls_status, {"status": "success", "result": []})
+                return
+            self._send_json(404, {"status": "error", "error": {"code": "NOT_FOUND"}})
+
+        def do_POST(self) -> None:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(content_length) or b"{}")
+            parsed = urlparse(self.path)
+            requests.append(
+                {
+                    "method": "POST",
+                    "path": parsed.path,
+                    "api_key": self.headers.get("X-API-Key"),
+                    "actor_peer": self.headers.get("X-OpenViking-Actor-Peer"),
+                    "body": body,
+                }
+            )
+            if find_error_code is not None:
+                self._send_error(find_status, find_error_code)
+                return
+            self._send_json(
+                find_status,
+                {
+                    "status": "success",
+                    "result": {
+                        "memories": [],
+                        "resources": [],
+                        "skills": [],
+                    },
+                },
+            )
+
+        def log_message(self, format: str, *args: Any) -> None:
+            del format, args
+
+        def _send_error(self, status: int, code: str) -> None:
+            self._send_json(
+                status,
+                {
+                    "status": "error",
+                    "error": {
+                        "code": code,
+                        "message": "ambiguous access failure",
+                    },
+                },
+            )
+
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            serialized = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(serialized)))
+            self.end_headers()
+            self.wfile.write(serialized)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(1.0)
+
+
+@pytest.fixture
+def unreachable_openviking_url() -> Iterator[str]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
+        reserved_socket.bind(("127.0.0.1", 0))
+        host, port = reserved_socket.getsockname()
+        yield f"http://{host}:{port}"
+
+
 def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -241,6 +372,51 @@ def test_backend_is_discovered_by_registered_name() -> None:
     assert _scan_backends()["openviking"] is OpenVikingMemoryManager
 
 
+@pytest.mark.parametrize(
+    ("read_policy", "expected"),
+    [
+        pytest.param("fail_open", False, id="fail_open"),
+        pytest.param("raise", True, id="raise"),
+    ],
+)
+def test_read_failure_capability_matches_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+    expected: bool,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"read": read_policy},
+    )
+
+    assert manager.read_failures_are_fatal is expected
+
+
+@pytest.mark.parametrize(
+    ("startup_policy", "expected"),
+    [
+        pytest.param("warn", False, id="warn"),
+        pytest.param("fail_fast", True, id="fail_fast"),
+    ],
+)
+def test_startup_failure_capability_matches_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    startup_policy: str,
+    expected: bool,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        startup_policy=startup_policy,
+    )
+
+    assert manager.startup_failures_are_fatal is expected
+
+
 def test_official_loader_uses_standalone_package() -> None:
     from deerflow.agents.memory.backends.openviking.openviking_manager import (
         _load_official_integration,
@@ -268,6 +444,178 @@ def test_manager_uses_official_recorder_retriever_and_commit_always(
         "timeout": 30.0,
         "extra_headers": {},
     }
+
+
+def test_warm_verifies_health_and_authenticated_read_only_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _authenticated_openviking_server(
+        find_status=401,
+        find_error_code="UNAUTHENTICATED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="fail_fast",
+        )
+
+        with manager._actor_peer_scope("ambient-peer"):
+            assert manager.warm() is True
+        manager.close()
+
+    assert requests == [
+        {
+            "method": "GET",
+            "path": "/health",
+            "api_key": "user-key",
+            "actor_peer": None,
+            "query": {},
+        },
+        {
+            "method": "GET",
+            "path": "/api/v1/fs/ls",
+            "api_key": "user-key",
+            "actor_peer": None,
+            "query": {
+                "uri": ["viking://user/memories"],
+                "simple": ["false"],
+                "recursive": ["false"],
+                "output": ["original"],
+                "abs_limit": ["256"],
+                "show_all_hidden": ["false"],
+                "node_limit": ["1"],
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("find_status", "error_code"),
+    [
+        pytest.param(401, "UNAUTHENTICATED", id="invalid_or_expired_key"),
+        pytest.param(403, "PERMISSION_DENIED", id="permission_denied"),
+    ],
+)
+def test_warm_fail_fast_maps_authenticated_access_denial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    find_status: int,
+    error_code: str,
+) -> None:
+    with _authenticated_openviking_server(
+        ls_status=find_status,
+        ls_error_code=error_code,
+        find_status=401,
+        find_error_code="UNAUTHENTICATED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="fail_fast",
+        )
+
+        with pytest.raises(MemoryAccessError, match="startup USER-key access") as exc_info:
+            manager.warm()
+        manager.close()
+
+    assert isinstance(
+        exc_info.value.__cause__,
+        (UnauthenticatedError, PermissionDeniedError),
+    )
+    assert [request["path"] for request in requests] == [
+        "/health",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("find_status", "error_code"),
+    [
+        pytest.param(401, "UNAUTHENTICATED", id="invalid_or_expired_key"),
+        pytest.param(403, "PERMISSION_DENIED", id="permission_denied"),
+    ],
+)
+def test_warm_warn_reports_authenticated_access_denial_unhealthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    find_status: int,
+    error_code: str,
+) -> None:
+    with _authenticated_openviking_server(
+        ls_status=find_status,
+        ls_error_code=error_code,
+        find_status=401,
+        find_error_code="UNAUTHENTICATED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="warn",
+        )
+
+        assert manager.warm() is False
+        manager.close()
+
+    assert "USER-key access" in caplog.text
+    assert [request["path"] for request in requests] == [
+        "/health",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize("startup_policy", ["fail_fast", "warn"])
+def test_warm_reports_unavailable_server_unhealthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+    startup_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        startup_policy=startup_policy,
+    )
+
+    if startup_policy == "fail_fast":
+        with pytest.raises(MemoryManagerError, match="health check"):
+            manager.warm()
+    else:
+        assert manager.warm() is False
+    manager.close()
+
+
+@pytest.mark.parametrize("startup_policy", ["fail_fast", "warn"])
+def test_warm_never_treats_missing_health_capability_as_healthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    startup_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        startup_policy=startup_policy,
+    )
+    monkeypatch.delattr(_Client, "health")
+
+    if startup_policy == "fail_fast":
+        with pytest.raises(MemoryManagerError, match="health"):
+            manager.warm()
+    else:
+        assert manager.warm() is False
+
+    assert manager._retriever.calls == []
+    assert manager._client.ls_calls == []
 
 
 def test_context_preserves_existing_fixed_query_behavior(
@@ -298,6 +646,7 @@ def test_context_preserves_existing_fixed_query_behavior(
             "search_mode": "search",
         }
     ]
+    assert manager._client.ls_calls == []
 
 
 def test_context_without_thread_uses_existing_find_path(
@@ -329,6 +678,484 @@ def test_context_without_thread_uses_existing_find_path(
     ]
 
 
+def test_unreachable_context_read_raise_aborts_dynamic_context_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "raise"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    with pytest.raises(MemoryReadError) as exc_info:
+        middleware.before_agent(state, None)
+
+    assert exc_info.value.__cause__ is not None
+
+
+def test_unreachable_context_read_fail_open_returns_no_injected_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "fail_open"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    assert manager.get_context("alice", agent_name="research") == ""
+    update = middleware.before_agent(state, None)
+    assert update is not None
+    assert all(not str(message.id).endswith("__memory") for message in update["messages"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+async def test_unreachable_async_context_read_honors_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+    read_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": read_policy},
+    )
+
+    if read_policy == "raise":
+        with pytest.raises(MemoryReadError) as exc_info:
+            await manager.aget_context("alice", agent_name="research")
+        assert exc_info.value.__cause__ is not None
+    else:
+        assert await manager.aget_context("alice", agent_name="research") == ""
+
+
+@pytest.mark.asyncio
+async def test_unreachable_context_read_raise_aborts_async_dynamic_context_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        failure_policy={"read": "raise"},
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.memory.get_memory_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
+        lambda runtime: "alice",
+    )
+    middleware = DynamicContextMiddleware()
+    state = {"messages": [HumanMessage("answer this", id="message-1")]}
+
+    with pytest.raises(MemoryReadError) as exc_info:
+        await middleware.abefore_agent(state, None)
+
+    assert exc_info.value.__cause__ is not None
+
+
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+def test_semantic_provider_auth_error_follows_read_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+) -> None:
+    with _authenticated_openviking_server(
+        find_status=401,
+        find_error_code="UNAUTHENTICATED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            failure_policy={"read": read_policy},
+        )
+
+        if read_policy == "raise":
+            with pytest.raises(MemoryReadError) as exc_info:
+                manager.get_context("alice", agent_name="research")
+            assert isinstance(exc_info.value.__cause__, UnauthenticatedError)
+        else:
+            assert manager.get_context("alice", agent_name="research") == ""
+        manager.close()
+
+    assert [request["path"] for request in requests] == [
+        "/api/v1/search/find",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+def test_runtime_caller_access_denial_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+) -> None:
+    with _authenticated_openviking_server(
+        ls_status=401,
+        ls_error_code="UNAUTHENTICATED",
+        find_status=401,
+        find_error_code="UNAUTHENTICATED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            failure_policy={"read": read_policy},
+        )
+
+        with pytest.raises(MemoryAccessError) as exc_info:
+            manager.get_context("alice", agent_name="research")
+        manager.close()
+
+    assert isinstance(exc_info.value.__cause__, UnauthenticatedError)
+    assert [request["path"] for request in requests] == [
+        "/api/v1/search/find",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+def test_unverifiable_semantic_auth_error_follows_read_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+) -> None:
+    with _authenticated_openviking_server(
+        ls_status=503,
+        ls_error_code="UNAVAILABLE",
+        find_status=403,
+        find_error_code="PERMISSION_DENIED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            failure_policy={"read": read_policy},
+        )
+
+        if read_policy == "raise":
+            with pytest.raises(MemoryReadError) as exc_info:
+                manager.get_context("alice", agent_name="research")
+            assert isinstance(exc_info.value.__cause__, PermissionDeniedError)
+        else:
+            assert manager.get_context("alice", agent_name="research") == ""
+        manager.close()
+
+    assert [request["path"] for request in requests] == [
+        "/api/v1/search/find",
+        "/api/v1/fs/ls",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize("read_policy", ["raise", "fail_open"])
+def test_search_provider_permission_error_follows_read_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_policy: str,
+) -> None:
+    with _authenticated_openviking_server(
+        find_status=403,
+        find_error_code="PERMISSION_DENIED",
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            failure_policy={"read": read_policy},
+        )
+
+        if read_policy == "raise":
+            with pytest.raises(MemoryReadError) as exc_info:
+                manager.search("preferences", user_id="alice")
+            assert isinstance(exc_info.value.__cause__, PermissionDeniedError)
+        else:
+            assert manager.search("preferences", user_id="alice") == []
+        manager.close()
+
+    assert [request["path"] for request in requests] == [
+        "/api/v1/search/find",
+        "/api/v1/fs/ls",
+    ]
+
+
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_semantic_provider_auth_error_follows_write_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    caplog: pytest.LogCaptureFixture,
+    access_error: Exception,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    manager._recorder.failures.append(access_error)
+
+    if write_policy == "raise":
+        with pytest.raises(MemoryManagerError) as exc_info:
+            manager.add(
+                "thread-1",
+                [HumanMessage("private", id="h1")],
+                user_id="alice",
+                agent_name="research",
+            )
+        assert not isinstance(exc_info.value, MemoryAccessError)
+        assert exc_info.value.__cause__ is access_error
+    else:
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="alice",
+            agent_name="research",
+        )
+        assert "capture cursor was not advanced" in caplog.text
+
+    assert manager._client.ls_calls == [
+        {
+            "uri": "viking://user/memories",
+            "node_limit": 1,
+            "actor_peer": None,
+        }
+    ]
+
+
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_unverifiable_semantic_auth_error_follows_write_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    caplog: pytest.LogCaptureFixture,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    access_error = UnauthenticatedError()
+    manager._recorder.failures.append(access_error)
+    manager._client.ls_failures.append(ConnectionError("probe unavailable"))
+
+    if write_policy == "raise":
+        with pytest.raises(MemoryManagerError) as exc_info:
+            manager.add(
+                "thread-1",
+                [HumanMessage("private", id="h1")],
+                user_id="alice",
+                agent_name="research",
+            )
+        assert not isinstance(exc_info.value, MemoryAccessError)
+        assert exc_info.value.__cause__ is access_error
+    else:
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="alice",
+            agent_name="research",
+        )
+        assert "capture cursor was not advanced" in caplog.text
+
+    assert len(manager._client.ls_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_runtime_caller_access_denial_on_write_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    access_error: Exception,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    manager._recorder.failures.append(access_error)
+    manager._client.ls_failures.append(type(access_error)())
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        manager.add(
+            "thread-1",
+            [HumanMessage("private", id="h1")],
+            user_id="alice",
+            agent_name="research",
+        )
+
+    assert exc_info.value.__cause__ is access_error
+    assert len(manager._client.ls_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "access_error",
+    [
+        pytest.param(UnauthenticatedError(), id="unauthenticated"),
+        pytest.param(PermissionDeniedError(), id="permission_denied"),
+    ],
+)
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_partial_write_provider_auth_error_follows_write_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    caplog: pytest.LogCaptureFixture,
+    access_error: Exception,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    partial_error = _PartialWriteError(1)
+    partial_error.__cause__ = access_error
+    manager._recorder.failures.append(partial_error)
+
+    if write_policy == "raise":
+        with pytest.raises(MemoryManagerError) as exc_info:
+            manager.add(
+                "thread-1",
+                [
+                    HumanMessage("private", id="h1"),
+                    AIMessage("noted", id="a1"),
+                ],
+                user_id="alice",
+                agent_name="research",
+            )
+        assert not isinstance(exc_info.value, MemoryAccessError)
+        assert exc_info.value.__cause__ is partial_error
+    else:
+        manager.add(
+            "thread-1",
+            [
+                HumanMessage("private", id="h1"),
+                AIMessage("noted", id="a1"),
+            ],
+            user_id="alice",
+            agent_name="research",
+        )
+        assert "partially recorded" in caplog.text
+
+    assert partial_error.__cause__ is access_error
+    assert len(manager._client.ls_calls) == 1
+
+
+@pytest.mark.parametrize("write_policy", ["raise", "log_and_drop"])
+def test_partial_write_caller_access_denial_always_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    write_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": write_policy},
+    )
+    access_error = UnauthenticatedError()
+    partial_error = _PartialWriteError(1)
+    partial_error.__cause__ = access_error
+    manager._recorder.failures.append(partial_error)
+    manager._client.ls_failures.append(UnauthenticatedError())
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        manager.add(
+            "thread-1",
+            [
+                HumanMessage("private", id="h1"),
+                AIMessage("noted", id="a1"),
+            ],
+            user_id="alice",
+            agent_name="research",
+        )
+
+    assert exc_info.value.__cause__ is partial_error
+    assert partial_error.__cause__ is access_error
+    assert len(manager._client.ls_calls) == 1
+
+
+def test_transient_write_failure_still_logs_and_drops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        failure_policy={"write": "log_and_drop"},
+    )
+    manager._recorder.failures.append(ConnectionError("server down"))
+
+    manager.add(
+        "thread-1",
+        [HumanMessage("remember this", id="h1")],
+        user_id="alice",
+        agent_name="research",
+    )
+
+    assert "capture cursor was not advanced" in caplog.text
+
+
 def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,9 +1163,9 @@ def test_manager_refuses_to_share_single_user_key_across_deerflow_users(
 ) -> None:
     manager = _manager(tmp_path, monkeypatch)
 
-    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
         manager.get_context("bob", agent_name="research")
-    with pytest.raises(MemoryManagerError, match="owner_user_id 'alice'"):
+    with pytest.raises(MemoryAccessError, match="owner_user_id 'alice'"):
         manager.add(
             "thread-1",
             [HumanMessage("private", id="h1")],
@@ -385,6 +1212,7 @@ def test_manager_records_only_unseen_suffix(
     assert manager._recorder.calls[0][1] == messages[:2]
     assert manager._recorder.calls[1][1] == messages[2:]
     assert all(call[2:] == ("research", "research") for call in manager._recorder.calls)
+    assert manager._client.ls_calls == []
 
 
 def test_partial_write_progress_is_not_resubmitted(
@@ -475,6 +1303,7 @@ def test_search_maps_documents_without_custom_http_models(
         "conds": ["preferences"],
     }
     assert manager._retriever.calls[0]["search_mode"] == "find"
+    assert manager._client.ls_calls == []
 
 
 def test_capture_keeps_tool_history_but_drops_hidden_injected_context(

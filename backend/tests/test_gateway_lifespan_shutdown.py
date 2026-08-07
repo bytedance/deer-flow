@@ -12,11 +12,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import pytest
 from fastapi import FastAPI
+
+from deerflow.agents.memory import MemoryAccessError, MemoryManagerError
 
 
 @asynccontextmanager
@@ -208,7 +212,13 @@ def test_lifespan_closes_memory_manager_when_flush_raises() -> None:
 # ── startup warm-up log accuracy ────────────────────────────────────────────
 
 
-async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
+async def _run_lifespan_with_warm_return(
+    warm_return: bool | None | Exception,
+    *,
+    startup_failures_are_fatal: bool = False,
+    startup_policy_error: Exception | None = None,
+    warm_delay: float = 0.0,
+) -> MagicMock:
     """Drive lifespan with a spied ``manager.warm`` returning ``warm_return``.
 
     The startup warm block reads the tri-state return: None = nothing to warm
@@ -235,12 +245,24 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
         return fake_service
 
     manager = MagicMock()
-    manager.warm.return_value = warm_return
+    if startup_policy_error is None:
+        manager.startup_failures_are_fatal = startup_failures_are_fatal
+    else:
+        type(manager).startup_failures_are_fatal = PropertyMock(
+            side_effect=startup_policy_error,
+        )
+    if isinstance(warm_return, Exception):
+        manager.warm.side_effect = warm_return
+    elif warm_delay:
+        manager.warm.side_effect = lambda: time.sleep(warm_delay) or warm_return
+    else:
+        manager.warm.return_value = warm_return
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._MEMORY_WARM_TIMEOUT_SECONDS", 0.01),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", stop_channel_service),
@@ -269,7 +291,82 @@ def test_lifespan_warns_when_warm_returns_false(caplog) -> None:
     caplog.set_level(logging.WARNING, logger="app.gateway.app")
     manager = asyncio.run(_run_lifespan_with_warm_return(False))
     manager.warm.assert_called_once_with()
-    assert any(r.levelno == logging.WARNING and "warm-up failed" in r.message for r in caplog.records)
+    assert any(r.levelno == logging.WARNING and "reported unhealthy" in r.message for r in caplog.records)
+
+
+def test_lifespan_propagates_typed_memory_warm_failure() -> None:
+    access_error = MemoryAccessError("OpenViking startup USER-key access validation was denied")
+
+    with pytest.raises(MemoryAccessError) as exc_info:
+        asyncio.run(
+            _run_lifespan_with_warm_return(
+                access_error,
+                startup_failures_are_fatal=True,
+            )
+        )
+
+    assert exc_info.value is access_error
+
+
+def test_lifespan_keeps_nonfatal_typed_memory_warm_failure_best_effort(
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="app.gateway.app")
+    access_error = MemoryAccessError("optional memory access failed")
+
+    manager = asyncio.run(_run_lifespan_with_warm_return(access_error))
+
+    manager.warm.assert_called_once_with()
+    assert any(r.levelno == logging.WARNING and "continuing in degraded mode" in r.message for r in caplog.records)
+
+
+def test_lifespan_keeps_untyped_memory_warm_failure_best_effort(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.gateway.app")
+
+    manager = asyncio.run(_run_lifespan_with_warm_return(RuntimeError("optional warm failed")))
+
+    manager.warm.assert_called_once_with()
+    assert any(r.levelno == logging.WARNING and "startup warm-up skipped" in r.message for r in caplog.records)
+
+
+def test_lifespan_strict_memory_warm_timeout_aborts_startup() -> None:
+    with pytest.raises(MemoryManagerError, match="warm-up timed out") as exc_info:
+        asyncio.run(
+            _run_lifespan_with_warm_return(
+                True,
+                startup_failures_are_fatal=True,
+                warm_delay=0.1,
+            )
+        )
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+
+
+def test_lifespan_nonfatal_memory_warm_timeout_remains_best_effort(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.gateway.app")
+
+    manager = asyncio.run(
+        _run_lifespan_with_warm_return(
+            True,
+            warm_delay=0.1,
+        )
+    )
+
+    manager.warm.assert_called_once_with()
+    assert any(r.levelno == logging.WARNING and "warm-up timed out" in r.message for r in caplog.records)
+
+
+def test_lifespan_warm_timeout_policy_resolution_failure_is_fatal() -> None:
+    with pytest.raises(MemoryManagerError, match="warm-up timed out") as exc_info:
+        asyncio.run(
+            _run_lifespan_with_warm_return(
+                True,
+                startup_policy_error=ValueError("invalid startup policy"),
+                warm_delay=0.1,
+            )
+        )
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
 async def _run_lifespan_with_slow_retrieval_warm() -> float:
