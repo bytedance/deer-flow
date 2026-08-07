@@ -153,6 +153,7 @@ class _FakeClient:
         # (e.g. RuntimeError) to prove the manager's boundary excepts are broad,
         # not narrowly typed to the client's own exception class.
         self.raise_exc_cls: type[BaseException] = HonchoRequestError
+        self.closed = False
 
     def _maybe_raise(self, name):
         if self.raise_on == name:
@@ -185,7 +186,7 @@ class _FakeClient:
         return [{"content": "found", "peer_id": "deerflow", "session_id": "df-t", "created_at": "2026-01-01"}]
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def _manager(**backend_config):
@@ -355,6 +356,14 @@ class TestHonchoManagerLifecycle:
         Honcho's deriver alongside model-directed search(). Mirrors mem0's
         identical ClassVar (mem0_manager.py)."""
         assert HonchoMemoryManager.requires_passive_writes_in_tool_mode is True
+
+    def test_close_releases_http_client(self):
+        """close() is the gateway shutdown hook (manager.py base default is a
+        no-op); Honcho must override it to release the underlying HTTP client,
+        mirroring mem0_manager.py's identical close()."""
+        mgr, fake = _manager()
+        mgr.close()
+        assert fake.closed is True
 
 
 class TestHonchoIdentityDerivation:

@@ -256,6 +256,10 @@ class HonchoMemoryManager(MemoryManager):
         """Writes are synchronous per-call; nothing is buffered locally."""
         return True
 
+    def close(self) -> None:
+        """Release the HTTP client (gateway shutdown hook)."""
+        self._client.close()
+
     # ── async offload (blocking-io gate: never run httpx on the event loop) ──
     async def aadd(
         self,

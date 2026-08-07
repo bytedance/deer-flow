@@ -130,21 +130,23 @@ Lessons from integrating external backends:
 
 ## Honcho Backend
 
-The optional `honcho/` backend is a remote-only HTTP adapter for user-model memory over Honcho (self-hosted or via api.honcho.dev). It supports middleware mode only and uses Honcho's server-side deriver to build representations (no local LLM calls).
+The optional `honcho/` backend is a remote-only HTTP adapter for user-model memory over Honcho (self-hosted or via api.honcho.dev). Middleware mode is the default; tool mode is also supported (search is implemented) and retains passive writes via `MemoryMiddleware` (`requires_passive_writes_in_tool_mode = True`) so Honcho's server-side deriver keeps building representations from every turn (no local LLM calls).
 
 **Configuration** (under `memory.backend_config`):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `base_url` | str | required | Honcho instance URL (e.g., `http://localhost:8000` or `https://api.honcho.dev`) |
+| `base_url` | str | `http://localhost:8000` | Honcho instance URL (e.g., `http://localhost:8000` or `https://api.honcho.dev`) |
 | `api_key` | str | optional | API key for hosted Honcho; required if `base_url` is `api.honcho.dev`. Can use `$HONCHO_API_KEY` env var syntax. Requires `allow_insecure_http: true` when using plain HTTP |
 | `allow_insecure_http` | bool | false | Allow HTTP (non-HTTPS) connections; needed for localhost development with api_key |
-| `workspace_prefix` | str | `deerflow-` | Prefix for isolated workspaces; each user gets one workspace named `{prefix}{sanitized_id}` |
+| `timeout_seconds` | float | `10.0` | HTTP client timeout (seconds) for calls to Honcho — read/write/pool; see `connect_timeout_seconds` for the connect phase |
+| `connect_timeout_seconds` | float | `3.0` | HTTP connect timeout (seconds) for establishing the connection to Honcho |
+| `workspace_prefix` | str | `deerflow-u-` | Prefix for isolated workspaces; each user gets one workspace named `{prefix}{sanitized_id}` |
 | `workspace_overrides` | dict | `{}` | Map specific user ids to custom workspace names; overrides the prefix-based derivation |
 | `user_peer_overrides` | dict | `{}` | Map specific user ids to custom peer names; overrides the default `assistant_peer` |
 | `assistant_peer` | str | `deerflow` | Default peer name for the assistant when storing messages |
-| `message_char_limit` | int | `8192` | Character limit per message; longer messages are truncated |
-| `max_injection_chars` | int | `12000` | Character limit for injected memory into the system prompt |
+| `message_char_limit` | int | `8000` | Character limit per message; longer messages are truncated |
+| `max_injection_chars` | int | `6000` | Character limit for injected memory into the system prompt |
 | `failure_policy.read` | str | `fail_open` | Recall failure handling: `fail_open` (log and return empty) or `fail_closed` (rethrow) |
 
 **Workspace Resolution**: Each DeerFlow user maps to one Honcho workspace. The workspace name is derived as: `workspace_overrides[user_id]` (if present) else `workspace_prefix + sanitized_id`, where `sanitized_id` is a collision-resistant hash suffix (sanitize[:48]-sha256[:8]). Missing user fails closed to no memory.
