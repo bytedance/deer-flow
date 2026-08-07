@@ -177,6 +177,16 @@ class MemoryManager(BaseModel):
 
         return type(self).read_failures_are_fatal_for_config(self.backend_config)
 
+    @property
+    def startup_failures_are_fatal(self) -> bool:
+        """Whether caller-owned warmup timeouts must abort startup.
+
+        The default preserves best-effort warmup for DeerMem, noop, and
+        third-party backends. Backends with a strict startup policy override.
+        """
+
+        return False
+
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
         """Cross-field invariants every backend must satisfy at instantiation.

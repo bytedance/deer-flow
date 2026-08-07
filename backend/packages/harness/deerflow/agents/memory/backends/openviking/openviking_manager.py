@@ -125,6 +125,10 @@ class OpenVikingMemoryManager(MemoryManager):
     ) -> bool:
         return OpenVikingConfig.from_backend_config(backend_config).read_failure_policy == "raise"
 
+    @property
+    def startup_failures_are_fatal(self) -> bool:
+        return self._config.startup_policy == "fail_fast"
+
     def add_nowait(
         self,
         thread_id: str,
@@ -278,21 +282,36 @@ class OpenVikingMemoryManager(MemoryManager):
             return False
         try:
             try:
-                health = getattr(self._client, "health", None)
-                healthy = bool(health()) if callable(health) else True
-            except Exception:
+                with self._actor_peer_scope(None):
+                    health = getattr(self._client, "health", None)
+                    if not callable(health):
+                        raise MemoryManagerError("OpenViking client does not support health checks")
+                    if not bool(health()):
+                        raise MemoryManagerError("OpenViking health check returned an unhealthy response")
+
+                    retriever = copy.copy(self._retriever)
+                    retriever.target_uri = "viking://user/memories"
+                    retriever.search_mode = "find"
+                    retriever.session_id = None
+                    retriever.limit = 1
+                    retriever.filter = None
+                    retriever.score_threshold = None
+                    retriever.context_types = ("memory",)
+                    retriever.content_mode = "overview"
+                    retriever.invoke(self._config.injection_query)
+            except Exception as exc:
                 if self._config.startup_policy == "fail_fast":
-                    raise
+                    if _is_access_error(exc):
+                        raise MemoryAccessError("OpenViking startup USER-key access validation was denied") from exc
+                    if isinstance(exc, MemoryManagerError):
+                        raise
+                    raise MemoryManagerError("OpenViking startup validation failed") from exc
                 logger.warning(
-                    "OpenViking startup validation failed; memory will run in degraded mode",
+                    "OpenViking startup health or USER-key access validation failed; memory will run in degraded mode",
                     exc_info=True,
                 )
                 return False
-            if not healthy and self._config.startup_policy == "fail_fast":
-                raise MemoryManagerError("OpenViking health check returned an unhealthy response")
-            if not healthy:
-                logger.warning("OpenViking health check returned unhealthy; memory will run in degraded mode")
-            return healthy
+            return True
         finally:
             self._end_operation()
 

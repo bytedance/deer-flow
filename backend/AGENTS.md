@@ -309,6 +309,9 @@ Memory backend async boundary:
   strings, and strict backends expose `read_failures_are_fatal` so the async
   injection timeout cannot silently degrade them. Ordinary unexpected recall
   errors retain the log-and-empty-context compatibility fallback.
+- Startup warmup remains best-effort by default. Backends with a strict startup
+  policy raise `MemoryManagerError` and expose `startup_failures_are_fatal` so
+  the Gateway's caller-owned warmup timeout cannot silently degrade them.
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 

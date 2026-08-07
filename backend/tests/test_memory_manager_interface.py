@@ -96,6 +96,7 @@ def test_minimal_backend_onboards_via_factory_with_only_add_get_context():
 
     # tier-3 inherits defaults: warm=None (nothing to warm); B-class no-op;
     # A-class (excl. warm) raise.
+    assert manager.startup_failures_are_fatal is False
     assert manager.warm() is None
     assert manager.on_pre_compress([]) == ""
     assert manager.on_turn_start(1, None) is None

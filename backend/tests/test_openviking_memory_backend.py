@@ -11,6 +11,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -216,6 +217,85 @@ def _manager(
     return OpenVikingMemoryManager.from_config(_backend_config(tmp_path, **overrides))
 
 
+@contextmanager
+def _authenticated_openviking_server(
+    *,
+    find_status: int = 200,
+    error_code: str | None = None,
+) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(
+                {
+                    "method": "GET",
+                    "path": self.path,
+                    "api_key": self.headers.get("X-API-Key"),
+                    "actor_peer": self.headers.get("X-OpenViking-Actor-Peer"),
+                }
+            )
+            self._send_json(200, {"status": "ok"})
+
+        def do_POST(self) -> None:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(content_length) or b"{}")
+            requests.append(
+                {
+                    "method": "POST",
+                    "path": self.path,
+                    "api_key": self.headers.get("X-API-Key"),
+                    "actor_peer": self.headers.get("X-OpenViking-Actor-Peer"),
+                    "body": body,
+                }
+            )
+            if error_code is not None:
+                self._send_json(
+                    find_status,
+                    {
+                        "status": "error",
+                        "error": {
+                            "code": error_code,
+                            "message": "startup access denied",
+                        },
+                    },
+                )
+                return
+            self._send_json(
+                find_status,
+                {
+                    "status": "success",
+                    "result": {
+                        "memories": [],
+                        "resources": [],
+                        "skills": [],
+                    },
+                },
+            )
+
+        def log_message(self, format: str, *args: Any) -> None:
+            del format, args
+
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            serialized = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(serialized)))
+            self.end_headers()
+            self.wfile.write(serialized)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(1.0)
+
+
 @pytest.fixture
 def unreachable_openviking_url() -> Iterator[str]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
@@ -277,6 +357,29 @@ def test_read_failure_capability_matches_policy(
     assert manager.read_failures_are_fatal is expected
 
 
+@pytest.mark.parametrize(
+    ("startup_policy", "expected"),
+    [
+        pytest.param("warn", False, id="warn"),
+        pytest.param("fail_fast", True, id="fail_fast"),
+    ],
+)
+def test_startup_failure_capability_matches_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    startup_policy: str,
+    expected: bool,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        startup_policy=startup_policy,
+    )
+
+    assert manager.startup_failures_are_fatal is expected
+
+
 def test_official_loader_uses_standalone_package() -> None:
     from deerflow.agents.memory.backends.openviking.openviking_manager import (
         _load_official_integration,
@@ -304,6 +407,166 @@ def test_manager_uses_official_recorder_retriever_and_commit_always(
         "timeout": 30.0,
         "extra_headers": {},
     }
+
+
+def test_warm_verifies_health_and_authenticated_read_only_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _authenticated_openviking_server() as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="fail_fast",
+        )
+
+        with manager._actor_peer_scope("ambient-peer"):
+            assert manager.warm() is True
+        manager.close()
+
+    assert requests == [
+        {
+            "method": "GET",
+            "path": "/health",
+            "api_key": "user-key",
+            "actor_peer": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/v1/search/find",
+            "api_key": "user-key",
+            "actor_peer": None,
+            "body": {
+                "query": "profile preferences and prior decisions",
+                "target_uri": "viking://user/memories",
+                "limit": 1,
+                "telemetry": False,
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("find_status", "error_code"),
+    [
+        pytest.param(401, "UNAUTHENTICATED", id="invalid_or_expired_key"),
+        pytest.param(403, "PERMISSION_DENIED", id="permission_denied"),
+    ],
+)
+def test_warm_fail_fast_maps_authenticated_access_denial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    find_status: int,
+    error_code: str,
+) -> None:
+    with _authenticated_openviking_server(
+        find_status=find_status,
+        error_code=error_code,
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="fail_fast",
+        )
+
+        with pytest.raises(MemoryAccessError, match="startup USER-key access") as exc_info:
+            manager.warm()
+        manager.close()
+
+    assert isinstance(
+        exc_info.value.__cause__,
+        (UnauthenticatedError, PermissionDeniedError),
+    )
+    assert [request["path"] for request in requests] == [
+        "/health",
+        "/api/v1/search/find",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("find_status", "error_code"),
+    [
+        pytest.param(401, "UNAUTHENTICATED", id="invalid_or_expired_key"),
+        pytest.param(403, "PERMISSION_DENIED", id="permission_denied"),
+    ],
+)
+def test_warm_warn_reports_authenticated_access_denial_unhealthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    find_status: int,
+    error_code: str,
+) -> None:
+    with _authenticated_openviking_server(
+        find_status=find_status,
+        error_code=error_code,
+    ) as (base_url, requests):
+        manager = _manager(
+            tmp_path,
+            monkeypatch,
+            base_url=base_url,
+            timeout_seconds=0.2,
+            startup_policy="warn",
+        )
+
+        assert manager.warm() is False
+        manager.close()
+
+    assert "USER-key access" in caplog.text
+    assert [request["path"] for request in requests] == [
+        "/health",
+        "/api/v1/search/find",
+    ]
+
+
+@pytest.mark.parametrize("startup_policy", ["fail_fast", "warn"])
+def test_warm_reports_unavailable_server_unhealthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unreachable_openviking_url: str,
+    startup_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        base_url=unreachable_openviking_url,
+        timeout_seconds=0.1,
+        startup_policy=startup_policy,
+    )
+
+    if startup_policy == "fail_fast":
+        with pytest.raises(MemoryManagerError, match="health check"):
+            manager.warm()
+    else:
+        assert manager.warm() is False
+    manager.close()
+
+
+@pytest.mark.parametrize("startup_policy", ["fail_fast", "warn"])
+def test_warm_never_treats_missing_health_capability_as_healthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    official_integration: None,
+    startup_policy: str,
+) -> None:
+    manager = _manager(
+        tmp_path,
+        monkeypatch,
+        startup_policy=startup_policy,
+    )
+    monkeypatch.delattr(_Client, "health")
+
+    if startup_policy == "fail_fast":
+        with pytest.raises(MemoryManagerError, match="health"):
+            manager.warm()
+    else:
+        assert manager.warm() is False
+
+    assert manager._retriever.calls == []
 
 
 def test_context_preserves_existing_fixed_query_behavior(

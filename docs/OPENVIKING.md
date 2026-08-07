@@ -155,6 +155,10 @@ boundary; peers separate memory scopes within that user.
 
 ## Retry and failure behavior
 
+- Startup warmup checks both the public service health endpoint and one
+  authenticated, read-only USER-key lookup limited to one result. With
+  `startup_policy: fail_fast`, an unavailable or unverifiable backend aborts
+  startup; `warn` reports it unhealthy and continues in degraded mode.
 - `read: fail_open` logs retrieval failures and continues the turn without
   recalled OpenViking context. `read: raise` aborts the turn when recall fails.
 - `write: log_and_drop` logs capture failures without failing an already

@@ -38,6 +38,7 @@ from app.gateway.routers import (
     uploads,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
+from deerflow.agents.memory import MemoryManager, MemoryManagerError
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
@@ -59,10 +60,19 @@ logger = logging.getLogger(__name__)
 # Bounds worker exit time so uvicorn's reload supervisor does not keep
 # firing signals into a worker that is stuck waiting for shutdown cleanup.
 _SHUTDOWN_HOOK_TIMEOUT_SECONDS = 5.0
+_MEMORY_WARM_TIMEOUT_SECONDS = 5.0
 
 # The retrieval index is derived state, so shutdown only waits briefly for its
 # startup rebuild. The canonical memory flush keeps its full configured budget.
 _RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
+
+
+def _memory_startup_failures_are_fatal(manager: MemoryManager) -> bool:
+    try:
+        return manager.startup_failures_are_fatal
+    except Exception:
+        logger.exception("Could not resolve memory startup failure policy; treating startup validation as fatal")
+        return True
 
 
 async def _ensure_admin_user(app: FastAPI) -> None:
@@ -246,33 +256,53 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
-    # Pre-warm tiktoken encoding cache so the first memory-injection request
-    # never blocks on the BPE data download (which hits an OpenAI/Azure URL
-    # that may be unreachable in restricted networks — see issue #3402).
-    # Warm-up runs via the manager's `warm()` tier-3 hook. DeerMem.warm re-checks
-    # token_counting=="char" and returns early, so char-mode backends never touch
-    # tiktoken (avoids even the 5s probe in network-restricted deployments - see
-    # issue #3429). A backend with nothing to warm (e.g. noop) returns None from
-    # the base default -- log "skipping" instead of the misleading "warmed
-    # successfully" so the log reflects what actually happened.
+    # Run the backend's tier-3 startup warm-up off the event loop. DeerMem uses
+    # this hook for tiktoken; network backends may validate connectivity and
+    # credentials. A backend with nothing to warm (e.g. noop) returns None.
+    manager = None
+    startup_failures_are_fatal = True
     try:
         from deerflow.agents.memory import get_memory_manager
 
         manager = await asyncio.to_thread(get_memory_manager)
-        warmed = await asyncio.wait_for(
-            asyncio.to_thread(manager.warm),
-            timeout=5,
-        )
-        if warmed is None:
-            logger.info("Memory backend %s has nothing to warm; skipping tiktoken warm-up", type(manager).__name__)
-        elif warmed:
-            logger.info("tiktoken encoding cache warmed successfully")
+        startup_failures_are_fatal = _memory_startup_failures_are_fatal(manager)
+        try:
+            warmed = await asyncio.wait_for(
+                asyncio.to_thread(manager.warm),
+                timeout=_MEMORY_WARM_TIMEOUT_SECONDS,
+            )
+        except TimeoutError as exc:
+            if startup_failures_are_fatal:
+                raise MemoryManagerError("Memory backend startup warm-up timed out") from exc
+            logger.warning(
+                "Memory backend %s startup warm-up timed out; continuing in degraded mode",
+                type(manager).__name__,
+            )
         else:
-            logger.warning("tiktoken encoding cache warm-up failed; token counting will use character-based fallback until tiktoken loads successfully")
-    except TimeoutError:
-        logger.warning("tiktoken encoding cache warm-up timed out; token counting will use character-based fallback until tiktoken loads successfully")
+            if warmed is None:
+                logger.info("Memory backend %s has nothing to warm; skipping startup warm-up", type(manager).__name__)
+            elif warmed:
+                logger.info("Memory backend %s startup warm-up completed successfully", type(manager).__name__)
+            else:
+                logger.warning(
+                    "Memory backend %s startup warm-up reported unhealthy; continuing in degraded mode",
+                    type(manager).__name__,
+                )
+    except MemoryManagerError:
+        if startup_failures_are_fatal:
+            if manager is not None:
+                try:
+                    await asyncio.to_thread(manager.close)
+                except Exception:
+                    logger.exception("Failed to close memory backend after fatal startup warm-up failure")
+            raise
+        logger.warning(
+            "Memory backend %s startup warm-up failed; continuing in degraded mode",
+            type(manager).__name__,
+            exc_info=True,
+        )
     except Exception:
-        logger.warning("tiktoken warm-up skipped", exc_info=True)
+        logger.warning("Memory backend startup warm-up skipped", exc_info=True)
 
     try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
