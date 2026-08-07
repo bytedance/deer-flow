@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import httpx
 import pytest
 
 from deerflow.agents.memory.backends.honcho.client import HonchoClient, HonchoRequestError
 from deerflow.agents.memory.backends.honcho.config import HonchoConfig, sanitize_id
+from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager
+from deerflow.agents.memory.manager import MemoryManagerError
 
 
 class TestHonchoConfig:
@@ -120,3 +125,170 @@ class TestHonchoClient:
 
         c = _client_with_handler(handler, api_key="sk-h", allow_insecure_http=True)
         c.get_or_create_peer("ws1", "alice")
+
+
+class _FakeClient:
+    """Records calls; canned returns. Replaces the real HonchoClient in tests."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, tuple]] = []
+        self.representation_text = "ajayr likes concise answers"
+        self.raise_on: str | None = None
+
+    def _maybe_raise(self, name):
+        if self.raise_on == name:
+            from deerflow.agents.memory.backends.honcho.client import HonchoRequestError
+
+            raise HonchoRequestError(name)
+
+    def get_or_create_peer(self, ws, pid):
+        self._maybe_raise("peer")
+        self.calls.append(("peer", (ws, pid)))
+
+    def get_or_create_session(self, ws, sid):
+        self._maybe_raise("session")
+        self.calls.append(("session", (ws, sid)))
+
+    def set_session_peers(self, ws, sid, pids):
+        self._maybe_raise("peers")
+        self.calls.append(("set_peers", (ws, sid, tuple(pids))))
+
+    def add_messages(self, ws, sid, msgs):
+        self._maybe_raise("messages")
+        self.calls.append(("messages", (ws, sid, tuple((m["peer_id"], m["content"]) for m in msgs))))
+
+    def working_representation(self, ws, pid, *, max_conclusions=25):
+        self._maybe_raise("representation")
+        self.calls.append(("rep", (ws, pid)))
+        return self.representation_text
+
+    def search(self, ws, query, *, limit=5):
+        self._maybe_raise("search")
+        self.calls.append(("search", (ws, query, limit)))
+        return [{"content": "found", "peer_id": "deerflow", "session_id": "df-t", "created_at": "2026-01-01"}]
+
+    def close(self):
+        pass
+
+
+def _manager(**backend_config):
+    mgr = HonchoMemoryManager.from_config({"base_url": "http://honcho.test", **backend_config})
+    fake = _FakeClient()
+    mgr._client = fake
+    return mgr, fake
+
+
+def _msg(msg_type, content):
+    return SimpleNamespace(type=msg_type, content=content)
+
+
+class TestHonchoManagerWrite:
+    def test_add_maps_messages_to_peers(self):
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"}, user_peer_overrides={"u1": "alice"})
+        mgr.add("t-1", [_msg("human", "please check the deploy"), _msg("ai", "deploy is green"), _msg("tool", "ignored")], user_id="u1")
+        assert ("messages", ("shared", "df-t-1", (("alice", "please check the deploy"), ("deerflow", "deploy is green")))) in fake.calls
+        assert ("set_peers", ("shared", "df-t-1", ("alice", "deerflow"))) in fake.calls
+
+    def test_add_without_user_is_noop(self):
+        mgr, fake = _manager()
+        mgr.add("t-1", [_msg("human", "hello")], user_id=None)
+        assert fake.calls == []
+
+    def test_add_prefix_workspace_for_unmapped_user(self):
+        mgr, fake = _manager()
+        mgr.add("t-2", [_msg("human", "x")], user_id="bob@example.com")
+        assert fake.calls[0] == ("peer", ("deerflow-u-bob-example-com", "bob-example-com"))
+
+    def test_add_swallows_backend_errors(self):
+        mgr, fake = _manager()
+        fake.raise_on = "messages"
+        mgr.add("t-3", [_msg("human", "x")], user_id="u1")  # must not raise
+
+    def test_add_truncates_long_content(self):
+        mgr, fake = _manager(message_char_limit=10)
+        mgr.add("t-4", [_msg("human", "0123456789ABCDEF")], user_id="u1")
+        sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
+        assert len(sent) == 10
+
+    def test_add_normalizes_list_content(self):
+        mgr, fake = _manager()
+        mgr.add("t-5", [_msg("human", [{"type": "text", "text": "part1"}, {"type": "text", "text": "part2"}])], user_id="u1")
+        sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
+        assert "part1" in sent and "part2" in sent
+
+
+class TestHonchoManagerRead:
+    def test_get_context_returns_representation(self):
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"})
+        assert "concise answers" in mgr.get_context("u1")
+
+    def test_get_context_without_user_is_empty(self):
+        mgr, _ = _manager()
+        assert mgr.get_context(None) == ""
+
+    def test_get_context_truncates(self):
+        mgr, fake = _manager(max_injection_chars=10)
+        fake.representation_text = "y" * 100
+        assert len(mgr.get_context("u1")) <= 10
+
+    def test_get_context_fail_open_by_default(self):
+        mgr, fake = _manager()
+        fake.raise_on = "representation"
+        assert mgr.get_context("u1") == ""
+
+    def test_get_context_fail_closed_raises_contract_error(self):
+        mgr, fake = _manager(failure_policy={"read": "fail_closed"})
+        fake.raise_on = "representation"
+        with pytest.raises(MemoryManagerError):
+            mgr.get_context("u1")
+
+    def test_search_maps_results(self):
+        mgr, _ = _manager()
+        results = mgr.search("deploy", top_k=3, user_id="u1")
+        assert results[0]["content"] == "found"
+
+    def test_search_without_user_is_empty(self):
+        mgr, _ = _manager()
+        assert mgr.search("q", user_id=None) == []
+
+    def test_supports_search_flag_matches_override(self):
+        mgr, _ = _manager()
+        assert type(mgr).supports_search is True
+
+    def test_get_memory_minimal_shape(self):
+        mgr, _ = _manager()
+        doc = mgr.get_memory(user_id="u1")
+        assert doc["facts"] == []
+        assert doc["user"]["workContext"]["summary"]
+        assert doc["lastUpdated"]
+
+
+class TestHonchoManagerAsync:
+    def test_async_entrypoints_delegate(self):
+        mgr, fake = _manager()
+
+        async def run():
+            await mgr.aadd("t-1", [_msg("human", "x")], user_id="u1")
+            ctx = await mgr.aget_context("u1")
+            hits = await mgr.asearch("q", user_id="u1")
+            return ctx, hits
+
+        ctx, hits = asyncio.run(run())
+        assert "concise" in ctx and hits
+
+
+class TestHonchoManagerLifecycle:
+    def test_shutdown_flush_true(self):
+        mgr, _ = _manager()
+        assert mgr.shutdown_flush(1.0) is True
+
+    def test_tool_mode_accepted(self):
+        mgr = HonchoMemoryManager.from_config({"base_url": "http://honcho.test"}, mode="tool")
+        assert mgr.mode == "tool"
+
+
+class TestFactoryDiscovery:
+    def test_manager_class_resolves(self):
+        from deerflow.agents.memory.backends.honcho import MANAGER_CLASS
+
+        assert MANAGER_CLASS is HonchoMemoryManager

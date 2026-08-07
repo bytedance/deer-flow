@@ -16,7 +16,7 @@ _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 def sanitize_id(raw: str) -> str:
-    """Map an arbitrary string onto Honcho's id grammar (``^[a-zA-Z0-9_-]+$``, <=100)."""
+    """Map an arbitrary string onto Honcho's id grammar (``^[a-zA-Z0-9_-]+$``; grammar allows up to 100, capped here at 64)."""
     return _ID_RE.sub("-", str(raw)).strip("-")[:64]
 
 

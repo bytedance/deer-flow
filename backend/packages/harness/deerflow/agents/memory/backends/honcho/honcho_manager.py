@@ -1,0 +1,251 @@
+"""Honcho memory backend — user-model memory via a Honcho (v3) instance.
+
+Positioning (upstream RFC #1898): Honcho covers the user-dimension of memory —
+long-term user modeling, preferences, cross-session working representation —
+complementing project/task-oriented backends. Ingestion is cheap (plain message
+writes); Honcho's own server-side deriver performs fact extraction and
+representation building asynchronously, so this backend makes **no LLM calls**.
+
+Multi-user isolation: every operation resolves a workspace from ``user_id``
+(``workspace_overrides`` exact match, else ``workspace_prefix + sanitize_id``).
+Honcho scopes all queries to one workspace, so users cannot see each other's
+memory by construction. A missing ``user_id`` fails closed: the call becomes a
+no-op / empty read, never a shared fallback workspace.
+
+Portability golden rule: the only ``from deerflow`` import is the contract line
+below. Everything else arrives via ``backend_config``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, ClassVar, Literal
+
+from pydantic import PrivateAttr
+
+# ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+
+from .client import HonchoClient, HonchoRequestError
+from .config import HonchoConfig, sanitize_id
+
+logger = logging.getLogger(__name__)
+
+_UTC_NOW_FIELDS = ("%Y-%m-%dT%H:%M:%SZ",)
+
+
+def _now_iso() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.UTC).strftime(_UTC_NOW_FIELDS[0])
+
+
+def _content_to_text(content: Any) -> str:
+    """Normalize LangChain message content (str or content-block list) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts)
+    return str(content or "")
+
+
+class HonchoMemoryManager(MemoryManager):
+    """MemoryManager backed by a Honcho v3 instance (self-hosted or hosted)."""
+
+    _config: HonchoConfig = PrivateAttr(default=None)
+    _client: Any = PrivateAttr(default=None)
+
+    supports_search: ClassVar[bool] = True
+
+    def model_post_init(self, __context: Any) -> None:
+        self._config = HonchoConfig.from_backend_config(self.backend_config)
+        self._client = HonchoClient(self._config)
+
+    @classmethod
+    def from_config(
+        cls,
+        backend_config: dict[str, Any] | None = None,
+        *,
+        mode: Literal["middleware", "tool"] = "middleware",
+        **host_hooks: Any,
+    ) -> HonchoMemoryManager:
+        """Config errors (bad URL/insecure key) raise here — fail fast at startup.
+
+        Connectivity is deliberately NOT probed: a temporarily unreachable Honcho
+        must not block Gateway startup; reads degrade per ``failure_policy.read``.
+        """
+        return cls(backend_config=backend_config, mode=mode)
+
+    # ── identity resolution (fail closed) ────────────────────────────────
+    def _workspace(self, user_id: str | None) -> str | None:
+        if not user_id:
+            return None
+        override = self._config.workspace_overrides.get(user_id)
+        if override:
+            return override
+        safe = sanitize_id(user_id)
+        if not safe:
+            return None
+        return f"{self._config.workspace_prefix}{safe}"
+
+    def _user_peer(self, user_id: str) -> str:
+        return self._config.user_peer_overrides.get(user_id) or sanitize_id(user_id)
+
+    # ── Tier 1: write ────────────────────────────────────────────────────
+    def add(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        workspace = self._workspace(user_id)
+        if workspace is None or not user_id:
+            logger.debug("honcho memory: no resolvable user for thread %s; skipping write", thread_id)
+            return
+        user_peer = self._user_peer(user_id)
+        assistant_peer = self._config.assistant_peer
+        outgoing: list[dict[str, str]] = []
+        for message in messages or []:
+            msg_type = getattr(message, "type", None)
+            text = _content_to_text(getattr(message, "content", "")).strip()
+            if not text:
+                continue
+            if msg_type == "human":
+                outgoing.append({"peer_id": user_peer, "content": text[: self._config.message_char_limit]})
+            elif msg_type in ("ai", "AIMessageChunk"):
+                outgoing.append({"peer_id": assistant_peer, "content": text[: self._config.message_char_limit]})
+        if not outgoing:
+            return
+        session_id = f"df-{sanitize_id(thread_id)}"
+        try:
+            self._client.get_or_create_peer(workspace, user_peer)
+            self._client.get_or_create_peer(workspace, assistant_peer)
+            self._client.get_or_create_session(workspace, session_id)
+            self._client.set_session_peers(workspace, session_id, [user_peer, assistant_peer])
+            self._client.add_messages(workspace, session_id, outgoing)
+        except HonchoRequestError as exc:
+            logger.warning("honcho memory: write failed for thread %s: %s", thread_id, exc)
+
+    # ── Tier 1: read ─────────────────────────────────────────────────────
+    def get_context(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
+        workspace = self._workspace(user_id)
+        if workspace is None or not user_id:
+            return ""
+        try:
+            representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
+        except HonchoRequestError as exc:
+            if self._config.read_fail_closed:
+                raise MemoryManagerError(f"honcho memory recall failed: {exc}") from exc
+            logger.warning("honcho memory: recall failed (fail-open): %s", exc)
+            return ""
+        return representation.strip()[: self._config.max_injection_chars]
+
+    # ── Tier 2 ───────────────────────────────────────────────────────────
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        workspace = self._workspace(user_id)
+        if workspace is None:
+            return []
+        try:
+            results = self._client.search(workspace, query, limit=top_k)
+        except HonchoRequestError as exc:
+            logger.warning("honcho memory: search failed: %s", exc)
+            return []
+        return [
+            {
+                "content": item.get("content", ""),
+                "category": category or "memory",
+                "session_id": item.get("session_id"),
+                "peer_id": item.get("peer_id"),
+                "created_at": item.get("created_at"),
+            }
+            for item in results
+            if isinstance(item, dict)
+        ][:top_k]
+
+    def get_memory(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Minimal DeerMem-shape view: representation as the work-context summary.
+
+        Honcho has no DeerMem-style fact CRUD; the gateway fills missing fields
+        with defaults (same contract as the noop backend's ``{"facts": []}``).
+        """
+        empty = {"facts": [], "lastUpdated": _now_iso(), "user": {}, "history": {}}
+        workspace = self._workspace(user_id)
+        if workspace is None or not user_id:
+            return empty
+        try:
+            representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
+        except HonchoRequestError as exc:
+            logger.warning("honcho memory: get_memory failed: %s", exc)
+            return empty
+        now = _now_iso()
+        return {
+            "facts": [],
+            "lastUpdated": now,
+            "user": {"workContext": {"summary": representation.strip()[: self._config.max_injection_chars], "updatedAt": now}},
+            "history": {},
+        }
+
+    def shutdown_flush(self, timeout: float) -> bool:
+        """Writes are synchronous per-call; nothing is buffered locally."""
+        return True
+
+    # ── async offload (blocking-io gate: never run httpx on the event loop) ──
+    async def aadd(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        await asyncio.to_thread(self.add, thread_id, messages, agent_name=agent_name, user_id=user_id, trace_id=trace_id)
+
+    async def aget_context(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+    ) -> str:
+        return await asyncio.to_thread(self.get_context, user_id, agent_name=agent_name, thread_id=thread_id)
+
+    async def asearch(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self.search, query, top_k, user_id=user_id, agent_name=agent_name, category=category)
