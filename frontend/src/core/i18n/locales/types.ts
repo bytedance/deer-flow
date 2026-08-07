@@ -227,6 +227,40 @@ export interface Translations {
     scheduledTasks: string;
     agentsDisabledTooltip: string;
     channels: string;
+    connectedApps: string;
+  };
+
+  // Connector page
+  connectorPage: {
+    title: string;
+    subtitleConnected: (count: number) => string;
+    subtitleEmpty: string;
+    consoleAction: string;
+    searchPlaceholder: string;
+    statusAll: string;
+    statusConnected: string;
+    statusDisconnected: string;
+    connectOAuth: string;
+    connectApiKey: string;
+    connect: string;
+    disconnect: string;
+    noResults: string;
+    noProvidersAvailable: string;
+    apiKeyDialogTitle: (name: string) => string;
+    apiKeyDialogDescription: (service: string) => string;
+    apiKeyPlaceholder: string;
+    cancel: string;
+    loading: string;
+    errorTitle: string;
+    errorDescription: string;
+    errorAction: string;
+    oauthToast: string;
+    unknownFieldsHint: string;
+    connectedViaOAuth: string;
+    connected: string;
+    connectedToast: (name: string) => string;
+    connectFailed: string;
+    clearFilter: string;
   };
 
   // Scheduled tasks

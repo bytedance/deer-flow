@@ -1,9 +1,18 @@
 {
   "middlewares": [],
   "mcpInterceptors": [
-    "my_package.mcp.auth:build_auth_interceptor"
+    "deerflow.mcp.connector_interceptor:build_interceptor"
   ],
   "mcpServers": {
+    "connectors": {
+      "enabled": false,
+      "type": "http",
+      "url": "http://localhost:5173/mcp",
+      "headers": {
+        "Authorization": "Bearer $ANYCONNECT_RUNTIME_TOKEN"
+      },
+      "description": "Connect to 1000+ SaaS tools — Gmail, GitHub, Slack, Notion, WeCom, and more. Your agents can send emails, manage repos, search docs, and automate workflows across all your apps."
+    },
     "github": {
       "enabled": false,
       "type": "stdio",
