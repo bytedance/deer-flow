@@ -1094,6 +1094,24 @@ export function pruneConfirmedTransientMessages(
   });
 }
 
+export function mergeThreadValues(
+  previousValues: Partial<AgentThreadState> | undefined,
+  nextValues: Partial<AgentThreadState> | undefined,
+): Partial<AgentThreadState> | undefined {
+  if (!previousValues) {
+    return nextValues;
+  }
+  if (!nextValues) {
+    return previousValues;
+  }
+
+  return {
+    ...previousValues,
+    ...nextValues,
+    todos: nextValues.todos ?? previousValues.todos,
+  };
+}
+
 function getMessagesAfterBaseline(
   messages: Message[],
   baselineMessageIds: ReadonlySet<string>,
@@ -1918,6 +1936,10 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  const valuesRef = useRef<Partial<AgentThreadState> | undefined>(
+    thread.values,
+  );
+  const valuesThreadIdRef = useRef<string | null>(threadId ?? null);
   // Non-null only after a turn submitted by this mounted client. Keep it after
   // finish/stop/error because the SDK can retain its transient event order in
   // the settled frame. The next local submit replaces it and a thread switch or
@@ -2580,10 +2602,17 @@ export function useThreadStream({
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
+  const activeThreadId = onStreamThreadId ?? threadId ?? null;
+  if (valuesThreadIdRef.current !== activeThreadId) {
+    valuesThreadIdRef.current = activeThreadId;
+    valuesRef.current = thread.values;
+  }
+  const mergedValues = mergeThreadValues(valuesRef.current, thread.values);
+  valuesRef.current = mergedValues;
   const mergedThread = {
     ...thread,
     stop: stopThread,
-    values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
+    values: hasVisibleStreamState ? mergedValues : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;
 
