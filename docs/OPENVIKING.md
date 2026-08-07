@@ -7,10 +7,12 @@ package instead of implementing OpenViking's HTTP protocol inside DeerFlow.
 
 ## Current scope
 
-The first official-adapter integration deliberately preserves DeerFlow's
-existing automatic-memory behavior:
+The official adapter preserves DeerFlow's existing automatic-memory behavior
+by default and can opt into query-aware recall:
 
-- memory is recalled through DeerFlow's existing fixed memory query;
+- the baseline session snapshot uses `retrieval.injection_query`;
+- optional per-turn recall uses the latest real user question while retaining
+  the thread's stable OpenViking Session mapping;
 - completed turns are captured by the existing memory middleware;
 - messages about to be compacted are captured by the existing summarization hook;
 - every accepted capture is committed to the thread's stable OpenViking Session;
@@ -73,6 +75,8 @@ Select the backend in `config.yaml`:
 memory:
   enabled: true
   injection_enabled: true
+  session_injection_enabled: true
+  turn_injection_enabled: false
   shutdown_flush_timeout_seconds: 30
   manager_class: openviking
   mode: middleware
@@ -93,6 +97,14 @@ memory:
         user profile preferences important entities events ongoing goals
         constraints and prior decisions
 ```
+
+`injection_enabled` is the master gate. `session_injection_enabled` preserves
+the existing frozen baseline snapshot and defaults to `true`.
+`turn_injection_enabled` defaults to `false`; enabling it adds request-only
+query-aware recall immediately before the current user message. It is retrieved
+once per DeerFlow user turn and is not written to graph state, checkpoints,
+history, or memory capture input. If the master gate is enabled, at least one
+of the two sub-controls must remain enabled.
 
 For a host-installed OpenViking used by Docker DeerFlow, set `base_url` to
 `http://host.docker.internal:1933` and `allow_insecure_http: true`. The optional
