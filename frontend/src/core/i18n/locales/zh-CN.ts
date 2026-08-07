@@ -28,6 +28,8 @@ export const zhCN: Translations = {
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",
+    back: "返回",
+    confirmTitle: "确认操作",
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
@@ -44,6 +46,7 @@ export const zhCN: Translations = {
     preview: "预览",
     cancel: "取消",
     save: "保存",
+    saving: "保存中…",
     install: "安装",
     create: "创建",
     import: "导入",
@@ -61,6 +64,11 @@ export const zhCN: Translations = {
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
     showBrowser: "打开浏览器面板",
+    resourceMeta: {
+      title: "记录",
+      createdBy: "创建者",
+      createdAt: "创建时间",
+    },
   },
 
   runDuration: {
@@ -517,12 +525,24 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    listTitle: "会话列表",
+    pageTitle: "对话记录",
+    pageDescription: "浏览并搜索工作区内的全部对话。",
+    countTotal: (count) => `共 ${count} 个对话`,
+    countFiltered: (shown, total) => `${shown} / ${total} 个对话`,
+    searchEmpty: "没有匹配的对话。",
+    emptyList: "暂无对话。",
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
     pinChat: "置顶对话",
     unpinChat: "取消置顶",
     pinChatFailed: "更新对话置顶状态失败",
+    mainChat: "主对话",
+    pinnedBadge: "已置顶",
+    messageCount: (count) => `${count.toLocaleString()} 条消息`,
+    deleteConfirm: "确定要删除该对话吗？此操作不可撤销，对话记录将被永久删除。",
+    deleteFailed: "删除对话失败。",
   },
 
   // Sidecar
