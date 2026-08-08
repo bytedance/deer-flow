@@ -142,8 +142,8 @@ The optional `honcho/` backend is a remote-only HTTP adapter for user-model memo
 | `timeout_seconds` | float | `10.0` | HTTP client timeout (seconds) for calls to Honcho — read/write/pool; see `connect_timeout_seconds` for the connect phase |
 | `connect_timeout_seconds` | float | `3.0` | HTTP connect timeout (seconds) for establishing the connection to Honcho |
 | `workspace_prefix` | str | `deerflow-u-` | Prefix for isolated workspaces; each user gets one workspace named `{prefix}{sanitized_id}` |
-| `workspace_overrides` | dict | `{}` | Map specific user ids to custom workspace names; overrides the prefix-based derivation |
-| `user_peer_overrides` | dict | `{}` | Map specific user ids to custom peer names; overrides the default `assistant_peer` |
+| `workspace_overrides` | dict | `{}` | Map specific user ids to custom workspace names; overrides the prefix-based derivation. Values must be non-empty (parse error otherwise) |
+| `user_peer_overrides` | dict | `{}` | Map specific user ids to custom names for the user's own peer; overrides the stable-id derivation. Values must be non-empty (parse error otherwise) |
 | `assistant_peer` | str | `deerflow` | Default peer name for the assistant when storing messages |
 | `message_char_limit` | int | `8000` | Character limit per message; longer messages are truncated |
 | `max_injection_chars` | int | `6000` | Character limit for injected memory into the system prompt |

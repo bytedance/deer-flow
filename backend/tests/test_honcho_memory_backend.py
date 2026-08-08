@@ -57,6 +57,18 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
         assert cfg.api_key is None
 
+    def test_empty_override_values_rejected(self):
+        """An override entry with an empty/null value is a config mistake: silently
+        falling through to the default derivation (empty string is falsy) or
+        stringifying YAML null into a workspace literally named "None" would both
+        mask the operator's intent. Fail fast at parse time instead."""
+        with pytest.raises(ValueError, match="workspace_overrides"):
+            HonchoConfig.from_backend_config({"workspace_overrides": {"alice": ""}})
+        with pytest.raises(ValueError, match="workspace_overrides"):
+            HonchoConfig.from_backend_config({"workspace_overrides": {"alice": None}})
+        with pytest.raises(ValueError, match="user_peer_overrides"):
+            HonchoConfig.from_backend_config({"user_peer_overrides": {"bob": "  "}})
+
 
 class TestSanitizeId:
     def test_passthrough_and_cleanup(self):
@@ -67,15 +79,8 @@ class TestSanitizeId:
 
 
 def _client_with_handler(handler, **cfg_over):
-    from deerflow.agents.memory.backends.honcho.config import HonchoConfig
-
     cfg = HonchoConfig.from_backend_config({"base_url": "http://honcho.test", **cfg_over})
-    client = HonchoClient(cfg)
-    headers = {"Content-Type": "application/json"}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    client._http = httpx.Client(base_url=cfg.base_url, headers=headers, transport=httpx.MockTransport(handler))
-    return client
+    return HonchoClient(cfg, transport=httpx.MockTransport(handler))
 
 
 class TestHonchoClient:
@@ -200,12 +205,31 @@ def _msg(msg_type, content):
     return SimpleNamespace(type=msg_type, content=content)
 
 
+class TestHonchoClientTransport:
+    def test_constructor_accepts_transport_for_tests(self):
+        """Tests inject httpx.MockTransport through the constructor (Mem0Client
+        precedent) instead of rebuilding and overwriting client._http."""
+        seen: list[str] = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            return httpx.Response(200)
+
+        cfg = HonchoConfig.from_backend_config({"base_url": "http://honcho.test"})
+        client = HonchoClient(cfg, transport=httpx.MockTransport(handler))
+        client.get_or_create_peer("w1", "p1")
+        assert seen == ["/v3/workspaces/w1/peers"]
+
+
 class TestHonchoManagerWrite:
     def test_add_maps_messages_to_peers(self):
         mgr, fake = _manager(workspace_overrides={"u1": "shared"}, user_peer_overrides={"u1": "alice"})
         mgr.add("t-1", [_msg("human", "please check the deploy"), _msg("ai", "deploy is green"), _msg("tool", "ignored")], user_id="u1")
-        assert ("messages", ("shared", "df-t-1", (("alice", "please check the deploy"), ("deerflow", "deploy is green")))) in fake.calls
-        assert ("set_peers", ("shared", "df-t-1", ("alice", "deerflow"))) in fake.calls
+        # Session ids share the user-id path's collision-resistant derivation;
+        # computed, not hardcoded (see test_add_prefix_workspace_for_unmapped_user).
+        sid = f"df-{_stable_id('t-1')}"
+        assert ("messages", ("shared", sid, (("alice", "please check the deploy"), ("deerflow", "deploy is green")))) in fake.calls
+        assert ("set_peers", ("shared", sid, ("alice", "deerflow"))) in fake.calls
 
     def test_add_without_user_is_noop(self):
         mgr, fake = _manager()
@@ -252,6 +276,17 @@ class TestHonchoManagerWrite:
         mgr.add("t-5", [_msg("human", [{"type": "text", "text": "part1"}, {"type": "text", "text": "part2"}])], user_id="u1")
         sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
         assert "part1" in sent and "part2" in sent
+
+    def test_session_ids_resist_sanitize_collisions(self):
+        """Same lossy-sanitization hazard as user ids, one tier down: thread ids
+        "t.1" and "t-1" both sanitize to "t-1", so bare sanitize_id would merge
+        two threads' histories into one Honcho session. Session ids must use the
+        same collision-resistant _stable_id derivation as the user-id path."""
+        mgr, fake = _manager()
+        mgr.add("t.1", [_msg("human", "x")], user_id="u1")
+        mgr.add("t-1", [_msg("human", "y")], user_id="u1")
+        session_ids = {c[1][1] for c in fake.calls if c[0] == "session"}
+        assert len(session_ids) == 2
 
 
 class TestHonchoManagerRead:
@@ -310,6 +345,27 @@ class TestHonchoManagerRead:
         mgr, _ = _manager()
         assert type(mgr).supports_search is True
 
+    def test_search_fail_open_by_default(self):
+        mgr, fake = _manager()
+        fake.raise_on = "search"
+        assert mgr.search("q", user_id="u1") == []
+
+    def test_search_fail_closed_raises_contract_error(self):
+        """search() is a recall op (the tool-mode memory_search path): it must
+        honor failure_policy.read like get_context() does, not silently return
+        [] and mask an outage from the model and the operator."""
+        mgr, fake = _manager(failure_policy={"read": "fail_closed"})
+        fake.raise_on = "search"
+        with pytest.raises(MemoryManagerError):
+            mgr.search("q", user_id="u1")
+
+    def test_search_fail_closed_wraps_non_honcho_exceptions(self):
+        mgr, fake = _manager(failure_policy={"read": "fail_closed"})
+        fake.raise_on = "search"
+        fake.raise_exc_cls = RuntimeError
+        with pytest.raises(MemoryManagerError):
+            mgr.search("q", user_id="u1")
+
     def test_get_memory_minimal_shape(self):
         mgr, _ = _manager()
         doc = mgr.get_memory(user_id="u1")
@@ -325,6 +381,21 @@ class TestHonchoManagerRead:
         assert doc["history"] == {}
         assert doc["lastUpdated"]
         assert fake.calls == []
+
+    def test_get_memory_fail_open_by_default(self):
+        mgr, fake = _manager()
+        fake.raise_on = "representation"
+        doc = mgr.get_memory(user_id="u1")
+        assert doc["facts"] == []
+        assert doc["user"] == {}
+
+    def test_get_memory_fail_closed_raises_contract_error(self):
+        """get_memory() backs the /memory gateway endpoint — a recall op, so it
+        follows failure_policy.read like get_context() and search()."""
+        mgr, fake = _manager(failure_policy={"read": "fail_closed"})
+        fake.raise_on = "representation"
+        with pytest.raises(MemoryManagerError):
+            mgr.get_memory(user_id="u1")
 
 
 class TestHonchoManagerAsync:

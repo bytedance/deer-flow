@@ -19,7 +19,9 @@ staying readable. ``workspace_overrides`` / ``user_peer_overrides`` match on
 the raw, un-sanitized key and are unaffected. Honcho scopes all queries to one
 workspace, so users cannot see each other's memory by construction. A missing
 ``user_id`` fails closed: the call becomes a no-op / empty read, never a
-shared fallback workspace.
+shared fallback workspace. Session ids reuse the same derivation
+(``df-`` + ``_stable_id(thread_id)``) — bare ``sanitize_id`` would merge
+threads like ``"t.1"`` and ``"t-1"`` into one Honcho session.
 
 Portability golden rule: the only ``from deerflow`` import is the contract line
 below. Everything else arrives via ``backend_config``.
@@ -42,13 +44,13 @@ from .config import HonchoConfig, sanitize_id
 
 logger = logging.getLogger(__name__)
 
-_UTC_NOW_FIELDS = ("%Y-%m-%dT%H:%M:%SZ",)
+_UTC_NOW_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _now_iso() -> str:
     import datetime
 
-    return datetime.datetime.now(datetime.UTC).strftime(_UTC_NOW_FIELDS[0])
+    return datetime.datetime.now(datetime.UTC).strftime(_UTC_NOW_FORMAT)
 
 
 def _content_to_text(content: Any) -> str:
@@ -128,6 +130,23 @@ class HonchoMemoryManager(MemoryManager):
     def _user_peer(self, user_id: str) -> str:
         return self._config.user_peer_overrides.get(user_id) or _stable_id(user_id)
 
+    # ── recall policy gate (get_context / search / get_memory) ───────────
+    def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
+        """Single ``failure_policy.read`` gate for every recall path, mirroring
+        mem0's helper of the same name: fail-open (default) logs and returns
+        ``fallback``; ``fail_closed`` wraps into ``MemoryManagerError``. The
+        broad ``except Exception`` is the containment boundary — no client
+        exception may escape into ``MemoryMiddleware.after_agent``."""
+        try:
+            return fn()
+        except MemoryManagerError:
+            raise
+        except Exception as exc:
+            if self._config.read_fail_closed:
+                raise MemoryManagerError(f"honcho memory recall failed: {exc}") from exc
+            logger.warning("honcho memory: recall failed (fail-open): %s", exc)
+            return fallback
+
     # ── Tier 1: write ────────────────────────────────────────────────────
     def add(
         self,
@@ -156,7 +175,7 @@ class HonchoMemoryManager(MemoryManager):
                 outgoing.append({"peer_id": assistant_peer, "content": text[: self._config.message_char_limit]})
         if not outgoing:
             return
-        session_id = f"df-{sanitize_id(thread_id)}"
+        session_id = f"df-{_stable_id(thread_id)}"
         try:
             self._client.get_or_create_peer(workspace, user_peer)
             self._client.get_or_create_peer(workspace, assistant_peer)
@@ -179,15 +198,7 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
             return ""
-        try:
-            representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
-        except MemoryManagerError:
-            raise
-        except Exception as exc:
-            if self._config.read_fail_closed:
-                raise MemoryManagerError(f"honcho memory recall failed: {exc}") from exc
-            logger.warning("honcho memory: recall failed (fail-open): %s", exc)
-            return ""
+        representation = self._read_or_fallback("", lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25))
         return representation.strip()[: self._config.max_injection_chars]
 
     # ── Tier 2 ───────────────────────────────────────────────────────────
@@ -203,13 +214,7 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None:
             return []
-        try:
-            results = self._client.search(workspace, query, limit=top_k)
-        except MemoryManagerError:
-            raise
-        except Exception as exc:
-            logger.warning("honcho memory: search failed: %s", exc)
-            return []
+        results = self._read_or_fallback([], lambda: self._client.search(workspace, query, limit=top_k))
         return [
             {
                 "content": item.get("content", ""),
@@ -237,12 +242,8 @@ class HonchoMemoryManager(MemoryManager):
         workspace = self._workspace(user_id)
         if workspace is None or not user_id:
             return empty
-        try:
-            representation = self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25)
-        except MemoryManagerError:
-            raise
-        except Exception as exc:
-            logger.warning("honcho memory: get_memory failed: %s", exc)
+        representation = self._read_or_fallback(None, lambda: self._client.working_representation(workspace, self._user_peer(user_id), max_conclusions=25))
+        if representation is None:  # fail-open fallback: keep the noop-shaped doc
             return empty
         now = _now_iso()
         return {

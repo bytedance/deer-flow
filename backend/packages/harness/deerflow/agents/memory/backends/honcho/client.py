@@ -20,7 +20,8 @@ class HonchoRequestError(RuntimeError):
 
 
 class HonchoClient:
-    def __init__(self, config: HonchoConfig) -> None:
+    def __init__(self, config: HonchoConfig, *, transport: httpx.BaseTransport | None = None) -> None:
+        # `transport` exists so tests can inject httpx.MockTransport (Mem0Client precedent).
         headers = {"Content-Type": "application/json"}
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
@@ -28,6 +29,7 @@ class HonchoClient:
             base_url=config.base_url,
             headers=headers,
             timeout=httpx.Timeout(config.timeout_seconds, connect=config.connect_timeout_seconds),
+            transport=transport,
         )
 
     def close(self) -> None:
