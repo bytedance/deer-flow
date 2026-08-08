@@ -8,11 +8,13 @@ signature the GitHub registry keys its cache off.
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest import mock
 
 import pytest
 from sqlalchemy import create_engine
 
+import deerflow.persistence.agents.model as agent_model
 from deerflow.config.agents_config import AgentConfig
 from deerflow.persistence.agents.base import AgentExistsError
 from deerflow.persistence.agents.model import AgentRow
@@ -157,6 +159,36 @@ def test_signature_changes_on_mutation(store):
     assert store.signature() == after_create
 
     store.update("x", {"name": "x", "description": "changed"}, None, user_id="u1")
+    assert store.signature() != after_create
+
+
+def test_signature_changes_when_update_reuses_timestamp(store, monkeypatch):
+    store.create(
+        "x",
+        {"name": "x", "description": "before"},
+        "s",
+        user_id="u1",
+    )
+    after_create = store.signature()
+
+    with store._Session() as session:
+        frozen_timestamp = session.query(AgentRow).one().updated_at
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_timestamp
+
+    monkeypatch.setattr(agent_model, "datetime", FrozenDateTime)
+
+    store.update(
+        "x",
+        {"name": "x", "description": "changed"},
+        None,
+        user_id="u1",
+    )
+
+    assert store.get("x", user_id="u1").description == "changed"
     assert store.signature() != after_create
 
 
