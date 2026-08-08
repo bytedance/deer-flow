@@ -74,8 +74,12 @@ def test_check_script_uses_shared_pnpm_runner():
     assert 'Path(__file__).resolve().with_name("pnpm.py")' in check_script
 
 
-def test_check_script_resolves_runner_paths_independently_of_cwd():
-    check_script = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_paths")
+def test_check_script_resolves_runner_paths_independently_of_cwd(monkeypatch):
+    # Reproduce invoking the entry point with a relative script path from the
+    # repository root. Before the fix, `__file__` stayed relative and the
+    # runner became `scripts/pnpm.py`, which later broke after cwd changed.
+    monkeypatch.chdir(REPO_ROOT)
+    check_script = _load_script(Path("scripts/check.py"), "deerflow_check_script_paths")
 
     assert check_script.PNPM_SCRIPT_PATH == PNPM_SCRIPT_PATH
     assert check_script.PNPM_SCRIPT_PATH.is_absolute()
