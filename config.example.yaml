@@ -1699,17 +1699,18 @@ memory:
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
-  # OpenViking HTTP example (replace this DeerMem backend_config block when
-  # manager_class is openviking; OpenViking currently supports middleware mode):
+  # OpenViking example (replace this DeerMem backend_config block when
+  # manager_class is openviking). This first official-adapter integration uses
+  # one credential-bound OpenViking USER key for one DeerFlow user and supports
+  # middleware mode only. Use owner_user_id: default when DeerFlow auth is off.
   #
   # backend_config:
   #   base_url: http://openviking:1933
-  #   auth_mode: trusted
-  #   account: deerflow
+  #   owner_user_id: default
   #   api_key_env: OPENVIKING_API_KEY
-  #   max_connections: 100
-  #   max_keepalive_connections: 20
-  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
+  #   timeout_seconds: 30
+  #   default_peer_id: deerflow
+  #   max_seen_message_ids: 512 # bounded hash-only capture cursor
   #   startup_policy: fail_fast
   #   failure_policy:
   #     read: fail_open
@@ -1718,6 +1719,10 @@ memory:
   #     top_k: 8
   #     score_threshold: 0.25
   #     max_injection_chars: 12000
+  #     content_mode: overview
+  #     injection_query: >-
+  #       user profile preferences important entities events ongoing goals
+  #       constraints and prior decisions
   #
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled

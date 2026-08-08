@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import IntegrityError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -78,6 +79,21 @@ async def test_remote_task_id_is_unique_per_user_and_server(tmp_path):
         remote_task_id="shared-remote-id",
     )
     assert other_user["remote_task_id"] == "shared-remote-id"
+
+
+@pytest.mark.asyncio
+async def test_other_integrity_errors_are_not_duplicate_remote_tasks(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="shared-local-id", now=now)
+
+    with pytest.raises(IntegrityError):
+        await _create_working_task(
+            repo,
+            task_id="shared-local-id",
+            now=now,
+            remote_task_id="different-remote-id",
+        )
 
 
 @pytest.mark.asyncio

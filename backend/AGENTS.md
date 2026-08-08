@@ -272,8 +272,8 @@ Blocking-IO runtime gate (`tests/blocking_io/`):
   skips redundant sandbox sync when thread data is already mounted);
   `test_channel_outbound_files.py` (locks Feishu, Telegram, and WeCom outbound
   attachment open/read/hash work off the event loop);
-  `test_openviking_memory_backend.py` (locks the OpenViking backend's async
-  add/context/search entrypoints offloading synchronous HTTP and watermark
+  `test_openviking_memory_backend.py` (locks the official OpenViking backend's
+  async add/context/search entrypoints offloading synchronous SDK and cursor
   filesystem IO); and
   `test_workspace_changes_recorder.py` (locks the offload around the snapshot
   text cache lifecycle — roots resolution, `mkdtemp`, and the `shutil.rmtree`
@@ -978,6 +978,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 
 **GitHub event-driven agents** (webhook-driven IM channel):
 - Custom agents declare a `github:` block in their `config.yaml` to bind to repos and event triggers; the webhook route is fail-closed by default (mounted only when `GITHUB_WEBHOOK_SECRET` is set) and exempt from auth/CSRF because authenticity is enforced by HMAC.
+- Registry caching is keyed by the configured agent store's opaque signature: file storage uses agent config mtimes, while database storage hashes the ordered owner/name/config/soul contents so same-timestamp writes still invalidate webhook routing.
 - Outbound is **log-only** by design: each agent posts its own reply mid-run via the `gh` CLI from its sandbox, so the manager uses `fire_and_forget=True` and `runs.create()` returns once pending.
 - **Follow-up buffering while busy** (issue #4121): because outbound is log-only, the pre-existing `THREAD_BUSY_MESSAGE` reply on a `ConflictError` was invisible to the commenter — a comment posted while a run was already active looked like it had been silently ignored. When `ChannelRunPolicy.buffer_followups_on_busy=True` (GitHub's default), a `ConflictError` on `runs.create()` now also appends the triggering message to a per-thread, in-memory buffer (`ChannelManager._followup_buffers`) — deduped by GitHub delivery id, capped at `FOLLOWUP_BUFFER_MAX_PER_THREAD` (20, oldest dropped with a WARNING log on overflow). The first successful `runs.create()` on a thread now captures its `run_id` and spawns a background watcher that subscribes to that run's `StreamBridge` stream; once it observes `END_SENTINEL`, the watcher drains up to `FOLLOWUP_DRAIN_BATCH_SIZE` (10) buffered entries into one `<followups-while-busy>`-wrapped input and fires a follow-up `runs.create()` — itself watched the same way, so a backlog deeper than one batch chains into further drain cycles instead of growing one unbounded input. If that follow-up `runs.create()` itself hits `ConflictError` (e.g. a manual Web UI turn or a scheduled run raced onto the same thread), the batch is requeued rather than lost, and is retried whenever this manager next successfully creates and watches a run on that thread. Reactions/acknowledgment (e.g. GitHub's `eyes`/`confused` reaction API) on buffered comments are intentionally **out of scope** for this mechanism and left to a follow-up — comments are coalesced silently. **Plumbing**: the watcher needs the Gateway's `StreamBridge` singleton, which `ChannelManager` did not previously have access to; it is threaded from `app.py`'s lifespan (where `app.state.stream_bridge` is already set by `langgraph_runtime`) through `start_channel_service(get_stream_bridge=...)` → `ChannelService.__init__` → `ChannelManager.__init__`, as a zero-arg closure mirroring the existing `launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs)` pattern used for `ScheduledTaskService` in the same lifespan function. A `ChannelManager` constructed without it (e.g. directly in a test) still buffers safely — it just has no watcher to auto-drain. **Scope limitation**: the buffer and watcher state are per-process, in-memory. Under `GATEWAY_WORKERS>1` or multi-pod, a follow-up comment routed to a different worker process than the one running the busy thread's agent will not see that buffer. This is a known, deliberately deferred limitation with the same shape as the cross-pod gap described for issue #4120 (a shared buffer store or IM-leader election would be needed to close it) — single-process/single-pod deployments, the safe default, see no correctness issue from this, only the documented per-process scope.
 - See [backend/docs/GITHUB_AGENTS.md](docs/GITHUB_AGENTS.md) for the architecture diagrams: webhook → fan-out → `InboundMessage` dispatch, `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism, mention-handle precedence chain, GH token lifecycle via `GH_TOKEN`/`GITHUB_TOKEN` per-call `extra_env`, and the narrow `ConflictError` (HTTP 409) thread-create race recovery.
@@ -1017,26 +1018,26 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - `memory.mode: middleware` (default) keeps the passive path: `MemoryMiddleware` filters messages (user inputs + final AI responses), captures `user_id` via `resolve_runtime_user_id(runtime)`, queues conversation with the captured `user_id`, and the debounced background thread invokes the LLM to extract context updates and facts using the stored `user_id`. `DynamicContextMiddleware` passes the same resolved identity to the memory read path. On standalone Agent Server runs, server-owned auth identity is also resolved during lead-agent construction, normalized through `make_safe_user_id` for DeerFlow storage, and explicitly reused for custom-agent config/SOUL, user skills, skill policy, and prompt assembly; ordinary client `user_id` values cannot override `langgraph_auth_user_id`. On the embedded Gateway path, `inject_authenticated_user_context` removes client-supplied `langgraph_auth_user` / `langgraph_auth_user_id` from both RunnableConfig sections before graph construction, so those reserved fields cannot impersonate Agent Server auth.
 - The optional `openviking` backend under
   `packages/harness/deerflow/agents/memory/backends/openviking/` is a
-  remote-only HTTP adapter. Select it with
+  remote-only adapter built on the maintained `langchain-openviking` package.
+  Select it with
   `memory.manager_class: openviking` and keep `memory.mode: middleware`. It
-  commits filtered turns to OpenViking Sessions and maps remote memory search
-  results into the shared contract. It hashes `(user_id, agent_name)` into a
-  safe OpenViking trusted-user identity for hard scope isolation and keeps
-  bounded message watermarks below
-  `{storage_path}/openviking/sessions/`. The watermark combines a constant-size
-  ordered-prefix digest for append-only histories with a bounded recent-ID
-  fallback for compaction and separately records submitted and committed
-  progress. Once batch submission succeeds, a later update never resubmits
-  those messages or retries an ambiguous commit; a future batch can commit the
-  still-open Session together with new messages. Schema-v2 recent-ID
-  watermarks migrate without duplicating their anchored history. The shared
-  HTTP client has explicit total/keep-alive connection limits and jittered
-  exponential retry delays, and its configuration representation omits the API
-  key. Session locks are weakly cached, async entrypoints offload synchronous
-  HTTP and file IO, and graceful shutdown rejects new work before draining all
-  in-flight client operations within its timeout. It does not implement
-  DeerMem fact CRUD/import/export and must not import the OpenViking embedded
-  runtime.
+  uses one OpenViking USER API key bound to the configured DeerFlow
+  `owner_user_id`; another DeerFlow user is rejected before remote access.
+  DeerFlow owns the existing recall/capture timing, fixed injection query and
+  full-transcript suffix cursor. `langchain-openviking` owns SDK transport,
+  message conversion, tool-call preservation, batching, partial-write progress
+  and Session commits. One DeerFlow thread maps to one stable OpenViking
+  Session, with the default or named agent represented as its actor peer.
+  Bounded hash-only cursors live below `{storage_path}/openviking/sessions/`;
+  session locks are weakly cached, async entrypoints offload synchronous SDK
+  and file IO, and graceful shutdown drains active operations before closing
+  the recorder-owned client. The recorder receives an explicit empty
+  `extra_headers` mapping so `ovcli.conf` cannot add arbitrary transport
+  headers. Do not reintroduce a backend-local HTTP client,
+  explicitly configured trusted identity headers, root-key data access, or
+  imports of the OpenViking embedded runtime. Multi-user provisioning,
+  query-aware refresh policy and new lifecycle scheduling are separate changes,
+  not part of this backend.
 - `memory.mode: tool` skips `MemoryMiddleware` and registers `memory_search`, `memory_add`, `memory_update`, and `memory_delete` on the agent. The model decides when to search, add, update, or delete facts; this is opt-in/experimental and should not be described as better than middleware mode without eval evidence.
 - Both modes share `FileMemoryStorage`, per-user/per-agent isolation, manual CRUD primitives, and the updater backend. Injection is mode-aware: middleware mode injects global `user`/`history` summaries plus the selected agent's facts, while tool mode injects only the global summaries and leaves every agent fact behind `memory_search` to avoid duplicating automatically injected and retrieval-returned context. `memory.injection_enabled: false` suppresses the complete block in either mode.
 - Middleware extraction classifies proposed facts with extraction-only `scope`/`durability`/`authority` labels. `_apply_updates` accepts only `user` + `durable` + `descriptive` new/consolidated facts, accepts only wholly user-scoped summary prose with `authority=descriptive`, and rejects missing labels per item without aborting unrelated updates. Contradiction removals use object entries with `id`, `scope`, `reason`, and optional zero-based `replacementFactIndex`; task/project removals fail closed, and a paired removal runs only when the referenced replacement survives the scope/confidence gates, deduplication, and max-fact trim under another fact ID. The labels are not persisted, so no storage migration is required. Staleness removals retain their independent candidate/cap guardrails, while tool-mode CRUD remains outside this extraction gate. Custom `memory.backend_config.prompts_dir` templates (including per-agent overrides) must carry the same classification fields; an un-migrated template makes the fail-closed gate reject every extraction-driven write, observable only through `rejected_by_scope_gate` and the >60% fact-rejection warning.
