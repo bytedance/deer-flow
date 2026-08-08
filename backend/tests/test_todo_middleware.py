@@ -681,6 +681,27 @@ class TestRunScopedReminderCleanup:
 
 
 class TestAwrapModelCall:
+    def test_async_no_pending_reminder_still_injects_todo_system_prompt(self):
+        """Mirror of the sync no-reminder test: the async path must also keep the
+        base class system-prompt injection while leaving messages untouched when
+        there are no pending completion reminders."""
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        request = _make_model_request([HumanMessage(content="hi")], runtime=runtime)
+        seen: list[ModelRequest] = []
+
+        async def handler(model_request: ModelRequest):
+            seen.append(model_request)
+            return "response"
+
+        result = asyncio.run(mw.awrap_model_call(request, handler))
+        assert result == "response"
+        assert len(seen) == 1
+        sent = seen[0]
+        assert sent.system_message is not None
+        assert "write_todos" in sent.system_message.text
+        assert sent.messages == [HumanMessage(content="hi")]
+
     def test_async_pending_reminder_is_injected(self):
         mw = TodoMiddleware()
         runtime = _make_runtime()
