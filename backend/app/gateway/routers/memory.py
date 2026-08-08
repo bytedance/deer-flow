@@ -6,6 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
+from app.gateway.deps import is_admin_user
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
@@ -13,6 +14,18 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
 
 router = APIRouter(prefix="/api", tags=["memory"])
+
+
+async def _redact_backend_config(backend_config: dict, request: Request) -> dict:
+    """Return ``backend_config`` with host paths redacted for non-admin callers.
+
+    Applied by **every** host-path-emitting memory route (config and status)
+    so the redaction cannot be bypassed by hitting the other endpoint.
+    Uses the shared fail-closed ``deps.is_admin_user`` gating.
+    """
+    if "storage_path" in backend_config and not await is_admin_user(request):
+        return {**backend_config, "storage_path": None}
+    return backend_config
 
 
 def _resolve_memory_user_id(request: Request) -> str:
@@ -438,7 +451,7 @@ async def import_memory(request: MemoryResponse, http_request: Request) -> Memor
     summary="Get Memory Configuration",
     description="Retrieve the current memory system configuration.",
 )
-async def get_memory_config_endpoint() -> MemoryConfigResponse:
+async def get_memory_config_endpoint(request: Request) -> MemoryConfigResponse:
     """Get the memory system configuration.
 
     Returns:
@@ -471,13 +484,14 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         ```
     """
     config = get_memory_config()
+    backend_config = await _redact_backend_config(config.backend_config, request)
     return MemoryConfigResponse(
         enabled=config.enabled,
         mode=config.mode,
         injection_enabled=config.injection_enabled,
         shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
         manager_class=config.manager_class,
-        backend_config=config.backend_config,
+        backend_config=backend_config,
     )
 
 
@@ -505,7 +519,7 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             injection_enabled=config.injection_enabled,
             shutdown_flush_timeout_seconds=config.shutdown_flush_timeout_seconds,
             manager_class=config.manager_class,
-            backend_config=config.backend_config,
+            backend_config=await _redact_backend_config(config.backend_config, http_request),
         ),
         data=MemoryResponse(**memory_data),
     )
