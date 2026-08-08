@@ -19,9 +19,19 @@ export class SkillRequestError extends Error {
 
 async function readErrorDetail(response: Response): Promise<string> {
   const data = (await response.json().catch(() => ({}))) as {
-    detail?: string;
+    detail?: string | { message?: unknown };
   };
-  return data.detail ?? `HTTP ${response.status}: ${response.statusText}`;
+  if (typeof data.detail === "string") {
+    return data.detail;
+  }
+  if (
+    data.detail &&
+    typeof data.detail === "object" &&
+    typeof data.detail.message === "string"
+  ) {
+    return data.detail.message;
+  }
+  return `HTTP ${response.status}: ${response.statusText}`;
 }
 
 export async function loadSkills() {
@@ -90,6 +100,29 @@ export async function installSkill(
       skill_name: "",
       message,
     };
+  }
+
+  return response.json();
+}
+
+export async function installSkillFile(
+  file: File,
+): Promise<InstallSkillResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/install/upload`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
+
+  if (!response.ok) {
+    throw new SkillRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
   }
 
   return response.json();
