@@ -6,7 +6,9 @@ Run from repo root:
 
 from __future__ import annotations
 
+import runpy
 import sys
+from pathlib import Path
 
 import doctor
 
@@ -28,6 +30,15 @@ class TestCheckPython:
 
 
 class TestCheckPnpm:
+    def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
+        repo_root = Path(doctor.__file__).resolve().parents[1]
+        monkeypatch.chdir(repo_root)
+
+        namespace = runpy.run_path(str(Path("scripts") / "doctor.py"))
+
+        assert namespace["PNPM_SCRIPT_PATH"] == repo_root / "scripts" / "pnpm.py"
+        assert namespace["FRONTEND_DIR"] == repo_root / "frontend"
+
     def test_uses_shared_runner_from_frontend(self, monkeypatch):
         captured = {}
 
