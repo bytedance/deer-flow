@@ -63,9 +63,18 @@ def test_config_parsing_normalizes_allowlist_and_defaults():
     assert ch._relay_url == "wss://buzz.example.com"
 
 
-def test_config_rejects_non_websocket_relay_url():
+@pytest.mark.parametrize(
+    "relay_url",
+    [
+        "https://buzz.example.com",
+        "ws://",
+        "wss://",
+        "ws:///missing-host",
+    ],
+)
+def test_config_rejects_invalid_websocket_relay_url(relay_url):
     with pytest.raises(ValueError):
-        _channel(relay_url="https://buzz.example.com")
+        _channel(relay_url=relay_url)
 
 
 def test_start_and_stop_manage_outbound_subscription():

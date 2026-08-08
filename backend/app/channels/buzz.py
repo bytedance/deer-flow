@@ -254,14 +254,15 @@ class BuzzChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="buzz", bus=bus, config=config)
         self._relay_url = str(config.get("relay_url", "")).strip()
-        if not self._relay_url.startswith(("ws://", "wss://")):
-            raise ValueError("channels.buzz.relay_url must be a ws:// or wss:// URL")
+        parsed_relay_url = urlparse(self._relay_url)
+        if parsed_relay_url.scheme not in ("ws", "wss") or not parsed_relay_url.hostname:
+            raise ValueError("channels.buzz.relay_url must be a ws:// or wss:// URL with a host")
         # One community per relay URL (see the design's multi-community note), so the
         # relay host is this channel's workspace: it scopes inbound dedupe, the
         # persisted connection row written by `/connect`, and the lookup that resolves
         # that row back on the inbound path. Computed once here so those three uses
         # can never drift apart.
-        self._workspace_id = urlparse(self._relay_url).netloc
+        self._workspace_id = parsed_relay_url.netloc
         self._private_key_raw = str(config.get("private_key", ""))
         self._keys: buzz_nostr.NostrKeys | None = None  # parsed in start() so coincurve stays lazy
         self._allowed_users = {buzz_nostr.parse_pubkey(v) for v in config.get("allowed_users", []) or []}
