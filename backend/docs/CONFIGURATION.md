@@ -648,6 +648,26 @@ title:
   model_name: null  # null = fast local fallback; set a model name to use LLM title generation
 ```
 
+### Memory Injection
+
+Automatic memory injection has one master gate and two independent timing
+controls:
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true          # master injection gate
+  session_injection_enabled: true  # frozen baseline snapshot; existing default
+  turn_injection_enabled: false    # latest-query recall; opt-in
+```
+
+`turn_injection_enabled` is used only when the selected `MemoryManager`
+advertises query-aware context support. Turn context is inserted into the model
+request as a hidden `HumanMessage`; it is not written to graph state,
+checkpoints, history, or memory capture input. When `injection_enabled` is
+`true`, at least one timing control must remain enabled. Set the master gate to
+`false` to disable all automatic injection.
+
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
 
 The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.

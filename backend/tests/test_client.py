@@ -2084,6 +2084,8 @@ class TestMemoryManagement:
         config.enabled = True
         config.mode = "middleware"
         config.injection_enabled = True
+        config.session_injection_enabled = True
+        config.turn_injection_enabled = False
         config.manager_class = "deermem"
         config.backend_config = {}
 
@@ -2098,6 +2100,8 @@ class TestMemoryManagement:
         config.enabled = True
         config.mode = "middleware"
         config.injection_enabled = True
+        config.session_injection_enabled = True
+        config.turn_injection_enabled = False
         config.manager_class = "deermem"
         config.backend_config = {}
 
@@ -2885,6 +2889,8 @@ class TestScenarioMemoryWorkflow:
         config.enabled = True
         config.mode = "middleware"
         config.injection_enabled = True
+        config.session_injection_enabled = True
+        config.turn_injection_enabled = False
         config.manager_class = "deermem"
         config.backend_config = {}
 
@@ -3265,6 +3271,8 @@ class TestGatewayConformance:
         mem_cfg.enabled = True
         mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
+        mem_cfg.session_injection_enabled = True
+        mem_cfg.turn_injection_enabled = False
         mem_cfg.manager_class = "deermem"
         mem_cfg.backend_config = {}
 
@@ -3280,6 +3288,8 @@ class TestGatewayConformance:
         mem_cfg.enabled = True
         mem_cfg.mode = "middleware"
         mem_cfg.injection_enabled = True
+        mem_cfg.session_injection_enabled = True
+        mem_cfg.turn_injection_enabled = False
         mem_cfg.manager_class = "deermem"
         mem_cfg.backend_config = {}
 

@@ -31,6 +31,11 @@ ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
 # entire value must be stripped from every observable serialization surface.
 SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY = "__skill_tool_policy_decision"
 
+# Reserved sub-key holding request-local query-aware memory text for reuse
+# across model calls in one tool loop. It contains recalled user data and must
+# never be persisted or externalized.
+DYNAMIC_MEMORY_CONTEXT_KEY = "__dynamic_memory_context"
+
 LEGACY_AUTH_TOKEN_METADATA_KEY = "auth_token"
 
 
@@ -129,6 +134,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
         SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        DYNAMIC_MEMORY_CONTEXT_KEY,
     }
 )
 
