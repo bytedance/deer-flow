@@ -834,6 +834,10 @@ export interface Translations {
       title: string;
       description: string;
       createSkill: string;
+      installPackage: string;
+      installing: string;
+      invalidPackage: string;
+      installFailed: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
