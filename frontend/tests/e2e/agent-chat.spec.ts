@@ -78,6 +78,123 @@ test.describe("Agent chat", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  for (const {
+    name,
+    toolGroups,
+    browserControlEnabled,
+    expectedVisible,
+    mock,
+  } of [
+    {
+      name: "shows Browser Live for an explicit browser tool group",
+      toolGroups: ["browser"],
+      browserControlEnabled: true,
+      expectedVisible: true,
+    },
+    {
+      name: "shows Browser Live when tool groups are unrestricted",
+      toolGroups: null,
+      browserControlEnabled: true,
+      expectedVisible: true,
+    },
+    {
+      name: "hides Browser Live without the browser tool group",
+      toolGroups: ["web"],
+      browserControlEnabled: true,
+      expectedVisible: false,
+    },
+    {
+      name: "hides Browser Live when browser control is unavailable",
+      toolGroups: ["browser"],
+      browserControlEnabled: false,
+      expectedVisible: false,
+    },
+    {
+      name: "hides Browser Live in mock custom-agent chats",
+      toolGroups: ["browser"],
+      browserControlEnabled: true,
+      expectedVisible: false,
+      mock: true,
+    },
+  ]) {
+    test(name, async ({ page }) => {
+      const agent = {
+        name: "browser-agent",
+        description: "A custom agent for Browser Live tests",
+        tool_groups: toolGroups,
+      };
+      mockLangGraphAPI(page, {
+        agents: [agent],
+        features: { browserControlEnabled },
+        threads: [
+          {
+            thread_id: MOCK_THREAD_ID,
+            title: "Browser agent conversation",
+            agent_name: agent.name,
+            messages: [
+              {
+                type: "ai",
+                id: "msg-ai-browser-agent",
+                content: "Ready to browse",
+              },
+            ],
+          },
+        ],
+      });
+
+      const featuresLoaded = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/features" &&
+          response.status() === 200,
+      );
+      await page.goto(
+        `/workspace/agents/${agent.name}/chats/${MOCK_THREAD_ID}${mock ? "?mock=true" : ""}`,
+      );
+      await featuresLoaded;
+      if (mock) {
+        await expect(
+          page.locator("header span", { hasText: agent.name }),
+        ).toBeVisible({ timeout: 15_000 });
+      } else {
+        await expect(page.getByText("Ready to browse")).toBeVisible({
+          timeout: 15_000,
+        });
+      }
+
+      const browserTrigger = page.getByTestId("browser-trigger");
+      if (expectedVisible) {
+        await expect(browserTrigger).toBeVisible();
+        await browserTrigger.click();
+        await expect(
+          page.getByPlaceholder("Enter a URL and press Enter"),
+        ).toBeVisible();
+      } else {
+        await expect(browserTrigger).toHaveCount(0);
+      }
+    });
+  }
+
+  test("hides Browser Live before a custom-agent thread is created", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      agents: [
+        {
+          name: "browser-agent",
+          description: "A custom agent for Browser Live tests",
+          tool_groups: ["browser"],
+        },
+      ],
+      features: { browserControlEnabled: true },
+    });
+
+    await page.goto("/workspace/agents/browser-agent/chats/new");
+    await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("browser-trigger")).toHaveCount(0);
+  });
+
   test("agent chat can regenerate its latest response", async ({ page }) => {
     const humanMessage = {
       type: "human",
