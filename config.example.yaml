@@ -1488,6 +1488,21 @@ sandbox:
 #   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
+# Tool Result Verification
+# ============================================================================
+# Deterministic receipts are stamped onto tool results and injected into the
+# model context so final reports can cite executed actions. Disable them only
+# if the extra provenance context is not wanted. The selective judge settings
+# are reserved for acceptance-criteria review and remain off by default.
+verification:
+  receipts_enabled: true
+  # Lead-chain ledger rendering: 'delegation_only' renders only while
+  # processing subagent results (subagent chains always render).
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
+
+# ============================================================================
 # ACP Agents Configuration
 # ============================================================================
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.

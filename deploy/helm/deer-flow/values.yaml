@@ -287,6 +287,12 @@ config: |
   memory:
     storage_path: memory.json
 
+  verification:
+    receipts_enabled: true
+    receipts_render_mode: "delegation_only"
+    judge_enabled: false
+    judge_model_name: null
+
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
   # tools run inside the AIO sandbox configured above. The web tools
