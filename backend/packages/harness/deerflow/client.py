@@ -21,7 +21,6 @@ import copy
 import logging
 import mimetypes
 import os
-import shutil
 import uuid
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -62,13 +61,17 @@ from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
+from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
-    claim_unique_filename,
+    PublishedUpload,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    publish_upload_copy_leased,
+    rollback_published_upload,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1495,11 +1498,12 @@ class DeerFlowClient:
             ValueError: If any supplied path exists but is not a regular file.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+        from deerflow.uploads.sandbox_sync import SandboxSyncReceipt, make_upload_paths_available, rollback_sandbox_sync
+        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         # Validate all files upfront to avoid partial uploads.
-        resolved_files = []
-        seen_names: set[str] = set()
+        resolved_files: list[Path] = []
         has_convertible_file = False
         for f in files:
             p = Path(f)
@@ -1507,13 +1511,17 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(p.name, seen_names)
-            resolved_files.append((p, dest_name))
+            resolved_files.append(p)
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
+        sandbox_provider = get_sandbox_provider(app_config=self._app_config)
+        effective_user_id = get_effective_user_id()
         uploaded_files: list[dict] = []
+        publications: list[PublishedUpload] = []
+        sandbox_receipts: list[SandboxSyncReceipt] = []
+        reserved_coordination_keys: set[str] = set()
 
         conversion_pool = None
         if has_convertible_file:
@@ -1528,13 +1536,25 @@ class DeerFlowClient:
                 # creating a new ThreadPoolExecutor per converted file.
                 conversion_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        def _convert_in_thread(path: Path, output_path: Path | None = None):
-            return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
+        def _convert_in_thread(publication: PublishedUpload) -> Path | None:
+            return asyncio.run(
+                convert_uploaded_file_to_markdown(
+                    publication.path,
+                    publication=publication,
+                )
+            )
 
         try:
-            for src_path, dest_name in resolved_files:
-                dest = uploads_dir / dest_name
-                shutil.copy2(src_path, dest)
+            for src_path in resolved_files:
+                publication = publish_upload_copy_leased(
+                    uploads_dir,
+                    src_path.name,
+                    src_path,
+                    reserved_coordination_keys=reserved_coordination_keys,
+                )
+                publications.append(publication)
+                dest = publication.path
+                dest_name = dest.name
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
@@ -1546,18 +1566,18 @@ class DeerFlowClient:
                 if dest_name != src_path.name:
                     info["original_filename"] = src_path.name
 
+                md_path = None
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    # Reserve companion .md name before convert so two stems
-                    # that collapse to the same .md (or a prior .md upload)
-                    # cannot silently overwrite each other.
-                    provisional_md_name = Path(dest_name).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
-                    md_output = dest.with_name(unique_md_name)
                     try:
                         if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
+                            md_path = conversion_pool.submit(_convert_in_thread, publication).result()
                         else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                            md_path = asyncio.run(
+                                convert_uploaded_file_to_markdown(
+                                    dest,
+                                    publication=publication,
+                                )
+                            )
                     except Exception:
                         logger.warning(
                             "Failed to convert %s to markdown",
@@ -1567,26 +1587,58 @@ class DeerFlowClient:
                         md_path = None
 
                     if md_path is not None:
+                        md_virtual_path = conversion_virtual_path(dest_name)
                         info["markdown_file"] = md_path.name
-                        info["markdown_path"] = str(uploads_dir / md_path.name)
-                        info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
-                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    else:
-                        # Conversion failed and wrote nothing, so release the
-                        # claim; holding it would rename a later same-stem
-                        # upload against a name nothing occupies.
-                        seen_names.discard(unique_md_name)
+                        info["markdown_path"] = str(md_path)
+                        info["markdown_virtual_path"] = md_virtual_path
+                        info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
+
+                sandbox_paths = [(dest, upload_virtual_path(dest_name))]
+                if md_path is not None:
+                    sandbox_paths.append((md_path, conversion_virtual_path(dest_name)))
+                sandbox_receipts.append(
+                    make_upload_paths_available(
+                        sandbox_provider,
+                        thread_id,
+                        user_id=effective_user_id,
+                        paths=sandbox_paths,
+                    )
+                )
 
                 uploaded_files.append(info)
-        finally:
-            if conversion_pool is not None:
-                conversion_pool.shutdown(wait=True)
 
-        return {
-            "success": True,
-            "files": uploaded_files,
-            "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
-        }
+            return {
+                "success": True,
+                "files": uploaded_files,
+                "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
+            }
+        except BaseException:
+            for receipt in reversed(sandbox_receipts):
+                try:
+                    rollback_sandbox_sync(receipt)
+                except BaseException:
+                    logger.warning("Failed to roll back rejected embedded sandbox batch", exc_info=True)
+            for publication in reversed(publications):
+                try:
+                    rollback_published_upload(publication)
+                except BaseException:
+                    logger.warning("Failed to roll back rejected embedded upload: %s", publication.path, exc_info=True)
+            raise
+        finally:
+            for publication in reversed(publications):
+                try:
+                    publication.release()
+                except Exception:
+                    logger.warning(
+                        "Failed to release committed embedded upload lease: %s",
+                        publication.path,
+                        exc_info=True,
+                    )
+            if conversion_pool is not None:
+                try:
+                    conversion_pool.shutdown(wait=True)
+                except Exception:
+                    logger.warning("Failed to shut down embedded upload conversion pool", exc_info=True)
 
     def list_uploads(self, thread_id: str) -> dict:
         """List files in a thread's uploads directory.
@@ -1619,10 +1671,21 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+        from deerflow.uploads.sandbox_sync import prepare_upload_deletion
 
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        sandbox_provider = get_sandbox_provider(app_config=self._app_config)
+        delete_remote_copy = prepare_upload_deletion(
+            sandbox_provider,
+            thread_id,
+            user_id=get_effective_user_id(),
+        )
+        return delete_file_safe(
+            uploads_dir,
+            filename,
+            delete_remote_copy=delete_remote_copy,
+        )
 
     # ------------------------------------------------------------------
     # Public API — artifacts

@@ -7,6 +7,8 @@ import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +17,39 @@ import requests
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxDiscoveryResult:
+    """Non-creating discovery outcome with explicit absence semantics."""
+
+    status: Literal["found", "absent", "unknown"]
+    info: SandboxInfo | None = None
+    backend_namespace: str | None = None
+    incarnation_id: str | None = None
+
+    @classmethod
+    def found(
+        cls,
+        info: SandboxInfo | None,
+        *,
+        backend_namespace: str,
+        incarnation_id: str,
+    ) -> SandboxDiscoveryResult:
+        return cls(
+            status="found",
+            info=info,
+            backend_namespace=backend_namespace,
+            incarnation_id=incarnation_id,
+        )
+
+    @classmethod
+    def absent(cls, *, backend_namespace: str) -> SandboxDiscoveryResult:
+        return cls(status="absent", backend_namespace=backend_namespace)
+
+    @classmethod
+    def unknown(cls) -> SandboxDiscoveryResult:
+        return cls(status="unknown")
 
 
 def sandbox_http_trust_env(sandbox_url: str) -> bool:
@@ -171,6 +206,17 @@ class SandboxBackend(ABC):
             SandboxInfo if found and healthy, None otherwise.
         """
         ...
+
+    def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
+        """Discover one exact old instance without creating a replacement.
+
+        The base contract has neither a backend namespace nor an immutable
+        instance identity, so no ordinary discovery result is safe for a
+        durable mutation. Backends with authoritative identity APIs override
+        this method.
+        """
+        del sandbox_id
+        return SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.

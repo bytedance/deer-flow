@@ -22,9 +22,16 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.async_helpers import (
+    publish_upload_bytes_leased_async,
+    release_published_upload_async,
+    rollback_published_upload_async,
+)
+from deerflow.uploads.layout import upload_virtual_path
+from deerflow.uploads.sandbox_sync import make_upload_paths_available_async
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -444,38 +451,46 @@ class FeishuChannel(Channel):
         else:
             filename = re.sub(r"[./\\]", "_", raw_filename)
 
-        def _persist():
+        def _prepare_upload_dir():
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
-            resolved_target = uploads_dir / filename
-            # Use thread_lock to avoid filename conflicts when writing.
-            with self._thread_lock:
-                resolved_target.write_bytes(content)
-            return resolved_target
+            return paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)
 
         try:
-            resolved_target = await asyncio.to_thread(_persist)
+            uploads_dir = await asyncio.to_thread(_prepare_upload_dir)
+            publication = await publish_upload_bytes_leased_async(uploads_dir, filename, content)
         except Exception:
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", filename, type)
             return f"Failed to obtain the [{type}]"
 
-        virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"
-
         try:
-            sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-            if not getattr(sandbox_provider, "uses_thread_data_mounts", False):
-                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                    return f"Failed to obtain the [{type}]"
-                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
-        except Exception:
-            logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
-            return f"Failed to obtain the [{type}]"
+            virtual_path = upload_virtual_path(publication.path.name)
 
-        logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
-        return virtual_path
+            try:
+                sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+                await make_upload_paths_available_async(
+                    sandbox_provider,
+                    thread_id,
+                    user_id=effective_user_id,
+                    paths=[(publication.path, virtual_path)],
+                )
+            except asyncio.CancelledError:
+                try:
+                    await rollback_published_upload_async(publication)
+                except Exception:
+                    logger.warning("[Feishu] failed to roll back cancelled resource: %s", virtual_path, exc_info=True)
+                raise
+            except Exception:
+                try:
+                    await rollback_published_upload_async(publication)
+                except Exception:
+                    logger.warning("[Feishu] failed to roll back rejected resource: %s", virtual_path, exc_info=True)
+                logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
+                return f"Failed to obtain the [{type}]"
+
+            logger.info("[Feishu] downloaded resource mapped: file_key=%s -> %s", file_key, virtual_path)
+            return virtual_path
+        finally:
+            await release_published_upload_async(publication)
 
     # -- message formatting ------------------------------------------------
 

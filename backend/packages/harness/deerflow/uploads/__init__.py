@@ -1,9 +1,28 @@
+from .errors import AtomicUploadPublishError, PathTraversalError, UnsafeUploadPathError
+from .layout import (
+    UPLOAD_CONVERSIONS_DIRNAME,
+    UPLOAD_LOCKS_DIRNAME,
+    UnsafeConversionPathError,
+    artifact_url_for_virtual_path,
+    conversion_dir_for_uploads,
+    conversion_filename_for_upload,
+    conversion_path_for_upload,
+    conversion_virtual_path,
+    ensure_conversion_dir,
+    ensure_upload_lock_dir,
+    existing_conversion_path_for_upload,
+    validate_conversion_dir,
+)
+from .lease import UploadIdentity, UploadNameLease, portable_name_coordination_key
 from .manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
-    PathTraversalError,
+    PublishedUpload,
+    StagedUpload,
+    abort_staged_upload,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    create_upload_staging_file,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
@@ -11,20 +30,67 @@ from .manager import (
     is_upload_staging_file,
     list_files_in_dir,
     normalize_filename,
+    publish_staged_upload,
+    publish_staged_upload_leased,
+    publish_upload_bytes,
+    publish_upload_bytes_leased,
+    publish_upload_copy,
+    publish_upload_copy_leased,
+    replace_system_owned_staged_file,
+    rollback_published_upload,
     upload_artifact_url,
     upload_virtual_path,
     validate_path_traversal,
     validate_thread_id,
 )
 
+
+def __getattr__(name: str):
+    if name == "convert_uploaded_file_to_markdown":
+        from .conversion import convert_uploaded_file_to_markdown
+
+        return convert_uploaded_file_to_markdown
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "get_uploads_dir",
+    "UPLOAD_CONVERSIONS_DIRNAME",
+    "UPLOAD_LOCKS_DIRNAME",
+    "UnsafeConversionPathError",
+    "conversion_dir_for_uploads",
+    "conversion_filename_for_upload",
+    "conversion_path_for_upload",
+    "conversion_virtual_path",
+    "artifact_url_for_virtual_path",
+    "validate_conversion_dir",
+    "ensure_conversion_dir",
+    "ensure_upload_lock_dir",
+    "existing_conversion_path_for_upload",
+    "convert_uploaded_file_to_markdown",
     "ensure_uploads_dir",
     "normalize_filename",
     "PathTraversalError",
+    "UnsafeUploadPathError",
+    "AtomicUploadPublishError",
+    "UploadIdentity",
+    "UploadNameLease",
+    "portable_name_coordination_key",
+    "StagedUpload",
+    "PublishedUpload",
     "UPLOAD_STAGING_PREFIX",
     "UPLOAD_STAGING_SUFFIX",
     "claim_unique_filename",
+    "create_upload_staging_file",
+    "abort_staged_upload",
+    "publish_staged_upload",
+    "publish_staged_upload_leased",
+    "publish_upload_bytes",
+    "publish_upload_bytes_leased",
+    "publish_upload_copy",
+    "publish_upload_copy_leased",
+    "rollback_published_upload",
+    "replace_system_owned_staged_file",
     "cleanup_stale_upload_staging_files",
     "is_upload_staging_file",
     "validate_path_traversal",

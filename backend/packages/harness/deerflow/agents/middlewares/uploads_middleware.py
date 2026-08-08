@@ -18,6 +18,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.uploads.layout import UnsafeConversionPathError, conversion_virtual_path, existing_conversion_path_for_upload
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
@@ -88,24 +89,30 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
         lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
+        markdown_virtual_path = file.get("markdown_virtual_path")
+        if markdown_virtual_path:
+            lines.append(f"  Generated Markdown: {neutralize_untrusted_tags(markdown_virtual_path)}")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
         if outline:
             truncated = outline[-1].get("truncated", False)
             visible = [e for e in outline if not e.get("truncated")]
-            lines.append("  Document outline (use `read_file` with line ranges to read sections):")
+            lines.append("  Document outline (use `read_file` on the Generated Markdown path with line ranges to read sections):")
             for entry in visible:
                 lines.append(f"    L{entry['line']}: {neutralize_untrusted_tags(entry['title'])}")
             if truncated:
-                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further)")
+                lines.append(f"    ... (showing first {len(visible)} headings; use `read_file` to explore further on the Generated Markdown path)")
         else:
             preview = file.get("outline_preview") or []
             if preview:
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
                     lines.append(f"    > {neutralize_untrusted_tags(text)}")
-            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+            if markdown_virtual_path:
+                lines.append("  Use `grep` on the Generated Markdown path to search for keywords.")
+            else:
+                lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
         lines.append("")
 
     def _select_files_for_context(
@@ -240,6 +247,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             # Clear stale uploaded_files so list_uploaded_files doesn't
             # exclude files that became historical after the previous turn.
             return {"uploaded_files": []}
+
+        if uploads_dir:
+            for file in new_files:
+                phys_path = uploads_dir / file["filename"]
+                try:
+                    generated_path = existing_conversion_path_for_upload(phys_path)
+                except UnsafeConversionPathError:
+                    logger.warning("Ignoring unsafe generated conversion for %s", file["filename"])
+                    generated_path = None
+                if generated_path is not None:
+                    file["markdown_virtual_path"] = conversion_virtual_path(file["filename"])
 
         context_files, omitted_files = self._select_files_for_context(new_files)
 

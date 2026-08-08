@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import stat
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -60,6 +61,55 @@ def test_thread_data_mounts_override_precedes_backend_detection(backend_is_local
     provider._backend = object.__new__(aio_mod.LocalContainerBackend) if backend_is_local else object()
 
     assert provider.uses_thread_data_mounts is expected
+
+
+def test_thread_data_mounts_defaults_to_mounted_for_uninitialized_mount_helper():
+    """Pure mount-shape inspection historically works without running provider init."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    assert provider.uses_thread_data_mounts is True
+
+
+def test_remote_mount_override_downgrades_without_current_provisioner_contract():
+    """A new Gateway must remain usable while the Provisioner is still old."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = 0
+    provider._backend._mount_contract_capability_known = True
+
+    assert provider.uses_thread_data_mounts is False
+
+
+def test_remote_mount_override_uses_current_provisioner_contract():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION
+
+    assert provider.uses_thread_data_mounts is True
+
+
+def test_remote_mount_mode_refreshes_stale_current_contract(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION
+    provider._backend._mount_contract_capability_known = True
+    provider._backend._capability_next_probe_at = 0.0
+    response = MagicMock(status_code=404)
+    monkeypatch.setattr(remote_mod.requests, "get", MagicMock(return_value=response))
+
+    assert provider_mod.sandbox_provider_uses_thread_data_mounts(provider) is False
+    remote_mod.requests.get.assert_called_once()
 
 
 # ── ensure_thread_dirs ───────────────────────────────────────────────────────
@@ -159,6 +209,20 @@ def test_get_thread_mounts_includes_user_data_dirs(tmp_path, monkeypatch):
     assert "/mnt/user-data/outputs" in container_paths
 
 
+def test_get_thread_mounts_includes_upload_conversions_read_only(tmp_path, monkeypatch):
+    """Generated upload conversions must be readable but immutable in AIO."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
+
+    mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-4")
+    container_paths = {container_path: (host_path, read_only) for host_path, container_path, read_only in mounts}
+
+    expected_host = tmp_path / "threads" / "thread-4" / "user-data" / ".upload-conversions"
+    assert container_paths["/mnt/user-data/.upload-conversions"] == (str(expected_host), True)
+    assert expected_host.is_dir()
+
+
 def test_get_thread_mounts_uses_explicit_user_id(tmp_path, monkeypatch):
     """Channel runs must mount the same user bucket used for artifact delivery."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -171,6 +235,7 @@ def test_get_thread_mounts_uses_explicit_user_id(tmp_path, monkeypatch):
     assert container_paths["/mnt/user-data/workspace"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "workspace")
     assert container_paths["/mnt/user-data/uploads"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "uploads")
     assert container_paths["/mnt/user-data/outputs"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / "outputs")
+    assert container_paths["/mnt/user-data/.upload-conversions"] == str(tmp_path / "users" / "ou-user" / "threads" / "thread-4" / "user-data" / ".upload-conversions")
 
 
 def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
@@ -247,6 +312,7 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     monkeypatch.setattr(remote_backend, "user_should_see_legacy_skills", lambda *_args, **_kwargs: False)
 
     provider = _make_provider(tmp_path)
+    provider._backend = object.__new__(aio_mod.LocalContainerBackend)
     mounts = provider._get_extra_mounts("thread-1", user_id="alice")
     container_paths = [container for _host, container, _read_only in mounts]
 
@@ -260,13 +326,20 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     payload = remote_backend._provisioner_extra_mounts_payload(mounts)
     payload_paths = [str(item["container_path"]) for item in payload]
     assert len(payload_paths) == len(set(payload_paths))
+    conversion_payload = next(item for item in payload if item["container_path"] == "/mnt/user-data/.upload-conversions")
+    assert conversion_payload["read_only"] is True
 
     provisioner_module.DEER_FLOW_HOST_BASE_DIR = str(home)
-    validated = provisioner_module._validated_extra_mounts([provisioner_module.ExtraMount(**item) for item in payload])
+    validated = provisioner_module._validated_extra_mounts(
+        [provisioner_module.ExtraMount(**item) for item in payload],
+        thread_id="thread-1",
+        user_id="alice",
+    )
     validated_paths = [mount.container_path for mount in validated]
 
     assert len(validated_paths) == len(set(validated_paths))
     assert set(validated_paths) == {
+        "/mnt/user-data/.upload-conversions",
         "/mnt/acp-workspace",
         "/mnt/skills/custom",
         "/mnt/skills/integrations",
@@ -274,6 +347,252 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
         lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
         lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
     }
+
+
+def test_nonmounted_remote_provider_omits_read_only_conversion_mount(tmp_path, monkeypatch):
+    """Explicit-sync mode must not write into a nested read-only mount."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_skills_mounts", staticmethod(lambda **_kwargs: []))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_user_skill_mounts", staticmethod(lambda **_kwargs: []))
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_lark_cli_runtime_mounts", staticmethod(lambda **_kwargs: []))
+    provider = _make_provider(tmp_path)
+    provider._config["thread_data_mounts"] = False
+    provider._backend = object()
+
+    mounts = provider._get_extra_mounts("thread-1", user_id="alice")
+
+    assert "/mnt/user-data/uploads" in {container for _host, container, _read_only in mounts}
+    assert "/mnt/user-data/.upload-conversions" not in {container for _host, container, _read_only in mounts}
+
+
+def test_remote_backend_negotiates_mount_contract_capability(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    requested: dict[str, object] = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"mount_contract_version": 2}
+
+    def _get(url, *, headers, timeout):
+        requested.update(url=url, headers=headers, timeout=timeout)
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "get", _get)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 2
+    assert backend.mount_contract_capability_known is True
+    assert requested == {
+        "url": "http://provisioner:8002/api/capabilities",
+        "headers": {"X-API-Key": "secret"},
+        "timeout": 5,
+    }
+
+
+def test_remote_backend_treats_missing_mount_capability_as_legacy(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"lark_cli_init_image": False}
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is True
+
+
+def test_remote_backend_treats_missing_capability_endpoint_as_known_legacy(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 404
+
+        def raise_for_status(self):
+            raise AssertionError("404 legacy response should not be raised")
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is True
+
+
+def test_remote_backend_distinguishes_unavailable_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    monkeypatch.setattr(
+        remote_mod.requests,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(remote_mod.requests.ConnectionError("not ready")),
+    )
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+
+    assert backend.mount_contract_version == 0
+    assert backend.mount_contract_capability_known is False
+
+
+def test_remote_mount_override_falls_back_to_explicit_sync_when_capability_probe_is_unavailable():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    assert provider.uses_thread_data_mounts is False
+
+
+def test_remote_backend_retries_unavailable_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    now = [100.0]
+    responses = [
+        remote_mod.requests.ConnectionError("not ready"),
+        {"mount_contract_version": 2},
+    ]
+
+    class _Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def _get(*_args, **_kwargs):
+        value = responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return _Response(value)
+
+    monkeypatch.setattr(remote_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(remote_mod.requests, "get", _get)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+    assert backend.mount_contract_capability_known is False
+
+    now[0] += 1.0
+    backend.refresh_capabilities_if_stale()
+
+    assert backend.mount_contract_capability_known is True
+    assert backend.mount_contract_version == 2
+
+
+def test_remote_backend_retries_known_legacy_capability_probe(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    now = [200.0]
+
+    class _Response:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        _Response(404),
+        _Response(200, {"mount_contract_version": 2}),
+    ]
+    monkeypatch.setattr(remote_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: responses.pop(0))
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    backend.probe_capabilities()
+    assert backend.mount_contract_version == 0
+
+    now[0] += 30.0
+    backend.refresh_capabilities_if_stale()
+
+    assert backend.mount_contract_version == 2
+
+
+def test_remote_discovery_carries_verified_identity(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    info = backend.discover("sandbox-1")
+
+    assert info is not None
+    assert (info.user_id, info.thread_id, info.mount_contract_version) == (
+        "alice",
+        "thread-1",
+        2,
+    )
+
+
+def test_remote_discovery_ignores_legacy_unverified_response(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://legacy.local"}
+
+    monkeypatch.setattr(remote_mod.requests, "get", lambda *_args, **_kwargs: _Response())
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+
+    assert backend.discover("sandbox-old") is None
+
+
+@pytest.mark.parametrize(
+    "conversion_mount",
+    [
+        ("/state/users/alice/threads/thread-1/user-data/.upload-conversions", "/mnt/user-data/.upload-conversions", False),
+        ("/state/users/bob/threads/thread-1/user-data/.upload-conversions", "/mnt/user-data/.upload-conversions", True),
+    ],
+)
+def test_provisioner_payload_rejects_unsafe_conversion_mount(conversion_mount):
+    remote_backend = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    mounts = [
+        ("/state/users/alice/threads/thread-1/user-data/uploads", "/mnt/user-data/uploads", False),
+        conversion_mount,
+    ]
+
+    with pytest.raises(ValueError, match="Upload conversion mount"):
+        remote_backend._provisioner_extra_mounts_payload(mounts)
 
 
 def test_join_host_path_preserves_windows_drive_letter_style():
@@ -298,6 +617,7 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     assert container_paths["/mnt/user-data/workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\workspace"
     assert container_paths["/mnt/user-data/uploads"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\uploads"
     assert container_paths["/mnt/user-data/outputs"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\outputs"
+    assert container_paths["/mnt/user-data/.upload-conversions"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\user-data\.upload-conversions"
     assert container_paths["/mnt/acp-workspace"] == r"C:\Users\demo\deer-flow\backend\.deer-flow\threads\thread-10\acp-workspace"
 
 
@@ -329,6 +649,362 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
             provider._discover_or_create_with_lock("thread-5", "sandbox-5")
 
     assert unlock_calls == []
+
+
+def test_remote_contract_backend_revalidates_existing_pod_via_create(tmp_path, monkeypatch):
+    """A GET cannot prove the live Pod matches the mounts requested this run."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        discover=MagicMock(side_effect=AssertionError("unvalidated discovery must be skipped")),
+    )
+    monkeypatch.setattr(provider, "_recheck_cached_sandbox", lambda *_args, **_kwargs: None)
+
+    with patch.object(provider, "_create_sandbox", return_value="sandbox-v2") as create:
+        result = provider._discover_or_create_with_lock(
+            "thread-1",
+            "sandbox-v2",
+            user_id="alice",
+        )
+
+    assert result == "sandbox-v2"
+    provider._backend.discover.assert_not_called()
+    create.assert_called_once_with("thread-1", "sandbox-v2", user_id="alice")
+
+
+@pytest.mark.anyio
+async def test_remote_contract_backend_revalidates_existing_pod_via_create_async(tmp_path, monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        discover=MagicMock(side_effect=AssertionError("unvalidated discovery must be skipped")),
+    )
+    monkeypatch.setattr(provider, "_recheck_cached_sandbox", lambda *_args, **_kwargs: None)
+    create_calls: list[tuple[str, str, str | None]] = []
+
+    async def create(thread_id, sandbox_id, *, user_id=None):
+        create_calls.append((thread_id, sandbox_id, user_id))
+        return sandbox_id
+
+    monkeypatch.setattr(provider, "_create_sandbox_async", create)
+
+    result = await provider._discover_or_create_with_lock_async(
+        "thread-1",
+        "sandbox-v2",
+        user_id="alice",
+    )
+
+    assert result == "sandbox-v2"
+    provider._backend.discover.assert_not_called()
+    assert create_calls == [("thread-1", "sandbox-v2", "alice")]
+
+
+def _install_remote_revalidation_backend(provider, aio_mod, calls):
+    def create(
+        thread_id,
+        sandbox_id,
+        *,
+        extra_mounts=None,
+        user_id=None,
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+    ):
+        calls.append(
+            {
+                "thread_id": thread_id,
+                "sandbox_id": sandbox_id,
+                "extra_mounts": extra_mounts,
+                "user_id": user_id,
+                "provision_lark_cli_runtime": provision_lark_cli_runtime,
+                "provision_lark_cli_broker": provision_lark_cli_broker,
+            }
+        )
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url="http://sandbox-host",
+            user_id=user_id,
+            thread_id=thread_id,
+            mount_contract_version=2,
+        )
+
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        is_alive=MagicMock(return_value=True),
+        create=create,
+    )
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._get_extra_mounts = lambda *_args, **_kwargs: [("/host/current", "/mnt/current", True)]
+    provider._lark_integration_active = lambda _user_id: True
+    provider._lark_broker_active = lambda _user_id: False
+
+
+def test_remote_active_cache_revalidates_current_contract_before_reuse(tmp_path):
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active"}
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = provider._acquire_internal("thread-1", user_id="alice")
+
+    assert result == "sandbox-active"
+    assert calls == [
+        {
+            "thread_id": "thread-1",
+            "sandbox_id": "sandbox-active",
+            "extra_mounts": [("/host/current", "/mnt/current", True)],
+            "user_id": "alice",
+            "provision_lark_cli_runtime": True,
+            "provision_lark_cli_broker": False,
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_remote_active_cache_revalidates_current_contract_before_reuse_async(tmp_path):
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active-async")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active-async"}
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = await provider._acquire_internal_async("thread-1", user_id="alice")
+
+    assert result == "sandbox-active-async"
+    assert len(calls) == 1
+    assert calls[0]["extra_mounts"] == [("/host/current", "/mnt/current", True)]
+
+
+def _make_remote_warm_provider(tmp_path, monkeypatch, sandbox_id):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._warm_pool = {
+        sandbox_id: (
+            aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"),
+            123.0,
+        )
+    }
+    provider._warm_pool_identity = {sandbox_id: None}
+    provider._sandbox_id_for_thread = lambda *_args, **_kwargs: sandbox_id
+    monkeypatch.setattr(
+        aio_mod,
+        "AioSandbox",
+        lambda id, base_url: SimpleNamespace(id=id, base_url=base_url),
+    )
+    return provider, aio_mod
+
+
+def test_remote_warm_pool_revalidates_current_contract_before_reclaim(tmp_path, monkeypatch):
+    provider, aio_mod = _make_remote_warm_provider(tmp_path, monkeypatch, "sandbox-warm")
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = provider._acquire_internal("thread-1", user_id="alice")
+
+    assert result == "sandbox-warm"
+    assert len(calls) == 1
+    assert calls[0]["sandbox_id"] == "sandbox-warm"
+    assert calls[0]["user_id"] == "alice"
+
+
+@pytest.mark.anyio
+async def test_remote_warm_pool_revalidates_current_contract_before_reclaim_async(tmp_path, monkeypatch):
+    provider, aio_mod = _make_remote_warm_provider(tmp_path, monkeypatch, "sandbox-warm-async")
+    calls: list[dict] = []
+    _install_remote_revalidation_backend(provider, aio_mod, calls)
+
+    result = await provider._acquire_internal_async("thread-1", user_id="alice")
+
+    assert result == "sandbox-warm-async"
+    assert len(calls) == 1
+    assert calls[0]["sandbox_id"] == "sandbox-warm-async"
+
+
+def test_remote_active_cache_replaces_client_when_validated_url_changes(tmp_path, monkeypatch):
+    provider, old_client, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-active-url")
+    provider._thread_sandboxes = {("alice", "thread-1"): "sandbox-active-url"}
+
+    def create(thread_id, sandbox_id, **_kwargs):
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url="http://new-sandbox-host",
+            user_id="alice",
+            thread_id=thread_id,
+            mount_contract_version=2,
+        )
+
+    provider._backend = SimpleNamespace(
+        requires_create_validation=True,
+        is_alive=MagicMock(return_value=True),
+        create=create,
+    )
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._get_extra_mounts = lambda *_args, **_kwargs: []
+    provider._lark_integration_active = lambda _user_id: False
+    provider._lark_broker_active = lambda _user_id: False
+    new_client = SimpleNamespace(id="sandbox-active-url", base_url="http://new-sandbox-host", close=MagicMock())
+    monkeypatch.setattr(aio_mod, "AioSandbox", lambda **_kwargs: new_client)
+
+    assert provider._acquire_internal("thread-1", user_id="alice") == "sandbox-active-url"
+    assert provider.get("sandbox-active-url") is new_client
+    old_client.close.assert_called_once_with()
+
+
+def test_remote_sandbox_id_changes_with_negotiated_mount_contract(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = 0
+    legacy_id = provider._sandbox_id_for_thread("thread-1", "default")
+
+    provider._backend._mount_contract_version = 2
+    current_id = provider._sandbox_id_for_thread("thread-1", "default")
+
+    assert legacy_id != current_id
+
+
+def test_cached_legacy_sandbox_is_not_reused_after_contract_upgrade(tmp_path):
+    provider, _sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "legacy-id")
+    provider._thread_sandboxes = {("default", "thread-1"): "legacy-id"}
+
+    assert (
+        provider._reuse_in_process_sandbox(
+            "thread-1",
+            user_id="default",
+            expected_sandbox_id="current-id",
+        )
+        is None
+    )
+    assert ("default", "thread-1") not in provider._thread_sandboxes
+
+
+@pytest.mark.anyio
+async def test_acquire_internal_async_does_not_block_on_capability_snapshot(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    provider._backend = backend
+    provider._ensure_skills_projection = lambda _user_id: None
+    provider._reuse_in_process_sandbox = lambda *_args, **_kwargs: "cached-v2"
+    backend._capability_probe_lock.acquire()
+    release_probe = threading.Timer(0.15, backend._capability_probe_lock.release)
+    release_probe.start()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    task = asyncio.create_task(provider._acquire_internal_async("thread-1", user_id="default"))
+    await asyncio.sleep(0.02)
+    ticker_elapsed = loop.time() - started
+    result = await task
+    release_probe.join(timeout=1)
+
+    assert ticker_elapsed < 0.08
+    assert result == "cached-v2"
+
+
+def test_acquire_restarts_with_a_new_id_when_mount_contract_changes(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    snapshots = iter(
+        [
+            remote_mod.MountContractSnapshot(version=2, capability_known=True),
+            remote_mod.MountContractSnapshot(version=0, capability_known=True),
+        ]
+    )
+    provider._acquisition_contract_snapshot = lambda: next(snapshots)
+    attempted_ids: list[str] = []
+
+    def acquire_internal(thread_id, *, user_id, contract_snapshot):
+        sandbox_id = provider._sandbox_id_for_thread(thread_id, user_id, contract_snapshot)
+        attempted_ids.append(sandbox_id)
+        if contract_snapshot.version == 2:
+            raise remote_mod.MountContractChangedError(2, 0)
+        return sandbox_id
+
+    provider._acquire_internal = acquire_internal
+
+    result = provider.acquire("thread-1", user_id="default")
+
+    assert attempted_ids == [
+        provider._deterministic_sandbox_id("thread-1", "default", 2),
+        provider._deterministic_sandbox_id("thread-1", "default", 0),
+    ]
+    assert result == attempted_ids[-1]
+
+
+@pytest.mark.anyio
+async def test_acquire_async_restarts_with_a_new_id_when_mount_contract_changes(tmp_path):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    snapshots = iter(
+        [
+            remote_mod.MountContractSnapshot(version=2, capability_known=True),
+            remote_mod.MountContractSnapshot(version=3, capability_known=True),
+        ]
+    )
+    provider._acquisition_contract_snapshot = lambda: next(snapshots)
+    attempted_ids: list[str] = []
+
+    async def acquire_internal(thread_id, *, user_id, contract_snapshot):
+        sandbox_id = provider._sandbox_id_for_thread(thread_id, user_id, contract_snapshot)
+        attempted_ids.append(sandbox_id)
+        if contract_snapshot.version == 2:
+            raise remote_mod.MountContractChangedError(2, 3)
+        return sandbox_id
+
+    provider._acquire_internal_async = acquire_internal
+
+    result = await provider.acquire_async("thread-1", user_id="default")
+
+    assert attempted_ids == [
+        provider._deterministic_sandbox_id("thread-1", "default", 2),
+        provider._deterministic_sandbox_id("thread-1", "default", 3),
+    ]
+    assert result == attempted_ids[-1]
+
+
+@pytest.mark.parametrize(
+    ("global_version", "sandbox_version", "expected"),
+    [
+        (2, 0, False),
+        (0, 2, True),
+    ],
+)
+def test_sandbox_mount_mode_uses_instance_contract_not_global_capability(
+    tmp_path,
+    global_version,
+    sandbox_version,
+    expected,
+):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    provider = _make_provider(tmp_path)
+    provider._config["thread_data_mounts"] = True
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend._mount_contract_version = global_version
+    provider._sandbox_infos = {}
+    provider._sandbox_infos["sandbox-1"] = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-1",
+        sandbox_url="http://sandbox.local",
+        mount_contract_version=sandbox_version,
+    )
+
+    assert provider_mod.sandbox_provider_sandbox_uses_thread_data_mounts(provider, "sandbox-1") is expected
 
 
 @pytest.mark.anyio
@@ -537,6 +1213,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
     """Provisioner mode must receive user_id so PVC subPath matches user isolation."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
     backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     token = set_current_user(SimpleNamespace(id="user-7"))
     posted: dict = {}
 
@@ -545,7 +1222,13 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
             return None
 
         def json(self):
-            return {"sandbox_url": "http://sandbox.local"}
+            return {
+                "sandbox_id": "sandbox-42",
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "user-7",
+                "thread_id": "thread-42",
+                "mount_contract_version": 2,
+            }
 
     def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
@@ -564,6 +1247,7 @@ def test_remote_backend_create_forwards_effective_user_id(monkeypatch):
         "sandbox_id": "sandbox-42",
         "thread_id": "thread-42",
         "user_id": "user-7",
+        "required_mount_contract_version": 2,
         "include_legacy_skills": True,
         "provision_lark_cli_runtime": False,
         "provision_lark_cli_broker": False,
@@ -574,6 +1258,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
     """Provisioner mode must not fall back to the ambient default for channel runs."""
     remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
     backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     posted: dict = {}
 
     class _Response:
@@ -581,7 +1266,13 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
             return None
 
         def json(self):
-            return {"sandbox_url": "http://sandbox.local"}
+            return {
+                "sandbox_id": "sandbox-42",
+                "sandbox_url": "http://sandbox.local",
+                "user_id": "ou-user",
+                "thread_id": "thread-42",
+                "mount_contract_version": 2,
+            }
 
     def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
         posted.update({"url": url, "json": json, "timeout": timeout})
@@ -595,6 +1286,7 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
 
     assert posted["json"]["user_id"] == "ou-user"
     assert posted["json"]["include_legacy_skills"] is False
+    assert posted["json"]["required_mount_contract_version"] == 2
 
 
 def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypatch):
@@ -1048,6 +1740,43 @@ def test_aio_wider_id_separates_known_legacy_collision():
     )
 
 
+def test_aio_mount_contract_upgrade_does_not_reuse_pre_upgrade_container_id():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    user_id = "alice"
+    thread_id = "thread-upgrade"
+    pre_upgrade_id = hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+
+    current_id = aio_mod.AioSandboxProvider._deterministic_sandbox_id(thread_id, user_id)
+
+    assert current_id != pre_upgrade_id
+    assert current_id == hashlib.sha256(f"mount-v{aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION}:{user_id}:{thread_id}".encode()).hexdigest()[:16]
+
+
+def test_reconcile_may_adopt_pre_upgrade_id_only_for_orphan_cleanup(tmp_path):
+    """Versioning blocks new acquisition reuse, not orphan enumeration/reaping."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._warm_pool = {}
+    provider._warm_pool_identity = {}
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._unowned_since = {}
+    old_id = hashlib.sha256(b"alice:thread-1").hexdigest()[:16]
+    old_info = aio_mod.SandboxInfo(
+        sandbox_id=old_id,
+        sandbox_url="http://old-sandbox",
+    )
+    provider._backend = SimpleNamespace(list_running=MagicMock(return_value=[old_info]))
+
+    provider._reconcile_orphans()
+
+    current_id = provider._deterministic_sandbox_id("thread-1", "alice")
+    assert old_id in provider._warm_pool
+    assert current_id != old_id
+    assert current_id not in provider._warm_pool
+
+
 def test_aio_forced_collision_never_overwrites_active_tenant(
     tmp_path,
     monkeypatch,
@@ -1059,7 +1788,7 @@ def test_aio_forced_collision_never_overwrites_active_tenant(
     monkeypatch.setattr(
         aio_mod.AioSandboxProvider,
         "_deterministic_sandbox_id",
-        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+        staticmethod(lambda thread_id, user_id, mount_contract_version=aio_mod.SANDBOX_MOUNT_CONTRACT_VERSION: "deadbeefdeadbeef"),
     )
 
     sandbox_id = provider.acquire("thread-a", user_id="user-a")
@@ -1295,3 +2024,210 @@ def test_reconcile_adopts_unready_container_when_no_teardown_is_in_flight(tmp_pa
     provider._reconcile_orphans()
 
     assert "adoptable" in provider._warm_pool, "reconcile must still adopt a genuinely unowned container"
+
+
+def test_reconciliation_reconnects_exact_discovered_sandbox_without_acquiring(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    info = info_mod.SandboxInfo(
+        sandbox_id="old-id",
+        sandbox_url="http://sandbox-old",
+        thread_id="thread-1",
+        user_id="alice",
+    )
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            info,
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        ),
+    )
+    provider.get = lambda _sandbox_id: (_ for _ in ()).throw(AssertionError("reconciliation must not borrow the active cache"))
+    created: list[tuple[str, str]] = []
+
+    class TransientSandbox:
+        def __init__(self, sandbox_id, sandbox_url):
+            created.append((sandbox_id, sandbox_url))
+
+    monkeypatch.setattr(aio_mod, "AioSandbox", TransientSandbox)
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "old-id",
+        thread_id="thread-1",
+        user_id="alice",
+        identity=provider_mod.SandboxReconciliationIdentity(
+            provider_key=provider.reconciliation_provider_key(),
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        ),
+    )
+
+    assert result.status == "found"
+    assert result.close_after is True
+    assert created == [("old-id", "http://sandbox-old")]
+
+
+def test_reconciliation_rejects_discovered_sandbox_from_another_identity():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    info = info_mod.SandboxInfo(
+        sandbox_id="old-id",
+        sandbox_url="http://sandbox-old",
+        thread_id="another-thread",
+        user_id="alice",
+    )
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            info,
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        ),
+    )
+    provider.get = lambda _sandbox_id: None
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "old-id",
+        thread_id="thread-1",
+        user_id="alice",
+        identity=provider_mod.SandboxReconciliationIdentity(
+            provider_key=provider.reconciliation_provider_key(),
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        ),
+    )
+
+    assert result.status == "unknown"
+    assert result.sandbox is None
+
+
+def test_reconciliation_identity_separates_provider_type_from_backend_namespace():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    first = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    second = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    info = info_mod.SandboxInfo(sandbox_id="same-id", sandbox_url="http://sandbox")
+    first._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            info,
+            backend_namespace="cluster-a",
+            incarnation_id="pod-a",
+        )
+    )
+    second._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            info,
+            backend_namespace="cluster-b",
+            incarnation_id="pod-b",
+        )
+    )
+
+    first_identity = first.prepare_sandbox_reconciliation_identity("same-id")
+    second_identity = second.prepare_sandbox_reconciliation_identity("same-id")
+
+    assert first.reconciliation_provider_key() == second.reconciliation_provider_key()
+    assert first_identity is not None
+    assert second_identity is not None
+    assert first_identity.backend_namespace == "cluster-a"
+    assert second_identity.backend_namespace == "cluster-b"
+
+
+def test_reconciliation_never_uses_active_replacement_with_same_raw_id():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    info_mod = importlib.import_module("deerflow.community.aio_sandbox.sandbox_info")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    replacement = MagicMock()
+    info = info_mod.SandboxInfo(
+        sandbox_id="same-id",
+        sandbox_url="http://replacement",
+        thread_id="thread-1",
+        user_id="alice",
+    )
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            info,
+            backend_namespace="namespace-1",
+            incarnation_id="pod-new",
+        )
+    )
+    provider.get = lambda _sandbox_id: replacement
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "same-id",
+        thread_id="thread-1",
+        user_id="alice",
+        identity=provider_mod.SandboxReconciliationIdentity(
+            provider_key=provider.reconciliation_provider_key(),
+            backend_namespace="namespace-1",
+            incarnation_id="pod-old",
+        ),
+    )
+
+    assert result.status == "absent"
+    assert result.sandbox is None
+    replacement.remove_file.assert_not_called()
+
+
+def test_reconciliation_keeps_journal_when_backend_namespace_changes():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._backend = SimpleNamespace(discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.absent(backend_namespace="cluster-new"))
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "same-id",
+        thread_id="thread-1",
+        user_id="alice",
+        identity=provider_mod.SandboxReconciliationIdentity(
+            provider_key=provider.reconciliation_provider_key(),
+            backend_namespace="cluster-old",
+            incarnation_id="pod-old",
+        ),
+    )
+
+    assert result.status == "unknown"
+
+
+def test_reconciliation_keeps_journal_when_exact_pod_has_no_service():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._backend = SimpleNamespace(
+        discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.found(
+            None,
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        )
+    )
+
+    result = provider.reconnect_sandbox_for_reconciliation(
+        "same-id",
+        thread_id="thread-1",
+        user_id="alice",
+        identity=provider_mod.SandboxReconciliationIdentity(
+            provider_key=provider.reconciliation_provider_key(),
+            backend_namespace="namespace-1",
+            incarnation_id="pod-1",
+        ),
+    )
+
+    assert result.status == "unknown"
+
+
+def test_prepare_reconciliation_identity_fails_closed_without_exact_instance():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend_mod = importlib.import_module("deerflow.community.aio_sandbox.backend")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._backend = SimpleNamespace(discover_for_reconciliation=lambda _sandbox_id: backend_mod.SandboxDiscoveryResult.unknown())
+
+    assert provider.prepare_sandbox_reconciliation_identity("same-id") is None

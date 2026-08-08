@@ -1,6 +1,6 @@
 # DeerFlow Sandbox Provisioner
 
-The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the DeerFlow backend to create, monitor, and destroy isolated sandbox environments for code execution.
+The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbox Pods in Kubernetes. It provides a REST API for the DeerFlow backend to create, monitor, and destroy isolated sandbox environments for code execution. Generated upload conversions are passed only as the fixed `/mnt/user-data/.upload-conversions` nested mount; the Provisioner verifies that its source belongs to the requested user/thread and that it is read-only before building either a hostPath or PVC-backed Pod.
 
 ## Architecture
 
@@ -88,18 +88,31 @@ When the Gateway mounts that same storage at its DeerFlow home and the PVC
 subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
 `config.yaml` to skip redundant upload-time sandbox acquire/sync. Leave the
 field unset when using unrelated storage or when the mount relationship is
-uncertain.
+uncertain. The Gateway probes `/api/capabilities`. A confirmed legacy
+Provisioner can use explicit synchronization only for the `default` no-auth
+user; its primary user-data mount does not isolate equal thread IDs belonging
+to different users, so authenticated deployments must upgrade the Provisioner
+before the Gateway. If the capability endpoint is temporarily unreachable,
+explicitly requested mounted mode fails closed. Remote acquisition uses the
+idempotent create endpoint even for an existing Pod so the Provisioner compares
+the live Pod against the complete mount signature requested by the current run.
 
 **Response**:
 ```json
 {
   "sandbox_id": "abc-123",
   "sandbox_url": "http://host.docker.internal:32123",
-  "status": "Pending"
+  "status": "Pending",
+  "user_id": "user-789",
+  "thread_id": "thread-456",
+  "mount_contract_version": 2
 }
 ```
 
-**Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox info.
+**Conditionally idempotent**: Calling with the same `sandbox_id` returns the
+existing sandbox only when its tenant labels, contract version, stored mount
+signature, and live Pod mount specification match the request. Mismatches return
+`409` instead of reusing an unverifiable or cross-tenant Pod.
 
 ### `GET /api/sandboxes/{sandbox_id}`
 Get status and URL of a specific sandbox.
@@ -114,6 +127,29 @@ Get status and URL of a specific sandbox.
 ```
 
 **Status Values**: `Pending`, `Running`, `Succeeded`, `Failed`, `Unknown`, `NotFound`
+
+### `GET /api/reconciliation/sandboxes/{sandbox_id}`
+
+Return the Kubernetes Namespace UID and the exact Pod UID used by durable
+Gateway cleanup. This endpoint is Pod-authoritative: a missing Service with a
+live Pod returns `status: "found"` and `sandbox_url: null`; only a missing Pod in
+the same Namespace UID returns `status: "absent"`. The Gateway therefore cannot
+redirect an old deletion journal to a replacement Pod that reused the same
+deterministic `sandbox_id`.
+
+**Response**:
+```json
+{
+  "sandbox_id": "abc-123",
+  "status": "found",
+  "backend_namespace": "namespace-uid",
+  "incarnation_id": "pod-uid",
+  "sandbox_url": "http://host.docker.internal:32123",
+  "user_id": "user-789",
+  "thread_id": "thread-456",
+  "mount_contract_version": 2
+}
+```
 
 ### `DELETE /api/sandboxes/{sandbox_id}`
 Destroy a sandbox Pod + Service.
@@ -153,8 +189,8 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
-| `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
-| `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
+| `THREADS_HOST_PATH` | - | Legacy fallback used only to infer the DeerFlow root when `DEER_FLOW_HOST_BASE_DIR` is empty |
+| `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root. HostPath user-data resolves to `users/{user_id}/threads/{thread_id}/user-data`, matching Gateway storage and the PVC subpath contract |
 | `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
@@ -250,9 +286,16 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
      - Read Namespaces (to create `deer-flow` if missing)
 
 4. **Host Paths**:
-   - `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
+   - `DEER_FLOW_HOST_BASE_DIR` must be an **absolute path on the host machine**
    - These paths are mounted into sandbox Pods via K8s HostPath volumes
    - The paths must exist and be readable by the K8s node
+
+   Upgrading from a Provisioner that mounted
+   `THREADS_HOST_PATH/{thread_id}/user-data` changes the HostPath source to
+   `DEER_FLOW_HOST_BASE_DIR/users/{user_id}/threads/{thread_id}/user-data`.
+   Before enabling mounted mode, copy any sandbox-written workspace/output data
+   needed from the legacy tree into the matching user tree, preserve the legacy
+   tree for rollback, and verify both paths before deleting the old copy.
 
 ### Docker Compose Setup
 

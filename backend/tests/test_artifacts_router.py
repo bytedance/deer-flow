@@ -225,6 +225,39 @@ def test_update_artifact_syncs_non_mounted_sandbox(tmp_path, monkeypatch) -> Non
 
     assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
     assert provider.released == ["sandbox-1"]
+
+
+def test_update_artifact_rechecks_mount_mode_after_acquire(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+
+    class ProviderThatBecomesMounted(_RemoteSandboxProvider):
+        async def acquire_async(self, _thread_id: str, *, user_id: str | None = None) -> str:
+            self.uses_thread_data_mounts = True
+            return "sandbox-1"
+
+        def get(self, sandbox_id: str):
+            raise AssertionError("mounted mode must not explicitly synchronize artifacts")
+
+    provider = ProviderThatBecomesMounted()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/note.txt",
+            artifacts_router.ArtifactUpdateRequest(
+                content="after",
+                expected_sha256=_artifact_sha256("before"),
+            ),
+            _make_request(),
+        )
+    )
+
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+    assert response.sha256 == _artifact_sha256("after")
+    assert provider.released == ["sandbox-1"]
     assert artifact_path.read_text(encoding="utf-8") == "after"
 
 

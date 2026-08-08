@@ -963,6 +963,10 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
+Uploads from the Web UI, embedded client, and IM channels share one collision-safe storage rule. A completed payload is published only if its candidate name does not exist; concurrent `report.pdf` uploads become `report.pdf`, `report_1.pdf`, `report_2.pdf`, and so on without replacing one another. Collision suffixes remain within the filesystem's 255-byte UTF-8 component limit, including names whose original suffix consumes nearly the whole limit. A busy candidate lease is treated as another collision instead of waiting, so inverse multi-file batches cannot deadlock. The selected name is leased through conversion and sandbox synchronization, so deleting that exact name waits for its active upload lifecycle while unrelated filenames continue concurrently. Internal staging names matching `.upload-*.part` and basenames that cannot be represented losslessly on Windows are rejected for new uploads and reported through `skipped_files`; exact legacy POSIX names already returned by the list endpoint—including literal backslashes and names made only from dots/spaces—remain deletable after upgrade.
+
+Optional document conversions are system-owned assets under `/mnt/user-data/.upload-conversions/`. Normal targets use `<actual-upload-name>.md`; names that would exceed the filesystem component limit use a deterministic UTF-8-safe prefix plus the full SHA-256 digest. The exact generated path is returned through the upload response and omitted from the primary upload listing. Mounted AIO sandboxes expose this namespace through a read-only mount; the remote Provisioner verifies its exact user/thread source and the concrete Pod mount signature. A mount-contract version in deterministic sandbox IDs prevents a pre-upgrade container from satisfying a new acquisition for the same thread; older containers may still be enumerated and adopted only for normal orphan cleanup. Local structured file APIs enforce the same rule through path mappings. Local host bash is outside that mapping boundary and must remain disabled for untrusted tasks. Non-mounted remote providers receive a private synchronized copy that may be writable but cannot mutate the authoritative host conversion or lock state. Direct Markdown uploads use one verified exclusive file descriptor for outline and preview reads, while other formats use only their exact generated asset. Deleting a primary removes its exact host and explicitly synchronized sandbox copies plus its generated asset, and never infers that a user-uploaded sibling such as `uploads/report.md` is disposable. Durable deletion of explicit sandbox copies requires a provider to identify both its backend namespace and the immutable sandbox incarnation; AIO Docker/Provisioner backends supply those identities, while providers without this restart-safe capability fail closed before host staging or remote deletion.
+
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
@@ -985,16 +989,29 @@ sandboxes receive uploaded files through explicit synchronization. Deployments
 where both sides are guaranteed to share the same thread user-data directories
 can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
 acquire and sync. Leave the field unset for automatic detection; setting it
-incorrectly can make uploaded files unavailable inside the sandbox.
+incorrectly can make uploaded files unavailable inside the sandbox. During a
+mixed-version rollout, a new Gateway probes the Provisioner mount-contract
+version. A confirmed legacy peer falls back to explicit synchronization for
+the default no-auth user, but authenticated user buckets fail closed because
+legacy Provisioners cannot isolate equal thread IDs across users. Upgrade the
+Provisioner first for authenticated deployments. If the capability probe is
+temporarily unreachable, explicitly requested mounted mode also fails closed
+instead of creating a Pod whose read-only conversion mount cannot be verified.
+Explicit-sync upload deletion additionally requires the Provisioner's immutable
+Namespace/Pod identity endpoint. During a mixed-version rollout, upgrade the
+Provisioner before relying on deletion of explicitly synchronized sandbox
+copies; an old peer stays fail closed rather than treating a missing Service as
+proof that its Pod is gone.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
 ```
 # Paths inside the sandbox container
 /mnt/user-data/
-├── uploads/          ← your files
-├── workspace/        ← agents' working directory
-└── outputs/          ← final deliverables
+├── uploads/               ← your primary files
+├── .upload-conversions/   ← system-owned Markdown (hidden from upload listings)
+├── workspace/             ← agents' working directory
+└── outputs/               ← final deliverables
 ```
 
 ### Agentic Browser Control

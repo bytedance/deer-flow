@@ -1736,7 +1736,11 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
 
     monkeypatch.setattr(
         "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: sandbox),
+        lambda: SimpleNamespace(
+            uses_thread_data_mounts=sandbox_id == "local",
+            acquire_async=_acquire_async,
+            get=lambda sid: sandbox,
+        ),
     )
 
 
@@ -2223,6 +2227,33 @@ class TestReceiveFile:
 
         _run(go())
 
+    def test_concurrent_duplicate_document_names_preserve_all_bytes(self, tmp_path, monkeypatch):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            uploads = tmp_path / "uploads"
+            uploads.mkdir()
+            _patch_uploads(monkeypatch, uploads)
+            payloads = [f"version-{index}".encode() for index in range(8)]
+            channel._download_by_code = AsyncMock(side_effect=payloads)
+
+            paths = await asyncio.gather(
+                *(
+                    channel._receive_single_file(
+                        f"code-{index}",
+                        "file",
+                        "quote.xlsx",
+                        "thread-1",
+                        user_id="default",
+                    )
+                    for index in range(len(payloads))
+                )
+            )
+
+            assert len(set(paths)) == len(payloads)
+            assert {(uploads / path.rsplit("/", 1)[-1]).read_bytes() for path in paths} == set(payloads)
+
+        _run(go())
+
     def test_write_does_not_follow_planted_symlink(self, tmp_path, monkeypatch):
         """A symlink planted at the destination must not be written through.
 
@@ -2250,7 +2281,9 @@ class TestReceiveFile:
             out = await channel.receive_file(msg, "t1", user_id="default")
 
             assert not outside.exists()
-            assert "[failed to load image: image.png]" in out.text
+            assert out.text == f"{VIRTUAL_PATH_PREFIX}/uploads/image_1.png"
+            assert (uploads / "image.png").is_symlink()
+            assert (uploads / "image_1.png").read_bytes() == b"PWNED"
 
         _run(go())
 

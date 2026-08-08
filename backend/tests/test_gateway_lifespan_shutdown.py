@@ -88,7 +88,13 @@ async def _run_lifespan_with_upload_staging_cleanup():
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char", enabled=False, shutdown_flush_timeout_seconds=30.0))
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
-    cleanup_upload_staging_files = MagicMock(return_value=2)
+    startup_events: list[str] = []
+    reconcile_remote_deletions = MagicMock(
+        side_effect=lambda **_kwargs: startup_events.append("reconcile") or 1,
+    )
+    cleanup_upload_staging_files = MagicMock(
+        side_effect=lambda: startup_events.append("cleanup") or 2,
+    )
     close_oidc_service = AsyncMock()
     stop_channel_service = AsyncMock()
 
@@ -100,6 +106,10 @@ async def _run_lifespan_with_upload_staging_cleanup():
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
         patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch(
+            "app.gateway.app.reconcile_pending_remote_deletions",
+            reconcile_remote_deletions,
+        ),
         patch("app.gateway.app.cleanup_stale_upload_staging_files", cleanup_upload_staging_files),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
@@ -108,13 +118,27 @@ async def _run_lifespan_with_upload_staging_cleanup():
         async with lifespan(app):
             pass
 
-    return cleanup_upload_staging_files, close_oidc_service, stop_channel_service
+    return (
+        reconcile_remote_deletions,
+        cleanup_upload_staging_files,
+        startup_events,
+        close_oidc_service,
+        stop_channel_service,
+    )
 
 
 def test_lifespan_sweeps_upload_staging_files_on_startup():
-    cleanup_upload_staging_files, close_oidc_service, stop_channel_service = asyncio.run(_run_lifespan_with_upload_staging_cleanup())
+    (
+        reconcile_remote_deletions,
+        cleanup_upload_staging_files,
+        startup_events,
+        close_oidc_service,
+        stop_channel_service,
+    ) = asyncio.run(_run_lifespan_with_upload_staging_cleanup())
 
+    reconcile_remote_deletions.assert_called_once()
     cleanup_upload_staging_files.assert_called_once_with()
+    assert startup_events == ["reconcile", "cleanup"]
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
 

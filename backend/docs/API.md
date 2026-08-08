@@ -617,13 +617,13 @@ Content-Type: multipart/form-data
     {
       "filename": "document.pdf",
       "size": 1234567,
-      "path": ".deer-flow/threads/abc123/user-data/uploads/document.pdf",
+      "path": ".deer-flow/users/alice/threads/abc123/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.pdf",
-      "markdown_file": "document.md",
-      "markdown_path": ".deer-flow/threads/abc123/user-data/uploads/document.md",
-      "markdown_virtual_path": "/mnt/user-data/uploads/document.md",
-      "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.md"
+      "markdown_file": "document.pdf.md",
+      "markdown_path": ".deer-flow/users/alice/threads/abc123/user-data/.upload-conversions/document.pdf.md",
+      "markdown_virtual_path": "/mnt/user-data/.upload-conversions/document.pdf.md",
+      "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/document.pdf.md"
     }
   ],
   "message": "Successfully uploaded 1 file(s)"
@@ -635,6 +635,10 @@ Content-Type: multipart/form-data
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
+
+All upload entry points publish complete payloads without replacing an existing name. Concurrent collisions are returned as `document.pdf`, `document_1.pdf`, `document_2.pdf`, and so on. Collision candidates remain within the 255-byte UTF-8 component limit; when a pathological suffix consumes nearly the entire component, DeerFlow truncates the complete basename before appending `_N`. A published filename remains leased through conversion, permission adjustment, sandbox synchronization, and response construction; portable case, Unicode-normalization, and Win32 trailing-dot/space aliases share the same coordination key. Publication never waits on a busy candidate lease and advances to `_N`, preventing inverse multi-file batches from deadlocking; deletion waits for the target generation and rejects ambiguous hard-linked identities. Mounted providers make the exact published paths sandbox-readable; non-mounted providers receive exact private copies for Gateway, embedded-client, and IM-channel ingresses. If a non-mounted sandbox update later fails or the request is cancelled, DeerFlow removes every exact remote path attempted by that request before rolling back its host generations. Gateway cancellation also drains and aborts an in-flight staging creation. Final lease release is the commit point: cancellation newly arriving during release is delayed and the already-built successful response is returned. Basenames matching the internal `.upload-*.part` staging pattern, containing NUL, `<`, or `>`, containing reserved model-context boundary markers, or invalid/reserved on Windows are rejected before staging so every accepted model-visible filename and path can be rendered losslessly; rejected names are returned through `skipped_files` and make the response unsuccessful. Embedded multi-file calls are request-atomic: a later failure rolls back every earlier host and remote generation in that call.
+
+Generated Markdown is stored outside the primary namespace and is not returned by the list endpoint. Normal conversion names are `<actual-primary-filename>.md`; if that component would exceed 255 UTF-8 bytes, the response contains a deterministic UTF-8-safe prefix plus the full SHA-256 digest and `.md`. Clients must consume the returned `markdown_*` fields rather than derive the path. Mounted AIO sandboxes use a read-only conversion mount. The remote Provisioner independently verifies its exact user/thread source, and the mount-contract version namespaces deterministic sandbox IDs so pre-upgrade containers without the mount are not reused. Local structured file APIs reject writes through a read-only path mapping; Local host bash is outside that boundary. Non-mounted providers receive a private synchronized copy rather than the authoritative host namespace. Direct Markdown primaries provide their own outline/preview; other formats use only the exact owned conversion. Deleting `document.pdf` also deletes only its exact generated conversion; an independent `uploads/document.md` is preserved.
 
 #### List Uploaded Files
 
@@ -649,7 +653,7 @@ GET /api/threads/{thread_id}/uploads/list
     {
       "filename": "document.pdf",
       "size": 1234567,
-      "path": ".deer-flow/threads/abc123/user-data/uploads/document.pdf",
+      "path": ".deer-flow/users/alice/threads/abc123/user-data/uploads/document.pdf",
       "virtual_path": "/mnt/user-data/uploads/document.pdf",
       "artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.pdf",
       "extension": ".pdf",
@@ -674,9 +678,16 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
+If an upload, conversion, or sandbox synchronization still owns this exact filename, the
+delete waits for that lifecycle to finish before removing the primary and its generated
+conversion. Work on unrelated filenames is not serialized. On POSIX deployments, exact
+legacy names returned by the list endpoint—including literal backslashes and components
+made only from dots/spaces—remain deletable after upgrade even when the same names would
+fail the stricter cross-platform validation applied to new uploads.
+
 ### Thread Cleanup
 
-Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
+Remove DeerFlow-managed local thread files under `.deer-flow/users/{user_id}/threads/{thread_id}` after the LangGraph thread itself has been deleted.
 
 ```http
 DELETE /api/threads/{thread_id}

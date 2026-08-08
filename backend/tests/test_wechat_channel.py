@@ -6,10 +6,13 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 from unittest import mock
 from unittest.mock import AsyncMock
+
+import pytest
 
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
 
@@ -1015,6 +1018,105 @@ def test_handle_update_downloads_inbound_file(monkeypatch, tmp_path: Path):
         assert stored.read_bytes() == plaintext
 
     _run(go())
+
+
+def test_stage_downloaded_file_preserves_concurrent_same_name_payloads(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    payloads = [f"payload-{index}".encode() for index in range(8)]
+
+    async def stage_all():
+        return await asyncio.gather(*(channel._stage_downloaded_file("report.pdf", payload) for payload in payloads))
+
+    paths = _run(stage_all())
+
+    assert all(path is not None for path in paths)
+    assert {path.name for path in paths if path is not None} == {
+        "report.pdf",
+        "report_1.pdf",
+        "report_2.pdf",
+        "report_3.pdf",
+        "report_4.pdf",
+        "report_5.pdf",
+        "report_6.pdf",
+        "report_7.pdf",
+    }
+    assert {path.read_bytes() for path in paths if path is not None} == set(payloads)
+
+
+def test_stage_downloaded_file_renames_around_planted_symlink(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    download_dir = tmp_path / channel.DEFAULT_IMAGE_DOWNLOAD_DIRNAME
+    download_dir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"victim")
+    (download_dir / "report.pdf").symlink_to(victim)
+
+    stored = _run(channel._stage_downloaded_file("report.pdf", b"attachment"))
+
+    assert stored == download_dir / "report_1.pdf"
+    assert stored.read_bytes() == b"attachment"
+    assert victim.read_bytes() == b"victim"
+
+
+def test_wechat_invalid_platform_filename_uses_safe_fallback(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    for filename in ["a" * 256 + ".pdf", r"folder\report.pdf", ".upload-user.part"]:
+        safe = channel._normalize_inbound_filename(
+            filename,
+            default_prefix="wechat-file",
+            message_id="m1",
+            index=0,
+        )
+        assert safe == "wechat-file-m1-0.bin"
+        assert _run(channel._stage_downloaded_file(safe, b"payload")) is not None
+
+
+def test_wechat_plain_filename_value_error_becomes_attachment_failure(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    with mock.patch(
+        "app.channels.wechat.publish_upload_bytes_leased_async",
+        new=AsyncMock(side_effect=ValueError("invalid filename")),
+    ):
+        assert _run(channel._stage_downloaded_file("report.pdf", b"payload")) is None
+
+
+def test_cancelled_stage_downloaded_file_rolls_back_late_publication(tmp_path: Path):
+    import deerflow.uploads.async_helpers as async_helpers
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+    publish_started = threading.Event()
+    allow_publish = threading.Event()
+    real_publish = async_helpers.publish_upload_bytes_leased
+
+    def paused_publish(*args, **kwargs):
+        publish_started.set()
+        assert allow_publish.wait(5)
+        return real_publish(*args, **kwargs)
+
+    async def exercise():
+        with mock.patch("deerflow.uploads.async_helpers.publish_upload_bytes_leased", side_effect=paused_publish):
+            task = asyncio.create_task(channel._stage_downloaded_file("report.pdf", b"payload"))
+            assert await asyncio.to_thread(publish_started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            allow_publish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    _run(exercise())
+    download_dir = tmp_path / channel.DEFAULT_IMAGE_DOWNLOAD_DIRNAME
+    assert not (download_dir / "report.pdf").exists()
+    assert not list(download_dir.glob("report*.pdf"))
 
 
 def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch, tmp_path: Path):

@@ -310,6 +310,80 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
     assert backend.discover("sandbox-timeout") is None
 
 
+def test_reconciliation_discovery_confirms_exact_container_absent(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(backend, "_reconciliation_backend_namespace", lambda: "docker:daemon-1")
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: False)
+
+    result = backend.discover_for_reconciliation("missing")
+
+    assert result.status == "absent"
+    assert result.info is None
+    assert result.backend_namespace == "docker:daemon-1"
+
+
+def test_reconciliation_discovery_preserves_runtime_uncertainty(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(backend, "_reconciliation_backend_namespace", lambda: "docker:daemon-1")
+
+    def fail(_name):
+        raise RuntimeError("daemon unavailable")
+
+    monkeypatch.setattr(backend, "_is_container_running", fail)
+
+    result = backend.discover_for_reconciliation("unknown")
+
+    assert result.status == "unknown"
+    assert result.info is None
+
+
+def test_reconciliation_discovery_returns_exact_running_container(monkeypatch):
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+    backend = _backend_for_inspect_tests()
+    info = SandboxInfo(sandbox_id="existing", sandbox_url="http://localhost:18080")
+    monkeypatch.setattr(backend, "_reconciliation_backend_namespace", lambda: "docker:daemon-1")
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(backend, "discover", lambda sandbox_id: info if sandbox_id == "existing" else None)
+    monkeypatch.setattr(backend, "_container_incarnation", lambda _name: "container-uid-1")
+
+    result = backend.discover_for_reconciliation("existing")
+
+    assert result.status == "found"
+    assert result.info is info
+    assert result.backend_namespace == "docker:daemon-1"
+    assert result.incarnation_id == "container-uid-1"
+
+
+def test_reconciliation_discovery_fails_closed_without_docker_daemon_identity(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(backend, "_reconciliation_backend_namespace", lambda: None)
+    running = SimpleNamespace(called=False)
+
+    def should_not_inspect(_name):
+        running.called = True
+        raise AssertionError("container lookup must not cross an unknown daemon boundary")
+
+    monkeypatch.setattr(backend, "_is_container_running", should_not_inspect)
+
+    result = backend.discover_for_reconciliation("same-id")
+
+    assert result.status == "unknown"
+    assert running.called is False
+
+
+@pytest.mark.parametrize("value", ["", "<no value>"])
+def test_reconciliation_backend_namespace_rejects_missing_docker_daemon_id(monkeypatch, value):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=f"{value}\n"),
+    )
+
+    assert backend._reconciliation_backend_namespace() is None
+
+
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
     """Apple Container's generic "not found" is trusted when it names the container."""
     backend = _backend_for_inspect_tests()

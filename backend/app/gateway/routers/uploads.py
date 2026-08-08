@@ -1,12 +1,10 @@
 """Upload router for handling file uploads."""
 
+import asyncio
 import logging
 import os
 import stat
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -16,24 +14,33 @@ from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import (
+    get_sandbox_provider,
+    sandbox_provider_sandbox_uses_thread_data_mounts,
+    sandbox_provider_uses_thread_data_mounts_async,
+)
+from deerflow.uploads.async_helpers import run_upload_lease_io, wait_for_task_completion
+from deerflow.uploads.conversion import convert_uploaded_file_to_markdown
+from deerflow.uploads.layout import artifact_url_for_virtual_path, conversion_virtual_path
 from deerflow.uploads.manager import (
-    UPLOAD_STAGING_PREFIX,
-    UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
-    UnsafeUploadPathError,
-    claim_unique_filename,
+    PublishedUpload,
+    StagedUpload,
+    abort_staged_upload,
+    create_upload_staging_file,
     delete_file_safe,
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    publish_staged_upload_leased,
+    rollback_published_upload,
     upload_artifact_url,
     upload_virtual_path,
-    validate_upload_destination,
 )
-from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
+from deerflow.uploads.sandbox_sync import prepare_upload_deletion_async
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId
 
@@ -45,13 +52,6 @@ UPLOAD_CHUNK_SIZE = 8192
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_MAX_TOTAL_SIZE = 100 * 1024 * 1024
-
-
-@dataclass(slots=True)
-class _UploadTempFile:
-    file_path: Path
-    temp_path: Path
-    handle: BinaryIO
 
 
 class UploadedFileInfo(BaseModel):
@@ -132,10 +132,6 @@ def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
     os.chmod(file_path, readable_mode, **chmod_kwargs)
 
 
-def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
-    return bool(getattr(sandbox_provider, "uses_thread_data_mounts", False))
-
-
 def _get_uploads_config_value(app_config: AppConfig, key: str, default: object) -> object:
     """Read a value from the uploads config, supporting dict and attribute access."""
     uploads_cfg = getattr(app_config, "uploads", None)
@@ -168,59 +164,128 @@ def _get_upload_limits(app_config: AppConfig) -> UploadLimits:
     )
 
 
-def _cleanup_uploaded_paths(paths: list[os.PathLike[str] | str]) -> None:
-    for path in reversed(paths):
+def _cleanup_published_uploads(
+    publications: list[PublishedUpload],
+    generated_paths: list[os.PathLike[str] | str],
+) -> None:
+    for path in reversed(generated_paths):
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
         except Exception:
-            logger.warning("Failed to clean up upload path after rejected request: %s", path, exc_info=True)
-
-
-def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_filename: str) -> _UploadTempFile:
-    uploads_dir_path = Path(uploads_dir)
-    file_path = validate_upload_destination(uploads_dir_path, display_filename)
-    temp_fd, temp_path_str = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=uploads_dir_path)
-    temp_path = Path(temp_path_str)
-    try:
-        handle = os.fdopen(temp_fd, "wb")
-    except Exception:
+            logger.warning("Failed to clean up generated upload path after rejected request: %s", path, exc_info=True)
+    for publication in reversed(publications):
         try:
-            os.close(temp_fd)
-        except OSError:
-            pass
+            rollback_published_upload(publication)
+        except Exception:
+            logger.warning("Failed to roll back published upload after rejected request: %s", publication.path, exc_info=True)
+
+
+def _cleanup_attempted_sandbox_paths(sandbox, virtual_paths: list[str]) -> None:
+    """Best-effort removal of every exact remote path attempted by this request."""
+    if sandbox is None or not virtual_paths:
+        return
+    for virtual_path in reversed(virtual_paths):
         try:
-            os.unlink(temp_path)
-        except FileNotFoundError:
-            pass
-        raise
-    return _UploadTempFile(file_path=file_path, temp_path=temp_path, handle=handle)
+            sandbox.remove_file(virtual_path)
+        except Exception:
+            logger.warning("Failed to remove synchronized sandbox upload path: %s", virtual_path, exc_info=True)
 
 
-def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
-    upload_temp.handle.write(chunk)
-
-
-def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
+def _rollback_upload_request(
+    sandbox,
+    attempted_sandbox_paths: list[str],
+    publications: list[PublishedUpload],
+    generated_paths: list[os.PathLike[str] | str],
+) -> None:
     try:
-        upload_temp.handle.close()
+        _cleanup_attempted_sandbox_paths(sandbox, attempted_sandbox_paths)
     finally:
+        _cleanup_published_uploads(publications, generated_paths)
+
+
+def _release_publications(publications: list[PublishedUpload]) -> None:
+    for publication in reversed(publications):
         try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
+            publication.release()
+        except Exception:
+            logger.warning("Failed to release published upload lease: %s", publication.path, exc_info=True)
 
 
-def _commit_upload_temp(upload_temp: _UploadTempFile) -> None:
-    upload_temp.handle.close()
+def _rollback_and_release_publication(publication: PublishedUpload) -> None:
     try:
-        os.replace(upload_temp.temp_path, upload_temp.file_path)
-    except Exception:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
+        rollback_published_upload(publication)
+    finally:
+        publication.release()
+
+
+async def _run_file_io_cancellation_safe(function, *args):
+    task = asyncio.create_task(run_file_io(function, *args))
+    cancelled = await wait_for_task_completion(task)
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _run_file_io_commit(function, *args):
+    """Finish a commit operation and ignore cancellation that arrives during it."""
+    task = asyncio.create_task(run_file_io(function, *args))
+    await wait_for_task_completion(task)
+    return task.result()
+
+
+async def _run_upload_lease_io_cancellation_safe(function, *args, **kwargs):
+    task = asyncio.create_task(run_upload_lease_io(function, *args, **kwargs))
+    cancelled = await wait_for_task_completion(task)
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _publish_staged_upload_cancellation_safe(
+    staged: StagedUpload,
+    filename: str,
+    reserved_coordination_keys: set[str] | None = None,
+) -> PublishedUpload:
+    publish_task = asyncio.create_task(
+        run_file_io(
+            publish_staged_upload_leased,
+            staged,
+            filename,
+            reserved_coordination_keys=reserved_coordination_keys,
+        )
+    )
+    try:
+        return await asyncio.shield(publish_task)
+    except asyncio.CancelledError:
+        await wait_for_task_completion(publish_task)
+        if not publish_task.cancelled() and publish_task.exception() is None:
+            cleanup_task = asyncio.create_task(run_file_io(_rollback_and_release_publication, publish_task.result()))
+            await wait_for_task_completion(cleanup_task)
+            try:
+                cleanup_task.result()
+            except Exception:
+                logger.warning("Failed to roll back a cancelled upload publication", exc_info=True)
+        raise
+
+
+async def _create_upload_staging_file_cancellation_safe(uploads_dir: Path) -> StagedUpload:
+    """Create a staged upload without leaking it when the caller is cancelled."""
+    create_task = asyncio.create_task(run_file_io(create_upload_staging_file, uploads_dir))
+    try:
+        return await asyncio.shield(create_task)
+    except asyncio.CancelledError:
+        await wait_for_task_completion(create_task)
+        if not create_task.cancelled() and create_task.exception() is None:
+            cleanup_task = asyncio.create_task(run_file_io(abort_staged_upload, create_task.result()))
+            await wait_for_task_completion(cleanup_task)
+            try:
+                cleanup_task.result()
+            except Exception:
+                logger.warning("Failed to abort a cancelled upload staging file", exc_info=True)
         raise
 
 
@@ -229,9 +294,16 @@ def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -
         _make_file_sandbox_readable(file_path)
 
 
-def _sync_upload_to_sandbox(sandbox, file_path: os.PathLike[str] | str, virtual_path: str) -> None:
+def _sync_upload_to_sandbox(
+    sandbox,
+    file_path: os.PathLike[str] | str,
+    virtual_path: str,
+    attempted_sandbox_paths: list[str],
+) -> None:
     _make_file_sandbox_writable(file_path)
-    sandbox.update_file(virtual_path, Path(file_path).read_bytes())
+    data = Path(file_path).read_bytes()
+    attempted_sandbox_paths.append(virtual_path)
+    sandbox.update_file(virtual_path, data)
 
 
 def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
@@ -245,9 +317,18 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
     return result
 
 
-def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
+def _delete_uploaded_file_for_thread(
+    thread_id: str,
+    filename: str,
+    user_id: str,
+    delete_remote_copy=None,
+) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+    return delete_file_safe(
+        uploads_dir,
+        filename,
+        delete_remote_copy=delete_remote_copy,
+    )
 
 
 async def _write_upload_file_with_limits(
@@ -258,11 +339,12 @@ async def _write_upload_file_with_limits(
     max_single_file_size: int,
     max_total_size: int,
     total_size: int,
-) -> tuple[os.PathLike[str] | str, int, int]:
+    reserved_coordination_keys: set[str] | None = None,
+) -> tuple[PublishedUpload, int, int]:
     file_size = 0
-    upload_temp: _UploadTempFile | None = None
+    upload_temp: StagedUpload | None = None
     try:
-        upload_temp = await run_file_io(_prepare_upload_destination, uploads_dir, display_filename)
+        upload_temp = await _create_upload_staging_file_cancellation_safe(Path(uploads_dir))
         while chunk := await file.read(UPLOAD_CHUNK_SIZE):
             file_size += len(chunk)
             total_size += len(chunk)
@@ -270,16 +352,19 @@ async def _write_upload_file_with_limits(
                 raise HTTPException(status_code=413, detail=f"File too large: {display_filename}")
             if total_size > max_total_size:
                 raise HTTPException(status_code=413, detail="Total upload size too large")
-            await run_file_io(_write_upload_chunk, upload_temp, chunk)
+            await run_file_io(upload_temp.handle.write, chunk)
 
-        await run_file_io(_commit_upload_temp, upload_temp)
-        file_path = upload_temp.file_path
+        publication = await _publish_staged_upload_cancellation_safe(
+            upload_temp,
+            display_filename,
+            reserved_coordination_keys,
+        )
         upload_temp = None
-    except Exception:
+    except BaseException:
         if upload_temp is not None:
-            await run_file_io(_abort_upload_temp, upload_temp)
+            await _run_file_io_cancellation_safe(abort_staged_upload, upload_temp)
         raise
-    return file_path, file_size, total_size
+    return publication, file_size, total_size
 
 
 def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
@@ -320,47 +405,56 @@ async def upload_files(
         raise HTTPException(status_code=400, detail=str(e))
     sandbox_uploads = uploads_dir
     uploaded_files = []
-    written_paths = []
+    publications: list[PublishedUpload] = []
+    generated_paths: list[Path] = []
     sandbox_sync_targets = []
+    attempted_sandbox_paths: list[str] = []
     skipped_files = []
+    reserved_coordination_keys: set[str] = set()
     total_size = 0
-    # Track filenames within this request so duplicate form parts do not
-    # silently truncate each other. Existing uploads keep the historical
-    # overwrite behavior for a single replacement upload.
-    seen_filenames: set[str] = set()
-
-    sandbox_provider = get_sandbox_provider()
-    sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
+    sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+    sync_to_sandbox = not await sandbox_provider_uses_thread_data_mounts_async(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
         sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-        sandbox = sandbox_provider.get(sandbox_id)
-        if sandbox is None:
-            raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
+        sync_to_sandbox = not sandbox_provider_sandbox_uses_thread_data_mounts(
+            sandbox_provider,
+            sandbox_id,
+        )
+        if sync_to_sandbox:
+            sandbox = sandbox_provider.get(sandbox_id)
+            if sandbox is None:
+                raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
+    current_filename = "request"
 
-    for file in files:
-        if not file.filename:
-            continue
+    try:
+        for file in files:
+            if not file.filename:
+                logger.warning("Skipping multipart upload with an empty filename")
+                skipped_files.append("")
+                continue
+            current_filename = file.filename
 
-        try:
-            original_filename = normalize_filename(file.filename)
-            safe_filename = claim_unique_filename(original_filename, seen_filenames)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
+            try:
+                original_filename = normalize_filename(file.filename)
+            except ValueError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                skipped_files.append(file.filename)
+                continue
 
-        try:
-            file_path, file_size, total_size = await _write_upload_file_with_limits(
+            publication, file_size, total_size = await _write_upload_file_with_limits(
                 file,
                 uploads_dir=uploads_dir,
-                display_filename=safe_filename,
+                display_filename=original_filename,
                 max_single_file_size=limits.max_file_size,
                 max_total_size=limits.max_total_size,
                 total_size=total_size,
+                reserved_coordination_keys=reserved_coordination_keys,
             )
-            written_paths.append(file_path)
-
+            publications.append(publication)
+            file_path = publication.path
+            safe_filename = file_path.name
             virtual_path = upload_virtual_path(safe_filename)
 
             if sync_to_sandbox:
@@ -380,67 +474,80 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                # Reserve the companion .md name in this request's seen set
-                # before writing so conversion cannot silently truncate another
-                # uploaded or derived file (same invariant as form-part dedupe).
-                provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
-                md_output = file_path.with_name(unique_md_name)
-                md_path = await convert_file_to_markdown(file_path, output_path=md_output)
+                try:
+                    md_path = await convert_uploaded_file_to_markdown(file_path, publication=publication)
+                except Exception:
+                    logger.warning("Failed to convert uploaded file: %s", file_path, exc_info=True)
+                    md_path = None
                 if md_path:
-                    written_paths.append(md_path)
-                    md_virtual_path = upload_virtual_path(md_path.name)
+                    generated_paths.append(md_path)
+                    md_virtual_path = conversion_virtual_path(safe_filename)
 
                     if sync_to_sandbox:
                         sandbox_sync_targets.append((md_path, md_virtual_path))
 
                     file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                    file_info["markdown_path"] = str(md_path)
                     file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                else:
-                    # Conversion failed and wrote nothing, so release the claim;
-                    # holding it would rename a later same-stem upload against
-                    # a name nothing occupies.
-                    seen_filenames.discard(unique_md_name)
+                    file_info["markdown_artifact_url"] = artifact_url_for_virtual_path(thread_id, md_virtual_path)
 
             uploaded_files.append(file_info)
 
-        except HTTPException as e:
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise e
-        except UnsafeUploadPathError as e:
-            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
-            skipped_files.append(safe_filename)
-            continue
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            await run_file_io(_cleanup_uploaded_paths, written_paths)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+        # Uploaded files are created with 0o600 permissions (owner read/write only).
+        # Always add group/other read bits before mounted or explicit sandbox use.
+        postprocess_paths = [publication.path for publication in publications] + generated_paths
+        await _run_file_io_cancellation_safe(_make_uploaded_paths_sandbox_readable, postprocess_paths)
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
+        if sync_to_sandbox:
+            for file_path, virtual_path in sandbox_sync_targets:
+                await _run_file_io_cancellation_safe(
+                    _sync_upload_to_sandbox,
+                    sandbox,
+                    file_path,
+                    virtual_path,
+                    attempted_sandbox_paths,
+                )
 
-    if sync_to_sandbox:
-        for file_path, virtual_path in sandbox_sync_targets:
-            await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
+        message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+        if skipped_files:
+            message += f"; skipped {len(skipped_files)} unsafe file(s)"
 
-    message = f"Successfully uploaded {len(uploaded_files)} file(s)"
-    if skipped_files:
-        message += f"; skipped {len(skipped_files)} unsafe file(s)"
-
-    return UploadResponse(
-        success=not skipped_files,
-        files=uploaded_files,
-        message=message,
-        skipped_files=skipped_files,
-    )
+        return UploadResponse(
+            success=not skipped_files,
+            files=uploaded_files,
+            message=message,
+            skipped_files=skipped_files,
+        )
+    except HTTPException:
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            attempted_sandbox_paths,
+            publications,
+            generated_paths,
+        )
+        raise
+    except Exception as exc:
+        logger.error("Failed to upload %s: %s", current_filename, exc)
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            attempted_sandbox_paths,
+            publications,
+            generated_paths,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to upload {current_filename}: {str(exc)}") from exc
+    except BaseException:
+        await _run_file_io_cancellation_safe(
+            _rollback_upload_request,
+            sandbox,
+            attempted_sandbox_paths,
+            publications,
+            generated_paths,
+        )
+        raise
+    finally:
+        await _run_file_io_commit(_release_publications, publications)
 
 
 @router.get("/limits", response_model=UploadLimits)
@@ -471,7 +578,20 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
+        user_id = get_effective_user_id()
+        sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
+        delete_remote_copy = await prepare_upload_deletion_async(
+            sandbox_provider,
+            thread_id,
+            user_id=user_id,
+        )
+        return await _run_upload_lease_io_cancellation_safe(
+            _delete_uploaded_file_for_thread,
+            thread_id,
+            filename,
+            user_id,
+            delete_remote_copy,
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:

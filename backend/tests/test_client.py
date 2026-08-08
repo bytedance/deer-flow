@@ -3,7 +3,9 @@
 import asyncio
 import concurrent.futures
 import json
+import os
 import tempfile
+import threading
 import zipfile
 from enum import Enum
 from pathlib import Path
@@ -26,9 +28,11 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.sandbox_provider import SandboxReconciliationIdentity
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
-from deerflow.uploads.manager import PathTraversalError
+from deerflow.uploads.layout import conversion_path_for_upload
+from deerflow.uploads.manager import PathTraversalError, UnsafeUploadPathError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -54,6 +58,7 @@ def mock_app_config():
     config.database.checkpoint_channel_mode = "full"
     config.database.checkpoint_delta.snapshot_frequency = 10
     config.authorization = AuthorizationConfig(enabled=False)
+    config.sandbox.use = "deerflow.sandbox.local:LocalSandboxProvider"
     return config
 
 
@@ -2121,6 +2126,99 @@ class TestMemoryManagement:
 
 
 class TestUploads:
+    @pytest.mark.asyncio
+    async def test_release_failure_does_not_strand_later_leases_or_conversion_pool(self, client, tmp_path):
+        from deerflow.uploads.lease import UploadNameLease
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "one.pdf"
+        second = tmp_path / "two.txt"
+        first.write_bytes(b"PDF")
+        second.write_bytes(b"text")
+        real_executor = concurrent.futures.ThreadPoolExecutor
+        created_executors = []
+
+        class TrackingExecutor(real_executor):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.shutdown_called = False
+                created_executors.append(self)
+
+            def shutdown(self, *args, **kwargs):
+                self.shutdown_called = True
+                return super().shutdown(*args, **kwargs)
+
+        async def no_conversion(_path, *, publication=None):
+            assert publication is not None
+            return None
+
+        real_release = UploadNameLease.release
+        injected = False
+
+        def release_with_one_error(lease):
+            nonlocal injected
+            real_release(lease)
+            if lease.filename == "two.txt" and not injected:
+                injected = True
+                raise OSError("injected release failure")
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=no_conversion),
+            patch("concurrent.futures.ThreadPoolExecutor", TrackingExecutor),
+            patch.object(UploadNameLease, "release", autospec=True, side_effect=release_with_one_error),
+        ):
+            result = client.upload_files("thread-release", [first, second])
+
+        assert result["success"] is True
+        assert injected
+        assert len(created_executors) == 1
+        assert created_executors[0].shutdown_called
+        for filename in ["one.pdf", "two.txt"]:
+            lease = UploadNameLease.try_acquire(uploads_dir, filename)
+            assert lease is not None
+            lease.release()
+
+    def test_delete_waits_for_client_conversion_and_metadata(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"PDF")
+        conversion_started = threading.Event()
+        allow_conversion = threading.Event()
+
+        async def paused_convert(path: Path, *, publication=None) -> Path:
+            assert publication is not None
+            assert publication.path == path
+            assert publication.is_active
+            conversion_started.set()
+            await asyncio.to_thread(allow_conversion.wait)
+            md_path = conversion_path_for_upload(path)
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            md_path.write_text("converted", encoding="utf-8")
+            return md_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=paused_convert),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            upload = pool.submit(client.upload_files, "thread-1", [source])
+            assert conversion_started.wait(5)
+            deletion = pool.submit(client.delete_upload, "thread-1", "report.pdf")
+            assert not deletion.done()
+            allow_conversion.set()
+            result = upload.result(timeout=5)
+            deletion.result(timeout=5)
+
+        assert result["files"][0]["markdown_file"] == "report.pdf.md"
+        assert not (uploads_dir / "report.pdf").exists()
+        assert not conversion_path_for_upload(uploads_dir / "report.pdf").exists()
+
     def test_upload_files(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2142,6 +2240,198 @@ class TestUploads:
             assert "artifact_url" in result["files"][0]
             assert "message" in result
             assert (uploads_dir / "test.txt").exists()
+            assert (uploads_dir / "test.txt").stat().st_mode & 0o044 == 0o044
+
+    def test_upload_files_syncs_primary_and_conversion_to_non_mounted_sandbox(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        source = tmp_path / "report.pdf"
+        source.write_bytes(b"PDF")
+        updates: list[tuple[str, bytes]] = []
+        removals: list[str] = []
+
+        class Sandbox:
+            def update_file(self, path, content):
+                updates.append((path, content))
+
+            def remove_file(self, path):
+                removals.append(path)
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            def acquire(self, thread_id, user_id=None):
+                return "remote"
+
+            def get(self, sandbox_id):
+                return Sandbox() if sandbox_id == "remote" else None
+
+        async def fake_convert(path: Path, *, publication=None) -> Path:
+            assert publication is not None
+            conversion = conversion_path_for_upload(path)
+            conversion.parent.mkdir(parents=True, exist_ok=True)
+            conversion.write_bytes(b"MARKDOWN")
+            return conversion
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=fake_convert),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=Provider()),
+        ):
+            result = client.upload_files("thread-1", [source])
+
+        info = result["files"][0]
+        assert updates == [
+            (info["virtual_path"], b"PDF"),
+            (info["markdown_virtual_path"], b"MARKDOWN"),
+        ]
+        assert removals == []
+
+    def test_upload_files_rolls_back_the_whole_batch_when_later_sync_fails(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        remote_files: dict[str, bytes] = {}
+
+        class Sandbox:
+            def update_file(self, path, content):
+                remote_files[path] = content
+                if path.endswith("second.txt"):
+                    raise RuntimeError("second sync failed after commit")
+
+            def remove_file(self, path):
+                remote_files.pop(path, None)
+
+        sandbox = Sandbox()
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            def acquire(self, thread_id, user_id=None):
+                return "remote"
+
+            def get(self, sandbox_id):
+                return sandbox if sandbox_id == "remote" else None
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=Provider()),
+        ):
+            with pytest.raises(RuntimeError, match="second sync failed"):
+                client.upload_files("thread-1", [first, second])
+
+        assert list(uploads_dir.iterdir()) == []
+        assert remote_files == {}
+
+    def test_upload_files_across_calls_never_overwrite(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = first_dir / "same.txt"
+        second = second_dir / "same.txt"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+        ):
+            first_result = client.upload_files("thread-1", [first])
+            second_result = client.upload_files("thread-1", [second])
+
+        assert first_result["files"][0]["filename"] == "same.txt"
+        assert second_result["files"][0]["filename"] == "same_1.txt"
+        assert (uploads_dir / "same.txt").read_bytes() == b"first"
+        assert (uploads_dir / "same_1.txt").read_bytes() == b"second"
+
+    def test_upload_files_renames_portable_aliases_within_one_batch(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        first_dir = tmp_path / "first"
+        second_dir = tmp_path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first = first_dir / "Report.txt"
+        second = second_dir / "report.txt"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            result = client.upload_files("thread-aliases", [first, second])
+
+        assert [file["filename"] for file in result["files"]] == ["Report.txt", "report_1.txt"]
+        assert (uploads_dir / "Report.txt").read_bytes() == b"first"
+        assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
+
+    def test_inverse_portable_alias_batches_do_not_deadlock(self, client, tmp_path):
+        import deerflow.client as client_module
+
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        batch_one = tmp_path / "batch-one"
+        batch_two = tmp_path / "batch-two"
+        batch_one.mkdir()
+        batch_two.mkdir()
+        files_one = [batch_one / "A.txt", batch_one / "B.txt"]
+        files_two = [batch_two / "b.txt", batch_two / "a.txt"]
+        for path in files_one + files_two:
+            path.write_bytes(path.name.encode())
+
+        first_publications = threading.Barrier(2)
+        batch_counts = {batch_one: 0, batch_two: 0}
+        counts_lock = threading.Lock()
+        real_publish = client_module.publish_upload_copy_leased
+
+        def pause_after_each_batch_publishes_first(base_dir, preferred_filename, source_path, **kwargs):
+            publication = real_publish(base_dir, preferred_filename, source_path, **kwargs)
+            with counts_lock:
+                batch_counts[source_path.parent] += 1
+                is_first = batch_counts[source_path.parent] == 1
+            if is_first:
+                first_publications.wait(timeout=5)
+            return publication
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.publish_upload_copy_leased", side_effect=pause_after_each_batch_publishes_first),
+            concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            future_one = pool.submit(client.upload_files, "thread-aliases", files_one)
+            future_two = pool.submit(client.upload_files, "thread-aliases", files_two)
+            result_one = future_one.result(timeout=5)
+            result_two = future_two.result(timeout=5)
+
+        assert [file["filename"] for file in result_one["files"]] == ["A.txt", "B_1.txt"]
+        assert [file["filename"] for file in result_two["files"]] == ["b.txt", "a_1.txt"]
+
+    def test_concurrent_client_uploads_preserve_all_payloads(self, client, tmp_path):
+        uploads_dir = tmp_path / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        sources = []
+        for index in range(8):
+            source_dir = tmp_path / f"source-{index}"
+            source_dir.mkdir()
+            source = source_dir / "same.bin"
+            source.write_bytes(f"payload-{index}".encode())
+            sources.append(source)
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            concurrent.futures.ThreadPoolExecutor(max_workers=len(sources)) as pool,
+        ):
+            results = list(pool.map(lambda source: client.upload_files("thread-1", [source]), sources))
+
+        names = [result["files"][0]["filename"] for result in results]
+        assert len(set(names)) == len(sources)
+        assert {(uploads_dir / name).read_bytes() for name in names} == {source.read_bytes() for source in sources}
 
     def test_upload_files_not_found(self, client):
         with pytest.raises(FileNotFoundError):
@@ -2166,8 +2456,10 @@ class TestUploads:
             created_executors = []
             real_executor_cls = concurrent.futures.ThreadPoolExecutor
 
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
+            async def fake_convert(path: Path, *, publication=None) -> Path:
+                assert publication is not None
+                md_path = conversion_path_for_upload(path)
+                md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"converted {path.name}")
                 return md_path
 
@@ -2192,7 +2484,7 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+                patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=fake_convert),
                 patch("concurrent.futures.ThreadPoolExecutor", FakeExecutor),
             ):
                 result = asyncio.run(call_upload())
@@ -2202,8 +2494,8 @@ class TestUploads:
             assert len(created_executors) == 1
             assert created_executors[0].max_workers == 1
             assert created_executors[0].shutdown_calls == [True]
-            assert result["files"][0]["markdown_file"] == "first.md"
-            assert result["files"][1]["markdown_file"] == "second.md"
+            assert result["files"][0]["markdown_file"] == "first.pdf.md"
+            assert result["files"][1]["markdown_file"] == "second.pdf.md"
 
     def test_upload_files_converted_markdown_uses_unique_names_on_stem_collision(self, client):
         """Companion .md from convert must not clobber another same-stem companion."""
@@ -2217,32 +2509,44 @@ class TestUploads:
             docx.write_bytes(b"DOCX")
             pdf.write_bytes(b"PDF")
 
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
+            markdown = tmp_path / "a.md"
+            markdown.write_bytes(b"USER")
+
+            async def fake_convert(path: Path, *, publication=None) -> Path:
+                assert publication is not None
+                md_path = conversion_path_for_upload(path)
+                md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
+                md_path.chmod(0o600)
                 return md_path
 
             with (
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx", ".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+                patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=fake_convert),
             ):
-                result = client.upload_files("thread-1", [docx, pdf])
+                result = client.upload_files("thread-1", [docx, pdf, markdown])
 
             assert result["success"] is True
-            assert result["files"][0]["markdown_file"] == "a.md"
-            assert result["files"][1]["markdown_file"] == "a_1.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
-            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            assert result["files"][0]["markdown_file"] == "a.docx.md"
+            assert result["files"][0]["markdown_virtual_path"] == "/mnt/user-data/.upload-conversions/a.docx.md"
+            assert result["files"][1]["markdown_file"] == "a.pdf.md"
+            assert result["files"][1]["markdown_artifact_url"] == ("/api/threads/thread-1/artifacts/mnt/user-data/.upload-conversions/a.pdf.md")
+            assert result["files"][2]["filename"] == "a.md"
+            assert (uploads_dir / "a.md").read_bytes() == b"USER"
+            assert conversion_path_for_upload(uploads_dir / "a.docx").read_text(encoding="utf-8") == "FROM:a.docx"
+            assert conversion_path_for_upload(uploads_dir / "a.pdf").read_text(encoding="utf-8") == "FROM:a.pdf"
+            for path in (
+                uploads_dir / "a.docx",
+                uploads_dir / "a.pdf",
+                conversion_path_for_upload(uploads_dir / "a.docx"),
+                conversion_path_for_upload(uploads_dir / "a.pdf"),
+            ):
+                assert path.stat().st_mode & 0o044 == 0o044
 
-    def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
-        """A conversion that writes nothing must not reserve stem.md against a later companion.
-
-        Destination names are claimed upfront, so a same-stem ``.md`` upload
-        always wins ``a.md``; the only reachable victim of a stale claim is the
-        next convertible's companion.
-        """
+    def test_upload_files_failed_conversion_does_not_block_other_conversion(self, client):
+        """A failed conversion does not affect another primary's owned asset."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             uploads_dir = tmp_path / "uploads"
@@ -2253,10 +2557,12 @@ class TestUploads:
             docx.write_bytes(b"DOCX")
             pdf.write_bytes(b"PDF")
 
-            async def convert_failing_on_docx(path: Path, output_path: Path | None = None) -> Path | None:
+            async def convert_failing_on_docx(path: Path, *, publication=None) -> Path | None:
+                assert publication is not None
                 if path.suffix.lower() == ".docx":
                     return None
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path = conversion_path_for_upload(path)
+                md_path.parent.mkdir(parents=True, exist_ok=True)
                 md_path.write_text(f"FROM:{path.name}", encoding="utf-8")
                 return md_path
 
@@ -2264,15 +2570,14 @@ class TestUploads:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx", ".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=convert_failing_on_docx),
+                patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=convert_failing_on_docx),
             ):
                 result = client.upload_files("thread-1", [docx, pdf])
 
             assert result["success"] is True
             assert result["files"][0].get("markdown_file") is None
-            assert result["files"][1]["markdown_file"] == "a.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
-            assert not (uploads_dir / "a_1.md").exists()
+            assert result["files"][1]["markdown_file"] == "a.pdf.md"
+            assert conversion_path_for_upload(uploads_dir / "a.pdf").read_text(encoding="utf-8") == "FROM:a.pdf"
 
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2295,28 +2600,122 @@ class TestUploads:
 
     def test_delete_upload(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            uploads_dir = Path(tmp)
-            (uploads_dir / "delete-me.txt").write_text("gone")
+            uploads_dir = Path(tmp) / "user-data" / "uploads"
+            uploads_dir.mkdir(parents=True)
+            primary = uploads_dir / "delete-me.txt"
+            primary.write_text("gone")
+            user_markdown = uploads_dir / "delete-me.md"
+            user_markdown.write_text("user")
+            conversion = conversion_path_for_upload(primary)
+            conversion.parent.mkdir()
+            conversion.write_text("generated")
 
-            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 result = client.delete_upload("thread-1", "delete-me.txt")
 
             assert result["success"] is True
             assert "delete-me.txt" in result["message"]
-            assert not (uploads_dir / "delete-me.txt").exists()
+            assert not primary.exists()
+            assert not conversion.exists()
+            assert user_markdown.read_text() == "user"
 
     def test_delete_upload_not_found(self, client):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=Path(tmp)),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 with pytest.raises(FileNotFoundError):
                     client.delete_upload("thread-1", "nope.txt")
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX legacy filenames are not representable on Windows")
+    @pytest.mark.parametrize("filename", ["report?.pdf", r"report\draft.pdf", "...", " "])
+    def test_delete_upload_accepts_legacy_posix_filename(self, client, tmp_path, filename):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        legacy = uploads_dir / filename
+        legacy.write_bytes(b"legacy")
+
+        provider = MagicMock(uses_thread_data_mounts=True)
+        with (
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+        ):
+            result = client.delete_upload("thread-1", legacy.name)
+
+        assert result["success"] is True
+        assert not legacy.exists()
 
     def test_delete_upload_path_traversal(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
-            with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            provider = MagicMock(uses_thread_data_mounts=True)
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+            ):
                 with pytest.raises(PathTraversalError):
                     client.delete_upload("thread-1", "../../etc/passwd")
+
+    def test_delete_upload_removes_explicitly_synced_remote_paths(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        primary = uploads_dir / "report.pdf"
+        primary.write_bytes(b"pdf")
+        conversion = conversion_path_for_upload(primary)
+        conversion.parent.mkdir()
+        conversion.write_text("generated", encoding="utf-8")
+        sandbox = MagicMock()
+
+        class Provider:
+            uses_thread_data_mounts = False
+
+            @staticmethod
+            def refresh_thread_data_mount_capabilities() -> bool:
+                return False
+
+            @staticmethod
+            def acquire(_thread_id: str, *, user_id: str | None = None) -> str:
+                return "remote-1"
+
+            @staticmethod
+            def get(sandbox_id: str):
+                return sandbox if sandbox_id == "remote-1" else None
+
+            @staticmethod
+            def reconciliation_provider_key() -> str:
+                return "tests.ClientExplicitSyncProvider"
+
+            def prepare_sandbox_reconciliation_identity(self, sandbox_id: str) -> SandboxReconciliationIdentity:
+                assert sandbox_id == "remote-1"
+                return SandboxReconciliationIdentity(
+                    provider_key=self.reconciliation_provider_key(),
+                    backend_namespace="tests.backend",
+                    incarnation_id="tests.incarnation",
+                )
+
+        provider = Provider()
+
+        with (
+            patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.sandbox.sandbox_provider.get_sandbox_provider", return_value=provider),
+        ):
+            result = client.delete_upload("thread-1", "report.pdf")
+
+        assert result["success"] is True
+        assert sandbox.remove_file.call_args_list == [
+            (("/mnt/user-data/uploads/report.pdf",),),
+            (("/mnt/user-data/.upload-conversions/report.pdf.md",),),
+        ]
+        assert not primary.exists()
+        assert not conversion.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -3070,7 +3469,7 @@ class TestScenarioEdgeCases:
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=Exception("conversion failed")),
+                patch("deerflow.client.convert_uploaded_file_to_markdown", side_effect=Exception("conversion failed")),
             ):
                 result = client.upload_files("t-pdf-fail", [pdf_file])
 
@@ -3784,7 +4183,7 @@ class TestSerializeMessage:
 
 class TestUploadDeleteSymlink:
     def test_delete_upload_symlink_outside_dir(self, client):
-        """A symlink in uploads dir pointing outside is caught by path traversal check."""
+        """A symlink in uploads dir is rejected without touching its target."""
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp) / "uploads"
             uploads_dir.mkdir()
@@ -3803,9 +4202,7 @@ class TestUploadDeleteSymlink:
                 raise
 
             with patch("deerflow.client.get_uploads_dir", return_value=uploads_dir), patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
-                # The resolved path of the symlink escapes uploads_dir,
-                # so path traversal check should catch it.
-                with pytest.raises(PathTraversalError):
+                with pytest.raises(UnsafeUploadPathError):
                     client.delete_upload("thread-1", "harmless.txt")
 
             # The outside file must NOT have been deleted.

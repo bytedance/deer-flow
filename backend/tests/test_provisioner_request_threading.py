@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -42,6 +43,61 @@ def test_provisioner_accepts_canonical_thread_ids(provisioner_module, thread_id:
     assert request.thread_id == thread_id
 
 
+def test_sandbox_access_url_sanitizes_transient_error_log(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    class FailingCoreV1:
+        def read_namespaced_service(self, _name: str, _namespace: str):
+            raise ApiException(status=500, reason="upstream\nforged\rentry")
+
+    monkeypatch.setattr(provisioner_module, "core_v1", FailingCoreV1())
+    caplog.set_level(logging.WARNING, logger=provisioner_module.logger.name)
+
+    assert (
+        provisioner_module._sandbox_access_url(
+            "sandbox\nforged",
+            tolerate_read_errors=True,
+        )
+        is None
+    )
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "sandboxforged" in message
+    assert "upstreamforgedentry" in message
+    assert "\n" not in message
+    assert "\r" not in message
+
+
+def test_create_rejects_mount_contract_precondition_before_k8s_io(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    required_version = provisioner_module.MOUNT_CONTRACT_VERSION + 1
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-wrong-contract",
+                thread_id="thread-1",
+                user_id="alice",
+                required_mount_contract_version=required_version,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == {
+        "code": "mount_contract_changed",
+        "expected": required_version,
+        "actual": provisioner_module.MOUNT_CONTRACT_VERSION,
+    }
+    assert fake_core_v1.thread_ids == []
+
+
 class _RecordingCoreV1:
     def __init__(
         self,
@@ -58,7 +114,11 @@ class _RecordingCoreV1:
         self.service_read_counts: dict[str, int] = {}
         self.created_pods: list[str] = []
         self.created_pod_specs: dict[str, object] = {}
+        self.existing_pod_specs: dict[str, object] = {}
+        self.missing_pods: set[str] = set()
+        self.pod_read_counts: dict[str, int] = {}
         self.created_services: list[str] = []
+        self.namespace_uid = "namespace-uid-1"
 
     def _record_k8s_call(self) -> None:
         thread_id = threading.get_ident()
@@ -86,7 +146,21 @@ class _RecordingCoreV1:
 
     def read_namespaced_pod(self, _name: str, _namespace: str):
         self._record_k8s_call()
+        sandbox_id = _name.removeprefix("sandbox-")
+        self.pod_read_counts[sandbox_id] = self.pod_read_counts.get(sandbox_id, 0) + 1
+        if sandbox_id in self.missing_pods:
+            raise ApiException(status=404)
+        pod = self.existing_pod_specs.get(sandbox_id) or self.created_pod_specs.get(sandbox_id)
+        if pod is not None:
+            if not getattr(pod.metadata, "uid", None):
+                pod.metadata.uid = f"pod-uid-{sandbox_id}"
+            pod.status = SimpleNamespace(phase="Running")
+            return pod
         return SimpleNamespace(status=SimpleNamespace(phase="Running"))
+
+    def read_namespace(self, _namespace: str):
+        self._record_k8s_call()
+        return SimpleNamespace(metadata=SimpleNamespace(uid=self.namespace_uid))
 
     def create_namespaced_pod(self, _namespace: str, pod) -> None:
         self._record_k8s_call()
@@ -140,6 +214,7 @@ def test_sandbox_business_route_handlers_are_sync(provisioner_module) -> None:
     for handler in (
         provisioner_module.create_sandbox,
         provisioner_module.destroy_sandbox,
+        provisioner_module.reconcile_sandbox_identity,
         provisioner_module.get_sandbox,
         provisioner_module.list_sandboxes,
     ):
@@ -172,6 +247,11 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     )
     monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
     monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="user-1",
+    )
 
     with _detect_provisioner_blocking_io(provisioner_module):
         transport = httpx.ASGITransport(app=provisioner_module.app)
@@ -187,6 +267,227 @@ async def test_sandbox_business_routes_run_k8s_client_off_event_loop_thread(
     if expected_created_sandbox is not None:
         assert fake_core_v1.created_pods == [expected_created_sandbox]
         assert fake_core_v1.created_services == [expected_created_sandbox]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_reports_pod_absence_authoritatively(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.missing_pods.add("sandbox-gone")
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-gone",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sandbox_id": "sandbox-gone",
+        "status": "absent",
+        "backend_namespace": "namespace-uid-1",
+        "incarnation_id": None,
+        "sandbox_url": None,
+        "user_id": None,
+        "thread_id": None,
+        "mount_contract_version": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_keeps_live_pod_when_service_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.existing_pod_specs["sandbox-partial"] = provisioner_module._build_pod(
+        "sandbox-partial",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-partial",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "found"
+    assert payload["backend_namespace"] == "namespace-uid-1"
+    assert payload["incarnation_id"] == "pod-uid-sandbox-partial"
+    assert payload["sandbox_url"] is None
+    assert payload["user_id"] == "alice"
+    assert payload["thread_id"] == "thread-1"
+    assert fake_core_v1.pod_read_counts["sandbox-partial"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_endpoint_returns_service_url_for_live_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    fake_core_v1.existing_pod_specs["sandbox-live"] = provisioner_module._build_pod(
+        "sandbox-live",
+        "thread-1",
+        user_id="alice",
+    )
+    fake_core_v1.service_sandboxes.add("sandbox-live")
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret")
+
+    with _detect_provisioner_blocking_io(provisioner_module):
+        transport = httpx.ASGITransport(app=provisioner_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/api/reconciliation/sandboxes/sandbox-live",
+                headers={"X-API-Key": "test-secret"},
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "found"
+    assert payload["incarnation_id"] == "pod-uid-sandbox-live"
+    assert payload["sandbox_url"] == provisioner_module._sandbox_url(
+        "sandbox-live",
+        node_port=32123,
+    )
+    assert fake_core_v1.pod_read_counts["sandbox-live"] == 1
+
+
+def test_existing_sandbox_rejects_cross_tenant_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="bob",
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "another user" in exc_info.value.detail
+
+
+def test_existing_sandbox_validates_read_only_conversion_before_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="alice",
+                extra_mounts=[
+                    provisioner_module.ExtraMount(
+                        host_path=("/.deer-flow/users/alice/threads/thread-1/user-data/.upload-conversions"),
+                        container_path="/mnt/user-data/.upload-conversions",
+                        read_only=False,
+                    )
+                ],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "read-only" in exc_info.value.detail
+
+
+def test_existing_sandbox_rejects_tampered_mount_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    existing = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    userdata = next(volume for volume in existing.spec.volumes if volume.name == "user-data")
+    userdata.host_path.path = "/state/users/mallory/threads/thread-1/user-data"
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = existing
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    with pytest.raises(provisioner_module.HTTPException) as exc_info:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                user_id="alice",
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "incompatible or unverifiable" in exc_info.value.detail
+
+
+def test_existing_sandbox_contract_ignores_kubernetes_service_account_injection(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    """Admission-added service-account mounts are outside the DeerFlow contract."""
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    existing = provisioner_module._build_pod(
+        "sandbox-existing",
+        "thread-1",
+        user_id="alice",
+    )
+    existing.spec.volumes.append(
+        provisioner_module.k8s_client.V1Volume(
+            name="kube-api-access-abcde",
+            projected=provisioner_module.k8s_client.V1ProjectedVolumeSource(sources=[]),
+        )
+    )
+    existing.spec.containers[0].volume_mounts.append(
+        provisioner_module.k8s_client.V1VolumeMount(
+            name="kube-api-access-abcde",
+            mount_path="/var/run/secrets/kubernetes.io/serviceaccount",
+            read_only=True,
+        )
+    )
+    fake_core_v1.existing_pod_specs["sandbox-existing"] = existing
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-existing",
+            thread_id="thread-1",
+            user_id="alice",
+        )
+    )
+
+    assert response.status == "Running"
 
 
 @pytest.mark.parametrize(

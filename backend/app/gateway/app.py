@@ -40,8 +40,10 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
+from deerflow.uploads.sandbox_sync import reconcile_pending_remote_deletions
 
 AppConfig = deerflow_app_config.AppConfig
 get_app_config = deerflow_app_config.get_app_config
@@ -275,9 +277,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("tiktoken warm-up skipped", exc_info=True)
 
     try:
+        reconciled_remote_deletions = await asyncio.to_thread(
+            reconcile_pending_remote_deletions,
+            sandbox_provider_factory=lambda: get_sandbox_provider(app_config=startup_config),
+        )
+        if reconciled_remote_deletions:
+            logger.info("Reconciled %d pending remote upload deletion(s)", reconciled_remote_deletions)
+    except Exception:
+        logger.warning("Pending remote upload deletion reconciliation skipped", exc_info=True)
+
+    try:
         removed_upload_staging_files = await asyncio.to_thread(cleanup_stale_upload_staging_files)
         if removed_upload_staging_files:
-            logger.info("Removed %d stale upload staging file(s)", removed_upload_staging_files)
+            logger.info("Cleaned or recovered %d stale upload staging transaction(s)", removed_upload_staging_files)
     except Exception:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 

@@ -7,7 +7,7 @@ DeerFlow 的文件上传系统返回三种不同的路径，每种路径用于�
 ### 1. 实际文件系统路径 (path)
 
 ```
-.deer-flow/threads/{thread_id}/user-data/uploads/document.pdf
+.deer-flow/users/{user_id}/threads/{thread_id}/user-data/uploads/document.pdf
 ```
 
 **用途：**
@@ -19,7 +19,7 @@ DeerFlow 的文件上传系统返回三种不同的路径，每种路径用于�
 ```python
 # Python 代码中直接访问
 from pathlib import Path
-file_path = Path("backend/.deer-flow/threads/abc123/user-data/uploads/document.pdf")
+file_path = Path("backend/.deer-flow/users/alice/threads/abc123/user-data/uploads/document.pdf")
 content = file_path.read_bytes()
 ```
 
@@ -99,21 +99,21 @@ async function uploadAndProcess(threadId: string, file: File) {
   console.log('文件信息：', fileInfo);
   // {
   //   filename: "report.pdf",
-  //   path: ".deer-flow/threads/abc123/user-data/uploads/report.pdf",
+  //   path: ".deer-flow/users/alice/threads/abc123/user-data/uploads/report.pdf",
   //   virtual_path: "/mnt/user-data/uploads/report.pdf",
   //   artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.pdf",
-  //   markdown_file: "report.md",
-  //   markdown_path: ".deer-flow/threads/abc123/user-data/uploads/report.md",
-  //   markdown_virtual_path: "/mnt/user-data/uploads/report.md",
-  //   markdown_artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/uploads/report.md"
+  //   markdown_file: "report.pdf.md",
+  //   markdown_path: ".deer-flow/users/alice/threads/abc123/user-data/.upload-conversions/report.pdf.md",
+  //   markdown_virtual_path: "/mnt/user-data/.upload-conversions/report.pdf.md",
+  //   markdown_artifact_url: "/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/report.pdf.md"
   // }
 
   // 2. 发送消息给 Agent
   await sendMessage(threadId, "请分析刚上传的 PDF 文件");
 
-  // Agent 会自动看到文件列表，包含：
+  // Agent 的当前上传上下文包含主文件：
   // - report.pdf (虚拟路径: /mnt/user-data/uploads/report.pdf)
-  // - report.md (虚拟路径: /mnt/user-data/uploads/report.md)
+  // 转换结果必须使用上传响应返回的 markdown_virtual_path，不要推导同目录文件名。
 
   // 3. 前端可以直接访问转换后的 Markdown
   const mdResponse = await fetch(fileInfo.markdown_artifact_url);
@@ -132,24 +132,26 @@ async function uploadAndProcess(threadId: string, file: File) {
 
 | 场景 | 使用的路径类型 | 示例 |
 |------|---------------|------|
-| 服务器后端代码直接访问 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
+| 服务器后端代码直接访问 | `path` | `.deer-flow/users/alice/threads/abc123/user-data/uploads/file.pdf` |
 | Agent 工具调用 | `virtual_path` | `/mnt/user-data/uploads/file.pdf` |
 | 前端下载/预览 | `artifact_url` | `/api/threads/abc123/artifacts/mnt/user-data/uploads/file.pdf` |
-| 备份脚本 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
-| 日志记录 | `path` | `.deer-flow/threads/abc123/user-data/uploads/file.pdf` |
+| Agent 读取生成 Markdown | `markdown_virtual_path` | `/mnt/user-data/.upload-conversions/file.pdf.md` |
+| 前端读取生成 Markdown | `markdown_artifact_url` | `/api/threads/abc123/artifacts/mnt/user-data/.upload-conversions/file.pdf.md` |
+| 备份脚本 | `path` | `.deer-flow/users/alice/threads/abc123/user-data/uploads/file.pdf` |
+| 日志记录 | `path` | `.deer-flow/users/alice/threads/abc123/user-data/uploads/file.pdf` |
 
 ## 代码示例集合
 
 ### Python - 后端处理
 
 ```python
-from pathlib import Path
-from deerflow.agents.middlewares.thread_data_middleware import THREAD_DATA_BASE_DIR
+from deerflow.config.paths import get_paths
+from deerflow.uploads.manager import normalize_filename
 
-def process_uploaded_file(thread_id: str, filename: str):
-    # 使用实际路径
-    base_dir = Path.cwd() / THREAD_DATA_BASE_DIR / thread_id / "user-data" / "uploads"
-    file_path = base_dir / filename
+def process_uploaded_file(user_id: str, thread_id: str, filename: str):
+    # 使用与请求所有者相同的用户隔离桶
+    base_dir = get_paths().sandbox_uploads_dir(thread_id, user_id=user_id)
+    file_path = base_dir / normalize_filename(filename)
 
     # 直接读取
     with open(file_path, 'rb') as f:
@@ -172,10 +174,8 @@ async function listUploadedFiles(threadId) {
     console.log(`下载: ${file.artifact_url}?download=true`);
     console.log(`预览: ${file.artifact_url}`);
 
-    // 如果是文档，还有 Markdown 版本
-    if (file.markdown_artifact_url) {
-      console.log(`Markdown: ${file.markdown_artifact_url}`);
-    }
+    // 列表接口只返回主文件。markdown_* 字段仅在本次上传响应中返回，
+    // 调用方如需保留转换链接，应保存该响应元数据。
   });
 
   return data.files;
@@ -204,7 +204,6 @@ interface UploadedFile {
   artifact_url: string;
   extension: string;
   modified: number;
-  markdown_artifact_url?: string;
 }
 
 function FileUploadList({ threadId }: { threadId: string }) {
@@ -254,9 +253,6 @@ function FileUploadList({ threadId }: { threadId: string }) {
             <span>{file.filename}</span>
             <a href={file.artifact_url} target="_blank">预览</a>
             <a href={`${file.artifact_url}?download=true`}>下载</a>
-            {file.markdown_artifact_url && (
-              <a href={file.markdown_artifact_url} target="_blank">Markdown</a>
-            )}
             <button onClick={() => handleDelete(file.filename)}>删除</button>
           </li>
         ))}
@@ -285,5 +281,10 @@ function FileUploadList({ threadId }: { threadId: string }) {
 
 4. **Markdown 转换**
    - 转换成功时，会返回额外的 `markdown_*` 字段
+   - 常规生成文件位于 `.upload-conversions/<完整主文件名>.md`；超长名称使用 UTF-8 安全前缀和完整 SHA-256 摘要，因此始终以上传响应中的 `markdown_*` 字段为准
+   - AIO 挂载模式以只读挂载暴露 `.upload-conversions`；Local 结构化文件 API 通过只读映射拒绝写入，但 Local 宿主机 bash 不受该映射约束；该目录不会出现在主文件列表中
+   - 同名主文件按 `file.pdf`、`file_1.pdf`、`file_2.pdf` 原子发布，不会覆盖
+   - 删除主文件会等待该实际文件名的活跃生命周期，然后只删除其精确生成资产，不会删除用户上传的 `uploads/file.md`
+   - `.upload-*.part` 是内部暂存名称，不能作为用户上传 basename
    - 建议优先使用 Markdown 版本（更易处理）
    - 原始文件始终保留

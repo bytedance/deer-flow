@@ -18,18 +18,25 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
+import re
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
 
 import requests
 
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import DEFAULT_USER_ID, get_effective_user_id
 from deerflow.skills.storage import user_should_see_legacy_skills
 
-from .backend import SandboxBackend
+from .backend import SandboxBackend, SandboxDiscoveryResult
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
 _PROVISIONER_EXTRA_MOUNT_PATHS = {
+    "/mnt/user-data/.upload-conversions",
     "/mnt/acp-workspace",
     "/mnt/skills/custom",
     "/mnt/skills/integrations",
@@ -38,9 +45,33 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
     "/mnt/integrations/lark-cli/runtime",
 }
 
+_UPLOADS_CONTAINER_PATH = "/mnt/user-data/uploads"
+_UPLOAD_CONVERSIONS_CONTAINER_PATH = "/mnt/user-data/.upload-conversions"
+_UPLOAD_MOUNT_CONTRACT_VERSION = 2
+_CAPABILITY_LEGACY_REFRESH_SECONDS = 30.0
+_CAPABILITY_CURRENT_REFRESH_SECONDS = 300.0
+_CAPABILITY_RETRY_MAX_SECONDS = 30.0
+
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 _LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
+
+
+@dataclass(frozen=True, slots=True)
+class MountContractSnapshot:
+    """One immutable Provisioner capability decision used by an acquisition."""
+
+    version: int
+    capability_known: bool
+
+
+class MountContractChangedError(RuntimeError):
+    """The Provisioner contract changed while an acquisition was in flight."""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        super().__init__(f"Provisioner mount contract changed during sandbox acquisition: expected v{expected}, now v{actual}")
+        self.expected = expected
+        self.actual = actual
 
 
 def _provisioner_extra_mounts_payload(
@@ -69,10 +100,35 @@ def _provisioner_extra_mounts_payload(
 
     drop_runtime = provision_lark_cli_runtime or provision_lark_cli_broker
 
+    uploads_host_path = next(
+        (host_path for host_path, container_path, _read_only in extra_mounts if container_path == _UPLOADS_CONTAINER_PATH),
+        None,
+    )
+
+    def expected_conversion_host_path() -> str | None:
+        if uploads_host_path is None:
+            return None
+        if re.match(r"^[A-Za-z]:[\\/]", uploads_host_path) or uploads_host_path.startswith("\\\\") or "\\" in uploads_host_path:
+            return str(PureWindowsPath(uploads_host_path).parent / ".upload-conversions")
+        return str(Path(uploads_host_path).parent / ".upload-conversions")
+
+    expected_conversion_path = expected_conversion_host_path()
+
     payload: list[dict[str, object]] = []
     for host_path, container_path, read_only in extra_mounts:
         if container_path not in _PROVISIONER_EXTRA_MOUNT_PATHS:
             continue
+        if container_path == _UPLOAD_CONVERSIONS_CONTAINER_PATH:
+            if not read_only:
+                raise ValueError("Upload conversion mount must be read-only")
+            if expected_conversion_path is None:
+                raise ValueError("Upload conversion mount requires the matching uploads mount")
+            if re.match(r"^[A-Za-z]:[\\/]", expected_conversion_path) or expected_conversion_path.startswith("\\\\"):
+                matches_expected = PureWindowsPath(host_path) == PureWindowsPath(expected_conversion_path)
+            else:
+                matches_expected = os.path.normpath(host_path) == os.path.normpath(expected_conversion_path)
+            if not matches_expected:
+                raise ValueError("Upload conversion mount must belong to the same thread data directory")
         if drop_runtime and container_path == _LARK_CLI_RUNTIME_CONTAINER_PATH:
             continue
         payload.append(
@@ -110,6 +166,11 @@ class RemoteSandboxBackend(SandboxBackend):
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
+        self._mount_contract_version = 0
+        self._mount_contract_capability_known = False
+        self._capability_probe_failures = 0
+        self._capability_next_probe_at = time.monotonic() + 1.0
+        self._capability_probe_lock = threading.Lock()
 
     @property
     def provisioner_url(self) -> str:
@@ -117,6 +178,114 @@ class RemoteSandboxBackend(SandboxBackend):
 
     def _auth_headers(self) -> dict[str, str]:
         return {"X-API-Key": self._api_key} if self._api_key else {}
+
+    @property
+    def mount_contract_version(self) -> int:
+        """Provisioner mount contract negotiated during provider startup."""
+        return self._mount_contract_version
+
+    @property
+    def mount_contract_capability_known(self) -> bool:
+        """Whether the peer definitively answered capability negotiation."""
+        return self._mount_contract_capability_known
+
+    def mount_contract_snapshot(self) -> MountContractSnapshot:
+        """Return one capability snapshot for a complete caller operation."""
+        with self._capability_probe_lock:
+            return MountContractSnapshot(
+                version=self._mount_contract_version,
+                capability_known=self._mount_contract_capability_known,
+            )
+
+    def refresh_capabilities_and_snapshot(self) -> MountContractSnapshot:
+        """Wait for an in-flight probe and return a fresh atomic snapshot.
+
+        Unlike ``refresh_capabilities_if_stale()``, this operation deliberately
+        waits for the probe lock.  It is used only by synchronous callers or in
+        a worker thread so an expired v2 result can never be reused as mounted
+        while another thread is proving that the peer is legacy/unavailable.
+        """
+        with self._capability_probe_lock:
+            if time.monotonic() >= self._capability_next_probe_at:
+                self._probe_capabilities_locked()
+            return MountContractSnapshot(
+                version=self._mount_contract_version,
+                capability_known=self._mount_contract_capability_known,
+            )
+
+    def _invalidate_capability_snapshot(self) -> None:
+        """Fail closed and force the next acquisition attempt to re-probe."""
+        with self._capability_probe_lock:
+            self._mount_contract_version = 0
+            self._mount_contract_capability_known = False
+            self._capability_next_probe_at = 0.0
+
+    @property
+    def requires_create_validation(self) -> bool:
+        """Require idempotent POST so the Provisioner checks requested mounts."""
+        return True
+
+    def probe_capabilities(self) -> None:
+        """Negotiate optional Provisioner capabilities without breaking old peers."""
+        with self._capability_probe_lock:
+            self._probe_capabilities_locked()
+
+    def refresh_capabilities_if_stale(self) -> bool:
+        """Refresh a legacy/unavailable capability result after its retry window.
+
+        Returns ``True`` when this call performed the probe.  The non-blocking
+        lock prevents a burst of concurrent acquires from serially repeating the
+        same network request after one cached result expires.
+        """
+        now = time.monotonic()
+        if now < self._capability_next_probe_at:
+            return False
+        if not self._capability_probe_lock.acquire(blocking=False):
+            return False
+        try:
+            if time.monotonic() < self._capability_next_probe_at:
+                return False
+            self._probe_capabilities_locked()
+            return True
+        finally:
+            self._capability_probe_lock.release()
+
+    def _probe_capabilities_locked(self) -> None:
+        """Probe while ``_capability_probe_lock`` is held."""
+        try:
+            response = requests.get(
+                f"{self._provisioner_url}/api/capabilities",
+                headers=self._auth_headers(),
+                timeout=5,
+            )
+            if getattr(response, "status_code", None) == 404:
+                self._mount_contract_version = 0
+                self._mount_contract_capability_known = True
+                self._capability_probe_failures = 0
+                self._capability_next_probe_at = time.monotonic() + _CAPABILITY_LEGACY_REFRESH_SECONDS
+                return
+            response.raise_for_status()
+            payload = response.json()
+            version = payload.get("mount_contract_version", 0) if isinstance(payload, dict) else 0
+            self._mount_contract_version = version if isinstance(version, int) and version >= 0 else 0
+            self._mount_contract_capability_known = True
+            self._capability_probe_failures = 0
+            refresh_seconds = _CAPABILITY_CURRENT_REFRESH_SECONDS if self._mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION else _CAPABILITY_LEGACY_REFRESH_SECONDS
+            self._capability_next_probe_at = time.monotonic() + refresh_seconds
+        except (requests.RequestException, ValueError, TypeError):
+            self._mount_contract_version = 0
+            self._mount_contract_capability_known = False
+            self._capability_probe_failures += 1
+            retry_exponent = min(
+                self._capability_probe_failures - 1,
+                int(_CAPABILITY_RETRY_MAX_SECONDS).bit_length(),
+            )
+            retry_seconds = min(
+                _CAPABILITY_RETRY_MAX_SECONDS,
+                float(2**retry_exponent),
+            )
+            self._capability_next_probe_at = time.monotonic() + retry_seconds
+            logger.warning("Provisioner mount capabilities are unavailable; mounted thread data will fail closed until compatibility can be verified")
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -129,12 +298,23 @@ class RemoteSandboxBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        required_mount_contract_version: int | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
+        snapshot = self.refresh_capabilities_and_snapshot()
+        if required_mount_contract_version is not None and snapshot.version != required_mount_contract_version:
+            raise MountContractChangedError(
+                required_mount_contract_version,
+                snapshot.version,
+            )
+        mount_contract_version = snapshot.version
+        effective_user_id = user_id or get_effective_user_id()
+        if mount_contract_version < _UPLOAD_MOUNT_CONTRACT_VERSION and thread_id is not None and effective_user_id != DEFAULT_USER_ID:
+            raise RuntimeError(f"Provisioner mount contract v{mount_contract_version} cannot isolate user {effective_user_id!r}; upgrade the Provisioner before creating authenticated-user sandboxes")
         return self._provisioner_create(
             thread_id,
             sandbox_id,
@@ -142,6 +322,7 @@ class RemoteSandboxBackend(SandboxBackend):
             user_id=user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
             provision_lark_cli_broker=provision_lark_cli_broker,
+            required_mount_contract_version=mount_contract_version,
         )
 
     def destroy(self, info: SandboxInfo) -> None:
@@ -159,6 +340,58 @@ class RemoteSandboxBackend(SandboxBackend):
         the Pod exists.
         """
         return self._provisioner_discover(sandbox_id)
+
+    def discover_for_reconciliation(self, sandbox_id: str) -> SandboxDiscoveryResult:
+        """Ask the Provisioner for a Pod-authoritative instance identity."""
+        try:
+            resp = requests.get(
+                f"{self._provisioner_url}/api/reconciliation/sandboxes/{sandbox_id}",
+                headers=self._auth_headers(),
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                # A rolling old Provisioner has no authoritative endpoint. Its
+                # ordinary sandbox GET conflates a missing Service with a
+                # missing Pod and therefore cannot prove absence.
+                return SandboxDiscoveryResult.unknown()
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError("Provisioner reconciliation response is not an object")
+            returned_id = data.get("sandbox_id")
+            if returned_id != sandbox_id:
+                raise ValueError("Provisioner reconciliation returned a different sandbox ID")
+            backend_namespace = data.get("backend_namespace")
+            if not isinstance(backend_namespace, str) or not backend_namespace:
+                raise ValueError("Provisioner reconciliation response has no backend namespace")
+            status = data.get("status")
+            if status == "absent":
+                return SandboxDiscoveryResult.absent(
+                    backend_namespace=backend_namespace,
+                )
+            if status != "found":
+                raise ValueError("Provisioner reconciliation returned an invalid status")
+            incarnation_id = data.get("incarnation_id")
+            if not isinstance(incarnation_id, str) or not incarnation_id:
+                raise ValueError("Provisioner reconciliation response has no incarnation ID")
+            sandbox_url = data.get("sandbox_url")
+            info = None
+            if isinstance(sandbox_url, str) and sandbox_url:
+                info = SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url=sandbox_url,
+                    user_id=data.get("user_id"),
+                    thread_id=data.get("thread_id"),
+                    mount_contract_version=data.get("mount_contract_version"),
+                )
+            return SandboxDiscoveryResult.found(
+                info,
+                backend_namespace=backend_namespace,
+                incarnation_id=incarnation_id,
+            )
+        except (requests.RequestException, ValueError, TypeError):
+            logger.warning("Provisioner reconciliation lookup failed for %s", sandbox_id, exc_info=True)
+            return SandboxDiscoveryResult.unknown()
 
     def list_running(self) -> list[SandboxInfo]:
         """Return all sandboxes currently managed by the provisioner.
@@ -215,14 +448,18 @@ class RemoteSandboxBackend(SandboxBackend):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
+        required_mount_contract_version: int | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
+        if required_mount_contract_version is None:
+            required_mount_contract_version = self.mount_contract_snapshot().version
         effective_user_id = user_id or get_effective_user_id()
         include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
         payload = {
             "sandbox_id": sandbox_id,
             "thread_id": thread_id,
             "user_id": effective_user_id,
+            "required_mount_contract_version": required_mount_contract_version,
             "include_legacy_skills": include_legacy_skills,
             "provision_lark_cli_runtime": provision_lark_cli_runtime,
             "provision_lark_cli_broker": provision_lark_cli_broker,
@@ -241,12 +478,64 @@ class RemoteSandboxBackend(SandboxBackend):
                 headers=self._auth_headers(),
                 timeout=30,
             )
+            if getattr(resp, "status_code", 200) == 409:
+                conflict_payload = resp.json()
+                detail = conflict_payload.get("detail") if isinstance(conflict_payload, dict) else None
+                if isinstance(detail, dict) and detail.get("code") == "mount_contract_changed" and type(detail.get("actual")) is int:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        detail["actual"],
+                    )
             resp.raise_for_status()
             data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("Provisioner mount contract response is not an object")
+            effective_thread_id = thread_id or sandbox_id
+            response_version = data.get("mount_contract_version")
+            if required_mount_contract_version >= _UPLOAD_MOUNT_CONTRACT_VERSION:
+                if type(response_version) is not int or response_version != required_mount_contract_version:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        response_version if type(response_version) is int else 0,
+                    )
+                response_contract = (
+                    data.get("sandbox_id"),
+                    data.get("user_id"),
+                    data.get("thread_id"),
+                    response_version,
+                )
+                expected_contract = (
+                    sandbox_id,
+                    effective_user_id,
+                    effective_thread_id,
+                    required_mount_contract_version,
+                )
+                if response_contract != expected_contract:
+                    raise RuntimeError(f"Provisioner mount contract response does not match the requested sandbox identity: expected={expected_contract!r}, received={response_contract!r}")
+            elif response_version is None:
+                if required_mount_contract_version != 0:
+                    self._invalidate_capability_snapshot()
+                    raise MountContractChangedError(
+                        required_mount_contract_version,
+                        0,
+                    )
+            elif type(response_version) is not int:
+                raise RuntimeError("Provisioner mount contract response contains a non-integer version")
+            elif response_version != required_mount_contract_version:
+                self._invalidate_capability_snapshot()
+                raise MountContractChangedError(
+                    required_mount_contract_version,
+                    response_version,
+                )
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                user_id=data.get("user_id"),
+                thread_id=data.get("thread_id"),
+                mount_contract_version=response_version,
             )
         except requests.RequestException as exc:
             logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
@@ -298,9 +587,19 @@ class RemoteSandboxBackend(SandboxBackend):
                 return None
             resp.raise_for_status()
             data = resp.json()
+            if data.get("mount_contract_version") != _UPLOAD_MOUNT_CONTRACT_VERSION:
+                logger.info(
+                    "Provisioner discovery ignored sandbox %s with mount contract %r",
+                    sandbox_id,
+                    data.get("mount_contract_version"),
+                )
+                return None
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                user_id=data.get("user_id"),
+                thread_id=data.get("thread_id"),
+                mount_contract_version=data.get("mount_contract_version"),
             )
         except requests.RequestException as exc:
             logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")

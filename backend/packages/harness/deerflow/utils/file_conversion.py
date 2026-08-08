@@ -8,8 +8,8 @@ PDF conversion strategy (auto mode):
      total when page count is unavailable), treat as image-based and fall back to MarkItDown.
   3. If pymupdf4llm is not installed, use MarkItDown directly (existing behaviour).
 
-Large files (> ASYNC_THRESHOLD_BYTES) are converted in a thread pool via
-asyncio.to_thread() to avoid blocking the event loop (fixes #1569).
+Parser work and generated-Markdown writes run in a worker thread so document
+conversion never blocks an async caller's event loop.
 
 No FastAPI or HTTP dependencies — pure utility functions.
 """
@@ -38,11 +38,6 @@ CONVERTIBLE_EXTENSIONS = {
     ".doc",
     ".docx",
 }
-
-# Files larger than this threshold are converted in a background thread.
-# Small files complete in < 1s synchronously; spawning a thread adds unnecessary
-# scheduling overhead for them.
-_ASYNC_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 
 # If pymupdf4llm produces fewer characters *per page* than this threshold,
 # the PDF is likely image-based or encrypted — fall back to MarkItDown.
@@ -140,12 +135,18 @@ def _do_convert(file_path: Path, pdf_converter: str) -> str:
     return _convert_with_markitdown(file_path)
 
 
+def _convert_file_to_markdown_sync(file_path: Path, output_path: Path | None) -> Path:
+    pdf_converter = _get_pdf_converter()
+    text = _do_convert(file_path, pdf_converter)
+    md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+    md_path.write_text(text, encoding="utf-8")
+    return md_path
+
+
 async def convert_file_to_markdown(file_path: Path, output_path: Path | None = None) -> Path | None:
-    """Convert a supported document file to Markdown.
+    """Convert a supported document file to Markdown off the event loop.
 
     PDF files are handled with a two-converter strategy (see module docstring).
-    Large files (> 1 MB) are offloaded to a thread pool to avoid blocking the
-    event loop.
 
     Args:
         file_path: Path to the file to convert.
@@ -158,18 +159,9 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
         Path to the generated .md file, or None if conversion failed.
     """
     try:
-        pdf_converter = _get_pdf_converter()
-        file_size = file_path.stat().st_size
+        md_path = await asyncio.to_thread(_convert_file_to_markdown_sync, file_path, output_path)
 
-        if file_size > _ASYNC_THRESHOLD_BYTES:
-            text = await asyncio.to_thread(_do_convert, file_path, pdf_converter)
-        else:
-            text = _do_convert(file_path, pdf_converter)
-
-        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
-        md_path.write_text(text, encoding="utf-8")
-
-        logger.info("Converted %s to markdown: %s (%d chars)", file_path.name, md_path.name, len(text))
+        logger.info("Converted %s to markdown: %s", file_path.name, md_path.name)
         return md_path
     except Exception as e:
         logger.error("Failed to convert %s to markdown: %s", file_path.name, e)

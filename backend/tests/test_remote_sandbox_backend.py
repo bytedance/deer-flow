@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import importlib
+import threading
+import time
+from unittest.mock import MagicMock
+
 import pytest
 import requests
 
@@ -44,6 +49,79 @@ def test_list_running_delegates_to_provisioner_list(monkeypatch):
     monkeypatch.setattr(backend, "_provisioner_list", mock_list)
 
     assert backend.list_running() == [sandbox_info]
+
+
+def test_reconciliation_discovery_does_not_trust_legacy_route_404(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: _StubResponse(status_code=404))
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "unknown"
+    assert result.info is None
+
+
+def test_reconciliation_discovery_accepts_pod_authoritative_absence(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "old-id",
+                "status": "absent",
+                "backend_namespace": "namespace-uid-1",
+            }
+        ),
+    )
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "absent"
+    assert result.backend_namespace == "namespace-uid-1"
+
+
+def test_reconciliation_discovery_preserves_transport_uncertainty(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr(requests, "get", fail)
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "unknown"
+    assert result.info is None
+
+
+def test_reconciliation_discovery_accepts_exact_old_mount_contract(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "old-id",
+                "status": "found",
+                "backend_namespace": "namespace-uid-1",
+                "incarnation_id": "pod-uid-1",
+                "sandbox_url": "http://sandbox-old",
+                "thread_id": "thread-1",
+                "user_id": "alice",
+                "mount_contract_version": 1,
+            }
+        ),
+    )
+
+    result = backend.discover_for_reconciliation("old-id")
+
+    assert result.status == "found"
+    assert result.info is not None
+    assert result.info.sandbox_id == "old-id"
+    assert result.info.mount_contract_version == 1
+    assert result.backend_namespace == "namespace-uid-1"
+    assert result.incarnation_id == "pod-uid-1"
 
 
 def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monkeypatch):
@@ -163,15 +241,26 @@ def test_user_should_see_legacy_skills_follows_storage_visibility_rule(monkeypat
 @pytest.mark.parametrize("expected_user_id", [None, "owner-1"])
 def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
     expected = SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001")
 
-    def mock_create(thread_id: str, sandbox_id: str, extra_mounts=None, *, user_id=None, provision_lark_cli_runtime=False, provision_lark_cli_broker=False):
+    def mock_create(
+        thread_id: str,
+        sandbox_id: str,
+        extra_mounts=None,
+        *,
+        user_id=None,
+        provision_lark_cli_runtime=False,
+        provision_lark_cli_broker=False,
+        required_mount_contract_version=None,
+    ):
         assert thread_id == "thread-1"
         assert sandbox_id == "abc123"
         assert extra_mounts == [("/host", "/container", False)]
         assert user_id == expected_user_id
         assert provision_lark_cli_runtime is True
         assert provision_lark_cli_broker is False
+        assert required_mount_contract_version == 2
         return expected
 
     monkeypatch.setattr(backend, "_provisioner_create", mock_create)
@@ -186,6 +275,339 @@ def test_create_delegates_to_provisioner_create(monkeypatch, expected_user_id):
     assert result == expected
 
 
+def test_create_rejects_nondefault_user_on_unverified_legacy_provisioner(monkeypatch):
+    backend = RemoteSandboxBackend("http://legacy-provisioner:8002")
+    called = False
+
+    def unexpected_create(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("unsafe legacy create should not be attempted")
+
+    monkeypatch.setattr(backend, "_provisioner_create", unexpected_create)
+
+    with pytest.raises(RuntimeError, match="cannot isolate user 'alice'"):
+        backend.create("shared-thread", "sandbox-1", user_id="alice")
+
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "mallory",
+            "thread_id": "thread-1",
+            "mount_contract_version": 2,
+        },
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "alice",
+            "thread_id": "other-thread",
+            "mount_contract_version": 2,
+        },
+    ],
+)
+def test_current_contract_create_rejects_mismatched_identity(monkeypatch, response_payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(payload=response_payload),
+    )
+
+    with pytest.raises(RuntimeError, match="mount contract response"):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"},
+        {
+            "sandbox_id": "abc123",
+            "sandbox_url": "http://k3s:31001",
+            "user_id": "alice",
+            "thread_id": "thread-1",
+            "mount_contract_version": 1,
+        },
+    ],
+)
+def test_current_contract_create_restarts_after_response_contract_change(monkeypatch, response_payload):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(payload=response_payload),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+    assert backend._capability_next_probe_at == 0.0
+
+
+def test_current_contract_create_returns_verified_identity(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        ),
+    )
+
+    info = backend.create("thread-1", "abc123", user_id="alice")
+
+    assert (info.sandbox_id, info.user_id, info.thread_id, info.mount_contract_version) == (
+        "abc123",
+        "alice",
+        "thread-1",
+        2,
+    )
+
+
+def test_create_keeps_v2_response_validation_when_capability_changes_during_post(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def old_peer_response(*_args, **_kwargs):
+        backend._mount_contract_version = 0
+        backend._mount_contract_capability_known = False
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://legacy.local",
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", old_peer_response)
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create("thread-1", "abc123", user_id="alice")
+
+    assert backend._capability_next_probe_at == 0.0
+
+
+def test_legacy_create_restarts_when_response_advertises_another_version(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://legacy.local",
+                "mount_contract_version": 1,
+            }
+        ),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create("thread-1", "abc123", user_id="default")
+
+    assert backend._capability_next_probe_at == 0.0
+
+
+def test_capability_retry_backoff_does_not_overflow_after_long_outage(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._capability_probe_failures = 1024
+    backend._capability_next_probe_at = 0.0
+    now = [100.0]
+    monkeypatch.setattr(remote_backend_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError("still down")),
+    )
+
+    assert backend.refresh_capabilities_if_stale() is True
+    assert backend._capability_probe_failures == 1025
+    assert backend._capability_next_probe_at == 130.0
+
+
+def test_mount_mode_waits_for_an_inflight_stale_probe(monkeypatch):
+    provider_mod = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = 0.0
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"thread_data_mounts": True}
+    provider._backend = backend
+    result: list[bool] = []
+    completed = threading.Event()
+
+    backend._capability_probe_lock.acquire()
+    try:
+        worker = threading.Thread(
+            target=lambda: (
+                result.append(provider_mod.sandbox_provider_uses_thread_data_mounts(provider)),
+                completed.set(),
+            ),
+            daemon=True,
+        )
+        worker.start()
+        assert not completed.wait(0.05)
+        backend._mount_contract_version = 0
+        backend._mount_contract_capability_known = True
+        backend._capability_next_probe_at = time.monotonic() + 30
+    finally:
+        backend._capability_probe_lock.release()
+
+    assert completed.wait(1)
+    worker.join(timeout=1)
+    assert result == [False]
+
+
+def test_create_restarts_when_required_mount_contract_changed(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    post = MagicMock()
+    monkeypatch.setattr(requests, "post", post)
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError):
+        backend.create(
+            "thread-1",
+            "sandbox-v2",
+            user_id="default",
+            required_mount_contract_version=2,
+        )
+
+    post.assert_not_called()
+
+
+def test_create_accepts_and_validates_future_compatible_contract(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 3
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v3",
+                "sandbox_url": "http://v3.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 3,
+            }
+        ),
+    )
+
+    info = backend.create("thread-1", "sandbox-v3", user_id="alice")
+
+    assert info.mount_contract_version == 3
+
+
+def test_create_sends_frozen_mount_contract_as_a_provisioner_precondition(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    captured: dict = {}
+
+    def post(_url, *, json, **_kwargs):
+        captured.update(json)
+        return _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v2",
+                "sandbox_url": "http://v2.local",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", post)
+
+    backend.create("thread-1", "sandbox-v2", user_id="alice")
+
+    assert captured["required_mount_contract_version"] == 2
+
+
+def test_create_retries_structured_provisioner_contract_precondition_failure(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 2
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            status_code=409,
+            payload={
+                "detail": {
+                    "code": "mount_contract_changed",
+                    "expected": 2,
+                    "actual": 3,
+                }
+            },
+        ),
+    )
+
+    with pytest.raises(remote_backend_mod.MountContractChangedError) as exc_info:
+        backend.create("thread-1", "sandbox-v2", user_id="alice")
+
+    assert (exc_info.value.expected, exc_info.value.actual) == (2, 3)
+    assert backend._capability_next_probe_at == 0.0
+
+
+@pytest.mark.parametrize("invalid_version", ["2", True])
+def test_legacy_create_rejects_non_integer_response_contract(monkeypatch, invalid_version):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    backend._mount_contract_version = 0
+    backend._mount_contract_capability_known = True
+    backend._capability_next_probe_at = time.monotonic() + 30
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *_args, **_kwargs: _StubResponse(
+            payload={
+                "sandbox_id": "sandbox-v0",
+                "sandbox_url": "http://legacy.local",
+                "mount_contract_version": invalid_version,
+            }
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="mount contract response"):
+        backend.create("thread-1", "sandbox-v0", user_id="default")
+
+
 def test_provisioner_create_returns_sandbox_info(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
     monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda user_id: True)
@@ -196,6 +618,7 @@ def test_provisioner_create_returns_sandbox_info(monkeypatch):
             "sandbox_id": "abc123",
             "thread_id": "thread-1",
             "user_id": "test-user-autouse",
+            "required_mount_contract_version": 0,
             "include_legacy_skills": True,
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,
@@ -317,6 +740,7 @@ def test_provisioner_create_accepts_anonymous_thread_id(monkeypatch):
             "sandbox_id": "anon123",
             "thread_id": None,
             "user_id": "test-user-autouse",
+            "required_mount_contract_version": 0,
             "include_legacy_skills": False,
             "provision_lark_cli_runtime": False,
             "provision_lark_cli_broker": False,
@@ -473,7 +897,15 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002")
 
     def mock_get(url: str, timeout: int, headers=None):
-        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "mount_contract_version": 2,
+            }
+        )
 
     monkeypatch.setattr(requests, "get", mock_get)
 
@@ -481,6 +913,11 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     assert info is not None
     assert info.sandbox_id == "abc123"
     assert info.sandbox_url == "http://k3s:31001"
+    assert (info.user_id, info.thread_id, info.mount_contract_version) == (
+        "alice",
+        "thread-1",
+        2,
+    )
 
 
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):

@@ -182,8 +182,57 @@ class TestReadOnlyPath:
             sandbox.update_file("/mnt/skills/existing.py", b"updated")
         assert exc_info.value.errno == errno.EROFS
 
+    def test_remove_file_blocked_on_read_only(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        existing_file = skills_dir / "existing.py"
+        existing_file.write_bytes(b"original")
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/skills", local_path=str(skills_dir), read_only=True)],
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            sandbox.remove_file("/mnt/skills/existing.py")
+
+        assert exc_info.value.errno == errno.EROFS
+        assert existing_file.read_bytes() == b"original"
+
+    def test_remove_file_deletes_exact_writable_path(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        existing_file = data_dir / "existing.txt"
+        existing_file.write_bytes(b"payload")
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/data", local_path=str(data_dir), read_only=False)],
+        )
+
+        sandbox.remove_file("/mnt/data/existing.txt")
+
+        assert not existing_file.exists()
+
 
 class TestSymlinkEscapes:
+    def test_remove_file_blocks_symlinked_parent_escape(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        victim = outside_dir / "victim.txt"
+        victim.write_text("protected", encoding="utf-8")
+        _symlink_to(outside_dir, mount_dir / "escape", target_is_directory=True)
+        sandbox = LocalSandbox(
+            "test",
+            [PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False)],
+        )
+
+        with pytest.raises(PermissionError) as exc_info:
+            sandbox.remove_file("/mnt/data/escape/victim.txt")
+
+        assert exc_info.value.errno == errno.EACCES
+        assert victim.read_text(encoding="utf-8") == "protected"
+
     def test_read_file_blocks_symlink_escape_from_mount(self, tmp_path):
         mount_dir = tmp_path / "mount"
         mount_dir.mkdir()
@@ -544,6 +593,34 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_thread_mappings_mount_upload_conversions_read_only(self, tmp_path):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path / "home")
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: tmp_path / "skills",
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            )
+        )
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=config),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+        ):
+            mappings = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
+
+        conversion_mapping = next(mapping for mapping in mappings if mapping.container_path == "/mnt/user-data/.upload-conversions")
+        assert conversion_mapping.local_path == str(paths.sandbox_user_data_dir("thread-a", user_id="alice") / ".upload-conversions")
+        assert conversion_mapping.read_only is True
+        assert Path(conversion_mapping.local_path).is_dir()
+
+        sandbox = LocalSandbox("test", mappings)
+        with pytest.raises(OSError) as exc_info:
+            sandbox.write_file("/mnt/user-data/.upload-conversions/forbidden.md", "content")
+        assert exc_info.value.errno == errno.EROFS
+
     def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
         from deerflow.config.paths import Paths
 

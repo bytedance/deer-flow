@@ -1,10 +1,9 @@
 """Regression anchor: ingesting inbound channel files must not block the event loop.
 
 ``ChannelManager``'s ``_ingest_inbound_files`` ensures the thread uploads
-directory (``mkdir``), enumerates it (``iterdir`` / ``is_file``) to de-duplicate
-filenames, and writes each downloaded attachment to disk
-(``write_upload_file_no_symlink``) — all blocking filesystem IO. The async
-function offloads the directory prep and every per-file write via
+directory (``mkdir``), stages each downloaded attachment, and publishes it
+without replacing an existing name — all blocking filesystem IO. The async
+function offloads the directory prep and every per-file publication via
 ``asyncio.to_thread`` while keeping the genuinely async network read
 (``file_reader``) on the loop. If any of that regresses back onto the event
 loop, the strict Blockbuster gate raises ``BlockingError`` and this test fails.
@@ -40,6 +39,10 @@ async def test_ingest_inbound_files_does_not_block_event_loop(tmp_path: Path, mo
         return b"payload-bytes"
 
     monkeypatch.setattr(mgr, "_read_http_inbound_file", _fake_reader)
+    monkeypatch.setattr(
+        "deerflow.sandbox.sandbox_provider.get_sandbox_provider",
+        lambda: type("MountedProvider", (), {"uses_thread_data_mounts": True})(),
+    )
 
     msg = InboundMessage(
         channel_name="unit-test-channel",  # absent from INBOUND_FILE_READERS -> default reader

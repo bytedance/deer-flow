@@ -8,7 +8,6 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 from deerflow.utils.file_conversion import (
-    _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
@@ -239,10 +238,13 @@ class TestGetPdfConverter:
 
 
 class TestConvertFileToMarkdown:
-    def test_small_file_runs_synchronously(self, tmp_path):
-        """Small files (< 1 MB) are converted in the event loop thread."""
+    def test_small_file_is_offloaded_to_thread(self, tmp_path):
+        """Small files are offloaded so parser and write IO cannot block the event loop."""
         pdf = tmp_path / "small.pdf"
         pdf.write_bytes(b"%PDF-1.4 " + b"x" * 100)  # well under 1 MB
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
 
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
@@ -250,12 +252,11 @@ class TestConvertFileToMarkdown:
                 "deerflow.utils.file_conversion._do_convert",
                 return_value="# Small PDF",
             ) as mock_convert,
-            patch("asyncio.to_thread") as mock_thread,
+            patch("asyncio.to_thread", side_effect=fake_to_thread) as mock_thread,
         ):
             md_path = _run(convert_file_to_markdown(pdf))
 
-        # asyncio.to_thread must NOT have been called
-        mock_thread.assert_not_called()
+        mock_thread.assert_called_once()
         mock_convert.assert_called_once()
         assert md_path == pdf.with_suffix(".md")
         assert md_path.read_text() == "# Small PDF"
@@ -263,8 +264,7 @@ class TestConvertFileToMarkdown:
     def test_large_file_offloaded_to_thread(self, tmp_path):
         """Large files (> 1 MB) are offloaded via asyncio.to_thread."""
         pdf = tmp_path / "large.pdf"
-        # Write slightly more than the threshold
-        pdf.write_bytes(b"%PDF-1.4 " + b"x" * (_ASYNC_THRESHOLD_BYTES + 1))
+        pdf.write_bytes(b"%PDF-1.4 " + b"x" * (1024 * 1024 + 1))
 
         async def fake_to_thread(fn, *args, **kwargs):
             return fn(*args, **kwargs)

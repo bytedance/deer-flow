@@ -19,6 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
+from deerflow.uploads.layout import UnsafeConversionPathError, conversion_virtual_path, existing_conversion_path_for_upload
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 
@@ -111,27 +112,15 @@ def _list_uploaded_files_impl(
         outline_for_all = False
         outline_filenames = set(include_outline)
 
-    # Collect historical files (sorted by mtime descending).
-    # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
+    # Collect historical primary uploads (sorted by mtime descending). Generated
+    # conversions live outside this directory in the system-owned namespace.
     candidates: list[tuple[float, Path, int]] = []
     try:
-        # Collect file entries once to build the name set and iterate.
         entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
 
         for entry in entries:
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
-            if entry.name.endswith(".md"):
-                stem = entry.name[:-3]  # remove ".md"
-                non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
-                if non_md_siblings:
-                    continue
             stat = entry.stat()
             candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))
     except OSError:
@@ -157,6 +146,13 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
+        try:
+            generated_path = existing_conversion_path_for_upload(file_path)
+        except UnsafeConversionPathError:
+            logger.warning("Ignoring unsafe generated conversion for %s", filename)
+            generated_path = None
+        if generated_path is not None:
+            file_info["markdown_virtual_path"] = neutralize_untrusted_tags(conversion_virtual_path(filename))
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
