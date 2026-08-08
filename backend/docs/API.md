@@ -527,26 +527,37 @@ POST /api/skills/{skill_name}/disable
 
 #### Install Skill
 
-Install a skill from a `.skill` file.
+Install a `.skill` archive that already exists in a thread's user-data directory.
 
 ```http
 POST /api/skills/install
-Content-Type: multipart/form-data
+Content-Type: application/json
 ```
 
 **Request Body:**
-- `file`: The `.skill` file to install
+```json
+{
+  "thread_id": "thread-id",
+  "path": "mnt/user-data/outputs/my-skill.skill"
+}
+```
+
+To upload and install an offline package directly:
+
+```http
+POST /api/skills/install/upload
+Content-Type: multipart/form-data
+```
+
+The multipart field `file` must contain one `.skill` package. Both endpoints
+require an authenticated administrator and return the same response shape.
 
 **Response:**
 ```json
 {
   "success": true,
-  "message": "Skill 'my-skill' installed successfully",
-  "skill": {
-    "name": "my-skill",
-    "display_name": "My Skill",
-    "path": "custom/my-skill"
-  }
+  "skill_name": "my-skill",
+  "message": "Skill 'my-skill' installed successfully"
 }
 ```
 

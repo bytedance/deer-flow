@@ -136,6 +136,70 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
+def test_upload_and_install_skill_package(monkeypatch):
+    archive_bytes = _make_skill_archive_bytes("offline-skill")
+    installed_archives = []
+    refresh_calls = []
+
+    class _Storage:
+        async def ainstall_skill_from_archive(self, archive_path):
+            installed_archives.append(Path(archive_path).read_bytes())
+            return {
+                "success": True,
+                "skill_name": "offline-skill",
+                "message": "Skill installed successfully",
+            }
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(user_id)
+
+    config = SimpleNamespace()
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("offline.skill", archive_bytes, "application/octet-stream")},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["skill_name"] == "offline-skill"
+    assert installed_archives == [archive_bytes]
+    assert refresh_calls == ["default"]
+
+
+def test_upload_and_install_rejects_non_skill_file(monkeypatch):
+    config = SimpleNamespace()
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("offline.zip", b"not-a-skill", "application/zip")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "A .skill package is required."
+
+
+def test_upload_and_install_rejects_oversized_package(monkeypatch):
+    config = SimpleNamespace()
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_SIZE", 3)
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("offline.skill", b"four", "application/octet-stream")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Skill archive is too large."
+
+
 def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):
     home = tmp_path / "home"
     skills_root = tmp_path / "skills"

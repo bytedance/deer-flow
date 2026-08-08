@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill, SkillRequestError } from "./api";
+import { enableSkill, installSkillFile, SkillRequestError } from "./api";
 
 import { loadSkills } from ".";
 
@@ -27,6 +27,18 @@ export function useEnableSkill() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
+    },
+  });
+}
+
+export function useInstallSkill() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: installSkillFile,
+    onSuccess: (result) => {
+      if (result.success) {
+        void queryClient.invalidateQueries({ queryKey: ["skills"] });
+      }
     },
   });
 }

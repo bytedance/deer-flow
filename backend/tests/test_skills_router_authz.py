@@ -81,6 +81,17 @@ def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
             assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
 
 
+def test_non_admin_is_forbidden_from_uploading_skill_package():
+    app = _make_app(system_role="user")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("demo.skill", b"archive", "application/octet-stream")},
+        )
+
+    assert response.status_code == 403
+
+
 def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
     """The basic list/detail endpoints expose only name/description and are
     needed by the normal-user UI, so they must NOT be admin-gated.
