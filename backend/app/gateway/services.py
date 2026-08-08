@@ -1051,6 +1051,8 @@ async def start_run(
     body: RunCreateRequest,
     thread_id: str,
     request: Request,
+    *,
+    idempotency_key: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1238,7 +1240,11 @@ async def start_run(
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
+                    idempotency_key=idempotency_key,
                 )
+
+                if record.idempotency_reused:
+                    return record
 
                 worker = run_after_metadata(record)
                 try:
@@ -1319,6 +1325,70 @@ async def launch_scheduled_thread_run(
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)
+    return {"run_id": record.run_id, "thread_id": record.thread_id}
+
+
+def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
+    """Build the internal user turn for one immutable MCP task event snapshot."""
+    payload = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return (
+        "A durable background MCP task has an update that requires the user's attention. "
+        "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
+        "When status is input_required, show the question but explain that this MCP integration "
+        "cannot resume the remote task with user input yet. When tracking_degraded is true, explain "
+        "that DeerFlow will continue retrying at a lower frequency.\n\n"
+        f"<background_task_event>{payload}</background_task_event>"
+    )
+
+
+async def launch_mcp_task_notification_run(
+    *,
+    app: Any,
+    thread_id: str,
+    assistant_id: str | None,
+    owner_user_id: str,
+    task_id: str,
+    dispatch_version: int,
+    dispatch_attempt: int,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Idempotently launch the Agent run that delivers one task event."""
+    request = SimpleNamespace(
+        app=app,
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        cookies={},
+    )
+    body = RunCreateRequest(
+        assistant_id=assistant_id,
+        input={"messages": [{"role": "user", "content": _mcp_task_notification_prompt(event)}]},
+        command=None,
+        metadata={
+            "mcp_task_notification": {
+                "task_id": task_id,
+                "dispatch_version": dispatch_version,
+                "dispatch_attempt": dispatch_attempt,
+            }
+        },
+        config=None,
+        context={"non_interactive": True, "user_id": owner_user_id},
+        webhook=None,
+        checkpoint_id=None,
+        checkpoint=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        stream_resumable=None,
+        on_disconnect="continue",
+        on_completion=None,
+        multitask_strategy="reject",
+        after_seconds=None,
+        if_not_exists="create",
+        feedback_keys=None,
+    )
+    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    record = await start_run(body, thread_id, request, idempotency_key=idempotency_key)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

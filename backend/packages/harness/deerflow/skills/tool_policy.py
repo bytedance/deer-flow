@@ -18,6 +18,8 @@ class NamedTool(Protocol):
 ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES = frozenset(
     {
         "describe_skill",
+        "cancel_background_task",
+        "list_background_tasks",
         "read_file",
         "review_skill_package",
         "tool_search",

@@ -1,6 +1,8 @@
 import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +16,7 @@ from deerflow.mcp.tasks import (
 )
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
 from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.runtime.runs.schemas import RunStatus
 
 
 class FakeRepository:
@@ -291,6 +294,85 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
         )
 
     assert driver.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_calls_remote_once_and_persists_terminal_snapshot():
+    record = _claimed_row()
+    repo = SimpleNamespace(
+        request_cancel=AsyncMock(return_value=record),
+        claim_cancel_requests=AsyncMock(return_value=[{**record, "cancel_attempt_count": 1}]),
+        apply_cancel_snapshot=AsyncMock(return_value=True),
+        release_cancel_claim=AsyncMock(return_value=True),
+        get=AsyncMock(return_value={**record, "status": "cancelled"}),
+    )
+    driver = FakeDriver()
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    result = await service.cancel_task(
+        task_id="task-1",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    assert result["status"] == "cancelled"
+    assert len(driver.cancel_calls) == 1
+    repo.apply_cancel_snapshot.assert_awaited_once()
+    repo.release_cancel_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notification_delivery_waits_for_successful_agent_run():
+    repo = SimpleNamespace(
+        mark_notification_dispatched=AsyncMock(return_value=True),
+        finish_notification_run=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+        defer_dispatched_notification=AsyncMock(return_value=True),
+    )
+    launch = AsyncMock(return_value={"run_id": "notify-run-1"})
+    get_run = AsyncMock(return_value=SimpleNamespace(status=RunStatus.running))
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch,
+        get_run=get_run,
+    )
+    now = datetime.now(UTC)
+    claimed = {
+        **_claimed_row(),
+        "notification_status": "claimed",
+        "dispatch_version": 2,
+        "dispatch_attempt": 0,
+        "dispatch_event": {"status": "completed"},
+    }
+
+    await service._notify_one(claimed, now=now)
+
+    repo.mark_notification_dispatched.assert_awaited_once()
+    repo.finish_notification_run.assert_not_awaited()
+
+    get_run.return_value = SimpleNamespace(status=RunStatus.success)
+    await service._notify_one(
+        {
+            **claimed,
+            "notification_status": "dispatched",
+            "notification_run_id": "notify-run-1",
+        },
+        now=now,
+    )
+    repo.finish_notification_run.assert_awaited_once()
+    assert repo.finish_notification_run.await_args.kwargs["delivered"] is True
 
 
 @pytest.mark.asyncio

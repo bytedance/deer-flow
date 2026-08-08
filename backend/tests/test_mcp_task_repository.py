@@ -325,3 +325,145 @@ async def test_consecutive_poll_error_count_increments_and_resets_on_success(tmp
     stored = await repo.get("task-6", user_id="user-1")
     assert stored is not None
     assert stored["consecutive_poll_error_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_notification_snapshot_is_versioned_and_not_overwritten_in_flight(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-notify", now=now)
+    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify",
+        lease_owner="poller",
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert first[0]["dispatch_version"] == 1
+    assert first[0]["dispatch_event"]["input_required"] == {"prompt": "Approve?"}
+
+    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-notify",
+        lease_owner="poller",
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    changed = await repo.get("task-notify", user_id="user-1")
+    assert changed is not None
+    assert changed["event_version"] == 2
+    assert changed["dispatch_version"] == 1
+    assert changed["dispatch_event"]["status"] == "input_required"
+
+    await repo.mark_notification_dispatched(
+        "task-notify",
+        lease_owner="notifier",
+        dispatch_version=1,
+        run_id="notify-run-1",
+        now=now,
+    )
+    await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    await repo.finish_notification_run(
+        "task-notify",
+        lease_owner="notifier",
+        dispatch_version=1,
+        delivered=True,
+        next_notification_at=None,
+        error=None,
+        now=now,
+    )
+    second = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert second[0]["dispatch_version"] == 2
+    assert second[0]["dispatch_event"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-cancel", now=now)
+    await repo.claim_due_tasks(now=now, lease_owner="stale-poller", lease_seconds=60, limit=1)
+
+    requested = await repo.request_cancel(
+        "task-cancel",
+        user_id="user-1",
+        thread_id="thread-1",
+        requested_at=now,
+    )
+    assert requested is not None
+    assert await repo.claim_due_tasks(now=now, lease_owner="new-poller", lease_seconds=60, limit=1) == []
+    assert (
+        await repo.apply_snapshot(
+            "task-cancel",
+            lease_owner="stale-poller",
+            status="completed",
+            result={"stale": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=now,
+        )
+        is False
+    )
+
+    claimed = await repo.claim_cancel_requests(
+        now=now,
+        lease_owner="canceller",
+        lease_seconds=60,
+        limit=1,
+    )
+    assert [row["id"] for row in claimed] == ["task-cancel"]
+    assert await repo.claim_cancel_requests(now=now, lease_owner="other", lease_seconds=60, limit=1) == []
+    assert await repo.apply_cancel_snapshot(
+        "task-cancel",
+        lease_owner="canceller",
+        status="cancelled",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        completed_at=now,
+    )
+    stored = await repo.get("task-cancel", user_id="user-1")
+    assert stored is not None
+    assert stored["status"] == "cancelled"
+    assert stored["notification_status"] == "pending"

@@ -425,6 +425,7 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -605,6 +606,28 @@ async def run_agent(
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+
+    if ctx.mcp_task_repo is not None and record.user_id is not None:
+        try:
+            task_rows = await ctx.mcp_task_repo.list_by_thread(
+                thread_id,
+                user_id=record.user_id,
+                limit=20,
+            )
+            graph_input = {
+                **graph_input,
+                "background_tasks": [
+                    {
+                        "task_id": row["id"],
+                        "task_name": row["task_name"],
+                        "status": row["status"],
+                        "updated_at": row["updated_at"],
+                    }
+                    for row in task_rows
+                ],
+            }
+        except Exception:
+            logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
 
     async def _finish_cancellation(
         action: str,

@@ -34,6 +34,7 @@ def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         "updated_at": record["updated_at"],
         "error": _short_error(record.get("error")),
         "tracking_degraded": _tracking_degraded(record, threshold=threshold),
+        "cancel_requested": record.get("cancel_requested_at") is not None,
     }
 
 
@@ -93,3 +94,22 @@ async def get_mcp_task(
         record,
         threshold=service.tracking_degraded_after_errors,
     )
+
+
+@router.post("/{task_id}/cancel")
+@require_permission("threads", "write", owner_check=True)
+async def cancel_mcp_task(
+    thread_id: ThreadId,
+    task_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    service = get_mcp_task_service(request)
+    user_id = await _current_user_id(request)
+    record = await service.cancel_task(
+        task_id=task_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="MCP task not found")
+    return _detail(record, threshold=service.tracking_degraded_after_errors)

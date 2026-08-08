@@ -21,6 +21,23 @@ class McpTaskSubmitter(Protocol):
         now: Any | None = None,
     ) -> dict: ...
 
+    async def list_tasks(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        limit: int = 50,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]: ...
+
+    async def cancel_matching_task(
+        self,
+        *,
+        thread_id: str,
+        user_id: str,
+        task: str | None = None,
+    ) -> dict[str, Any]: ...
+
 
 _submitter: McpTaskSubmitter | None = None
 _TaskServerConfigSnapshot = tuple[dict[str, dict[str, Any]], Any]
