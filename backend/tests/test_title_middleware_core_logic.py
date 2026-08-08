@@ -88,6 +88,37 @@ class TestTitleMiddlewareCoreLogic:
 
         assert middleware._get_title_user_message(state) == "分析这份报告"
 
+    def test_attachment_only_title_falls_back_to_new_conversation(self):
+        _set_test_title_config(enabled=True, model_name=None)
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ]
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "New Conversation"}
+
+    def test_title_preserves_structured_content_without_original_user_content(self):
+        middleware = TitleMiddleware()
+        state = {
+            "messages": [
+                {
+                    "type": "human",
+                    "content": [{"type": "text", "content": "嵌套的用户请求"}],
+                },
+                {"type": "ai", "content": "好的"},
+            ]
+        }
+
+        assert middleware._get_title_user_message(state) == "嵌套的用户请求"
+
     def test_should_not_generate_title_when_disabled_or_already_set(self):
         middleware = TitleMiddleware()
 

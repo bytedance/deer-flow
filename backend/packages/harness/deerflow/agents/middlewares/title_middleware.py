@@ -2,6 +2,7 @@
 
 import logging
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -13,7 +14,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -82,18 +83,6 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return getattr(message, "content", "")
 
     @staticmethod
-    def _original_user_content(message: object) -> str | None:
-        if isinstance(message, dict):
-            additional_kwargs = message.get("additional_kwargs")
-        else:
-            additional_kwargs = getattr(message, "additional_kwargs", None)
-        if isinstance(additional_kwargs, dict):
-            original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
-            if isinstance(original_content, str):
-                return original_content
-        return None
-
-    @staticmethod
     def _is_dynamic_context_reminder_message(message: object) -> bool:
         if is_dynamic_context_reminder(message):
             return True
@@ -111,8 +100,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_message = next((m for m in messages if self._is_user_message_for_title(m)), None)
         if user_message is None:
             return ""
-        original_content = self._original_user_content(user_message)
-        user_msg_content = original_content if original_content is not None else self._message_content(user_message)
+        if isinstance(user_message, dict):
+            additional_kwargs = user_message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(user_message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and isinstance(additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY), str):
+            user_msg_content = get_original_user_content_text(self._message_content(user_message), additional_kwargs)
+        else:
+            # Keep TitleMiddleware's richer normalization for ordinary structured content.
+            user_msg_content = self._message_content(user_message)
         return self._normalize_content(user_msg_content)
 
     def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
