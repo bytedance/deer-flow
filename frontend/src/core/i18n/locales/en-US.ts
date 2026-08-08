@@ -304,6 +304,32 @@ export const enUS: Translations = {
     agentsDisabledTooltip: "Feature not enabled",
   },
 
+  backgroundTasks: {
+    label: "Background tasks",
+    title: "Background tasks",
+    description: "Long-running MCP work for this chat.",
+    active: "Active",
+    recent: "Recent",
+    empty: "No background tasks yet",
+    emptyHint: "Long-running MCP tasks started in this chat will appear here.",
+    loadFailed: "Couldn't load background tasks",
+    retry: "Try again",
+    cancel: "Cancel task",
+    cancelling: "Cancelling…",
+    cancelFailed: "Failed to cancel task",
+    trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
+    created: (time) => `Started ${time}`,
+    updated: (time) => `Updated ${time}`,
+    status: {
+      submitted: "Submitted",
+      working: "Working",
+      inputRequired: "Input needed",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {

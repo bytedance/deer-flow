@@ -288,6 +288,32 @@ export const zhCN: Translations = {
     agentsDisabledTooltip: "功能未启用",
   },
 
+  backgroundTasks: {
+    label: "后台任务",
+    title: "后台任务",
+    description: "当前对话中的 MCP 长程任务。",
+    active: "进行中",
+    recent: "最近任务",
+    empty: "暂无后台任务",
+    emptyHint: "在当前对话中启动的 MCP 长程任务会显示在这里。",
+    loadFailed: "无法加载后台任务",
+    retry: "重试",
+    cancel: "取消任务",
+    cancelling: "正在取消…",
+    cancelFailed: "取消任务失败",
+    trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
+    created: (time) => `开始于${time}`,
+    updated: (time) => `更新于${time}`,
+    status: {
+      submitted: "已提交",
+      working: "进行中",
+      inputRequired: "需要输入",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
   // 定时任务
   scheduledTasks: {
     scheduleType: {

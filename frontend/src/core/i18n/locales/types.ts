@@ -229,6 +229,33 @@ export interface Translations {
     channels: string;
   };
 
+  // Thread-scoped MCP background tasks
+  backgroundTasks: {
+    label: string;
+    title: string;
+    description: string;
+    active: string;
+    recent: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    retry: string;
+    cancel: string;
+    cancelling: string;
+    cancelFailed: string;
+    trackingDegraded: string;
+    created: (time: string) => string;
+    updated: (time: string) => string;
+    status: {
+      submitted: string;
+      working: string;
+      inputRequired: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: { cron: string; once: string };
