@@ -52,6 +52,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
+  - `component/` — Workspace resource UI kit (lists, cards, dialogs, page shell). See **[component/AGENTS.md](src/components/component/AGENTS.md)**.
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
@@ -155,6 +156,7 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
 - **Path alias**: `@/*` maps to `src/*`.
 - **Components**: `ui/` and `ai-elements/` are generated from registries (Shadcn, MagicUI, React Bits, Vercel AI SDK) — don't manually edit these.
+- **ESLint (pre-commit)**: Staged `frontend/` files run ESLint + Prettier. Before commit, run `pnpm check`. Avoid `||` where `prefer-nullish-coalescing` expects explicit empty-string handling; never use empty arrow functions (`no-empty-function`) — use a named noop or optional callbacks. If pre-commit reformats files, stage them again. See `.cursor/rules/frontend-eslint.mdc`.
 
 ## Environment
 
