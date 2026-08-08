@@ -289,6 +289,23 @@ class TestChannelStore:
         store = ChannelStore(path=path)
         assert store.get_thread_id("x", "y") is None
 
+    def test_empty_topic_id_is_distinct_from_none(self, store):
+        """Empty topic_id must not collapse onto the topic-less base key.
+
+        Channels such as DingTalk may pass ``topic_id=""`` when a group
+        message lacks ``message_id``. Truthy keying would overwrite/delete the
+        base conversation mapping instead of a topic-specific entry.
+        """
+        store.set_thread_id("dingtalk", "conv", "base-thread", topic_id=None)
+        store.set_thread_id("dingtalk", "conv", "empty-topic-thread", topic_id="")
+
+        assert store.get_thread_id("dingtalk", "conv") == "base-thread"
+        assert store.get_thread_id("dingtalk", "conv", topic_id="") == "empty-topic-thread"
+
+        assert store.remove("dingtalk", "conv", topic_id="") is True
+        assert store.get_thread_id("dingtalk", "conv", topic_id="") is None
+        assert store.get_thread_id("dingtalk", "conv") == "base-thread"
+
 
 # ---------------------------------------------------------------------------
 # Channel base class tests
