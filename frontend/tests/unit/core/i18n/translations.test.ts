@@ -2,7 +2,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import { loadTranslations } from "@/core/i18n/translations";
 
-describe("AI disclaimer translations", () => {
+describe("core copy loading", () => {
   it("loads only the requested overseas and domestic copy", async () => {
     const [english, chinese] = await Promise.all([
       loadTranslations("en-US"),
