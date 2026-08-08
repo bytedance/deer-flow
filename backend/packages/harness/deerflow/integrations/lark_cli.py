@@ -64,6 +64,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 from weakref import WeakValueDictionary
 
 try:
@@ -109,6 +110,7 @@ LARK_CLI_SANDBOX_DATA_DIR = "/mnt/integrations/lark-cli/data"
 LARK_CLI_SANDBOX_RUNTIME_DIR = "/mnt/integrations/lark-cli/runtime"
 LARK_CLI_LINUX_ARCHES = ("amd64", "arm64")
 LARK_CLI_RUNTIME_MANIFEST_FILE = ".deerflow-lark-cli-runtime.json"
+LARK_CLI_FLOW_STATE_FILE = ".deerflow-lark-cli-flow.json"
 
 # Pattern B (issue #4338): loopback URL the sandbox shim uses to reach the broker
 # sidecar. LARK_BROKER_URL_ENV is imported from the broker module so the shim,
@@ -219,6 +221,7 @@ class LarkInstallResult:
 class LarkConfigStartResult:
     verification_url: str
     device_code: str
+    generation: str
     expires_in: int | None = None
     interval: int | None = None
     user_code: str | None = None
@@ -230,12 +233,14 @@ class LarkConfigCompleteResult:
     success: bool
     status: LarkIntegrationStatus
     message: str
+    generation: str
 
 
 @dataclass(frozen=True)
 class LarkAuthStartResult:
     verification_url: str
     device_code: str
+    generation: str
     expires_in: int | None = None
     user_code: str | None = None
     hint: str | None = None
@@ -246,6 +251,10 @@ class LarkAuthCompleteResult:
     success: bool
     status: LarkIntegrationStatus
     message: str
+
+
+class LarkFlowSupersededError(ValueError):
+    """Raised when a delayed integration flow is no longer current."""
 
 
 def lark_integration_root(_user_id: str | None = None) -> Path:
@@ -476,6 +485,38 @@ def _lark_credential_lock(user_id: str):
     lock_path = root.parent / f".{INTEGRATION_ID}.credentials.lock"
     with _exclusive_install_lock(lock_path, _lark_credential_thread_lock(user_id)):
         yield
+
+
+def _lark_flow_state_path(user_id: str) -> Path:
+    return _lark_cli_credential_root(user_id) / LARK_CLI_FLOW_STATE_FILE
+
+
+def _write_lark_flow_generation_locked(user_id: str, generation: str) -> None:
+    ensure_lark_cli_credential_tree(user_id)
+    path = _lark_flow_state_path(user_id)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{LARK_CLI_FLOW_STATE_FILE}.", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(json.dumps({"generation": generation}) + "\n", encoding="utf-8")
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _advance_lark_flow_generation_locked(user_id: str) -> str:
+    generation = uuid4().hex
+    _write_lark_flow_generation_locked(user_id, generation)
+    return generation
+
+
+def _require_lark_flow_generation_locked(user_id: str, generation: str) -> str:
+    expected = generation.strip()
+    state = _read_json_object_file(_lark_flow_state_path(user_id))
+    if not expected or state is None or state.get("generation") != expected:
+        raise LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")
+    return expected
 
 
 def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
@@ -996,6 +1037,8 @@ def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) 
 def start_lark_config(user_id: str, *, brand: str = "feishu") -> LarkConfigStartResult:
     """Start the browser flow that creates/binds a Lark OAuth app for this user."""
     parsed_brand = _normalize_lark_brand(brand)
+    with _lark_credential_lock(user_id):
+        generation = _advance_lark_flow_generation_locked(user_id)
     begin_data = _request_lark_app_registration_begin(parsed_brand)
     user_code = str(begin_data.get("user_code") or "").strip()
     device_code = str(begin_data.get("device_code") or "").strip()
@@ -1005,6 +1048,7 @@ def start_lark_config(user_id: str, *, brand: str = "feishu") -> LarkConfigStart
     return LarkConfigStartResult(
         verification_url=verification_url,
         device_code=device_code,
+        generation=generation,
         expires_in=_int_or_none(begin_data.get("expires_in")),
         interval=_int_or_none(begin_data.get("interval")),
         user_code=user_code,
@@ -1017,6 +1061,7 @@ def complete_lark_config(
     config: AppConfig,
     *,
     device_code: str,
+    generation: str,
     brand: str = "feishu",
     interval: int | None = None,
     expires_in: int | None = None,
@@ -1027,36 +1072,45 @@ def complete_lark_config(
         raise ValueError("device_code is required.")
     parsed_brand = _normalize_lark_brand(brand)
     with _lark_credential_lock(user_id):
+        generation = _require_lark_flow_generation_locked(user_id, generation)
+    result = _poll_lark_app_registration(
+        device_code=device_code,
+        brand=parsed_brand,
+        interval=interval or 5,
+        expires_in=expires_in or 300,
+    )
+    if not result.get("client_secret") and _tenant_brand(result) == "lark":
+        # Lark CLI starts polling on the Feishu accounts host for both brands.
+        # For Lark tenants that response can include user_info.tenant_brand and
+        # client_id but omit client_secret; polling the Lark accounts host with
+        # the same device_code returns the complete app credentials.
         result = _poll_lark_app_registration(
             device_code=device_code,
-            brand=parsed_brand,
+            brand="lark",
             interval=interval or 5,
             expires_in=expires_in or 300,
         )
-        if not result.get("client_secret") and _tenant_brand(result) == "lark":
-            # Lark CLI starts polling on the Feishu accounts host for both brands.
-            # For Lark tenants that response can include user_info.tenant_brand and
-            # client_id but omit client_secret; polling the Lark accounts host with
-            # the same device_code returns the complete app credentials.
-            result = _poll_lark_app_registration(
-                device_code=device_code,
-                brand="lark",
-                interval=interval or 5,
-                expires_in=expires_in or 300,
-            )
 
-        app_id = str(result.get("client_id") or "").strip()
-        app_secret = str(result.get("client_secret") or "").strip()
-        final_brand = _tenant_brand(result) or parsed_brand
-        if not app_id or not app_secret:
-            raise ValueError("Lark app registration succeeded but did not return app credentials.")
+    app_id = str(result.get("client_id") or "").strip()
+    app_secret = str(result.get("client_secret") or "").strip()
+    final_brand = _tenant_brand(result) or parsed_brand
+    if not app_id or not app_secret:
+        raise ValueError("Lark app registration succeeded but did not return app credentials.")
 
-        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=final_brand)
+    with _lark_credential_lock(user_id):
+        generation = _require_lark_flow_generation_locked(user_id, generation)
+        _replace_lark_app_credentials_locked(
+            user_id,
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=final_brand,
+        )
         status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
         message="Lark/Feishu connection setup completed.",
+        generation=generation,
     )
 
 
@@ -1080,19 +1134,20 @@ def set_lark_app_credentials(
         raise ValueError("brand must be feishu or lark.")
 
     with _lark_credential_lock(user_id):
+        generation = _advance_lark_flow_generation_locked(user_id)
         _validate_lark_app_credentials_with_cli(app_id=app_id, app_secret=app_secret, brand=parsed_brand)
-        ensure_lark_cli_credential_tree(user_id)
-        root = _lark_cli_credential_root(user_id)
-        with _lark_credential_transaction(user_id, root) as snapshot:
-            _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=parsed_brand)
-            _clear_directory_contents(lark_cli_data_dir(user_id))
-            _revoke_lark_auth_from_snapshot(snapshot)
-
-    status = get_lark_integration_status(user_id, config)
+        _replace_lark_app_credentials_locked(
+            user_id,
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=parsed_brand,
+        )
+        status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
         message="Lark/Feishu app switched. Reconnect to authorize the new app.",
+        generation=generation,
     )
 
 
@@ -1102,6 +1157,7 @@ def start_lark_auth(
     domains: tuple[str, ...] = (),
     scope: str | None = None,
     recommend: bool = False,
+    generation: str | None = None,
 ) -> LarkAuthStartResult:
     """Start a non-blocking Lark device authorization flow.
 
@@ -1119,15 +1175,21 @@ def start_lark_auth(
         if domain:
             args.extend(["--domain", domain])
 
-    data = _run_lark_cli_json(args, user_id=user_id, timeout=20)
-    verification_url = str(data.get("verification_url") or data.get("verification_uri_complete") or "").strip()
-    device_code = str(data.get("device_code") or "").strip()
-    if not verification_url or not device_code:
-        raise ValueError("lark-cli did not return a verification_url and device_code.")
+    with _lark_credential_lock(user_id):
+        if generation is None:
+            generation = _advance_lark_flow_generation_locked(user_id)
+        else:
+            generation = _require_lark_flow_generation_locked(user_id, generation)
+        data = _run_lark_cli_json(args, user_id=user_id, timeout=20)
+        verification_url = str(data.get("verification_url") or data.get("verification_uri_complete") or "").strip()
+        device_code = str(data.get("device_code") or "").strip()
+        if not verification_url or not device_code:
+            raise ValueError("lark-cli did not return a verification_url and device_code.")
 
     return LarkAuthStartResult(
         verification_url=verification_url,
         device_code=device_code,
+        generation=generation,
         expires_in=_int_or_none(data.get("expires_in")),
         user_code=str(data.get("user_code") or "") or None,
         hint=str(data.get("hint") or "") or None,
@@ -1139,6 +1201,7 @@ def complete_lark_auth(
     config: AppConfig,
     *,
     device_code: str,
+    generation: str,
     wait_timeout_seconds: int = LARK_AUTH_COMPLETE_DEFAULT_WAIT_SECONDS,
 ) -> LarkAuthCompleteResult:
     """Complete a Lark device authorization flow after the user approves it."""
@@ -1149,6 +1212,7 @@ def complete_lark_auth(
         raise ValueError(f"wait_timeout_seconds must be between {LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS} and {LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS}.")
 
     with _lark_credential_lock(user_id):
+        _require_lark_flow_generation_locked(user_id, generation)
         path = _require_lark_cli_path()
         _run_lark_cli_json(
             [path, "auth", "login", "--device-code", device_code, "--json"],
@@ -1412,6 +1476,15 @@ def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, bra
             brand=brand,
             env=_lark_cli_env_for_directories(config_dir=config_dir, data_dir=data_dir),
         )
+
+
+def _replace_lark_app_credentials_locked(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+    ensure_lark_cli_credential_tree(user_id)
+    root = _lark_cli_credential_root(user_id)
+    with _lark_credential_transaction(user_id, root) as snapshot:
+        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=brand)
+        _clear_directory_contents(lark_cli_data_dir(user_id))
+        _revoke_lark_auth_from_snapshot(snapshot)
 
 
 def _clear_directory_contents(directory: Path) -> None:

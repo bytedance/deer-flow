@@ -262,23 +262,30 @@ function LarkIntegrationCard() {
     browserWindow = browserWindowRef.current,
     request = authRequestRef.current,
     generation = flowGenerationRef.current,
+    serverGeneration?: string,
   ) => {
-    startAuth.mutate(request, {
-      onSuccess: (result) => {
-        if (!isActiveFlow(generation)) return;
-        setPendingFlow({ kind: "auth", ...result });
-        openAuthorizationUrl(result.verification_url, browserWindow);
-        authToastIdRef.current = toast.info(
-          t.settings.integrations.lark.authStarted,
-        );
-        startAutomaticAuthorizationCheck(result, generation);
+    startAuth.mutate(
+      {
+        ...request,
+        ...(serverGeneration ? { generation: serverGeneration } : {}),
       },
-      onError: (err) => {
-        if (!isActiveFlow(generation)) return;
-        closePendingBrowserWindow(browserWindow);
-        toast.error(err instanceof Error ? err.message : String(err));
+      {
+        onSuccess: (result) => {
+          if (!isActiveFlow(generation)) return;
+          setPendingFlow({ kind: "auth", ...result });
+          openAuthorizationUrl(result.verification_url, browserWindow);
+          authToastIdRef.current = toast.info(
+            t.settings.integrations.lark.authStarted,
+          );
+          startAutomaticAuthorizationCheck(result, generation);
+        },
+        onError: (err) => {
+          if (!isActiveFlow(generation)) return;
+          closePendingBrowserWindow(browserWindow);
+          toast.error(err instanceof Error ? err.message : String(err));
+        },
       },
-    });
+    );
   };
 
   const handleContinueConnection = () => {
@@ -287,6 +294,7 @@ function LarkIntegrationCard() {
     completeConfig.mutate(
       {
         device_code: pendingFlow.device_code,
+        generation: pendingFlow.generation,
         brand: pendingFlow.brand,
         interval: pendingFlow.interval,
         expires_in: pendingFlow.expires_in,
@@ -301,6 +309,7 @@ function LarkIntegrationCard() {
             browserWindowRef.current,
             authRequestRef.current,
             generation,
+            result.generation,
           );
         },
         onError: (err) => {
@@ -377,7 +386,12 @@ function LarkIntegrationCard() {
           setShowChangeApp(false);
           // The new app has no user authorization yet; drive the browser auth
           // flow immediately so the switch ends in a usable connection.
-          startUserAuth(browserWindow, authRequestRef.current, generation);
+          startUserAuth(
+            browserWindow,
+            authRequestRef.current,
+            generation,
+            result.generation,
+          );
         },
         onError: (err) => {
           if (!isActiveFlow(generation)) return;
@@ -443,6 +457,7 @@ function LarkIntegrationCard() {
 
   const completeAuthorization = (
     deviceCode: string,
+    serverGeneration: string,
     {
       automatic,
       attemptId,
@@ -456,6 +471,7 @@ function LarkIntegrationCard() {
     completeAuth.mutate(
       {
         device_code: deviceCode,
+        generation: serverGeneration,
         ...(automatic
           ? { wait_timeout_seconds: AUTOMATIC_LARK_AUTH_WAIT_SECONDS }
           : {}),
@@ -484,7 +500,12 @@ function LarkIntegrationCard() {
             toastOptions,
           );
           if (automatic && attemptId != null) {
-            scheduleAuthorizationRetry(deviceCode, attemptId, generation);
+            scheduleAuthorizationRetry(
+              deviceCode,
+              serverGeneration,
+              attemptId,
+              generation,
+            );
           }
         },
         onError: (err) => {
@@ -502,7 +523,12 @@ function LarkIntegrationCard() {
               toastOptions,
             );
             if (attemptId != null) {
-              scheduleAuthorizationRetry(deviceCode, attemptId, generation);
+              scheduleAuthorizationRetry(
+                deviceCode,
+                serverGeneration,
+                attemptId,
+                generation,
+              );
             }
             return;
           }
@@ -518,6 +544,7 @@ function LarkIntegrationCard() {
 
   const scheduleAuthorizationRetry = (
     deviceCode: string,
+    serverGeneration: string,
     attemptId: number,
     generation: number,
   ) => {
@@ -528,7 +555,7 @@ function LarkIntegrationCard() {
       return;
     }
     authRetryTimeoutRef.current = setTimeout(() => {
-      completeAuthorization(deviceCode, {
+      completeAuthorization(deviceCode, serverGeneration, {
         automatic: true,
         attemptId,
         generation,
@@ -545,7 +572,7 @@ function LarkIntegrationCard() {
     authAttemptIdRef.current = attemptId;
     authDeadlineRef.current =
       Date.now() + Math.max(result.expires_in ?? 300, 30) * 1000;
-    completeAuthorization(result.device_code, {
+    completeAuthorization(result.device_code, result.generation, {
       automatic: true,
       attemptId,
       generation,
@@ -559,7 +586,7 @@ function LarkIntegrationCard() {
     }
     clearAuthRetryTimer();
     authAttemptIdRef.current += 1;
-    completeAuthorization(pendingFlow.device_code, {
+    completeAuthorization(pendingFlow.device_code, pendingFlow.generation, {
       automatic: false,
       generation: flowGenerationRef.current,
     });

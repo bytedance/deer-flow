@@ -1247,6 +1247,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           verification_url: "https://open.feishu.cn/page/cli?user_code=config",
           device_code: "mock-config-device-code",
+          generation: "config-generation",
           expires_in: 600,
           interval: 5,
           user_code: "config",
@@ -1277,6 +1278,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           success: true,
           message: "Lark/Feishu connection setup completed.",
+          generation: "config-generation",
           status: larkIntegrationStatus,
         }),
       });
@@ -1305,6 +1307,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           success: true,
           message:
             "Lark/Feishu app switched. Reconnect to authorize the new app.",
+          generation: "switch-generation",
           status: larkIntegrationStatus,
         }),
       });
@@ -1314,12 +1317,16 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   void page.route("**/api/integrations/lark/auth/start", (route) => {
     if (route.request().method() === "POST") {
+      const request = route.request().postDataJSON() as {
+        generation?: string;
+      };
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           verification_url: "https://open.feishu.cn/auth/mock-device",
           device_code: "mock-device-code",
+          generation: request.generation ?? "auth-generation",
           expires_in: 600,
           user_code: null,
           hint: null,

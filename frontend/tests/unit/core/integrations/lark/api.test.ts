@@ -139,6 +139,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         verification_url: "https://open.feishu.cn/auth/mock",
         device_code: "device-code",
+        generation: "auth-generation",
         expires_in: 600,
         user_code: null,
         hint: null,
@@ -154,6 +155,7 @@ describe("lark integration api", () => {
     ).resolves.toEqual({
       verification_url: "https://open.feishu.cn/auth/mock",
       device_code: "device-code",
+      generation: "auth-generation",
       expires_in: 600,
       user_code: null,
       hint: null,
@@ -177,6 +179,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         verification_url: "https://open.feishu.cn/page/cli?user_code=config",
         device_code: "config-device-code",
+        generation: "config-generation",
         expires_in: 600,
         interval: 5,
         user_code: "config",
@@ -187,6 +190,7 @@ describe("lark integration api", () => {
     await expect(startLarkConfiguration({ brand: "feishu" })).resolves.toEqual({
       verification_url: "https://open.feishu.cn/page/cli?user_code=config",
       device_code: "config-device-code",
+      generation: "config-generation",
       expires_in: 600,
       interval: 5,
       user_code: "config",
@@ -207,6 +211,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         success: true,
         message: "Lark/Feishu connection setup completed.",
+        generation: "config-generation",
         status: {
           installed: true,
           version: "v1.0.65",
@@ -239,6 +244,7 @@ describe("lark integration api", () => {
     await expect(
       completeLarkConfiguration({
         device_code: "config-device-code",
+        generation: "config-generation",
         brand: "feishu",
         interval: 5,
         expires_in: 600,
@@ -254,6 +260,7 @@ describe("lark integration api", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           device_code: "config-device-code",
+          generation: "config-generation",
           brand: "feishu",
           interval: 5,
           expires_in: 600,
@@ -268,6 +275,7 @@ describe("lark integration api", () => {
         success: true,
         message:
           "Lark/Feishu app switched. Reconnect to authorize the new app.",
+        generation: "switch-generation",
         status: {
           installed: true,
           version: "v1.0.65",
@@ -356,7 +364,10 @@ describe("lark integration api", () => {
     );
 
     await expect(
-      completeLarkAuthorization({ device_code: "device-code" }),
+      completeLarkAuthorization({
+        device_code: "device-code",
+        generation: "auth-generation",
+      }),
     ).resolves.toMatchObject({
       success: true,
       status: { auth: { status: "authenticated", user: "Alice" } },
@@ -366,7 +377,10 @@ describe("lark integration api", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_code: "device-code" }),
+        body: JSON.stringify({
+          device_code: "device-code",
+          generation: "auth-generation",
+        }),
       },
     );
   });

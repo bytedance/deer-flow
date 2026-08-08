@@ -106,6 +106,7 @@ test.describe("Integrations settings", () => {
         body: JSON.stringify({
           verification_url: "about:blank",
           device_code: "mock-config-device-code",
+          generation: "config-generation",
           expires_in: 600,
           interval: 5,
           user_code: "config",
@@ -115,12 +116,14 @@ test.describe("Integrations settings", () => {
     });
     await page.route("**/api/integrations/lark/auth/start", async (route) => {
       authStartRequest = route.request().postDataJSON();
+      const request = authStartRequest as { generation?: string };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           verification_url: "https://open.feishu.cn/auth/mock-device",
           device_code: "mock-device-code",
+          generation: request.generation ?? "auth-generation",
           expires_in: 600,
           user_code: null,
           hint: null,
@@ -174,12 +177,14 @@ test.describe("Integrations settings", () => {
         recommend: false,
         domains: ["calendar"],
         scope: "calendar:calendar.event:read",
+        generation: "config-generation",
       });
 
     await expect
       .poll(() => authCompleteRequests)
       .toContainEqual({
         device_code: "mock-device-code",
+        generation: "config-generation",
         wait_timeout_seconds: 8,
       });
     await expect(
@@ -230,6 +235,7 @@ test.describe("Integrations settings", () => {
             success: true,
             message:
               "Lark/Feishu app switched. Reconnect to authorize the new app.",
+            generation: "switch-generation",
             status: {
               ...configuredStatus,
               app_id: "cli_new_mock",
@@ -247,12 +253,14 @@ test.describe("Integrations settings", () => {
     let authStartRequest: unknown;
     await page.route("**/api/integrations/lark/auth/start", async (route) => {
       authStartRequest = route.request().postDataJSON();
+      const request = authStartRequest as { generation?: string };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           verification_url: "https://open.feishu.cn/auth/switched-app",
           device_code: "switched-device-code",
+          generation: request.generation ?? "auth-generation",
           expires_in: 600,
           user_code: null,
           hint: null,
@@ -299,6 +307,7 @@ test.describe("Integrations settings", () => {
         recommend: false,
         domains: [],
         scope: null,
+        generation: "switch-generation",
       });
     await expect
       .poll(() => popup.url())
@@ -348,6 +357,7 @@ test.describe("Integrations settings", () => {
         recommend: false,
         domains: ["calendar"],
         scope: "calendar:calendar.event:read",
+        generation: "config-generation",
       });
     await popup.close();
   });

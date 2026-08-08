@@ -79,6 +79,11 @@ def _patch_paths(monkeypatch, base_dir: Path) -> None:
     monkeypatch.setattr(paths_module, "_paths", Paths(base_dir=base_dir))
 
 
+def _advance_lark_flow(user_id: str = "alice") -> str:
+    with lark_cli._lark_credential_lock(user_id):
+        return lark_cli._advance_lark_flow_generation_locked(user_id)
+
+
 def test_sandbox_lark_cli_env_prepends_managed_linux_runtime() -> None:
     overlay = lark_cli.lark_cli_env_overlay("alice", sandbox_paths=True)
 
@@ -968,6 +973,8 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
 
     assert result.verification_url == "https://open.feishu.cn/auth/mock"
     assert result.device_code == "device-code"
+    assert result.generation
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation}
     assert captured["args"] == [
         "/usr/bin/lark-cli",
         "auth",
@@ -1016,6 +1023,25 @@ def test_start_lark_auth_uses_minimal_login_by_default(monkeypatch, tmp_path):
         "--no-wait",
         "--json",
     ]
+
+
+def test_start_lark_auth_reuses_parent_flow_generation(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    generation = _advance_lark_flow()
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(
+        lark_cli,
+        "_run_lark_cli_json",
+        lambda *_args, **_kwargs: {
+            "verification_url": "https://open.feishu.cn/auth/mock",
+            "device_code": "device-code",
+        },
+    )
+
+    result = lark_cli.start_lark_auth("alice", generation=generation)
+
+    assert result.generation == generation
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": generation}
 
 
 def test_lark_cli_env_from_runtime_exposes_settings_auth_to_lark_commands(monkeypatch, tmp_path):
@@ -1204,7 +1230,8 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
         ),
     )
 
-    result = lark_cli.complete_lark_auth("alice", config, device_code="device-code")
+    generation = _advance_lark_flow()
+    result = lark_cli.complete_lark_auth("alice", config, device_code="device-code", generation=generation)
 
     assert result.success is True
     assert captured["args"] == [
@@ -1256,10 +1283,12 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
         ),
     )
 
+    generation = _advance_lark_flow()
     result = lark_cli.complete_lark_auth(
         "alice",
         config,
         device_code="device-code",
+        generation=generation,
         wait_timeout_seconds=8,
     )
 
@@ -1267,14 +1296,36 @@ def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tm
     assert captured["timeout"] == 8
 
 
+def test_complete_lark_auth_rejects_superseded_generation_before_token_write(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    stale_generation = _advance_lark_flow()
+    current_generation = _advance_lark_flow()
+    monkeypatch.setattr(
+        lark_cli,
+        "_run_lark_cli_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale auth must not write tokens")),
+    )
+
+    with pytest.raises(lark_cli.LarkFlowSupersededError, match="superseded"):
+        lark_cli.complete_lark_auth(
+            "alice",
+            config,
+            device_code="stale-device-code",
+            generation=stale_generation,
+        )
+
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": current_generation}
+
+
 def test_auth_complete_request_bounds_poll_timeout() -> None:
-    model = integrations_router.LarkAuthCompleteRequest(device_code="device-code", wait_timeout_seconds=8)
+    model = integrations_router.LarkAuthCompleteRequest(device_code="device-code", generation="flow-generation", wait_timeout_seconds=8)
     assert "wait_timeout_seconds" in type(model).model_fields
     assert model.wait_timeout_seconds == 8
     with pytest.raises(ValueError):
-        integrations_router.LarkAuthCompleteRequest(device_code="device-code", wait_timeout_seconds=4)
+        integrations_router.LarkAuthCompleteRequest(device_code="device-code", generation="flow-generation", wait_timeout_seconds=4)
     with pytest.raises(ValueError):
-        integrations_router.LarkAuthCompleteRequest(device_code="device-code", wait_timeout_seconds=46)
+        integrations_router.LarkAuthCompleteRequest(device_code="device-code", generation="flow-generation", wait_timeout_seconds=46)
 
 
 def test_start_lark_config_returns_app_registration_url(monkeypatch, tmp_path):
@@ -1293,6 +1344,8 @@ def test_start_lark_config_returns_app_registration_url(monkeypatch, tmp_path):
     result = lark_cli.start_lark_config("alice", brand="feishu")
 
     assert result.device_code == "config-device-code"
+    assert result.generation
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation}
     assert result.user_code == "abc"
     assert result.verification_url.startswith("https://open.feishu.cn/page/cli?")
     assert "user_code=abc" in result.verification_url
@@ -1305,6 +1358,15 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
     (skills_root / "custom").mkdir()
     config = _config(skills_root)
     captured: dict[str, object] = {}
+    revoked: list[str] = []
+    config_dir = lark_cli.lark_cli_config_dir("alice")
+    data_dir = lark_cli.lark_cli_data_dir("alice")
+    config_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True)
+    (config_dir / "config.json").write_text("old-config", encoding="utf-8")
+    token_file = data_dir / "token.json"
+    token_file.write_text("old-token", encoding="utf-8")
+    generation = _advance_lark_flow()
 
     monkeypatch.setattr(
         lark_cli,
@@ -1319,6 +1381,11 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
         lark_cli,
         "_save_lark_app_config_with_cli",
         lambda user_id, **kwargs: captured.update({"user_id": user_id, **kwargs}),
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "_revoke_lark_auth_from_snapshot",
+        lambda snapshot: revoked.append((snapshot / "data" / "token.json").read_text(encoding="utf-8")),
     )
     monkeypatch.setattr(
         lark_cli,
@@ -1342,9 +1409,18 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
         ),
     )
 
-    result = lark_cli.complete_lark_config("alice", config, device_code="config-device-code", brand="feishu")
+    result = lark_cli.complete_lark_config(
+        "alice",
+        config,
+        device_code="config-device-code",
+        generation=generation,
+        brand="feishu",
+    )
 
     assert result.success is True
+    assert result.generation == generation
+    assert revoked == ["old-token"]
+    assert not token_file.exists()
     assert captured == {
         "user_id": "alice",
         "app_id": "cli_mock",
@@ -1361,6 +1437,7 @@ def test_complete_lark_config_repolls_lark_tenant_for_client_secret(monkeypatch,
     config = _config(skills_root)
     poll_calls: list[dict[str, object]] = []
     captured: dict[str, object] = {}
+    generation = _advance_lark_flow()
 
     def _poll_lark_app_registration(**kwargs):
         poll_calls.append(kwargs)
@@ -1403,7 +1480,13 @@ def test_complete_lark_config_repolls_lark_tenant_for_client_secret(monkeypatch,
         ),
     )
 
-    result = lark_cli.complete_lark_config("alice", config, device_code="config-device-code", brand="feishu")
+    result = lark_cli.complete_lark_config(
+        "alice",
+        config,
+        device_code="config-device-code",
+        generation=generation,
+        brand="feishu",
+    )
 
     assert result.success is True
     assert [call["brand"] for call in poll_calls] == ["feishu", "lark"]
@@ -1413,6 +1496,66 @@ def test_complete_lark_config_repolls_lark_tenant_for_client_secret(monkeypatch,
         "app_secret": "secret",
         "brand": "lark",
     }
+
+
+def test_complete_lark_config_rejects_registration_superseded_by_direct_switch(monkeypatch, tmp_path):
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    stale_generation = _advance_lark_flow()
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+    saved_apps: list[str] = []
+    monkeypatch.setattr(lark_cli, "_validate_lark_app_credentials_with_cli", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        lark_cli,
+        "_save_lark_app_config_with_cli",
+        lambda _user_id, *, app_id, **_kwargs: saved_apps.append(app_id),
+    )
+    monkeypatch.setattr(lark_cli, "_revoke_lark_auth_from_snapshot", lambda _snapshot: None)
+    monkeypatch.setattr(
+        lark_cli,
+        "get_lark_integration_status",
+        lambda _user_id, _config, **_kwargs: _status_stub(
+            app_configured=True,
+            app_id="cli_direct",
+            auth_status="not_authorized",
+        ),
+    )
+
+    def _poll(**_kwargs):
+        poll_started.set()
+        assert release_poll.wait(timeout=3)
+        return {
+            "client_id": "cli_stale",
+            "client_secret": "stale-secret",
+            "user_info": {"tenant_brand": "feishu"},
+        }
+
+    monkeypatch.setattr(lark_cli, "_poll_lark_app_registration", _poll)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        completion = executor.submit(
+            lark_cli.complete_lark_config,
+            "alice",
+            config,
+            device_code="stale-device-code",
+            generation=stale_generation,
+        )
+        assert poll_started.wait(timeout=3)
+        try:
+            switched = lark_cli.set_lark_app_credentials(
+                "alice",
+                config,
+                app_id="cli_direct",
+                app_secret="direct-secret",
+            )
+        finally:
+            release_poll.set()
+        with pytest.raises(lark_cli.LarkFlowSupersededError, match="superseded"):
+            completion.result(timeout=3)
+
+    assert switched.generation != stale_generation
+    assert saved_apps == ["cli_direct"]
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": switched.generation}
 
 
 def _make_user(system_role: str) -> User:
@@ -1531,6 +1674,7 @@ def test_lark_config_start_route_returns_browser_url(monkeypatch, tmp_path):
         lambda _user_id, **_kwargs: lark_cli.LarkConfigStartResult(
             verification_url="https://open.feishu.cn/page/cli?user_code=config",
             device_code="config-device-code",
+            generation="config-generation",
             expires_in=600,
             interval=5,
             user_code="config",
@@ -1544,6 +1688,7 @@ def test_lark_config_start_route_returns_browser_url(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["verification_url"] == "https://open.feishu.cn/page/cli?user_code=config"
     assert response.json()["device_code"] == "config-device-code"
+    assert response.json()["generation"] == "config-generation"
 
 
 def test_lark_config_complete_route_saves_app_credentials(monkeypatch, tmp_path):
@@ -1556,6 +1701,7 @@ def test_lark_config_complete_route_saves_app_credentials(monkeypatch, tmp_path)
         lambda _user_id, _config, *, device_code, **_kwargs: lark_cli.LarkConfigCompleteResult(
             success=True,
             message=f"configured {device_code}",
+            generation="config-generation",
             status=lark_cli.LarkIntegrationStatus(
                 installed=True,
                 version="v1.0.65",
@@ -1579,12 +1725,42 @@ def test_lark_config_complete_route_saves_app_credentials(monkeypatch, tmp_path)
     with TestClient(app) as client:
         response = client.post(
             "/api/integrations/lark/config/complete",
-            json={"device_code": "config-device-code", "brand": "feishu", "interval": 5, "expires_in": 600},
+            json={
+                "device_code": "config-device-code",
+                "generation": "config-generation",
+                "brand": "feishu",
+                "interval": 5,
+                "expires_in": 600,
+            },
         )
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+    assert response.json()["generation"] == "config-generation"
     assert response.json()["status"]["app_configured"] is True
+
+
+def test_lark_config_complete_route_rejects_superseded_flow(monkeypatch, tmp_path):
+    config = _config(tmp_path / "skills")
+    app = _make_app(system_role="user", config=config)
+    monkeypatch.setattr(
+        integrations_router,
+        "complete_lark_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(lark_cli.LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/integrations/lark/config/complete",
+            json={
+                "device_code": "stale-device-code",
+                "generation": "stale-generation",
+                "brand": "feishu",
+            },
+        )
+
+    assert response.status_code == 409
+    assert "superseded" in response.json()["detail"]
 
 
 def test_lark_auth_start_route_returns_browser_url(monkeypatch, tmp_path):
@@ -1600,6 +1776,7 @@ def test_lark_auth_start_route_returns_browser_url(monkeypatch, tmp_path):
             or lark_cli.LarkAuthStartResult(
                 verification_url="https://open.feishu.cn/auth/mock",
                 device_code="device-code",
+                generation="auth-generation",
                 expires_in=600,
             )
         ),
@@ -1611,7 +1788,8 @@ def test_lark_auth_start_route_returns_browser_url(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["verification_url"] == "https://open.feishu.cn/auth/mock"
     assert response.json()["device_code"] == "device-code"
-    assert captured_kwargs == {"domains": (), "scope": None, "recommend": False}
+    assert response.json()["generation"] == "auth-generation"
+    assert captured_kwargs == {"domains": (), "scope": None, "recommend": False, "generation": None}
 
 
 def test_lark_auth_start_route_passes_explicit_recommend(monkeypatch, tmp_path):
@@ -1627,6 +1805,7 @@ def test_lark_auth_start_route_passes_explicit_recommend(monkeypatch, tmp_path):
             or lark_cli.LarkAuthStartResult(
                 verification_url="https://open.feishu.cn/auth/mock",
                 device_code="device-code",
+                generation="auth-generation",
                 expires_in=600,
             )
         ),
@@ -1638,7 +1817,7 @@ def test_lark_auth_start_route_passes_explicit_recommend(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.json()["verification_url"] == "https://open.feishu.cn/auth/mock"
     assert response.json()["device_code"] == "device-code"
-    assert captured_kwargs == {"domains": (), "scope": None, "recommend": True}
+    assert captured_kwargs == {"domains": (), "scope": None, "recommend": True, "generation": None}
 
 
 def test_lark_auth_complete_route_polls_device_code(monkeypatch, tmp_path):
@@ -1673,13 +1852,20 @@ def test_lark_auth_complete_route_polls_device_code(monkeypatch, tmp_path):
     monkeypatch.setattr(integrations_router, "complete_lark_auth", _complete_auth)
 
     with TestClient(app) as client:
-        response = client.post("/api/integrations/lark/auth/complete", json={"device_code": "device-code"})
+        response = client.post(
+            "/api/integrations/lark/auth/complete",
+            json={"device_code": "device-code", "generation": "auth-generation"},
+        )
 
     assert response.status_code == 200
     assert response.json()["success"] is True
     assert response.json()["status"]["auth"]["status"] == "authenticated"
     assert response.json()["status"]["auth"]["verified"] is True
-    assert captured_kwargs == {"device_code": "device-code", "wait_timeout_seconds": 45}
+    assert captured_kwargs == {
+        "device_code": "device-code",
+        "generation": "auth-generation",
+        "wait_timeout_seconds": 45,
+    }
 
 
 def _status_stub(*, app_configured: bool, app_id: str | None, auth_status: str) -> lark_cli.LarkIntegrationStatus:
@@ -1901,6 +2087,7 @@ def test_lark_config_credentials_route_switches_app(monkeypatch, tmp_path):
             or lark_cli.LarkConfigCompleteResult(
                 success=True,
                 message="Lark/Feishu app switched. Reconnect to authorize the new app.",
+                generation="switch-generation",
                 status=_status_stub(app_configured=True, app_id="cli_new", auth_status="not_authorized"),
             )
         ),
@@ -1914,6 +2101,7 @@ def test_lark_config_credentials_route_switches_app(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
+    assert response.json()["generation"] == "switch-generation"
     assert response.json()["status"]["app_configured"] is True
     assert response.json()["status"]["auth"]["status"] == "not_authorized"
     assert captured == {"app_id": "cli_new", "app_secret": "new-secret", "brand": "feishu"}
