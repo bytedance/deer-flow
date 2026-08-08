@@ -63,6 +63,8 @@ def _bech32_decode(expected_hrp: str, value: str) -> bytes:
         if bits >= 8:
             bits -= 8
             out.append((acc >> bits) & 0xFF)
+    if bits and acc & ((1 << bits) - 1):
+        raise ValueError(f"nonzero bech32 padding in {value!r}")
     if len(out) != 32:
         raise ValueError(f"expected 32-byte payload in {value!r}")
     return bytes(out)
