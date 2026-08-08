@@ -62,6 +62,21 @@ class McpToolOverride(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class McpTaskToolsetConfig(BaseModel):
+    """One ordinary submit/status/cancel contract exposed by an MCP server.
+
+    Tool names are the exact raw names advertised by that server. The
+    presentation prefix added by ``langchain-mcp-adapters`` is deliberately not
+    part of this durable binding.
+    """
+
+    name: str = Field(min_length=1, description="Stable local name shown for tasks from this toolset")
+    submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
+    status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
+    cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
+    model_config = ConfigDict(extra="forbid")
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -105,15 +120,20 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
-            "and persistent stdio session initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung "
-            "server cannot block agent construction indefinitely. None means no timeout."
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
         ),
+    )
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
 
@@ -130,6 +150,18 @@ class McpServerConfig(BaseModel):
         spelling works, with ``type`` taking precedence when both are provided.
         """
         return normalize_mcp_transport_alias(data)
+
+    @model_validator(mode="after")
+    def _validate_task_tool_bindings(self) -> "McpServerConfig":
+        claimed: dict[str, str] = {}
+        for toolset in self.task_toolsets:
+            for role in ("submit_tool", "status_tool", "cancel_tool"):
+                raw_name = getattr(toolset, role)
+                previous = claimed.get(raw_name)
+                if previous is not None:
+                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                claimed[raw_name] = f"{toolset.name}.{role}"
+        return self
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
