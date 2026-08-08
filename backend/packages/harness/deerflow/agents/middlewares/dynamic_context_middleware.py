@@ -42,6 +42,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -61,23 +62,16 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
-# Suffix the ID-swap gives the real user message; the reminder SystemMessage
-# takes the original id so ``add_messages`` can replace it in place.
-INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
 
-
-def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
-    """Return the id *message_id* had before the reminder ID-swap.
-
-    Replaying a persisted user turn must feed the graph the id the client
-    originally sent: a ``{id}__user`` message is skipped as an injection target,
-    so replaying one into a state that has no reminder yet silently drops the
-    date and memory block for that turn.
-    """
-
-    if isinstance(message_id, str) and message_id.endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
-        return message_id[: -len(INJECTED_USER_MESSAGE_ID_SUFFIX)] or message_id
-    return message_id
+# ``INJECTED_USER_MESSAGE_ID_SUFFIX`` / ``strip_injected_user_message_id_suffix``
+# are defined in ``deerflow.utils.messages`` and re-exported here, where the
+# ID-swap they describe actually happens. Existing importers keep working.
+__all__ = [
+    "INJECTED_USER_MESSAGE_ID_SUFFIX",
+    "DynamicContextMiddleware",
+    "is_dynamic_context_reminder",
+    "strip_injected_user_message_id_suffix",
+]
 
 
 def _extract_date(content: str) -> str | None:
