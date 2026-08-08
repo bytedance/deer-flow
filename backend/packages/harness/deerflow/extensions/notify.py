@@ -92,6 +92,27 @@ async def _notify_each(
                 )
                 continue
             await asyncio.wait_for(call, remaining)
+        except TimeoutError:
+            if deadline is not None and loop.time() >= deadline:
+                # Budget exhaustion mid-hook is the same expected operational
+                # condition as the skip above, so it stays a warning rather
+                # than a hook failure with an asyncio-internal traceback.
+                logger.warning(
+                    "Extension %s: %s timed out for task %s; the %.1fs notification budget was spent",
+                    source,
+                    hook,
+                    task_id,
+                    timeout,
+                )
+            else:
+                # A TimeoutError the contributor raised on its own is a hook
+                # failure like any other.
+                logger.exception(
+                    "Extension %s: %s failed for task %s",
+                    source,
+                    hook,
+                    task_id,
+                )
         except asyncio.CancelledError:
             if _host_is_cancelling():
                 raise
@@ -268,7 +289,7 @@ async def notify_system_model_call(
             request,
             result,
         ),
-        kind.value,
+        f"{store.scope_id} ({kind.value})",
         timeout,
     )
 

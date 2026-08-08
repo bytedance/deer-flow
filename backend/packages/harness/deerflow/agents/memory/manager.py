@@ -714,7 +714,10 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
                 ),
                 SystemOperationKind.MEMORY.value,
             )
-        except BaseException:
+        except Exception:
+            # Only the bridge's own failures are non-fatal. A teardown signal
+            # must propagate, matching the boundary the DeerMem-side call
+            # site documents and tests.
             logger.warning(
                 "Extension observation of the memory model call failed (non-fatal)",
                 exc_info=True,

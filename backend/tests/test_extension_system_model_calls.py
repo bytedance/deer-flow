@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -464,6 +465,71 @@ async def test_memory_callback_dispatches_the_captured_snapshot_and_live_store()
     assert first.calls[0][2].duration_ms == 12.5
     assert first.stores == [store]
     assert second.calls == []
+
+
+def test_memory_callback_does_not_swallow_interpreter_shutdown(monkeypatch):
+    # Fail-open covers the bridge's own failures, not a process teardown
+    # signal — the same boundary the DeerMem-side call site pins in
+    # `test_memory_updater.py`.
+    from deerflow.agents.memory.manager import LangfuseMemoryCallbacks
+    from deerflow.extensions import notify as notify_module
+
+    def _teardown(coro, what):
+        coro.close()
+        raise SystemExit("interpreter is going down")
+
+    monkeypatch.setattr(notify_module, "dispatch_system_model_observation", _teardown)
+    callback = LangfuseMemoryCallbacks(extensions=_extensions(_Observer()))
+
+    with pytest.raises(SystemExit):
+        callback.on_memory_llm_result(
+            {},
+            prompt=("memory prompt",),
+            response=None,
+            error=None,
+            duration_ms=1.0,
+            model_name="memory-model",
+        )
+
+
+def test_memory_callback_contains_bridge_failures(monkeypatch):
+    from deerflow.agents.memory.manager import LangfuseMemoryCallbacks
+    from deerflow.extensions import notify as notify_module
+
+    def _broken(coro, what):
+        coro.close()
+        raise RuntimeError("loop is gone")
+
+    monkeypatch.setattr(notify_module, "dispatch_system_model_observation", _broken)
+    callback = LangfuseMemoryCallbacks(extensions=_extensions(_Observer()))
+
+    callback.on_memory_llm_result(
+        {},
+        prompt=("memory prompt",),
+        response="memory response",
+        error=None,
+        duration_ms=1.0,
+        model_name="memory-model",
+    )
+
+
+@pytest.mark.asyncio
+async def test_system_model_failure_logs_identify_the_task_scope(caplog):
+    class _Broken:
+        async def on_system_model_call(self, app_store, task_store, kind, request, result):
+            raise RuntimeError("observer broke")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.extensions.notify"):
+        await notify_system_model_call(
+            _extensions(_Broken()),
+            ExtensionData("summary-live-task"),
+            SystemOperationKind.GOAL,
+            SystemModelRequest(messages=("prompt",), model_name="system-model"),
+            SystemModelResult(response="ok"),
+        )
+
+    messages = [record.getMessage() for record in caplog.records if record.name == "deerflow.extensions.notify"]
+    assert any("summary-live-task" in message and "goal" in message for message in messages)
 
 
 @pytest.fixture

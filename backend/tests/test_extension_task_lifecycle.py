@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -116,6 +117,59 @@ async def test_notification_timeout_is_one_shared_budget():
 
     assert reached == ["hang"]
     assert loop.time() - started < 1
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_mid_hook_logs_a_warning_not_a_traceback(caplog):
+    # Spending the shared budget mid-hook is the same expected operational
+    # condition as the pre-hook skip, not a hook failure.
+    class _Hang:
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            await asyncio.sleep(10)
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.extensions.notify"):
+        await notify_task_stop(
+            _extensions(_Hang()),
+            ExtensionData("task-1"),
+            _info(),
+            TaskOutcome.COMPLETED,
+            timeout=0.02,
+        )
+
+    records = [record for record in caplog.records if record.name == "deerflow.extensions.notify"]
+    assert [record.levelno for record in records] == [logging.WARNING]
+    assert "timed out" in records[0].getMessage()
+    assert "task-1" in records[0].getMessage()
+    assert records[0].exc_info is None
+
+
+@pytest.mark.asyncio
+async def test_contributor_timeout_error_before_budget_is_a_hook_failure(caplog):
+    # A TimeoutError the contributor raises on its own is not budget
+    # exhaustion; it stays classified as a hook failure.
+    class _TimedOut:
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            raise TimeoutError("the contributor's own downstream call timed out")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.extensions.notify"):
+        await notify_task_stop(
+            _extensions(_TimedOut()),
+            ExtensionData("task-1"),
+            _info(),
+            TaskOutcome.COMPLETED,
+            timeout=30,
+        )
+        # And with no notification budget at all.
+        await notify_task_stop(
+            _extensions(_TimedOut()),
+            ExtensionData("task-1"),
+            _info(),
+            TaskOutcome.COMPLETED,
+        )
+
+    records = [record for record in caplog.records if record.name == "deerflow.extensions.notify"]
+    assert [record.levelno for record in records] == [logging.ERROR, logging.ERROR]
+    assert all("failed" in record.getMessage() for record in records)
 
 
 class _RunRecorder(_Recorder):
