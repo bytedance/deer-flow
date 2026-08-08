@@ -68,9 +68,8 @@ def load_memory_context(
         kwargs = {
             "agent_name": agent_name,
         }
-        if supports_query_aware_context:
-            kwargs["thread_id"] = thread_id
         if query is not None:
+            kwargs["thread_id"] = thread_id
             kwargs["query"] = query
         memory_content = manager.get_context(
             resolved_user_id,
@@ -110,9 +109,8 @@ async def aload_memory_context(
         kwargs = {
             "agent_name": agent_name,
         }
-        if supports_query_aware_context:
-            kwargs["thread_id"] = thread_id
         if query is not None:
+            kwargs["thread_id"] = thread_id
             kwargs["query"] = query
         memory_content = await manager.aget_context(
             resolved_user_id,
