@@ -80,6 +80,53 @@ async def test_async_memory_context_config_resolution_failure_is_fail_open(monke
     assert await aload_memory_context() == ""
 
 
+def test_sync_query_aware_backend_receives_no_thread_id_without_query(monkeypatch):
+    manager = SimpleNamespace(
+        supports_query_aware_context=True,
+        get_context=Mock(return_value="baseline recall"),
+    )
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    assert (
+        load_memory_context(
+            agent_name="research",
+            app_config=_app_config(session=True, turn=False),
+            user_id="alice",
+            thread_id="thread-1",
+            query=None,
+        )
+        == "<memory>\nbaseline recall\n</memory>\n"
+    )
+    manager.get_context.assert_called_once_with(
+        "alice",
+        agent_name="research",
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_query_aware_backend_receives_no_thread_id_without_query(monkeypatch):
+    manager = SimpleNamespace(
+        supports_query_aware_context=True,
+        aget_context=AsyncMock(return_value="baseline recall"),
+    )
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    assert (
+        await aload_memory_context(
+            agent_name="research",
+            app_config=_app_config(session=True, turn=False),
+            user_id="alice",
+            thread_id="thread-1",
+            query=None,
+        )
+        == "<memory>\nbaseline recall\n</memory>\n"
+    )
+    manager.aget_context.assert_awaited_once_with(
+        "alice",
+        agent_name="research",
+    )
+
+
 def test_sync_turn_recall_uses_sync_manager_context(monkeypatch):
     manager = SimpleNamespace(
         supports_query_aware_context=True,
@@ -286,7 +333,6 @@ async def test_session_and_turn_injection_controls(
         manager.get_context.assert_called_once_with(
             "alice",
             agent_name=None,
-            thread_id="thread-1",
         )
         assert any("session recall" in str(message.content) for message in state_update["messages"])
     else:
