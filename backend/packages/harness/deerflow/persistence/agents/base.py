@@ -126,6 +126,6 @@ class AgentStore(abc.ABC):
 
         Equal tokens mean "nothing changed since last read". The GitHub registry
         keys its cache off this instead of ``stat()`` so it works for both
-        backends (mtime triples for ``file``; ``max(updated_at)`` + row count for
-        ``db``).
+        backends (mtime triples for ``file``; a deterministic digest of stored
+        agent contents for ``db``).
         """

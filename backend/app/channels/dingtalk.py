@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
@@ -428,8 +428,16 @@ class DingTalkChannel(Channel):
                 len(files),
             )
 
-            if _is_dingtalk_command(text):
+            # DingTalk group chats often deliver "@bot /new" with the mention left
+            # in the text (Slack/Discord strip their own bot mention upstream).
+            # Skip a leading mention only for the command path so ordinary chat
+            # keeps @mentions intact for the agent; the stripped form also flows
+            # into the inbound so ChannelManager._handle_command parses the bare
+            # command. Mirrors FeishuChannel.
+            command_text = strip_leading_mentions(text)
+            if _is_dingtalk_command(command_text):
                 msg_type = InboundMessageType.COMMAND
+                text = command_text
             else:
                 msg_type = InboundMessageType.CHAT
 
