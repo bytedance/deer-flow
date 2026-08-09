@@ -567,9 +567,11 @@ class TestLarkCliInitContainer:
         runtime_mounts = [m for m in pod.spec.containers[0].volume_mounts if m.mount_path == "/mnt/integrations/lark-cli/runtime"]
         assert len(runtime_mounts) == 1
         assert runtime_mounts[0].name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME
+        sandbox_mount_order = [m.mount_path for m in pod.spec.containers[0].volume_mounts]
         sandbox_mounts = {m.mount_path: m for m in pod.spec.containers[0].volume_mounts}
         assert sandbox_mounts["/mnt/integrations/lark-cli/config"].read_only is True
         assert sandbox_mounts["/mnt/integrations/lark-cli/config/locks"].read_only is False
+        assert sandbox_mount_order.index("/mnt/integrations/lark-cli/config") < sandbox_mount_order.index("/mnt/integrations/lark-cli/config/locks")
 
 
 class TestLarkCliBrokerSidecar:
@@ -647,13 +649,15 @@ class TestLarkCliBrokerSidecar:
         assert sidecar.image == "deer-flow/lark-cli-broker:v1.0.65"
         assert sidecar.args == ["serve"]
         # Credentials mounted into the sidecar only.
-        sidecar_paths = {m.mount_path for m in sidecar.volume_mounts}
+        sidecar_mount_order = [m.mount_path for m in sidecar.volume_mounts]
+        sidecar_mounts = {m.mount_path: m for m in sidecar.volume_mounts}
+        sidecar_paths = set(sidecar_mounts)
         assert provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH in sidecar_paths
         assert provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH in sidecar_paths
         assert provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH in sidecar_paths
-        sidecar_mounts = {m.mount_path: m for m in sidecar.volume_mounts}
         assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH].read_only is True
         assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH].read_only is False
+        assert sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH) < sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH)
 
         # Sandbox container: runtime shim mount + broker URL env, NO config/data.
         sandbox = pod.spec.containers[0]

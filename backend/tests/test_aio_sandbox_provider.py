@@ -183,6 +183,7 @@ def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
     runtime_dir.mkdir(parents=True)
 
     mounts = aio_mod.AioSandboxProvider._get_lark_cli_runtime_mounts(user_id="alice")
+    mount_order = [container_path for _host_path, container_path, _read_only in mounts]
     container_paths = {container_path: (host_path, read_only) for host_path, container_path, read_only in mounts}
 
     assert container_paths[lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR] == (
@@ -193,6 +194,7 @@ def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks"),
         False,
     )
+    assert mount_order.index(lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR) < mount_order.index(lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR)
     assert container_paths[lark_cli.LARK_CLI_SANDBOX_DATA_DIR] == (
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"),
         False,
@@ -266,7 +268,7 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     payload = remote_backend._provisioner_extra_mounts_payload(mounts)
     payload_paths = [str(item["container_path"]) for item in payload]
     assert len(payload_paths) == len(set(payload_paths))
-    assert lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR in payload_paths
+    assert payload_paths.index(lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR) < payload_paths.index(lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR)
 
     provisioner_module.DEER_FLOW_HOST_BASE_DIR = str(home)
     validated = provisioner_module._validated_extra_mounts([provisioner_module.ExtraMount(**item) for item in payload])
