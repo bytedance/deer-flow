@@ -31,6 +31,25 @@ _HOST_PUBLIC_PATH_PREFIXES = (
     "/api/v1/auth/callback/",
     "/api/webhooks/",
 )
+_HOST_PUBLIC_EXACT_PATHS = frozenset(
+    {
+        "/api/v1/auth/login/local",
+        "/api/v1/auth/register",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/setup-status",
+        "/api/v1/auth/initialize",
+        "/api/v1/auth/providers",
+    }
+)
+_HOST_CSRF_EXEMPT_EXACT_PATHS = frozenset({"/api/v1/auth/me"})
+_CSRF_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+_STANDARD_CONVERTOR_REGEXES = {
+    "str": "[^/]+",
+    "path": ".*",
+    "int": "[0-9]+",
+    "float": r"[0-9]+(\.[0-9]+)?",
+    "uuid": "[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}",
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,7 @@ class _RouteClaim:
     methods: _RouteMethods
     scopes: _RouteScopes
     mount_prefix: str | None = None
+    standard_convertors: bool = True
 
 
 _RouteOwners = list[tuple[_RouteClaim, str]]
@@ -77,20 +97,161 @@ def _route_scopes(route: Any) -> _RouteScopes:
     return frozenset({"http", "websocket"})
 
 
-def _route_claim(route: Any) -> _RouteClaim | None:
-    from starlette.routing import Mount
+def _route_claim(route: Any, *, recompile: bool = False) -> _RouteClaim | None:
+    from starlette.routing import Mount, compile_path
 
     path = getattr(route, "path", None)
-    matcher = _route_path_matcher(route)
+    if recompile and path is not None:
+        path_regex, _path_format, param_convertors = compile_path(path)
+        matcher = _PATH_PARAMETER_GROUP.sub("(?:", path_regex.pattern)
+    else:
+        matcher = _route_path_matcher(route)
+        param_convertors = getattr(route, "param_convertors", {})
     if path is None or matcher is None:
         return None
+    is_mount = isinstance(route, Mount)
     return _RouteClaim(
         path=path,
         matcher=matcher,
         methods=_route_methods(route),
         scopes=_route_scopes(route),
-        mount_prefix=path.rstrip("/") if isinstance(route, Mount) else None,
+        mount_prefix=path.rstrip("/") if is_mount else None,
+        standard_convertors=_uses_standard_convertors(
+            path,
+            param_convertors,
+            is_mount=is_mount,
+        ),
     )
+
+
+def _uses_standard_convertors(
+    path: str,
+    param_convertors: Any,
+    *,
+    is_mount: bool,
+) -> bool:
+    for match in _PATH_PARAMETER.finditer(path):
+        parameter_name = match.group(1)
+        convertor_name = match.group(2) or "str"
+        expected_regex = _STANDARD_CONVERTOR_REGEXES.get(convertor_name)
+        actual_regex = getattr(param_convertors.get(parameter_name), "regex", None)
+        if expected_regex is None or actual_regex != expected_regex:
+            return False
+
+    if is_mount:
+        return getattr(param_convertors.get("path"), "regex", None) == _STANDARD_CONVERTOR_REGEXES["path"]
+    return True
+
+
+def _convertor_can_extend_prefix(convertor: str, prefix: str) -> bool:
+    """Return a proven built-in-convertor witness beginning with ``prefix``.
+
+    Public-route protection is a security boundary, so an unknown custom
+    convertor fails closed when its value could begin inside a public prefix.
+    Shadow detection remains separate and continues to allow relationships it
+    cannot prove.
+    """
+    if convertor == "path":
+        return True
+    if convertor == "str":
+        return "/" not in prefix
+    if convertor == "int":
+        return all(character in "0123456789" for character in prefix)
+    if convertor == "float":
+        if not prefix:
+            return True
+        return bool(re.fullmatch(r"[0-9]+", prefix) or re.fullmatch(r"[0-9]+\.", prefix) or re.fullmatch(r"[0-9]+\.[0-9]+", prefix))
+    if convertor == "uuid":
+        groups = (8, 4, 4, 4, 12)
+        for mask in range(1 << (len(groups) - 1)):
+            shape = ""
+            for index, width in enumerate(groups):
+                shape += "h" * width
+                if index < len(groups) - 1 and mask & (1 << index):
+                    shape += "-"
+            if len(prefix) <= len(shape) and all((expected == "h" and character in "0123456789abcdefABCDEF") or character == expected for character, expected in zip(prefix, shape, strict=False)):
+                return True
+        return False
+    return True
+
+
+def _path_template_can_start_with(path: str, prefix: str) -> bool:
+    """Whether a built-in route template has a concrete path under ``prefix``."""
+    from functools import cache
+
+    tokens: list[tuple[str, str]] = []
+    cursor = 0
+    for match in _PATH_PARAMETER.finditer(path):
+        literal = path[cursor : match.start()]
+        if literal:
+            tokens.append(("literal", literal))
+        tokens.append(("parameter", match.group(2) or "str"))
+        cursor = match.end()
+    trailing_literal = path[cursor:]
+    if trailing_literal:
+        tokens.append(("literal", trailing_literal))
+
+    @cache
+    def can_match(token_index: int, prefix_index: int) -> bool:
+        if prefix_index == len(prefix):
+            return True
+        if token_index == len(tokens):
+            return False
+
+        kind, value = tokens[token_index]
+        remaining = prefix[prefix_index:]
+        if kind == "literal":
+            if value.startswith(remaining):
+                return True
+            if remaining.startswith(value):
+                return can_match(token_index + 1, prefix_index + len(value))
+            return False
+
+        registered_regex = _STANDARD_CONVERTOR_REGEXES.get(value)
+        if registered_regex is None:
+            return False
+        for end_index in range(prefix_index, len(prefix) + 1):
+            concrete = prefix[prefix_index:end_index]
+            if re.fullmatch(registered_regex, concrete) is not None and can_match(
+                token_index + 1,
+                end_index,
+            ):
+                return True
+        return _convertor_can_extend_prefix(value, remaining)
+
+    return can_match(0, 0)
+
+
+def _claim_can_enter_prefix(claim: _RouteClaim, prefix: str) -> bool:
+    if claim.standard_convertors:
+        return _path_template_can_start_with(claim.path, prefix)
+    literal_prefix = claim.path.partition("{")[0]
+    return claim.path.startswith(prefix) or prefix.startswith(literal_prefix)
+
+
+def _claim_can_enter_exact_path(claim: _RouteClaim, exact_path: str) -> bool:
+    """Whether a route can dispatch to ``exact_path`` plus trailing slashes."""
+    if not claim.standard_convertors:
+        return _claim_can_enter_prefix(claim, exact_path)
+
+    # Auth and CSRF normalize with rstrip("/"), so two or more trailing
+    # slashes are just as exempt as one. For built-in convertors, a shortest
+    # slash-only witness is bounded by the template's literal length because
+    # ``path`` may be empty and every other built-in rejects slash.
+    for slash_count in range(len(claim.path) + 2):
+        if (
+            re.fullmatch(
+                claim.matcher,
+                exact_path + "/" * slash_count,
+            )
+            is not None
+        ):
+            return True
+
+    # Custom regex language inclusion is deliberately not guessed at a
+    # security boundary. If its template can reach the exact-path prefix,
+    # reject it fail-closed; shadow matching below remains fail-open.
+    return False
 
 
 def _router_routes(router: Any) -> list[_RouteClaim]:
@@ -111,11 +272,21 @@ def _router_routes(router: Any) -> list[_RouteClaim]:
             raise TypeError("contributed WebSocket routes are not supported until the host can apply authentication and Origin checks")
         if not isinstance(route, Route):
             raise TypeError(f"contributed router contains an unsupported route item: {type(route).__name__}")
-        claim = _route_claim(route)
+        # FastAPI.include_router() reconstructs every route from ``route.path``
+        # using the converter registry at include time. Preflight must project
+        # those same semantics, not the router object's older compiled regex.
+        claim = _route_claim(route, recompile=True)
         if claim is not None:
-            literal_prefix = claim.path.partition("{")[0]
-            if any(claim.path.startswith(public_prefix) or public_prefix.startswith(literal_prefix) for public_prefix in _HOST_PUBLIC_PATH_PREFIXES):
+            enters_public_exact_path = any(_claim_can_enter_exact_path(claim, public_path) for public_path in _HOST_PUBLIC_EXACT_PATHS)
+            enters_csrf_exact_path = _methods_overlap(
+                claim.methods,
+                _CSRF_STATE_CHANGING_METHODS,
+            ) and any(_claim_can_enter_exact_path(claim, exempt_path) for exempt_path in _HOST_CSRF_EXEMPT_EXACT_PATHS)
+            enters_public_prefix = any(_claim_can_enter_prefix(claim, public_prefix) for public_prefix in _HOST_PUBLIC_PATH_PREFIXES)
+            if enters_public_prefix:
                 raise TypeError(f"contributed route {claim.path} can enter a host public namespace")
+            if enters_public_exact_path or enters_csrf_exact_path:
+                raise TypeError(f"contributed route {claim.path} can enter a host-reserved exact path")
             claims.append(claim)
     return claims
 
@@ -144,8 +315,10 @@ def _path_shape(path: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def _convertor_covers(owner: str, candidate: str) -> bool:
-    if owner == candidate or owner == "path":
+    if owner == candidate:
         return True
+    if owner == "path":
+        return candidate in {"int", "float", "uuid"}
     if owner == "str":
         return candidate in {"str", "int", "float", "uuid"}
     if owner == "float":
@@ -172,16 +345,14 @@ def _path_segments(path: str) -> tuple[tuple[str, str], ...] | None:
 
 
 def _static_segment_matches(convertor: str, value: str) -> bool:
-    from starlette.convertors import CONVERTOR_TYPES
-
-    registered = CONVERTOR_TYPES.get(convertor)
-    return registered is not None and re.fullmatch(registered.regex, value) is not None
+    registered_regex = _STANDARD_CONVERTOR_REGEXES.get(convertor)
+    return registered_regex is not None and re.fullmatch(registered_regex, value) is not None
 
 
 def _compound_segment_covers(owner: str, candidate: str) -> bool:
     owner_literals, owner_convertors = _path_shape(owner)
     candidate_literals, candidate_convertors = _path_shape(candidate)
-    return (
+    if (
         owner_literals == candidate_literals
         and len(owner_convertors) == len(candidate_convertors)
         and all(
@@ -192,14 +363,49 @@ def _compound_segment_covers(owner: str, candidate: str) -> bool:
                 strict=True,
             )
         )
+    ):
+        return True
+
+    if len(owner_convertors) != 1 or owner_convertors[0] != "str":
+        return False
+    owner_prefix, owner_suffix = owner_literals
+    minimum_candidate_length = sum(map(len, candidate_literals)) + sum(0 if convertor == "path" else 1 for convertor in candidate_convertors)
+    return (
+        candidate_literals[0].startswith(owner_prefix)
+        and candidate_literals[-1].endswith(owner_suffix)
+        and minimum_candidate_length > len(owner_prefix) + len(owner_suffix)
+        and all(convertor in {"str", "int", "float", "uuid"} for convertor in candidate_convertors)
     )
 
 
-def _compound_segment_matches_static(compound: str, value: str) -> bool:
-    from starlette.routing import compile_path
+def _compound_is_ascii_digits(compound: str) -> bool:
+    literals, convertors = _path_shape(compound)
+    return all(character in "0123456789" for literal in literals for character in literal) and all(convertor == "int" for convertor in convertors)
 
-    matcher, _path_format, _convertors = compile_path(f"/{compound}")
-    return re.fullmatch(matcher.pattern, f"/{value}") is not None
+
+def _segment_excludes_newline(segment: tuple[str, str]) -> bool:
+    kind, value = segment
+    if kind == "literal":
+        return "\n" not in value
+    if kind == "parameter":
+        return value in {"path", "int", "float", "uuid"}
+    literals, convertors = _path_shape(value)
+    return all("\n" not in literal for literal in literals) and all(convertor in {"path", "int", "float", "uuid"} for convertor in convertors)
+
+
+def _compound_segment_matches_static(compound: str, value: str) -> bool:
+    pattern = ""
+    cursor = 0
+    for match in _PATH_PARAMETER.finditer(compound):
+        pattern += re.escape(compound[cursor : match.start()])
+        convertor = match.group(2) or "str"
+        registered_regex = _STANDARD_CONVERTOR_REGEXES.get(convertor)
+        if registered_regex is None:
+            return False
+        pattern += f"(?:{registered_regex})"
+        cursor = match.end()
+    pattern += re.escape(compound[cursor:])
+    return re.fullmatch(pattern, value) is not None
 
 
 def _segment_covers(owner: tuple[str, str], candidate: tuple[str, str]) -> bool:
@@ -209,9 +415,11 @@ def _segment_covers(owner: tuple[str, str], candidate: tuple[str, str]) -> bool:
         return candidate_kind == "literal" and owner_value == candidate_value
     if owner_kind == "parameter" and candidate_kind == "compound":
         if owner_value == "path":
-            return True
+            return _segment_excludes_newline(candidate)
         if owner_value == "str":
             return all((match.group(2) or "str") in {"str", "int", "float", "uuid"} for match in _PATH_PARAMETER.finditer(candidate_value))
+        if owner_value in {"int", "float"}:
+            return _compound_is_ascii_digits(candidate_value)
         return False
     if owner_kind == "compound":
         if candidate_kind == "literal":
@@ -234,7 +442,18 @@ def _segmented_path_covers(owner_path: str, candidate_path: str) -> bool:
 
     if owner and owner[-1] == ("parameter", "path"):
         prefix = owner[:-1]
-        return len(candidate) > len(prefix) and all(_segment_covers(owner_segment, candidate_segment) for owner_segment, candidate_segment in zip(prefix, candidate, strict=False))
+        return (
+            len(candidate) > len(prefix)
+            and all(
+                _segment_covers(owner_segment, candidate_segment)
+                for owner_segment, candidate_segment in zip(
+                    prefix,
+                    candidate,
+                    strict=False,
+                )
+            )
+            and all(_segment_excludes_newline(candidate_segment) for candidate_segment in candidate[len(prefix) :])
+        )
 
     return len(owner) == len(candidate) and all(_segment_covers(owner_segment, candidate_segment) for owner_segment, candidate_segment in zip(owner, candidate, strict=True))
 
@@ -244,6 +463,9 @@ def _matcher_covers(owner: _RouteClaim, candidate: _RouteClaim) -> bool:
     if owner.matcher == candidate.matcher:
         return True
 
+    if not owner.standard_convertors or not candidate.standard_convertors:
+        return False
+
     owner_literals, owner_convertors = _path_shape(owner.path)
     candidate_literals, candidate_convertors = _path_shape(candidate.path)
 
@@ -252,7 +474,8 @@ def _matcher_covers(owner: _RouteClaim, candidate: _RouteClaim) -> bool:
 
     if owner.mount_prefix is not None:
         if owner.mount_prefix == "":
-            return True
+            candidate_segments = _path_segments(candidate.path)
+            return candidate_segments is not None and all(_segment_excludes_newline(segment) for segment in candidate_segments)
         return _segmented_path_covers(
             f"{owner.mount_prefix}/{{mount_path:path}}",
             candidate.path,

@@ -203,10 +203,14 @@ async def test_service_originated_timeout_error_is_reported_as_failure_not_budge
         ("/items/{item_id}", "GET", "/items/{id}", "GET", True),
         ("/items/{item_id}", "GET", "/items/new", "GET", True),
         ("/items/{item_id}", "GET", "/items/prefix-{id}", "GET", True),
+        ("/pre{tenant}", "GET", "/prefoo{id}", "GET", True),
         ("/items/new", "GET", "/items/{id}", "GET", False),
         ("/records/{value}", "GET", "/records/{id:int}", "GET", True),
+        ("/records/{value:int}", "GET", "/records/0{id:int}", "GET", True),
         ("/records/{value:int}", "GET", "/records/new", "GET", False),
         ("/files/{rest:path}", "GET", "/files/{id:int}", "GET", True),
+        ("/files/{rest:path}", "GET", "/files/{id}", "GET", False),
+        ("/x/{rest:path}/tail", "GET", "/x/a/{id}/tail", "GET", False),
         ("/items/{item_id}", "GET", "/items/{id}", "POST", False),
         ("/live/{item_id}", "WS", "/live/{id}", "GET", False),
     ],
@@ -215,10 +219,14 @@ async def test_service_originated_timeout_error_is_reported_as_failure_not_budge
         "renamed-parameter",
         "dynamic-shadows-static",
         "dynamic-shadows-compound",
+        "compound-trailing-str-shadows-narrower-compound",
         "static-does-not-shadow-dynamic",
         "str-covers-int",
+        "int-shadows-digit-compound",
         "int-does-not-cover-static",
         "path-covers-descendant",
+        "path-does-not-cover-newline-capable-str",
+        "nonterminal-path-does-not-cover-newline-capable-str",
         "disjoint-http-methods",
         "websocket-does-not-shadow-http",
     ],
@@ -263,6 +271,153 @@ def test_router_conflicts_follow_starlette_dispatch_order(
         assert any(getattr(route, "path", None) == candidate_path for route in app.routes)
 
 
+@pytest.mark.parametrize("convertor_name", ["flip", "int"])
+def test_re_registered_convertor_does_not_create_a_false_shadow(
+    monkeypatch,
+    convertor_name,
+):
+    from fastapi import APIRouter, FastAPI
+    from starlette.convertors import CONVERTOR_TYPES, Convertor
+    from starlette.routing import Match
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    class DigitsConvertor(Convertor[str]):
+        regex = "[0-9]+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    class LettersConvertor(Convertor[str]):
+        regex = "[A-Z]+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    async def endpoint(value: str):
+        return {"value": value}
+
+    monkeypatch.setitem(CONVERTOR_TYPES, convertor_name, DigitsConvertor())
+    route_path = f"/owned/{{value:{convertor_name}}}"
+    app = FastAPI()
+    app.add_api_route(route_path, endpoint, methods=["GET"])
+    owner = app.routes[-1]
+
+    monkeypatch.setitem(CONVERTOR_TYPES, convertor_name, LettersConvertor())
+    router = APIRouter()
+    router.add_api_route(route_path, endpoint, methods=["GET"])
+    registry = ExtensionRegistry()
+    with registry.attributed_to("candidate:install"):
+        registry.routers((router,))
+
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    candidate = app.routes[-1]
+    scope = {
+        "type": "http",
+        "path": "/owned/A",
+        "method": "GET",
+        "root_path": "",
+    }
+    assert owner.matches(scope)[0] is Match.NONE
+    assert candidate.matches(scope)[0] is Match.FULL
+
+
+def test_router_claim_uses_converter_semantics_at_include_time(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from starlette.convertors import CONVERTOR_TYPES, Convertor
+    from starlette.routing import Match
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    class DigitsConvertor(Convertor[str]):
+        regex = "[0-9]+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    class LettersConvertor(Convertor[str]):
+        regex = "[A-Z]+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    async def endpoint(value: str):
+        return {"value": value}
+
+    monkeypatch.setitem(CONVERTOR_TYPES, "flip", DigitsConvertor())
+    route_path = "/owned/{value:flip}"
+    app = FastAPI()
+    app.add_api_route(route_path, endpoint, methods=["GET"])
+    owner = app.routes[-1]
+    router = APIRouter()
+    router.add_api_route(route_path, endpoint, methods=["GET"])
+
+    monkeypatch.setitem(CONVERTOR_TYPES, "flip", LettersConvertor())
+    registry = ExtensionRegistry()
+    with registry.attributed_to("candidate:install"):
+        registry.routers((router,))
+
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    candidate = app.routes[-1]
+    scope = {
+        "type": "http",
+        "path": "/owned/A",
+        "method": "GET",
+        "root_path": "",
+    }
+    assert owner.matches(scope)[0] is Match.NONE
+    assert candidate.matches(scope)[0] is Match.FULL
+
+
+def test_recompiled_converter_cannot_enter_a_public_namespace(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from starlette.convertors import CONVERTOR_TYPES, Convertor
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    class PublicPathConvertor(Convertor[str]):
+        regex = r"webhooks/.+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    async def endpoint(value: str):
+        return {"value": value}
+
+    router = APIRouter()
+    router.add_api_route("/api/{value:int}", endpoint, methods=["GET"])
+    monkeypatch.setitem(CONVERTOR_TYPES, "int", PublicPathConvertor())
+    registry = ExtensionRegistry()
+    with registry.attributed_to("candidate:install"):
+        registry.routers((router,))
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert [diagnostic.source for diagnostic in diagnostics] == ["candidate:install"]
+    assert "public namespace" in diagnostics[0].message
+    assert not any(getattr(route, "path", None) == "/api/{value:int}" for route in app.routes)
+
+
 def test_host_mount_claims_descendant_http_paths():
     from fastapi import APIRouter, FastAPI
 
@@ -272,8 +427,8 @@ def test_host_mount_claims_descendant_http_paths():
     app.mount("/assets", FastAPI())
     router = APIRouter()
 
-    @router.get("/assets/{name}")
-    async def asset(name: str):
+    @router.get("/assets/{name:int}")
+    async def asset(name: int):
         return {"name": name}
 
     registry = ExtensionRegistry()
@@ -296,8 +451,8 @@ def test_dynamic_host_mount_claims_matching_descendants():
     app.mount("/pre{tenant}", FastAPI())
     router = APIRouter()
 
-    @router.get("/prefoo/{item_id}")
-    async def item(item_id: str):
+    @router.get("/prefoo/{item_id:int}")
+    async def item(item_id: int):
         return {"item_id": item_id}
 
     registry = ExtensionRegistry()
@@ -308,6 +463,49 @@ def test_dynamic_host_mount_claims_matching_descendants():
 
     assert [diagnostic.source for diagnostic in diagnostics] == ["mount:install"]
     assert "host" in diagnostics[0].message
+
+
+@pytest.mark.parametrize(
+    ("mount_path", "candidate_path", "witness"),
+    [
+        ("/assets", "/assets/{name}", "/assets/a\nb"),
+        ("/pre{tenant}", "/prefoo{id}/{child}", "/prefoo1/a\nb"),
+    ],
+)
+def test_host_mount_does_not_claim_newline_capable_str_descendants(
+    mount_path,
+    candidate_path,
+    witness,
+):
+    from fastapi import APIRouter, FastAPI
+    from starlette.routing import Match, Mount
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    async def endpoint():
+        return {"ok": True}
+
+    app = FastAPI()
+    app.mount(mount_path, FastAPI())
+    host_mount = next(route for route in app.routes if isinstance(route, Mount) and route.path == mount_path)
+    router = APIRouter()
+    router.add_api_route(candidate_path, endpoint, methods=["GET"])
+    registry = ExtensionRegistry()
+    with registry.attributed_to("mount:install"):
+        registry.routers((router,))
+
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    candidate_route = next(route for route in app.routes if getattr(route, "path", None) == candidate_path)
+    scope = {
+        "type": "http",
+        "path": witness,
+        "method": "GET",
+        "root_path": "",
+    }
+    assert host_mount.matches(scope)[0] is Match.NONE
+    assert candidate_route.matches(scope)[0] is Match.FULL
 
 
 def test_contributed_websocket_route_is_rejected_until_host_auth_wraps_it():
@@ -340,6 +538,7 @@ def test_contributed_websocket_route_is_rejected_until_host_auth_wraps_it():
         "/redoc-private",
         "/api/webhooks/extension",
         "/api/{rest:path}",
+        "/api/{section}/extension",
     ],
 )
 def test_extension_routes_cannot_enter_host_public_namespaces(path):
@@ -364,11 +563,235 @@ def test_extension_routes_cannot_enter_host_public_namespaces(path):
     assert not any(getattr(route, "path", None) == path for route in app.routes)
 
 
-def test_extension_reserved_prefixes_track_auth_middleware_public_prefixes():
-    from app.gateway.auth_middleware import _PUBLIC_PATH_PREFIXES
-    from deerflow.extensions.gateway import _HOST_PUBLIC_PATH_PREFIXES
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api",
+        "/heal",
+        "/api/{item_id:int}",
+        "/api/{item_id}",
+    ],
+)
+def test_extension_routes_that_cannot_enter_a_public_namespace_are_allowed(path):
+    from fastapi import APIRouter, FastAPI
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    async def endpoint():
+        return {"ok": True}
+
+    router = APIRouter()
+    router.add_api_route(path, endpoint, methods=["GET"])
+    registry = ExtensionRegistry()
+    with registry.attributed_to("private:install"):
+        registry.routers((router,))
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    assert any(getattr(route, "path", None) == path for route in app.routes)
+
+
+def test_unknown_convertor_near_a_public_namespace_fails_closed(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from starlette.convertors import CONVERTOR_TYPES, Convertor
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    class UppercaseConvertor(Convertor[str]):
+        regex = "[A-Z]+"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    monkeypatch.setitem(CONVERTOR_TYPES, "uppercase", UppercaseConvertor())
+    router = APIRouter()
+    router.add_api_route(
+        "/api/{value:uppercase}",
+        lambda: {"ok": True},
+        methods=["GET"],
+    )
+    registry = ExtensionRegistry()
+    with registry.attributed_to("custom-public:install"):
+        registry.routers((router,))
+
+    diagnostics = include_contributed_routers(
+        FastAPI(docs_url=None, redoc_url=None, openapi_url=None),
+        registry.build(),
+    )
+
+    assert [diagnostic.source for diagnostic in diagnostics] == ["custom-public:install"]
+    assert "public namespace" in diagnostics[0].message
+
+
+def test_private_custom_convertor_with_named_backreference_is_allowed(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from starlette.convertors import CONVERTOR_TYPES, Convertor
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    class DoubledLetterConvertor(Convertor[str]):
+        regex = r"(?P<char>[A-Z])(?P=char)"
+
+        def convert(self, value: str) -> str:
+            return value
+
+        def to_string(self, value: str) -> str:
+            return value
+
+    monkeypatch.setitem(CONVERTOR_TYPES, "doubled", DoubledLetterConvertor())
+    router = APIRouter()
+    router.add_api_route(
+        "/private/{value:doubled}",
+        lambda value: {"value": value},
+        methods=["GET"],
+    )
+    registry = ExtensionRegistry()
+    with registry.attributed_to("custom-private:install"):
+        registry.routers((router,))
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    assert any(getattr(route, "path", None) == "/private/{value:doubled}" for route in app.routes)
+
+
+def test_extension_public_paths_track_auth_middleware_public_paths():
+    from app.gateway.auth_middleware import (
+        _PUBLIC_EXACT_PATHS,
+        _PUBLIC_PATH_PREFIXES,
+        _is_public,
+    )
+    from deerflow.extensions.gateway import (
+        _HOST_PUBLIC_EXACT_PATHS,
+        _HOST_PUBLIC_PATH_PREFIXES,
+    )
 
     assert _HOST_PUBLIC_PATH_PREFIXES == _PUBLIC_PATH_PREFIXES
+    assert _HOST_PUBLIC_EXACT_PATHS == _PUBLIC_EXACT_PATHS
+    assert all(_is_public(f"{path}//") for path in _HOST_PUBLIC_EXACT_PATHS)
+
+
+@pytest.mark.parametrize(
+    ("host_path", "host_method", "candidate_path", "candidate_method"),
+    [
+        (
+            "/api/v1/auth/login/local",
+            "POST",
+            "/api/v1/auth/login/local",
+            "GET",
+        ),
+        (
+            "/api/v1/auth/login/local",
+            "POST",
+            "/api/v1/auth/login/local/",
+            "GET",
+        ),
+        (
+            "/api/v1/auth/login/local",
+            "POST",
+            "/api/v1/auth/login/local//",
+            "GET",
+        ),
+        ("/api/v1/auth/me", "GET", "/api/v1/auth/me", "POST"),
+        ("/api/v1/auth/me", "GET", "/api/v1/auth/me/", "POST"),
+    ],
+)
+def test_extension_routes_cannot_claim_reserved_exact_paths_with_a_disjoint_method(
+    host_path,
+    host_method,
+    candidate_path,
+    candidate_method,
+):
+    from fastapi import APIRouter, FastAPI
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    async def endpoint():
+        return {"ok": True}
+
+    app = FastAPI()
+    app.add_api_route(host_path, endpoint, methods=[host_method])
+    router = APIRouter()
+    router.add_api_route(candidate_path, endpoint, methods=[candidate_method])
+    registry = ExtensionRegistry()
+    with registry.attributed_to("public-exact:install"):
+        registry.routers((router,))
+
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert [diagnostic.source for diagnostic in diagnostics] == ["public-exact:install"]
+    assert "reserved" in diagnostics[0].message
+    assert not any(getattr(route, "path", None) == candidate_path and getattr(route, "methods", set()) == {candidate_method} for route in app.routes)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/me",
+        "/api/v1/auth/me/",
+        "/api/v1/auth/me//",
+    ],
+)
+def test_extension_csrf_reserved_exact_paths_track_csrf_exemption(
+    monkeypatch,
+    path,
+):
+    from starlette.requests import Request
+
+    from app.gateway import csrf_middleware
+    from deerflow.extensions.gateway import (
+        _CSRF_STATE_CHANGING_METHODS,
+        _HOST_CSRF_EXEMPT_EXACT_PATHS,
+        _HOST_PUBLIC_EXACT_PATHS,
+    )
+
+    monkeypatch.setattr(csrf_middleware, "is_auth_disabled", lambda: False)
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "server": ("testserver", 80),
+        }
+    )
+
+    assert path.rstrip("/") in _HOST_CSRF_EXEMPT_EXACT_PATHS
+    assert _HOST_CSRF_EXEMPT_EXACT_PATHS == csrf_middleware._CSRF_EXEMPT_EXACT_PATHS
+    assert _CSRF_STATE_CHANGING_METHODS == csrf_middleware._CSRF_STATE_CHANGING_METHODS
+    assert csrf_middleware._AUTH_EXEMPT_PATHS <= _HOST_PUBLIC_EXACT_PATHS
+    assert csrf_middleware.should_check_csrf(request) is False
+
+
+def test_safe_method_at_csrf_exempt_exact_path_is_not_reserved():
+    from fastapi import APIRouter, FastAPI
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    router = APIRouter()
+    router.add_api_route(
+        "/api/v1/auth/me",
+        lambda: {"ok": True},
+        methods=["GET"],
+    )
+    registry = ExtensionRegistry()
+    with registry.attributed_to("safe-csrf:install"):
+        registry.routers((router,))
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert diagnostics == []
+    assert any(getattr(route, "path", None) == "/api/v1/auth/me" for route in app.routes)
 
 
 def test_router_with_one_conflict_is_rejected_atomically_and_names_first_owner():
