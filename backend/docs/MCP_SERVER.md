@@ -59,8 +59,10 @@ MCP initialization and discovery flow, prefixes the discovered names with
 The OpenViking tool named `forget` permanently deletes a `viking://` URI, so the
 example disables it by its original MCP name before prefixing because the
 deletion is irreversible. Other official OpenViking harnesses expose resource
-ingestion, and an unwanted added resource can be removed later, so this initial
-integration keeps resource operations available for capability parity.
+ingestion, and an operator can later remove an unwanted added resource through
+the OpenViking CLI or REST API, so this initial integration keeps resource
+operations available for capability parity. Under this default configuration,
+the agent cannot perform that removal because its `forget` tool is disabled.
 `add_resource` can fetch a model-selected URL and, when configured with
 recurring watch behavior, can create repeated fetch and re-embedding work.
 Operators who do not want that capability can disable `add_resource` with the
