@@ -434,6 +434,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
+            from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -447,7 +448,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 run_repository=app.state.run_store,
             )
+            app.state.mcp_task_repo = McpTaskRepository(sf)
+            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
+            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
         else:
+            app.state.mcp_task_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
 
@@ -598,6 +603,20 @@ def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
+def get_mcp_task_repo(request: Request):
+    val = getattr(request.app.state, "mcp_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task repo not available")
+    return val
+
+
+def get_mcp_task_service(request: Request):
+    val = getattr(request.app.state, "mcp_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task service not available")
     return val
 
 
