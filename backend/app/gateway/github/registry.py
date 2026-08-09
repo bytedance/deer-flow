@@ -12,8 +12,9 @@ delivery. We avoid re-loading every agent on each call via a small cache keyed
 on the store's :meth:`~deerflow.persistence.agents.base.AgentStore.signature`
 change token: the file backend derives it from ``config.yaml`` mtimes (any
 edit, addition, or deletion invalidates the cache transparently); the db backend
-derives it from ``max(updated_at)`` + the row count. Operators who hand-edit a
-``config.yaml`` see the change on the next webhook.
+derives it from a deterministic digest of each agent's owner, name, config, and
+soul. Operators who hand-edit a ``config.yaml`` see the change on the next
+webhook.
 
 Cache invalidation caveat (file backend): mtime granularity on macOS HFS+ /
 APFS is ~1 µs but on some filesystems (FAT, network shares with caching) it's
