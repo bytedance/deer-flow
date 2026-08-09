@@ -229,6 +229,33 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].name == "unknown_tool"
         assert patched[1].status == "error"
 
+    def test_raw_fallback_is_skipped_when_invalid_view_carries_the_same_call(self):
+        # The raw additional_kwargs payload is a fallback serialization of the
+        # same calls; the provider reaches for it only when BOTH structured
+        # views are empty (see _normalize_tool_call_ids). Collecting it while
+        # invalid_tool_calls is non-empty counts the call twice and emits two
+        # ToolMessages for one id — the duplicate-id shape strict providers
+        # reject with HTTP 400.
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[{"id": "call_x", "name": "read_file", "args": None, "error": "parse"}],
+                additional_kwargs={"tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        tool_messages = [m for m in patched if isinstance(m, ToolMessage)]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].tool_call_id == "call_x"
+        assert tool_messages[0].status == "error"
+
     def test_existing_tool_result_still_sanitizes_empty_structured_tool_call_name(self):
         mw = DanglingToolCallMiddleware()
         msgs = [
