@@ -1,59 +1,90 @@
-"""OpenViking HTTP implementation of the pluggable memory contract.
-
-This backend deliberately contains no OpenViking extraction or vector logic.
-It forwards filtered conversation turns to OpenViking Sessions and maps remote
-memory search results back to DeerFlow's backend-neutral shapes.
-"""
+"""OpenViking memory backend built on the maintained LangChain adapters."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import copy
 import json
 import logging
 import os
-import re
 import threading
 import time
 import weakref
-from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-# ABC contract -- the only DeerFlow import in this backend package.
-from deerflow.agents.memory.manager import MemoryManager
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
 
-from .client import OpenVikingClientError, OpenVikingHttpClient
 from .config import OpenVikingConfig
-from .models import OpenVikingIdentity, OpenVikingMessage, OpenVikingSearchHit
+from .session import (
+    _advanced_cursor,
+    _canonical_peer_id,
+    _captureable_messages,
+    _matching_prefix_count,
+    _memory_target_uris,
+    _message_signature,
+    _session_id,
+    _string_list,
+)
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_AGENT_SCOPE = "__default__"
-_SESSION_NAMESPACE = "deerflow-openviking-v1"
-_SAFE_SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-
 
 class OpenVikingMemoryManager(MemoryManager):
-    """Remote OpenViking memory backend for passive middleware mode."""
+    """Single-user OpenViking backend using the official integration package.
+
+    DeerFlow continues to choose when capture and recall occur. The official
+    adapter owns SDK transport, message conversion, batching, commit retries,
+    and retrieval behavior.
+    """
 
     supports_search: ClassVar[bool] = True
 
     _config: OpenVikingConfig = PrivateAttr()
-    _client: OpenVikingHttpClient = PrivateAttr()
-    _should_keep_hidden_message: Callable[[Any], bool] | None = PrivateAttr(default=None)
+    _client: Any = PrivateAttr()
+    _recorder: Any = PrivateAttr()
+    _retriever: Any = PrivateAttr()
+    _use_actor_peer: Any = PrivateAttr()
+    _partial_write_error: type[Exception] = PrivateAttr()
+    _should_keep_hidden_message: Any = PrivateAttr(default=None)
     _session_locks: weakref.WeakValueDictionary[str, threading.RLock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
     _session_locks_guard: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _lifecycle: threading.Condition = PrivateAttr(default_factory=threading.Condition)
     _active_operations: int = PrivateAttr(default=0)
     _closed: bool = PrivateAttr(default=False)
-    _client_closed: bool = PrivateAttr(default=False)
+    _close_requested: bool = PrivateAttr(default=False)
+    _resources_closed: bool = PrivateAttr(default=False)
+    _resource_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def model_post_init(self, __context: Any) -> None:
         self._config = OpenVikingConfig.from_backend_config(self.backend_config)
-        self._client = OpenVikingHttpClient(self._config)
+        integration = _load_official_integration()
+        commit_policy = integration["OpenVikingCommitPolicy"](mode="always")
+        self._recorder = integration["OpenVikingSessionRecorder"](
+            url=self._config.base_url,
+            api_key=self._config.api_key,
+            timeout=self._config.timeout_seconds,
+            # An explicit mapping disables the SDK's ovcli.conf header fallback.
+            extra_headers={},
+            commit_policy=commit_policy,
+        )
+        # The recorder owns one recovery-aware SDK client. Retrieval borrows the
+        # same handle, so this backend has one connection pool and one owner.
+        self._client = self._recorder.client
+        self._retriever = integration["OpenVikingRetriever"](
+            client=self._client,
+            search_mode="find",
+            limit=self._config.search_top_k,
+            score_threshold=self._config.score_threshold,
+            context_types=("memory",),
+            content_mode=self._config.content_mode,
+            max_content_chars=self._config.max_injection_chars,
+        )
+        self._use_actor_peer = integration["use_actor_peer"]
+        self._partial_write_error = integration["OpenVikingPartialWriteError"]
 
     @classmethod
     def from_config(
@@ -64,10 +95,10 @@ class OpenVikingMemoryManager(MemoryManager):
         **host_hooks: Any,
     ) -> OpenVikingMemoryManager:
         if mode != "middleware":
-            raise ValueError("The OpenViking HTTP backend currently supports memory.mode='middleware' only")
-        instance = cls(backend_config=backend_config, mode=mode)
-        hook = host_hooks.get("should_keep_hidden_message")
-        instance._should_keep_hidden_message = hook if callable(hook) else None
+            raise ValueError("The OpenViking automatic-memory backend supports memory.mode='middleware' only; use OpenViking MCP for explicit model tools")
+        instance = cls(backend_config=backend_config or {}, mode=mode)
+        hidden_filter = host_hooks.get("should_keep_hidden_message")
+        instance._should_keep_hidden_message = hidden_filter if callable(hidden_filter) else None
         return instance
 
     def add(
@@ -79,7 +110,13 @@ class OpenVikingMemoryManager(MemoryManager):
         user_id: str | None = None,
         trace_id: str | None = None,
     ) -> None:
-        self._write_conversation(thread_id, messages, agent_name=agent_name, user_id=user_id)
+        del trace_id
+        self._write_conversation(
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
 
     def add_nowait(
         self,
@@ -89,7 +126,14 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> None:
-        self._write_conversation(thread_id, messages, agent_name=agent_name, user_id=user_id)
+        # Preserve DeerFlow's existing pre-compaction behavior. This backend
+        # commits every accepted capture, so add_nowait needs no separate mode.
+        self._write_conversation(
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
 
     async def aadd(
         self,
@@ -119,21 +163,31 @@ class OpenVikingMemoryManager(MemoryManager):
         if not self._begin_operation():
             return ""
         try:
-            try:
-                hits = self._search_hits(
-                    self._config.injection_query,
-                    top_k=self._config.search_top_k,
-                    user_id=user_id,
-                    agent_name=agent_name,
-                    category=None,
-                    thread_id=thread_id,
+            peer_id = self._resolve_scope(user_id, agent_name)
+            retriever = copy.copy(self._retriever)
+            retriever.target_uri = _memory_target_uris(peer_id)
+            if thread_id:
+                retriever.search_mode = "search"
+                retriever.session_id = _session_id(
+                    self._config.owner_user_id,
+                    peer_id,
+                    thread_id,
                 )
-            except OpenVikingClientError:
+            try:
+                with self._actor_peer_scope(peer_id):
+                    documents = retriever.invoke(self._config.injection_query)
+            except Exception:
                 if self._config.read_failure_policy == "raise":
                     raise
-                logger.warning("OpenViking context retrieval failed; continuing without injected memory", exc_info=True)
+                logger.warning(
+                    "OpenViking context retrieval failed; continuing without injected memory",
+                    exc_info=True,
+                )
                 return ""
-            return _format_context(hits, max_chars=self._config.max_injection_chars)
+            return _format_documents(
+                documents,
+                max_chars=self._config.max_injection_chars,
+            )
         finally:
             self._end_operation()
 
@@ -160,26 +214,33 @@ class OpenVikingMemoryManager(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
-        if not query.strip():
-            return []
-        if not self._begin_operation():
+        if not query.strip() or not self._begin_operation():
             return []
         try:
+            peer_id = self._resolve_scope(user_id, agent_name)
+            retriever = copy.copy(self._retriever)
+            retriever.target_uri = _memory_target_uris(peer_id)
+            retriever.search_mode = "find"
+            retriever.session_id = None
+            retriever.limit = max(1, min(int(top_k), 100))
+            if category:
+                retriever.filter = {
+                    "op": "must",
+                    "field": "category",
+                    "conds": [category],
+                }
             try:
-                hits = self._search_hits(
-                    query,
-                    top_k=top_k,
-                    user_id=user_id,
-                    agent_name=agent_name,
-                    category=category,
-                    thread_id=None,
-                )
-            except OpenVikingClientError:
+                with self._actor_peer_scope(peer_id):
+                    documents = retriever.invoke(query.strip())
+            except Exception:
                 if self._config.read_failure_policy == "raise":
                     raise
-                logger.warning("OpenViking memory search failed; returning no results", exc_info=True)
+                logger.warning(
+                    "OpenViking memory search failed; returning no results",
+                    exc_info=True,
+                )
                 return []
-            return [_hit_to_fact(hit) for hit in hits]
+            return [_document_to_fact(document) for document in documents]
         finally:
             self._end_operation()
 
@@ -206,14 +267,18 @@ class OpenVikingMemoryManager(MemoryManager):
             return False
         try:
             try:
-                healthy = self._client.health()
-            except OpenVikingClientError:
+                health = getattr(self._client, "health", None)
+                healthy = bool(health()) if callable(health) else True
+            except Exception:
                 if self._config.startup_policy == "fail_fast":
                     raise
-                logger.warning("OpenViking health check failed; memory will run in degraded mode", exc_info=True)
+                logger.warning(
+                    "OpenViking startup validation failed; memory will run in degraded mode",
+                    exc_info=True,
+                )
                 return False
             if not healthy and self._config.startup_policy == "fail_fast":
-                raise RuntimeError("OpenViking health check returned an unhealthy response")
+                raise MemoryManagerError("OpenViking health check returned an unhealthy response")
             if not healthy:
                 logger.warning("OpenViking health check returned unhealthy; memory will run in degraded mode")
             return healthy
@@ -221,20 +286,29 @@ class OpenVikingMemoryManager(MemoryManager):
             self._end_operation()
 
     def shutdown_flush(self, timeout: float) -> bool:
-        """Stop new operations, drain in-flight work, then close the HTTP pool."""
+        """Stop new work, drain accepted calls, and close owned resources."""
+
         deadline = time.monotonic() + max(0.0, timeout)
         with self._lifecycle:
             self._closed = True
+            self._close_requested = True
             while self._active_operations:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 self._lifecycle.wait(remaining)
-            if self._client_closed:
-                return True
-            self._client_closed = True
-        self._client.close()
+        self._close_resources()
         return True
+
+    def close(self) -> None:
+        """Request idempotent closure after any active operation finishes."""
+
+        with self._lifecycle:
+            self._closed = True
+            self._close_requested = True
+            can_close = self._active_operations == 0
+        if can_close:
+            self._close_resources()
 
     def _write_conversation(
         self,
@@ -250,116 +324,147 @@ class OpenVikingMemoryManager(MemoryManager):
         try:
             if not thread_id:
                 raise ValueError("OpenViking memory write requires thread_id")
-
-            identity = self._identity(user_id, agent_name)
-            session_id = _session_id(identity, thread_id)
-            lock = self._session_lock(session_id)
-            with lock:
-                state = self._load_state(session_id)
-                submitted_ids = list(state.get("submitted_message_ids", state.get("seen_message_ids", [])))
-                committed_ids = list(state.get("committed_message_ids", state.get("seen_message_ids", [])))
-                converted = _convert_messages(messages, self._should_keep_hidden_message)
-                prefix_count = _matching_submitted_prefix_count(state, submitted_ids, converted)
-                if prefix_count is not None:
-                    pending = converted[prefix_count:]
-                else:
-                    submitted = set(submitted_ids)
-                    pending = [message for message in converted if message.message_id not in submitted]
-                if not pending:
-                    if prefix_count is None and converted:
-                        state = {
-                            **state,
-                            "schema_version": 3,
-                            "submitted_prefix_count": len(converted),
-                            "submitted_prefix_digest": _message_sequence_digest(converted),
-                        }
-                        self._save_state(session_id, state)
-                    return
-                try:
-                    self._client.ensure_session(identity, session_id)
-                    self._client.add_messages(identity, session_id, pending)
-                except OpenVikingClientError:
-                    if self._config.write_failure_policy == "raise":
-                        raise
-                    logger.error(
-                        "OpenViking memory message submission failed; dropping this update (session=%s, messages=%d)",
-                        session_id,
-                        len(pending),
-                        exc_info=True,
-                    )
-                    return
-                submitted_ids.extend(message.message_id for message in pending)
-                state = {
-                    "schema_version": 3,
-                    "session_id": session_id,
-                    "submitted_message_ids": submitted_ids[-self._config.max_seen_message_ids :],
-                    "committed_message_ids": committed_ids[-self._config.max_seen_message_ids :],
-                    "submitted_prefix_count": len(converted),
-                    "submitted_prefix_digest": _message_sequence_digest(converted),
-                    "committed_prefix_count": state.get("committed_prefix_count"),
-                    "committed_prefix_digest": state.get("committed_prefix_digest"),
-                    "last_commit_task_id": state.get("last_commit_task_id"),
-                    "last_archive_uri": state.get("last_archive_uri"),
-                }
-                self._save_state(session_id, state)
-
-                try:
-                    commit = self._client.commit_session(identity, session_id)
-                except OpenVikingClientError:
-                    if self._config.write_failure_policy == "raise":
-                        raise
-                    logger.error(
-                        "OpenViking memory commit failed; preserving submitted watermark without retry (session=%s)",
-                        session_id,
-                        exc_info=True,
-                    )
-                    return
-
-                state = {
-                    **state,
-                    "schema_version": 3,
-                    "committed_message_ids": state["submitted_message_ids"],
-                    "committed_prefix_count": state["submitted_prefix_count"],
-                    "committed_prefix_digest": state["submitted_prefix_digest"],
-                    "last_commit_task_id": commit.task_id,
-                    "last_archive_uri": commit.archive_uri,
-                }
-                self._save_state(session_id, state)
+            peer_id = self._resolve_scope(user_id, agent_name)
+            session_id = _session_id(
+                self._config.owner_user_id,
+                peer_id,
+                thread_id,
+            )
+            with self._session_lock(session_id):
+                self._capture_locked(
+                    session_id,
+                    peer_id,
+                    _captureable_messages(
+                        messages,
+                        self._should_keep_hidden_message,
+                    ),
+                )
         finally:
             self._end_operation()
 
-    def _search_hits(
+    def _capture_locked(
         self,
-        query: str,
-        *,
-        top_k: int,
-        user_id: str | None,
-        agent_name: str | None,
-        category: str | None,
-        thread_id: str | None,
-    ) -> list[OpenVikingSearchHit]:
-        identity = self._identity(user_id, agent_name)
-        session_id = _session_id(identity, thread_id) if thread_id else None
-        return self._client.search(
-            identity,
-            query,
-            top_k=max(1, min(top_k, 100)),
-            category=category,
-            session_id=session_id,
+        session_id: str,
+        peer_id: str,
+        messages: list[Any],
+    ) -> None:
+        state = self._load_cursor(session_id)
+        signatures = [_message_signature(message) for message in messages]
+
+        if state.get("commit_pending"):
+            try:
+                with self._actor_peer_scope(peer_id):
+                    self._recorder.flush(session_id)
+            except Exception as exc:
+                self._handle_write_error(
+                    exc,
+                    "OpenViking pending commit retry failed; preserving capture cursor",
+                    session_id,
+                )
+                return
+            state = {**state, "commit_pending": False}
+            self._save_cursor(session_id, state)
+
+        start = _matching_prefix_count(state, signatures)
+        append_only = start is not None
+        if append_only:
+            pending = messages[start:]
+            pending_signatures = signatures[start:]
+        else:
+            submitted = set(_string_list(state.get("submitted_signatures")))
+            pending_pairs = [(message, signature) for message, signature in zip(messages, signatures, strict=True) if signature not in submitted]
+            pending = [message for message, _ in pending_pairs]
+            pending_signatures = [signature for _, signature in pending_pairs]
+
+        if not pending:
+            self._save_cursor(
+                session_id,
+                _advanced_cursor(
+                    state,
+                    signatures,
+                    [],
+                    max_seen=self._config.max_seen_message_ids,
+                    commit_pending=False,
+                ),
+            )
+            return
+
+        try:
+            with self._actor_peer_scope(peer_id):
+                self._recorder.record(
+                    session_id,
+                    pending,
+                    peer_id=peer_id,
+                )
+        except self._partial_write_error as exc:
+            consumed = max(
+                0,
+                min(
+                    len(pending_signatures),
+                    int(getattr(exc, "input_messages_consumed", 0)),
+                ),
+            )
+            confirmed = pending_signatures[:consumed]
+            commit_pending = bool(getattr(exc, "commit_pending", False))
+            if confirmed or commit_pending:
+                confirmed_prefix = signatures[: int(start or 0) + consumed] if append_only else None
+                self._save_cursor(
+                    session_id,
+                    _advanced_cursor(
+                        state,
+                        confirmed_prefix,
+                        confirmed,
+                        max_seen=self._config.max_seen_message_ids,
+                        commit_pending=commit_pending,
+                    ),
+                )
+            self._handle_write_error(
+                exc,
+                "OpenViking partially recorded a conversation; confirmed progress was preserved",
+                session_id,
+            )
+            return
+        except Exception as exc:
+            self._handle_write_error(
+                exc,
+                "OpenViking conversation recording failed; capture cursor was not advanced",
+                session_id,
+            )
+            return
+
+        self._save_cursor(
+            session_id,
+            _advanced_cursor(
+                state,
+                signatures,
+                pending_signatures,
+                max_seen=self._config.max_seen_message_ids,
+                commit_pending=False,
+            ),
         )
 
-    def _identity(self, user_id: str | None, agent_name: str | None) -> OpenVikingIdentity:
-        raw_user = str(user_id or "anonymous")
-        agent_scope = _canonical_agent_scope(agent_name)
-        # OpenViking trusted identity must be a safe path segment. Hashing the
-        # DeerFlow scope also prevents raw emails/usernames from leaving the
-        # Gateway and gives each agent a hard-isolated memory namespace.
-        digest = hashlib.sha256(f"{self._config.account}\0{raw_user}\0{agent_scope}".encode()).hexdigest()
-        return OpenVikingIdentity(account=self._config.account, user=f"df_{digest[:40]}")
+    def _resolve_scope(
+        self,
+        user_id: str | None,
+        agent_name: str | None,
+    ) -> str:
+        resolved_user = str(user_id or "default")
+        if resolved_user != self._config.owner_user_id:
+            raise MemoryManagerError(f"OpenViking USER API key is bound to DeerFlow owner_user_id {self._config.owner_user_id!r}, but this request belongs to {resolved_user!r}. Refusing to share one credential across users.")
+        return _canonical_peer_id(agent_name, self._config.default_peer_id)
+
+    def _actor_peer_scope(
+        self,
+        peer_id: str,
+    ) -> AbstractContextManager[None]:
+        return self._use_actor_peer(peer_id)
 
     def _session_lock(self, session_id: str) -> threading.RLock:
         with self._session_locks_guard:
-            return self._session_locks.setdefault(session_id, threading.RLock())
+            return self._session_locks.setdefault(
+                session_id,
+                threading.RLock(),
+            )
 
     def _begin_operation(self) -> bool:
         with self._lifecycle:
@@ -369,172 +474,108 @@ class OpenVikingMemoryManager(MemoryManager):
             return True
 
     def _end_operation(self) -> None:
+        should_close = False
         with self._lifecycle:
             self._active_operations -= 1
             if self._active_operations == 0:
                 self._lifecycle.notify_all()
+                should_close = self._close_requested
+        if should_close:
+            try:
+                self._close_resources()
+            except Exception:
+                logger.exception("Failed to close OpenViking memory resources")
+
+    def _close_resources(self) -> None:
+        with self._resource_lock:
+            if self._resources_closed:
+                return
+            self._recorder.close()
+            self._resources_closed = True
 
     def _state_path(self, session_id: str) -> Path:
         root = Path(self._config.storage_path or ".") / "openviking" / "sessions"
         return root / f"{session_id}.json"
 
-    def _load_state(self, session_id: str) -> dict[str, Any]:
+    def _load_cursor(self, session_id: str) -> dict[str, Any]:
         path = self._state_path(session_id)
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
-        except (OSError, ValueError):
-            logger.warning("Ignoring unreadable OpenViking session watermark: %s", path, exc_info=True)
-            return {}
-        return value if isinstance(value, dict) else {}
+        except (OSError, ValueError) as exc:
+            raise MemoryManagerError(f"OpenViking capture cursor is unreadable; refusing unsafe replay (session={session_id})") from exc
+        if not isinstance(value, dict):
+            raise MemoryManagerError(f"OpenViking capture cursor is invalid; refusing unsafe replay (session={session_id})")
+        return value
 
-    def _save_state(self, session_id: str, state: dict[str, Any]) -> None:
+    def _save_cursor(self, session_id: str, state: dict[str, Any]) -> None:
         path = self._state_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         try:
-            temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             os.replace(temp_path, path)
         finally:
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
-                logger.debug("Failed to remove OpenViking watermark temp file: %s", temp_path, exc_info=True)
+                logger.debug(
+                    "Failed to remove OpenViking cursor temp file: %s",
+                    temp_path,
+                    exc_info=True,
+                )
+
+    def _handle_write_error(
+        self,
+        exc: Exception,
+        message: str,
+        session_id: str,
+    ) -> None:
+        detail = f"{message} (session={session_id})"
+        if self._config.write_failure_policy == "raise":
+            raise MemoryManagerError(detail) from exc
+        logger.error(detail, exc_info=True)
 
 
-def _canonical_agent_scope(agent_name: str | None) -> str:
-    if agent_name is None:
-        return _DEFAULT_AGENT_SCOPE
-    value = str(agent_name).strip().lower()
-    if value == _DEFAULT_AGENT_SCOPE or not _SAFE_SCOPE_RE.fullmatch(value):
-        raise ValueError(f"Invalid OpenViking agent scope: {agent_name!r}")
-    return value
-
-
-def _session_id(identity: OpenVikingIdentity, thread_id: str) -> str:
-    digest = hashlib.sha256(f"{_SESSION_NAMESPACE}\0{identity.account}\0{identity.user}\0{thread_id}".encode()).hexdigest()
-    return f"df_{digest[:48]}"
-
-
-def _matching_submitted_prefix_count(
-    state: dict[str, Any],
-    submitted_ids: list[str],
-    messages: list[OpenVikingMessage],
-) -> int | None:
-    count = state.get("submitted_prefix_count")
-    digest = state.get("submitted_prefix_digest")
-    if isinstance(count, int) and 0 <= count <= len(messages) and isinstance(digest, str):
-        if _message_sequence_digest(messages[:count]) == digest:
-            return count
-        return None
-
-    # Schema v2 only retained a recent suffix of submitted IDs. When that
-    # suffix still appears intact, it safely anchors the append-only prefix and
-    # avoids a one-time duplicate submission during migration to schema v3.
-    if submitted_ids and len(submitted_ids) <= len(messages):
-        message_ids = [message.message_id for message in messages]
-        width = len(submitted_ids)
-        for start in range(len(message_ids) - width, -1, -1):
-            if message_ids[start : start + width] == submitted_ids:
-                return start + width
-    return None
-
-
-def _message_sequence_digest(messages: list[OpenVikingMessage]) -> str:
-    digest = hashlib.sha256()
-    for message in messages:
-        encoded = message.message_id.encode()
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-    return digest.hexdigest()
-
-
-def _convert_messages(
-    messages: list[Any],
-    should_keep_hidden_message: Callable[[Any], bool] | None,
-) -> list[OpenVikingMessage]:
-    converted: list[OpenVikingMessage] = []
-    for index, message in enumerate(messages):
-        role = _message_role(message)
-        if role not in {"user", "assistant"}:
-            continue
-        additional_kwargs = _message_value(message, "additional_kwargs", {})
-        if not isinstance(additional_kwargs, dict):
-            additional_kwargs = {}
-        if additional_kwargs.get("hide_from_ui") and not (should_keep_hidden_message and should_keep_hidden_message(additional_kwargs)):
-            continue
-        tool_calls = _message_value(message, "tool_calls", [])
-        if role == "assistant" and tool_calls:
-            continue
-        content = _text_content(_message_value(message, "content", ""))
-        if not content.strip():
-            continue
-        native_id = _message_value(message, "id", None)
-        stable_id = str(native_id) if native_id else hashlib.sha256(f"{role}\0{index}\0{content}".encode()).hexdigest()
-        converted.append(OpenVikingMessage(message_id=f"df_{stable_id}", role=role, content=content.strip()))
-    return converted
-
-
-def _message_role(message: Any) -> str | None:
-    value = _message_value(message, "type", None) or _message_value(message, "role", None)
-    if value in {"human", "user"}:
-        return "user"
-    if value in {"ai", "assistant"}:
-        return "assistant"
-    name = type(message).__name__.lower()
-    if "human" in name:
-        return "user"
-    if "ai" in name:
-        return "assistant"
-    return None
-
-
-def _message_value(message: Any, key: str, default: Any) -> Any:
-    return message.get(key, default) if isinstance(message, dict) else getattr(message, key, default)
-
-
-def _text_content(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content) if content is not None else ""
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and block.get("type") in {"text", "input_text", "output_text"}:
-            text = block.get("text")
-            if text:
-                parts.append(str(text))
-    return "\n".join(parts)
-
-
-def _hit_content(hit: OpenVikingSearchHit) -> str:
-    return (hit.overview or hit.abstract).strip()
-
-
-def _hit_to_fact(hit: OpenVikingSearchHit) -> dict[str, Any]:
+def _load_official_integration() -> dict[str, Any]:
+    try:
+        from langchain_openviking import (
+            OpenVikingCommitPolicy,
+            OpenVikingPartialWriteError,
+            OpenVikingRetriever,
+            OpenVikingSessionRecorder,
+            has_request_actor_peer_support,
+        )
+        from langchain_openviking.actor_peer import use_actor_peer
+    except ImportError as exc:
+        raise ImportError("The OpenViking memory backend requires langchain-openviking==0.1.0. Install DeerFlow backend dependencies and retry.") from exc
+    if not has_request_actor_peer_support():
+        raise ImportError("The installed OpenViking SDK lacks request-scoped actor-peer support. Install openviking-sdk>=0.1.6,<0.2 and retry.")
     return {
-        "id": hit.uri,
-        "content": _hit_content(hit),
-        "category": hit.category or "memory",
-        "confidence": hit.score,
-        "source": hit.uri,
-        "score": hit.score,
+        "OpenVikingCommitPolicy": OpenVikingCommitPolicy,
+        "OpenVikingPartialWriteError": OpenVikingPartialWriteError,
+        "OpenVikingRetriever": OpenVikingRetriever,
+        "OpenVikingSessionRecorder": OpenVikingSessionRecorder,
+        "use_actor_peer": use_actor_peer,
     }
 
 
-def _format_context(hits: list[OpenVikingSearchHit], *, max_chars: int) -> str:
+def _format_documents(documents: list[Any], *, max_chars: int) -> str:
     lines: list[str] = []
     seen: set[str] = set()
-    for hit in hits:
-        content = " ".join(_hit_content(hit).split())
+    for document in documents:
+        content = " ".join(str(getattr(document, "page_content", "") or "").split())
         key = content.casefold()
         if not content or key in seen:
             continue
         seen.add(key)
-        line = f"- [{hit.category or 'memory'}] {content}"
+        metadata = getattr(document, "metadata", {}) or {}
+        category = metadata.get("openviking_category") or "memory"
+        line = f"- [{category}] {content}"
         candidate = "\n".join([*lines, line])
         if len(candidate) > max_chars:
             remaining = max_chars - len("\n".join(lines)) - (1 if lines else 0)
@@ -543,3 +584,24 @@ def _format_context(hits: list[OpenVikingSearchHit], *, max_chars: int) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def _document_to_fact(document: Any) -> dict[str, Any]:
+    metadata = getattr(document, "metadata", {}) or {}
+    uri = metadata.get("openviking_uri") or metadata.get("source") or ""
+    score = metadata.get("openviking_score")
+    return {
+        "id": uri,
+        "content": str(getattr(document, "page_content", "") or ""),
+        "category": metadata.get("openviking_category") or "memory",
+        "confidence": score,
+        "source": uri,
+        "score": score,
+    }
+
+
+__all__ = [
+    "OpenVikingMemoryManager",
+    "_canonical_peer_id",
+    "_session_id",
+]

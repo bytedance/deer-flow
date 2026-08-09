@@ -46,6 +46,7 @@ export type MockAgent = {
   name: string;
   description?: string;
   system_prompt?: string;
+  tool_groups?: string[] | null;
 };
 
 export type MockSkill = {
