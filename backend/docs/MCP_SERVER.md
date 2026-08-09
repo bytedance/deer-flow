@@ -14,6 +14,62 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## OpenViking MCP Tools
+
+OpenViking's official server exposes a Streamable HTTP MCP endpoint at `/mcp`.
+DeerFlow connects to it through the same generic MCP client used for other HTTP
+servers:
+
+```json
+{
+  "mcpServers": {
+    "openviking": {
+      "enabled": true,
+      "type": "http",
+      "url": "http://127.0.0.1:1933/mcp",
+      "headers": {
+        "X-API-Key": "$OPENVIKING_API_KEY"
+      },
+      "tools": {
+        "forget": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}
+```
+
+Set `OPENVIKING_API_KEY` to a normal owner-bound OpenViking **USER API key**.
+The key determines the OpenViking account and user. Do not use a root/admin
+key, trusted mode, or add `X-OpenViking-Account`, `X-OpenViking-User`, or
+`X-OpenViking-Actor-Peer` headers for this personal single-owner setup.
+`X-API-Key` is used here because DeerFlow expands a whole-string `$ENV_VAR`
+value without storing a credential in the checked-in configuration.
+
+OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
+MCP initialization and discovery flow, prefixes the discovered names with
+`openviking_` by default, and routes calls back through the generic MCP client.
+The OpenViking tool named `forget` permanently deletes a `viking://` URI, so the
+example disables it by its original MCP name before prefixing. Other tools,
+including read, search, recall, and resource operations, remain available.
+
+This explicit tool path is separate from the automatic OpenViking memory backend
+configured under `config.yaml -> memory`. Both may be enabled at the same time:
+the memory backend handles automatic turn capture and recall, while MCP tools
+are model-selected operations.
+
+For Docker, point `url` at the OpenViking address reachable from the Gateway
+container, such as `http://openviking:1933/mcp` for a shared Compose network or
+`http://host.docker.internal:1933/mcp` for a host-installed server.
+
+## Tool Enablement
+
+Set `tools.<original_tool_name>.enabled` to `false` to omit one discovered tool
+without disabling the whole server. The key is the MCP server's original tool
+name, before DeerFlow adds the default `<server_name>_` prefix. Omitted tool
+entries and omitted `enabled` values default to enabled.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such

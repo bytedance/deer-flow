@@ -58,6 +58,7 @@ class McpRoutingConfig(BaseModel):
 class McpToolOverride(BaseModel):
     """Per-tool MCP configuration overrides."""
 
+    enabled: bool = Field(default=True, description="Whether this discovered MCP tool is exposed to agents")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig)
     model_config = ConfigDict(extra="allow")
 

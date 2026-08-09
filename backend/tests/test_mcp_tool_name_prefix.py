@@ -6,7 +6,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from app.gateway.routers.mcp import McpServerConfigResponse
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpToolOverride
 from deerflow.mcp.tools import _make_session_pool_tool, get_mcp_tools
 from deerflow.tools.mcp_metadata import get_mcp_routing
 
@@ -31,6 +31,12 @@ def test_mcp_tool_name_prefix_is_an_explicit_default_true_field() -> None:
     assert "tool_name_prefix" in McpServerConfig.model_fields
     assert McpServerConfig().tool_name_prefix is True
     assert McpServerConfig(tool_name_prefix=False).model_dump()["tool_name_prefix"] is False
+
+
+def test_mcp_tool_override_enabled_is_an_explicit_default_true_field() -> None:
+    assert "enabled" in McpToolOverride.model_fields
+    assert McpToolOverride().enabled is True
+    assert McpToolOverride(enabled=False).model_dump()["enabled"] is False
 
 
 def test_gateway_mcp_config_preserves_tool_name_prefix() -> None:
@@ -135,6 +141,71 @@ async def test_mcp_tool_name_prefix_can_be_disabled_per_server_without_disabling
     wrap_tool.assert_called_once()
     assert wrap_tool.call_args.args[1] == "semantic_scholar"
     assert wrap_tool.call_args.kwargs["tool_name_prefix"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_overrides", "expected_names"),
+    [
+        pytest.param({}, {"openviking_find", "openviking_forget"}, id="default_allows_discovered_tools"),
+        pytest.param(
+            {"forget": {"enabled": False}},
+            {"openviking_find"},
+            id="disabled_original_name_is_not_exposed",
+        ),
+    ],
+)
+async def test_mcp_tool_enabled_override_uses_original_name_before_prefixing(
+    tool_overrides: dict[str, dict[str, bool]],
+    expected_names: set[str],
+) -> None:
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "openviking": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:1933/mcp",
+                    "tools": tool_overrides,
+                }
+            }
+        }
+    )
+    servers_config = {
+        "openviking": {
+            "transport": "http",
+            "url": "http://127.0.0.1:1933/mcp",
+        }
+    }
+
+    class FakeClient:
+        def __init__(
+            self,
+            connections,
+            *,
+            callbacks=None,
+            tool_interceptors=None,
+            tool_name_prefix=False,
+        ) -> None:
+            self.connections = connections
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+            self.tool_name_prefix = tool_name_prefix
+
+        async def get_tools(self, *, server_name=None):
+            assert server_name == "openviking"
+            assert self.tool_name_prefix is True
+            return [_tool("openviking_find"), _tool("openviking_forget")]
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+    ):
+        tools = await get_mcp_tools()
+
+    assert {tool.name for tool in tools} == expected_names
 
 
 @pytest.mark.asyncio
