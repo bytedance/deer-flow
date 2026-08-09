@@ -157,6 +157,9 @@ This section accumulates work toward the **2.1.0** milestone
   [#3866])
 - **mcp:** Per-server `tool_call_timeout` for MCP tool calls, and routing hints
   that guide the model to the right server. ([#3843], [#4004])
+- **mcp:** Add an official OpenViking `/mcp` example, reusable per-original-tool
+  enable/disable configuration, and a safe default that omits `forget`.
+  ([#4745])
 - **community:** Agentic browser control as a first-class thread capability -
   Playwright-backed browser sessions the agent operates while the user observes
   or takes over from the workspace. ([#4187])

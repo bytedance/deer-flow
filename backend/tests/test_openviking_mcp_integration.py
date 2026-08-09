@@ -15,7 +15,6 @@ from mcp.server.fastmcp import FastMCP
 
 from app.gateway.routers.mcp import McpServerConfigResponse, _mask_server_config
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.config.memory_config import MemoryConfig
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.tools import get_mcp_tools
 
@@ -119,7 +118,7 @@ def _write_openviking_extensions_config(path: Path, url: str) -> None:
     )
 
 
-def test_openviking_mcp_config_resolves_masks_and_coexists_with_memory(
+def test_openviking_mcp_config_resolves_headers_omits_identity_masks_secrets_and_disables_forget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -133,26 +132,11 @@ def test_openviking_mcp_config_resolves_masks_and_coexists_with_memory(
     server = extensions.mcp_servers["openviking"]
     params = build_server_params("openviking", server)
     masked = _mask_server_config(McpServerConfigResponse.model_validate(server.model_dump()))
-    memory = MemoryConfig.model_validate(
-        {
-            "enabled": True,
-            "mode": "middleware",
-            "manager_class": "openviking",
-            "backend_config": {
-                "base_url": "http://127.0.0.1:1933",
-                "owner_user_id": "default",
-                "api_key_env": "OPENVIKING_API_KEY",
-            },
-        }
-    )
 
     assert params["headers"] == {"X-API-Key": api_key}
     assert _IDENTITY_HEADERS.isdisjoint({name.lower() for name in params["headers"]})
     assert masked.headers == {"X-API-Key": "***"}
     assert masked.tools["forget"].enabled is False
-    assert memory.enabled is True
-    assert memory.manager_class == "openviking"
-    assert extensions.mcp_servers["openviking"].enabled is True
     assert api_key not in masked.model_dump_json()
     assert api_key not in caplog.text
 

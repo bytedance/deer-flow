@@ -169,6 +169,20 @@ class ExtensionsConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    @model_validator(mode="after")
+    def _warn_unknown_mcp_tool_override_fields(self) -> "ExtensionsConfig":
+        for server_name, server_config in self.mcp_servers.items():
+            for tool_name, override in server_config.tools.items():
+                unknown_fields = sorted((override.model_extra or {}).keys())
+                if unknown_fields:
+                    logger.warning(
+                        "MCP server '%s' tool override '%s' has unknown field(s): %s",
+                        server_name,
+                        tool_name,
+                        ", ".join(unknown_fields),
+                    )
+        return self
+
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""
         return self.model_dump(by_alias=True)

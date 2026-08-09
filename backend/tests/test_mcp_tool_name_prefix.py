@@ -27,6 +27,60 @@ def _tool(name: str) -> StructuredTool:
     )
 
 
+async def _load_openviking_tools(
+    tool_overrides: dict[str, dict[str, object]],
+    *,
+    discovered_names: tuple[str, ...] = ("find", "forget"),
+) -> tuple[list[StructuredTool], ExtensionsConfig]:
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "openviking": {
+                    "type": "http",
+                    "url": "http://127.0.0.1:1933/mcp",
+                    "tools": tool_overrides,
+                }
+            }
+        }
+    )
+    servers_config = {
+        "openviking": {
+            "transport": "http",
+            "url": "http://127.0.0.1:1933/mcp",
+        }
+    }
+
+    class FakeClient:
+        def __init__(
+            self,
+            connections,
+            *,
+            callbacks=None,
+            tool_interceptors=None,
+            tool_name_prefix=False,
+        ) -> None:
+            self.connections = connections
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+            self.tool_name_prefix = tool_name_prefix
+
+        async def get_tools(self, *, server_name=None):
+            assert server_name == "openviking"
+            assert self.tool_name_prefix is True
+            return [_tool(f"openviking_{name}") for name in discovered_names]
+
+    with (
+        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+    ):
+        tools = await get_mcp_tools()
+
+    return tools, extensions_config
+
+
 def test_mcp_tool_name_prefix_is_an_explicit_default_true_field() -> None:
     assert "tool_name_prefix" in McpServerConfig.model_fields
     assert McpServerConfig().tool_name_prefix is True
@@ -159,53 +213,59 @@ async def test_mcp_tool_enabled_override_uses_original_name_before_prefixing(
     tool_overrides: dict[str, dict[str, bool]],
     expected_names: set[str],
 ) -> None:
-    extensions_config = ExtensionsConfig.model_validate(
-        {
-            "mcpServers": {
-                "openviking": {
-                    "type": "http",
-                    "url": "http://127.0.0.1:1933/mcp",
-                    "tools": tool_overrides,
-                }
-            }
-        }
-    )
-    servers_config = {
-        "openviking": {
-            "transport": "http",
-            "url": "http://127.0.0.1:1933/mcp",
-        }
-    }
-
-    class FakeClient:
-        def __init__(
-            self,
-            connections,
-            *,
-            callbacks=None,
-            tool_interceptors=None,
-            tool_name_prefix=False,
-        ) -> None:
-            self.connections = connections
-            self.callbacks = callbacks
-            self.tool_interceptors = tool_interceptors or []
-            self.tool_name_prefix = tool_name_prefix
-
-        async def get_tools(self, *, server_name=None):
-            assert server_name == "openviking"
-            assert self.tool_name_prefix is True
-            return [_tool("openviking_find"), _tool("openviking_forget")]
-
-    with (
-        patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),
-        patch("deerflow.mcp.tools.build_servers_config", return_value=servers_config),
-        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
-        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
-        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
-    ):
-        tools = await get_mcp_tools()
+    tools, _ = await _load_openviking_tools(tool_overrides)
 
     assert {tool.name for tool in tools} == expected_names
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_override_warns_when_original_name_is_not_discovered(caplog: pytest.LogCaptureFixture) -> None:
+    tools, _ = await _load_openviking_tools({"forgot": {"enabled": False}})
+
+    assert {tool.name for tool in tools} == {"openviking_find", "openviking_forget"}
+    assert ("MCP server 'openviking' configured tool override 'forgot' did not match any discovered tool; offered original tool names: 'find', 'forget'") in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_override_warning_escapes_discovered_names(caplog: pytest.LogCaptureFixture) -> None:
+    tools, _ = await _load_openviking_tools(
+        {"forgot": {"enabled": False}},
+        discovered_names=("find\nforged-log-line",),
+    )
+
+    assert tools == []
+    warning = next(message for message in caplog.messages if "did not match any discovered tool" in message)
+    assert "offered original tool names: 'find\\nforged-log-line'" in warning
+    assert "\n" not in warning
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_override_does_not_warn_for_discovered_original_name(caplog: pytest.LogCaptureFixture) -> None:
+    tools, _ = await _load_openviking_tools({"forget": {"enabled": False}})
+
+    assert {tool.name for tool in tools} == {"openviking_find"}
+    assert not any("did not match any discovered tool" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_override_does_not_warn_for_empty_discovery(caplog: pytest.LogCaptureFixture) -> None:
+    tools, _ = await _load_openviking_tools(
+        {"forgot": {"enabled": False}},
+        discovered_names=(),
+    )
+
+    assert tools == []
+    assert not any("did not match any discovered tool" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_override_warns_for_unknown_field_without_disabling_tool(caplog: pytest.LogCaptureFixture) -> None:
+    tools, extensions_config = await _load_openviking_tools({"forget": {"enable": False}})
+
+    override = extensions_config.mcp_servers["openviking"].tools["forget"]
+    assert override.enabled is True
+    assert {tool.name for tool in tools} == {"openviking_find", "openviking_forget"}
+    assert "MCP server 'openviking' tool override 'forget' has unknown field(s): enable" in caplog.messages
 
 
 @pytest.mark.asyncio

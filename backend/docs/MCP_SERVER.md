@@ -46,13 +46,25 @@ key, trusted mode, or add `X-OpenViking-Account`, `X-OpenViking-User`, or
 `X-OpenViking-Actor-Peer` headers for this personal single-owner setup.
 `X-API-Key` is used here because DeerFlow expands a whole-string `$ENV_VAR`
 value without storing a credential in the checked-in configuration.
+If `OPENVIKING_API_KEY` is missing or empty during initialization, OpenViking
+authentication fails and DeerFlow skips that MCP server, so no OpenViking tools
+appear. Changing only the environment variable does not invalidate DeerFlow's
+already-populated, file-signature-based MCP tool cache; after setting or fixing
+the key, restart DeerFlow, modify and re-save the extensions config, or call the
+MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
 
 OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
 MCP initialization and discovery flow, prefixes the discovered names with
 `openviking_` by default, and routes calls back through the generic MCP client.
 The OpenViking tool named `forget` permanently deletes a `viking://` URI, so the
-example disables it by its original MCP name before prefixing. Other tools,
-including read, search, recall, and resource operations, remain available.
+example disables it by its original MCP name before prefixing because the
+deletion is irreversible. Other official OpenViking harnesses expose resource
+ingestion, and an unwanted added resource can be removed later, so this initial
+integration keeps resource operations available for capability parity.
+`add_resource` can fetch a model-selected URL and, when configured with
+recurring watch behavior, can create repeated fetch and re-embedding work.
+Operators who do not want that capability can disable `add_resource` with the
+same per-tool mechanism.
 
 This explicit tool path is separate from the automatic OpenViking memory backend
 configured under `config.yaml -> memory`. Both may be enabled at the same time:
