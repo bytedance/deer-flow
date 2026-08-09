@@ -6839,6 +6839,28 @@ class TestChannelService:
         assert service.manager._langgraph_url == "http://custom-gateway:8001/api"
         assert service.manager._gateway_url == "http://custom-gateway:8001"
 
+    def test_public_base_url_is_forwarded_to_manager(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_PUBLIC_BASE_URL", "https://env.example.com")
+
+        service = ChannelService(
+            channels_config={
+                "public_base_url": "https://deer.example.com/deer-flow/",
+            }
+        )
+
+        assert service.manager._public_base_url == "https://deer.example.com/deer-flow"
+
+    def test_public_base_url_falls_back_to_env(self, monkeypatch):
+        from app.channels.service import ChannelService
+
+        monkeypatch.setenv("DEER_FLOW_CHANNELS_PUBLIC_BASE_URL", "https://deer.example.com/")
+
+        service = ChannelService(channels_config={})
+
+        assert service.manager._public_base_url == "https://deer.example.com"
+
     def test_from_app_config_uses_explicit_config(self):
         from app.channels.service import ChannelService
 

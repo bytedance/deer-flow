@@ -317,6 +317,8 @@ channels:
   langgraph_url: http://localhost:8001/api
   # Gateway API URL（默认：http://localhost:8001）
   gateway_url: http://localhost:8001
+  # 可选：浏览器可访问的 DeerFlow 地址，用于在 IM 回复中生成 HTML 文件超链接
+  public_base_url: https://deer.example.com
 
   # 可选：所有移动端渠道共用的全局 session 默认值
   session:
@@ -385,6 +387,8 @@ channels:
     allowed_users: []                          # 留空表示允许所有人
     card_template_id: ""                       # 可选：AI 卡片模板 ID，用于流式打字机效果
 ```
+
+配置 `public_base_url` 后，已成功解析的 `.html`、`.htm` 和 `.xhtml` 文件会在 IM 回复中显示为 Markdown 超链接，同时仍会正常发送文件附件作为回退。链接继续使用现有的 artifact 鉴权：启用鉴权时，接收者需要已有 DeerFlow 浏览器会话；为避免生成的脚本在 DeerFlow 域名下执行，HTML 仍会以下载方式打开。也可以通过 `DEER_FLOW_CHANNELS_PUBLIC_BASE_URL` 设置该地址。
 
 说明：
 - `assistant_id: lead_agent` 会直接调用默认的 LangGraph assistant。

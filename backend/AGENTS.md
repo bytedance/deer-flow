@@ -958,7 +958,8 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph-compatible Gateway API base URL (default: `http://localhost:8001/api`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+- `public_base_url` - Optional browser-facing DeerFlow URL used to add authenticated HTML artifact links to IM replies; attachment delivery remains the fallback
+- In Docker Compose, IM channels run inside the `gateway` container, so `localhost` points back to that container. Use `http://gateway:8001/api` for `langgraph_url` and `http://gateway:8001` for `gateway_url`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` / `DEER_FLOW_CHANNELS_GATEWAY_URL`. Set `public_base_url` to the external deployment URL or use `DEER_FLOW_CHANNELS_PUBLIC_BASE_URL`.
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token, optional `rich_messages` for final Markdown Rich Messages), `dingtalk` (client_id, client_secret, optional `card_template_id` for AI Card streaming), `github` (operator kill-switch `enabled`, plus `default_mention_login` for mention-required GitHub triggers), `buzz` (relay_url, private_key)
 
 **User-owned channel connections** (`config.yaml` -> `channel_connections`):

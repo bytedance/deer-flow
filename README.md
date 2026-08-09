@@ -450,6 +450,8 @@ channels:
   langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
+  # Optional public DeerFlow URL used for clickable HTML artifact links in IM replies
+  public_base_url: https://deer.example.com
 
   # Optional: global session defaults for all mobile channels
   session:
@@ -528,6 +530,7 @@ Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
+- When `public_base_url` is configured, resolved `.html`, `.htm`, and `.xhtml` artifacts are listed as Markdown links in IM replies. The normal file attachment is still sent as a fallback. Links use the existing authenticated artifact API, so auth-enabled deployments require the recipient to have a DeerFlow browser session; active HTML remains a download to avoid executing generated scripts on the DeerFlow origin.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 
 Set the corresponding API keys in your `.env` file:
@@ -602,7 +605,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
 
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`. `channels.public_base_url` is different: set it to the browser-facing deployment URL, or use `DEER_FLOW_CHANNELS_PUBLIC_BASE_URL`.
 
 **Commands**
 
