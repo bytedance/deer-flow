@@ -1134,8 +1134,8 @@ def set_lark_app_credentials(
         raise ValueError("brand must be feishu or lark.")
 
     with _lark_credential_lock(user_id):
-        generation = _advance_lark_flow_generation_locked(user_id)
         _validate_lark_app_credentials_with_cli(app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+        generation = _advance_lark_flow_generation_locked(user_id)
         _replace_lark_app_credentials_locked(
             user_id,
             app_id=app_id,
@@ -1464,6 +1464,7 @@ def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str
 
 
 def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, brand: str) -> None:
+    """Validate credentials through config init's live tenant-token probe."""
     with tempfile.TemporaryDirectory(prefix=".validating-lark-app-") as temp_dir:
         root = Path(temp_dir)
         config_dir = root / "config"

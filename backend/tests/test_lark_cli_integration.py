@@ -1111,6 +1111,29 @@ def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_pa
     assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
 
+def test_validate_lark_app_credentials_surfaces_cli_probe_rejection(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+
+    def _run(args, **kwargs):
+        assert kwargs["env"]["LARKSUITE_CLI_CONFIG_DIR"] != str(lark_cli.lark_cli_config_dir("alice"))
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=3,
+            stdout='{"ok":false,"error":{"type":"config","subtype":"invalid_client","message":"The specified app does not exist."}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(lark_cli.subprocess, "run", _run)
+
+    with pytest.raises(ValueError, match="specified app does not exist"):
+        lark_cli._validate_lark_app_credentials_with_cli(
+            app_id="cli_invalid",
+            app_secret="invalid-secret",
+            brand="feishu",
+        )
+
+
 def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
 
@@ -1892,6 +1915,7 @@ def test_set_lark_app_credentials_validates_switches_and_revokes_prior_auth(monk
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
     calls: list[tuple[str, object]] = []
+    pending_generation = _advance_lark_flow()
 
     config_dir = lark_cli.lark_cli_config_dir("alice")
     data_dir = lark_cli.lark_cli_data_dir("alice")
@@ -1904,7 +1928,15 @@ def test_set_lark_app_credentials_validates_switches_and_revokes_prior_auth(monk
     monkeypatch.setattr(
         lark_cli,
         "_validate_lark_app_credentials_with_cli",
-        lambda **kwargs: calls.append(("validate", kwargs)),
+        lambda **kwargs: calls.append(
+            (
+                "validate",
+                {
+                    **kwargs,
+                    "generation": json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8"))["generation"],
+                },
+            )
+        ),
     )
 
     def _save(user_id, **kwargs):
@@ -1931,10 +1963,12 @@ def test_set_lark_app_credentials_validates_switches_and_revokes_prior_auth(monk
 
     assert result.success is True
     assert calls == [
-        ("validate", {"app_id": "cli_new", "app_secret": "new-secret", "brand": "lark"}),
+        ("validate", {"app_id": "cli_new", "app_secret": "new-secret", "brand": "lark", "generation": pending_generation}),
         ("save", {"user_id": "alice", "app_id": "cli_new", "app_secret": "new-secret", "brand": "lark"}),
         ("revoke", '{"access_token": "old-app-token"}'),
     ]
+    assert result.generation != pending_generation
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": result.generation}
     assert not token_file.exists()
 
 
@@ -1949,6 +1983,7 @@ def test_set_lark_app_credentials_validation_failure_preserves_active_tree(monke
     token_file = data_dir / "token.json"
     config_file.write_text("old-config", encoding="utf-8")
     token_file.write_text("old-token", encoding="utf-8")
+    pending_generation = _advance_lark_flow()
 
     monkeypatch.setattr(
         lark_cli,
@@ -1966,6 +2001,7 @@ def test_set_lark_app_credentials_validation_failure_preserves_active_tree(monke
 
     assert config_file.read_text(encoding="utf-8") == "old-config"
     assert token_file.read_text(encoding="utf-8") == "old-token"
+    assert json.loads(lark_cli._lark_flow_state_path("alice").read_text(encoding="utf-8")) == {"generation": pending_generation}
 
 
 @pytest.mark.parametrize("failure_step", ["save", "revoke"])
