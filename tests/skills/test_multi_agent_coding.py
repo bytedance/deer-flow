@@ -39,14 +39,18 @@ def test_skill_persists_stable_stage_dag_before_delegation() -> None:
     assert normalized.index("submit_task_plan") < normalized.index(
         "create_coding_worktree"
     )
-    assert normalized.index("create_coding_worktree") < normalized.index(
-        "code-analyzer"
+    assert normalized.index("## prepare isolated worktree") < normalized.index(
+        "## workflow"
     )
+    assert normalized.index("## workflow") < normalized.index("### 1. analyze")
     assert '"id": "coding-analysis"' in normalized
     assert '"id": "coding-implementation"' in normalized
     assert '"id": "coding-review"' in normalized
     assert '"blocked_by": ["coding-analysis"]' in normalized
     assert '"blocked_by": ["coding-implementation"]' in normalized
+    assert '"agent_type": "code-analyzer"' in normalized
+    assert '"agent_type": "code-implementer"' in normalized
+    assert '"agent_type": "code-reviewer"' in normalized
 
     assert "`coding_task_id`: `coding-analysis`" in normalized
     assert "`coding_task_id`: `coding-implementation`" in normalized

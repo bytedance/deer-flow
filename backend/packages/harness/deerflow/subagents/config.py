@@ -1,7 +1,7 @@
 """Subagent configuration definitions."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -29,6 +29,9 @@ class SubagentConfig:
             effective limit is the global ``subagents.timeout_seconds`` (default
             1800 = 30 min), layered on by the registry; this 900 only applies
             when no differing global value exists.
+        workspace_access: 对 Coding Worktree 的持久修改权限。``read_only``
+            Profile 会在运行前后接受工作区指纹校验，任何可见改动都会使任务失败。
+        artifact_type: Coding Agent 完成后必须返回的结构化产物类型。
     """
 
     name: str
@@ -40,6 +43,8 @@ class SubagentConfig:
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
+    workspace_access: Literal["read_only", "read_write"] = "read_write"
+    artifact_type: str | None = None
 
 
 def _default_model_name(app_config: "AppConfig") -> str:

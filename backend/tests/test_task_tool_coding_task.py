@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 from enum import Enum
 from types import SimpleNamespace
 
@@ -35,8 +36,12 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
             calls.append(("claim", task_id, owner))
             return SimpleNamespace(worktree=None)
 
-        def complete(self, task_id: str):
-            calls.append(("complete", task_id))
+        def get_upstream_artifacts(self, task_id: str):
+            calls.append(("upstream", task_id))
+            return []
+
+        def complete(self, task_id: str, artifact=None):
+            calls.append(("complete", task_id, artifact))
 
     class FakeExecutor:
         def __init__(self, **_kwargs):
@@ -51,45 +56,41 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
         description="Analyze code",
         system_prompt="Analyze code",
         timeout_seconds=10,
+        artifact_type="analysis_report",
     )
+    analysis_report = {
+        "report_type": "analysis_report",
+        "summary": "analysis done",
+        "relevant_files": ["pricing.py"],
+        "implementation_steps": ["fix calculation"],
+        "risks": [],
+        "test_plan": ["run unit tests"],
+        "implementer_input": "apply the verified formula",
+    }
     result = SimpleNamespace(
         status=FakeSubagentStatus.COMPLETED,
         ai_messages=[],
-        result="analysis done",
+        result=json.dumps(analysis_report),
         error=None,
         stop_reason=None,
         token_usage_records=[],
         usage_reported=False,
     )
 
-    monkeypatch.setattr(
-        task_tool_module, "_token_usage_cache_enabled", lambda _config: False
-    )
+    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(
-        task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"]
-    )
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
-    monkeypatch.setattr(
-        task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice"
-    )
+    monkeypatch.setattr(task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice")
     monkeypatch.setattr(
         task_tool_module,
         "create_task_graph",
-        lambda thread_id, *, user_id: (
-            calls.append(("create_graph", thread_id, user_id)) or FakeGraph()
-        ),
+        lambda thread_id, *, user_id: calls.append(("create_graph", thread_id, user_id)) or FakeGraph(),
     )
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", FakeExecutor)
-    monkeypatch.setattr(
-        task_tool_module, "get_background_task_result", lambda _task_id: result
-    )
-    monkeypatch.setattr(
-        task_tool_module, "get_stream_writer", lambda: lambda _event: None
-    )
-    monkeypatch.setattr(
-        task_tool_module, "cleanup_background_task", lambda _task_id: None
-    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
 
@@ -114,8 +115,9 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
     assert calls == [
         ("create_graph", "thread-1", "alice"),
         ("claim", "task-1", "code-analyzer"),
+        ("upstream", "task-1"),
         ("execute", "Inspect the code", "tool-call-1"),
-        ("complete", "task-1"),
+        ("complete", "task-1", analysis_report),
     ]
 
 
@@ -128,15 +130,16 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
         (None, None, "Task tool-call-1 disappeared from background tasks"),
     ],
 )
-def test_coding_task_is_failed_for_each_terminal_failure(
-    monkeypatch, status, error, expected_reason
-):
+def test_coding_task_is_failed_for_each_terminal_failure(monkeypatch, status, error, expected_reason):
     calls: list[tuple] = []
 
     class FakeGraph:
         def claim(self, task_id: str, owner: str):
             calls.append(("claim", task_id, owner))
             return SimpleNamespace(worktree=None)
+
+        def get_upstream_artifacts(self, _task_id: str):
+            return []
 
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))
@@ -167,32 +170,20 @@ def test_coding_task_is_failed_for_each_terminal_failure(
             usage_reported=False,
         )
 
-    monkeypatch.setattr(
-        task_tool_module, "_token_usage_cache_enabled", lambda _config: False
-    )
+    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(
-        task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"]
-    )
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
-    monkeypatch.setattr(
-        task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice"
-    )
+    monkeypatch.setattr(task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice")
     monkeypatch.setattr(
         task_tool_module,
         "create_task_graph",
         lambda _thread_id, *, user_id: FakeGraph(),
     )
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", FakeExecutor)
-    monkeypatch.setattr(
-        task_tool_module, "get_background_task_result", lambda _task_id: result
-    )
-    monkeypatch.setattr(
-        task_tool_module, "get_stream_writer", lambda: lambda _event: None
-    )
-    monkeypatch.setattr(
-        task_tool_module, "cleanup_background_task", lambda _task_id: None
-    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
 
@@ -229,6 +220,9 @@ def test_coding_task_is_failed_when_subagent_cannot_start(monkeypatch):
             calls.append(("claim", task_id, owner))
             return SimpleNamespace(worktree=None)
 
+        def get_upstream_artifacts(self, _task_id: str):
+            return []
+
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))
 
@@ -247,16 +241,10 @@ def test_coding_task_is_failed_when_subagent_cannot_start(monkeypatch):
         timeout_seconds=10,
     )
 
-    monkeypatch.setattr(
-        task_tool_module, "_token_usage_cache_enabled", lambda _config: False
-    )
-    monkeypatch.setattr(
-        task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"]
-    )
+    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
-    monkeypatch.setattr(
-        task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice"
-    )
+    monkeypatch.setattr(task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice")
     monkeypatch.setattr(
         task_tool_module,
         "create_task_graph",
@@ -290,7 +278,12 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
     monkeypatch,
 ):
     calls: list[tuple] = []
+    fingerprints: list[str] = []
     captured_executor_kwargs: dict = {}
+    upstream_artifacts = [
+        {"report_type": "analysis_report", "summary": "inspect pricing.py"},
+        {"report_type": "implementation_report", "summary": "fixed formula"},
+    ]
     parent_thread_data = {
         "workspace_path": "D:/sandbox/thread-1/user-data/workspace",
         "uploads_path": "D:/sandbox/thread-1/user-data/uploads",
@@ -304,8 +297,12 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
             calls.append(("claim", task_id, owner))
             return SimpleNamespace(worktree="E:/projectA/.worktrees/coding-run")
 
-        def complete(self, task_id: str):
-            calls.append(("complete", task_id))
+        def get_upstream_artifacts(self, task_id: str):
+            calls.append(("upstream", task_id))
+            return upstream_artifacts
+
+        def complete(self, task_id: str, artifact=None):
+            calls.append(("complete", task_id, artifact))
 
     class FakeExecutor:
         def __init__(self, **kwargs):
@@ -316,10 +313,11 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
             return task_id
 
     config = SubagentConfig(
-        name="code-analyzer",
-        description="Analyze code",
-        system_prompt="Analyze code",
+        name="code-reviewer",
+        description="Review code",
+        system_prompt="Review code",
         timeout_seconds=10,
+        workspace_access="read_only",
     )
     result = SimpleNamespace(
         status=FakeSubagentStatus.COMPLETED,
@@ -331,17 +329,11 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
         usage_reported=False,
     )
 
-    monkeypatch.setattr(
-        task_tool_module, "_token_usage_cache_enabled", lambda _config: False
-    )
+    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(
-        task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"]
-    )
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["code-reviewer"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
-    monkeypatch.setattr(
-        task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice"
-    )
+    monkeypatch.setattr(task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice")
     monkeypatch.setattr(
         task_tool_module,
         "create_task_graph",
@@ -349,14 +341,13 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
     )
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", FakeExecutor)
     monkeypatch.setattr(
-        task_tool_module, "get_background_task_result", lambda _task_id: result
+        task_tool_module,
+        "capture_worktree_fingerprint",
+        lambda path: fingerprints.append(path) or "stable-fingerprint",
     )
-    monkeypatch.setattr(
-        task_tool_module, "get_stream_writer", lambda: lambda _event: None
-    )
-    monkeypatch.setattr(
-        task_tool_module, "cleanup_background_task", lambda _task_id: None
-    )
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_args: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
 
@@ -372,7 +363,7 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
             runtime=runtime,
             description="Analyze task",
             prompt="Inspect the code",
-            subagent_type="code-analyzer",
+            subagent_type="code-reviewer",
             tool_call_id="tool-call-1",
             coding_task_id="task-1",
         )
@@ -383,19 +374,18 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
         "workspace_path": "E:/projectA/.worktrees/coding-run",
     }
     assert runtime.state["thread_data"] is parent_thread_data
-    assert (
-        runtime.state["thread_data"]["workspace_path"]
-        == "D:/sandbox/thread-1/user-data/workspace"
-    )
+    assert runtime.state["thread_data"]["workspace_path"] == "D:/sandbox/thread-1/user-data/workspace"
     assert calls == [
-        ("claim", "task-1", "code-analyzer"),
+        ("claim", "task-1", "code-reviewer"),
+        ("upstream", "task-1"),
         (
             "execute",
-            f"{task_tool_module._CODING_WORKSPACE_INSTRUCTION}\n\nInspect the code",
+            (f"{task_tool_module._CODING_WORKSPACE_INSTRUCTION}\n\nInspect the code\n\n{task_tool_module._UPSTREAM_ARTIFACTS_INSTRUCTION.format(artifacts=task_tool_module.render_upstream_artifacts(upstream_artifacts))}"),
             "tool-call-1",
         ),
-        ("complete", "task-1"),
+        ("complete", "task-1", None),
     ]
+    assert fingerprints == ["E:/projectA/.worktrees/coding-run"] * 2
 
 
 def test_coding_task_worktree_preparation_failure_marks_claimed_task_failed(
@@ -407,6 +397,9 @@ def test_coding_task_worktree_preparation_failure_marks_claimed_task_failed(
         def claim(self, task_id: str, owner: str):
             calls.append(("claim", task_id, owner))
             return SimpleNamespace(worktree="E:/projectA/.worktrees/coding-run")
+
+        def get_upstream_artifacts(self, _task_id: str):
+            return []
 
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))
@@ -422,16 +415,10 @@ def test_coding_task_worktree_preparation_failure_marks_claimed_task_failed(
         timeout_seconds=10,
     )
 
-    monkeypatch.setattr(
-        task_tool_module, "_token_usage_cache_enabled", lambda _config: False
-    )
-    monkeypatch.setattr(
-        task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"]
-    )
+    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["code-analyzer"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
-    monkeypatch.setattr(
-        task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice"
-    )
+    monkeypatch.setattr(task_tool_module, "resolve_runtime_user_id", lambda _runtime: "alice")
     monkeypatch.setattr(
         task_tool_module,
         "create_task_graph",

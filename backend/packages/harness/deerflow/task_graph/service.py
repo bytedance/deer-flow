@@ -86,6 +86,8 @@ class TaskGraph:
         task = self.store.load(task_id)
         if task.status is not TaskStatus.pending:
             raise ValueError("task must be pending")
+        if task.agent_type is not None and task.agent_type != owner:
+            raise ValueError(f"task requires agent '{task.agent_type}', got '{owner}'")
         if not self.can_start(task_id):
             raise ValueError("task is blocked")
         task.owner = owner
@@ -112,7 +114,7 @@ class TaskGraph:
         self.store.save(task)
         return task
 
-    def complete(self, task_id: str) -> list[str]:
+    def complete(self, task_id: str, artifact: dict | None = None) -> list[str]:
         """标记为完成"""
         # 加载任务
         # -> status 不是 in_progress：抛出 ValueError
@@ -125,6 +127,7 @@ class TaskGraph:
         if task.status is not TaskStatus.in_progress:
             raise ValueError("task must be in_progress")
         task.status = TaskStatus.completed
+        task.artifact = artifact
         self.store.save(task)
         tasks = self.store.list_all()
         ids = []
@@ -132,10 +135,29 @@ class TaskGraph:
             # status 是 pending
             # blocked_by 不是空列表
             # can_start(task.id) 是 True
-            if (
-                task.status is TaskStatus.pending
-                and task.blocked_by
-                and self.can_start(task.id)
-            ):
+            if task.status is TaskStatus.pending and task.blocked_by and self.can_start(task.id):
                 ids.append(task.id)
         return ids
+
+    def get_upstream_artifacts(self, task_id: str) -> list[dict]:
+        """按依赖顺序读取当前任务的全部已完成上游产物。"""
+        task = self.store.load(task_id)
+        artifacts: list[dict] = []
+        visited: set[str] = set()
+
+        def collect(dependency_id: str) -> None:
+            if dependency_id in visited:
+                return
+            dependency = self.store.load(dependency_id)
+            for parent_id in dependency.blocked_by:
+                collect(parent_id)
+            if dependency.status is not TaskStatus.completed:
+                raise ValueError(f"dependency '{dependency_id}' is not completed")
+            if dependency.artifact is None:
+                raise ValueError(f"dependency '{dependency_id}' has no artifact")
+            artifacts.append(dependency.artifact)
+            visited.add(dependency_id)
+
+        for dependency_id in task.blocked_by:
+            collect(dependency_id)
+        return artifacts

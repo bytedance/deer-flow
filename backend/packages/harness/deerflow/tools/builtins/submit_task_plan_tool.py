@@ -15,6 +15,7 @@ class CodingTaskInput(TypedDict):
     subject: str
     description: str
     blocked_by: NotRequired[list[str]]
+    agent_type: NotRequired[str]
 
 
 @tool("submit_task_plan", parse_docstring=True)
@@ -44,6 +45,7 @@ def submit_task_plan(tasks: list[CodingTaskInput], runtime: Runtime) -> str:
             subject=item["subject"],
             description=item["description"],
             blocked_by=list(item.get("blocked_by", [])),
+            agent_type=item.get("agent_type"),
         )
         for item in tasks
     ]

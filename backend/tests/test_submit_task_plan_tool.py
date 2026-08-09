@@ -39,12 +39,14 @@ def test_submit_task_plan_converts_model_input_and_uses_thread_graph(monkeypatch
                 "id": "task-1",
                 "subject": "Analyze",
                 "description": "Analyze the change",
+                "agent_type": "code-analyzer",
             },
             {
                 "id": "task-2",
                 "subject": "Implement",
                 "description": "Implement the change",
                 "blocked_by": ["task-1"],
+                "agent_type": "code-implementer",
             },
         ],
         runtime=_runtime(),
@@ -55,13 +57,17 @@ def test_submit_task_plan_converts_model_input_and_uses_thread_graph(monkeypatch
         "user_id": "alice",
         "tasks": [
             CodingTask(
-                id="task-1", subject="Analyze", description="Analyze the change"
+                id="task-1",
+                subject="Analyze",
+                description="Analyze the change",
+                agent_type="code-analyzer",
             ),
             CodingTask(
                 id="task-2",
                 subject="Implement",
                 description="Implement the change",
                 blocked_by=["task-1"],
+                agent_type="code-implementer",
             ),
         ],
     }

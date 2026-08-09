@@ -51,6 +51,21 @@ def test_claim_persists_owner_and_in_progress_status(task_graph):
     assert store.load("task-1") == claimed
 
 
+def test_claim_rejects_wrong_specialized_agent(task_graph):
+    graph, store = task_graph
+    store.save(
+        CodingTask(
+            id="task-1",
+            subject="Analyze",
+            description="Analyze change",
+            agent_type="code-analyzer",
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires agent 'code-analyzer'"):
+        graph.claim("task-1", "code-implementer")
+
+
 def test_claim_rejects_non_pending_or_blocked_task(task_graph):
     graph, store = task_graph
     store.save(
@@ -95,9 +110,7 @@ def test_complete_persists_status_and_returns_newly_ready_task_ids(task_graph):
             blocked_by=["task-1"],
         )
     )
-    store.save(
-        CodingTask(id="task-3", subject="Independent", description="No dependencies")
-    )
+    store.save(CodingTask(id="task-3", subject="Independent", description="No dependencies"))
     store.save(
         CodingTask(
             id="task-4",
@@ -107,10 +120,51 @@ def test_complete_persists_status_and_returns_newly_ready_task_ids(task_graph):
         )
     )
 
-    unblocked = graph.complete("task-1")
+    artifact = {"report_type": "analysis_report", "summary": "done"}
+    unblocked = graph.complete("task-1", artifact=artifact)
 
-    assert store.load("task-1").status is TaskStatus.completed
+    completed = store.load("task-1")
+    assert completed.status is TaskStatus.completed
+    assert completed.artifact == artifact
     assert unblocked == ["task-2"]
+
+
+def test_get_upstream_artifacts_returns_transitive_dependency_order(task_graph):
+    graph, store = task_graph
+    analysis = {"report_type": "analysis_report", "summary": "analysis"}
+    implementation = {
+        "report_type": "implementation_report",
+        "summary": "implementation",
+    }
+    store.save(
+        CodingTask(
+            id="analysis",
+            subject="Analyze",
+            description="Analyze",
+            status=TaskStatus.completed,
+            artifact=analysis,
+        )
+    )
+    store.save(
+        CodingTask(
+            id="implementation",
+            subject="Implement",
+            description="Implement",
+            status=TaskStatus.completed,
+            blocked_by=["analysis"],
+            artifact=implementation,
+        )
+    )
+    store.save(
+        CodingTask(
+            id="review",
+            subject="Review",
+            description="Review",
+            blocked_by=["implementation"],
+        )
+    )
+
+    assert graph.get_upstream_artifacts("review") == [analysis, implementation]
 
 
 def test_complete_rejects_task_that_is_not_in_progress(task_graph):
@@ -180,9 +234,7 @@ def test_recover_resets_failed_task_for_a_new_claim(task_graph):
 def test_bind_worktree_persists_one_worktree_for_the_whole_pipeline(task_graph):
     graph, store = task_graph
     tasks = [
-        CodingTask(
-            id="coding-analysis", subject="Analyze", description="Analyze change"
-        ),
+        CodingTask(id="coding-analysis", subject="Analyze", description="Analyze change"),
         CodingTask(
             id="coding-implementation",
             subject="Implement",
@@ -207,11 +259,7 @@ def test_bind_worktree_persists_one_worktree_for_the_whole_pipeline(task_graph):
 
 def test_bind_worktree_validates_the_whole_batch_before_persisting(task_graph):
     graph, store = task_graph
-    store.save(
-        CodingTask(
-            id="coding-analysis", subject="Analyze", description="Analyze change"
-        )
-    )
+    store.save(CodingTask(id="coding-analysis", subject="Analyze", description="Analyze change"))
 
     with pytest.raises(FileNotFoundError):
         graph.bind_worktree(["coding-analysis", "missing-task"], "coding-run")

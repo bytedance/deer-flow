@@ -10,8 +10,9 @@
 
 - **GitHub Issue MCP**：通过自定义 MCP Server 读取 Issue，整理为结构化 `coding_brief`。
 - **Coding Skill**：用 Skill 固定输入门禁、人工审批、任务顺序、失败处理和输出契约。
-- **三角色 Sub-Agent**：`code-analyzer`、`code-implementer`、`code-reviewer` 分别负责分析、实现与独立验收。
-- **持久化 Task DAG**：保存任务依赖、领取者、执行状态、失败原因和 Worktree，支持进程重启后恢复。
+- **三角色 Sub-Agent**：`code-analyzer`、`code-implementer`、`code-reviewer` 是源码内置角色，分别拥有只读分析、读写实现、只读审查工具边界。
+- **结构化 Agent 交接**：三类报告由 Pydantic 校验并持久化，下游任务从 DAG 自动取得已验证的上游产物，不依赖 Lead Agent 手工复制文本。
+- **持久化 Task DAG**：保存任务依赖、指定角色、领取者、执行状态、结构化产物、失败原因和 Worktree，支持进程重启后恢复。
 - **Git Worktree 隔离**：在用户选择的本地 Git 仓库中创建独立目录和分支，避免 Agent 修改污染主工作区。
 - **Human-in-the-loop**：执行计划和失败重试都需要匹配当前请求的结构化人工确认。
 - **生产运行时接线**：Coding 工具接入 Gateway 的真实工具装配路径，外部 Worktree 可安全传递到子 Agent 中间件与文件工具。
@@ -24,8 +25,10 @@ GitHub Issue / coding_brief
   -> 人工批准 Coding Plan
   -> submit_task_plan 保存三阶段 DAG
   -> create_coding_worktree 创建隔离分支与目录
-  -> code-analyzer 读取源码和测试，输出 analysis_report
-  -> code-implementer 修改代码并运行测试，输出 implementation_report
+  -> code-analyzer 只读分析，analysis_report 校验并写入 DAG
+  -> DAG 自动把 analysis_report 注入 code-implementer
+  -> code-implementer 修改代码、运行测试，implementation_report 校验并写入 DAG
+  -> DAG 自动把两份上游报告注入 code-reviewer
   -> code-reviewer 独立检查 diff 与测试，输出 review_report
   -> Lead Agent 汇总 coding_run
 ```
@@ -37,8 +40,11 @@ GitHub Issue / coding_brief
 | 模块 | 职责 |
 | --- | --- |
 | `skills/public/multi-agent-coding/` | 定义 Coding 工作流、人工计划审批、角色交接和输出契约 |
+| `subagents/builtins/coding_agents.py` | 定义三个内置专业角色、提示词、工具白名单、工作区权限和产物类型 |
+| `subagents/coding_artifacts.py` | 定义并校验 analysis / implementation / review 三类结构化报告 |
+| `subagents/worktree_integrity.py` | 为只读分析与审查角色校验运行前后的 Git 可见工作区指纹 |
 | `backend/packages/harness/deerflow/mcp_servers/github_issue.py` | 提供 GitHub Issue MCP 工具 |
-| `backend/packages/harness/deerflow/task_graph/` | 定义 CodingTask、JSON 持久化和 DAG 状态转换 |
+| `backend/packages/harness/deerflow/task_graph/` | 定义 CodingTask、JSON 持久化、角色绑定、产物传递和 DAG 状态转换 |
 | `submit_task_plan_tool.py` | 把模型生成的任务计划写入线程级 TaskGraph |
 | `worktree_tool.py` | 校验目标仓库、创建 Git Worktree 并绑定 CodingTask |
 | `task_tool.py` | 领取任务、启动 Sub-Agent、回写完成或失败状态 |
@@ -168,7 +174,7 @@ D:\Project\example-repo
 主工作区：无受跟踪文件修改
 ```
 
-相关回归测试覆盖 Task DAG、Worktree 创建与绑定、人工恢复、生产工具注册、子 Agent 工作区传递和路径安全边界。
+相关回归测试覆盖内置角色与工具边界、结构化报告校验、DAG 角色绑定与产物传递、Worktree 创建与绑定、只读指纹、人工恢复、生产工具注册和路径安全边界。
 
 运行核心测试：
 
@@ -179,6 +185,9 @@ uv run pytest \
   tests/test_task_graph_store.py \
   tests/test_task_graph_service.py \
   tests/test_task_graph_factory.py \
+  tests/test_coding_subagents_config.py \
+  tests/test_coding_artifacts.py \
+  tests/test_worktree_integrity.py \
   tests/test_task_tool_coding_task.py \
   tests/test_recover_coding_task_tool.py \
   tests/test_coding_workflow_tool_registration.py -q
@@ -189,8 +198,9 @@ uv run pytest \
 | 能力 | 来源 |
 | --- | --- |
 | LangGraph Agent Loop、Checkpoint、Sandbox、MCP 客户端、Skill 加载、基础 Sub-Agent | DeerFlow / LangGraph 上游 |
-| GitHub Issue MCP、Coding Skill、三角色配置 | 本项目新增 |
-| 持久化 Coding Task DAG 与失败恢复 | 本项目新增 |
+| GitHub Issue MCP、Coding Skill、三个源码内置专业角色 | 本项目新增 |
+| 结构化报告校验、DAG 自动交接与只读角色 Worktree 指纹 | 本项目新增 |
+| 持久化 Coding Task DAG、角色绑定与失败恢复 | 本项目新增 |
 | 外部 Git Worktree 创建、绑定和运行时路径接线 | 本项目新增 |
 | 计划审批与任务级人工重试确认 | 本项目新增 |
 
@@ -202,6 +212,7 @@ uv run pytest \
 - Worktree 基于已提交的 `HEAD` 创建，目标仓库未提交的修改不会自动复制进去。
 - 当前流程不会自动合并分支、推送远端或创建 PR。
 - 失败恢复会清空当前失败字段，尚未保存完整的多次尝试历史。
+- 只读角色采用“运行前后 Git 可见状态一致”的结果校验，而不是操作系统级只读挂载；被 `.gitignore` 忽略的测试缓存不计入持久代码改动。
 
 ## 致谢与许可证
 

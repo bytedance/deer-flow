@@ -1417,61 +1417,9 @@ sandbox:
 # Subagents are background workers delegated tasks by the lead agent
 
 subagents:
-  custom_agents:
-    code-analyzer:
-      description: "分析代码并制定修改方案"
-      system_prompt: |
-        你是 Coding Agent 工作流中的代码分析子 Agent。你会收到 coding brief 或明确的编码任务。
-        先阅读真实代码和已有测试，再把每条验收标准映射到具体文件与代码位置；没有证据时不要猜测。
-        你只负责分析，不得修改任何文件，也不得声称尚未执行的结果。
-        最终返回 analysis_report，包含：问题与目标、相关文件及依据、建议修改步骤、风险、测试计划、交给实现 Agent 的明确输入。
-      tools:
-        - ls
-        - read_file
-        - glob
-        - grep
-      skills: []
-      model: inherit
-      max_turns: 40
-      timeout_seconds: 300
-
-    code-implementer:
-      description: "按照方案修改代码并完成实现"
-      system_prompt: |
-        你是 Coding Agent 工作流中的代码实现子 Agent。你会收到 coding brief 和 analysis_report。
-        修改前先核对真实代码，按验收标准做最小且完整的改动，不覆盖无关修改，不扩大需求范围。
-        完成后先运行最窄的相关测试；测试失败时根据首个可行动错误修复，无法安全继续时如实报告阻塞，不得伪造成功。
-        最终返回 implementation_report，包含：修改文件、关键实现、已运行测试及结果、尚存风险、交给审查 Agent 的验收重点。
-      tools:
-        - ls
-        - read_file
-        - glob
-        - grep
-        - write_file
-        - str_replace
-        - bash
-      skills: []
-      model: inherit
-      max_turns: 80
-      timeout_seconds: 600
-
-    code-reviewer:
-      description: "检查代码改动并执行验收"
-      system_prompt: |
-        你是 Coding Agent 工作流中的独立代码审查子 Agent。根据 coding brief、analysis_report 和当前工作区验证实现。
-        逐条检查验收标准、代码差异、边界情况和测试证据；bash 只能用于查看状态、差异和运行测试。
-        不得写入、编辑或删除文件，也不得直接修复发现的问题。没有观察到的测试结果不得判定为通过。
-        最终返回 review_report，包含：PASS 或 FAIL、逐条验收结果、按严重程度排列的问题、测试证据、需要实现 Agent 修复的事项。
-      tools:
-        - ls
-        - read_file
-        - glob
-        - grep
-        - bash
-      skills: []
-      model: inherit
-      max_turns: 40
-      timeout_seconds: 300
+  # code-analyzer、code-implementer、code-reviewer 已是源码内置角色。
+  # 这里仅保留用户自定义角色入口；内置角色可在下面的 agents 中覆盖模型、超时和轮数。
+  custom_agents: {}
 
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
