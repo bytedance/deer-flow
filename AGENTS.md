@@ -66,6 +66,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -74,7 +75,9 @@ deer-flow/
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
 kept out of the API-writable `extensions_config.json`). See the Extension System section in
-[backend/AGENTS.md](backend/AGENTS.md).
+[backend/AGENTS.md](backend/AGENTS.md). Packaged extensions can contribute middleware,
+task lifecycle, system-model observers, Gateway services, and FastAPI HTTP routers; the
+[reference extension](examples/deerflow-extension-example/) demonstrates all five.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP

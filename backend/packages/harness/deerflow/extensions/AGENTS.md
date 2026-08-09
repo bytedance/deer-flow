@@ -7,12 +7,14 @@ through Gateway APIs, while importing Python entry points is an operator-control
 execution boundary. A plugin marked `required: true` fails Gateway construction when it
 cannot load; optional plugins fail open with attributed diagnostics.
 
-The public package is `packages/extension-api/` and must never import `deerflow`. Its
-registry contract exposes exactly three contribution kinds: middleware contributors,
-task-lifecycle contributors, and system-model-call observers. Middleware contributions
-declare lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
-`MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, or `STANDARD`) rather than a fragile list
-index. `extensions/stack.py` is the single final composition point; do not inject inside
+The public package is `packages/extension-api/` and must never import `deerflow` or carry
+framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
+themselves. Its registry contract exposes five contribution kinds: middleware
+contributors, task-lifecycle contributors, system-model-call observers, Gateway-lifetime
+services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
+`TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
+single final composition point; do not inject inside
 the shared base builder because the lead builder appends more middleware afterward.
 `extensions/ordering.py` owns host ordering invariants and validates the final composed
 stack. Nothing under `extensions/` may import `agents.middlewares` at module scope: the
@@ -32,8 +34,9 @@ capability, so a single-sided wrapper receives a pass-through counterpart; imple
 both sides when the extension must observe both synchronous and asynchronous execution
 paths.
 
-Lead runs and subagents allocate an `ExtensionData` task store only when at least one of
-the three contribution kinds is registered. Middleware and system-call sites recover the
+Lead runs and subagents allocate an `ExtensionData` task store only when middleware,
+task-lifecycle, or system-model observation is registered; services and routers are
+app-scoped and do not allocate one. Middleware and system-call sites recover the
 live store through `EXTENSION_TASK_STORE_KEY` / `task_store_from_runtime()`; lifecycle
 contributors receive that same store directly. Each task resolves the immutable
 loaded-extension snapshot once and binds that same object through task-store allocation,
@@ -84,6 +87,40 @@ subagent's isolated loop, while synchronous system callbacks submit fire-and-for
 there. Shutdown stops accepting detached observations before the memory shutdown flush and
 resets the loop only after in-flight run/subagent drain ordering is complete.
 
+Gateway services start in registration order after the persistence engine and session
+factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
+app store, projected host policy, and session factory. Start failures are attributed and
+fail open. The runtime captures `app.state.extensions` once, registers cleanup before the
+start batch, and stops the attempted service prefix in reverse order after run/subagent
+drain but before store, checkpointer, and engine teardown. Each stop has an independent
+bounded timeout; failures do not starve later cleanup. A service-originated
+`CancelledError` fails open, while a new cancellation of the host task still propagates
+through the exit stack. Runtime diagnostics must be appended through
+`record_runtime_diagnostics()` so `app.state.extension_diagnostics` remains the canonical
+live list.
+
+Routers are constructed eagerly during `install()` and mounted only after all host routes,
+so host handlers always win. The Gateway rejects a contributed router atomically when an
+earlier host or extension route provably covers one of its paths for the same HTTP method.
+The conservative matcher proves common shadows through normalized parameter names,
+static-vs-dynamic matching, known built-in-converter containment, supported compound
+segments, full-segment `path` catch-alls, and `Mount` descendants reducible to those same
+rules. Relationships requiring general regex-language inclusion are allowed rather than
+guessed. Host WebSocket routes do not collide with contributed HTTP routes, but contributed
+WebSocket routes are rejected until the host can supply authentication and Origin checks.
+Because `include_router()` recompiles contributed routes, preflight projects the converter
+registry at include time. Nonstandard converters fail closed against reserved security
+paths but otherwise prove a shadow only when their normalized matchers are identical.
+Host authentication- and CSRF-exempt paths are reserved, and contributed Mounts, unsupported
+route items, startup/shutdown hooks, and custom router lifespans are rejected; lifetime
+resources must use `ExtensionService`. Auth and CSRF classify
+`get_request_route_path(request)`, the same root-path-adjusted ASGI path Starlette routes
+match; do not switch those security predicates back to reconstructed `request.url.path`.
+Any preflight, conflict, or include failure rolls back the whole router without preventing
+later routers from mounting. Do not introduce a framework-bound `RouterContributor`
+contract: the public registry accepts `Sequence[Any]`
+to keep extension-api dependency-free.
+
 The memory kind reaches those observers through a different shape, and the difference is
 deliberate rather than an oversight to be "aligned" away. DeerMem must stay vendorable and
 cannot import the extension API, so it reports through the `MemoryCallbacks.on_memory_llm_result`
@@ -96,7 +133,8 @@ The host hook wrapper around the callback stays at `Exception`: only the hook's 
 are non-fatal, and an observability path must not swallow `SystemExit` / `KeyboardInterrupt`.
 
 Gateway `create_app()` loads plugins once, stores the immutable registry on `app.state`
-and in the process-wide singleton, and installs one canonical live diagnostics list.
+and in the process-wide singleton, mounts contributed routers last, and installs one
+canonical live diagnostics list.
 Changing `plugins` requires a restart. Any future contribution kind must be added to the
 public contract and host runtime in the same slice; never accept a registration method
 that the current host silently ignores.
