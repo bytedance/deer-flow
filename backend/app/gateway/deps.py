@@ -22,7 +22,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
@@ -420,6 +420,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize persistence engine BEFORE checkpointer so that
         # auto-create-database logic runs first (postgres backend).
+        # Own cleanup before initialization so partial startup and host
+        # cancellation cannot strand an engine created along the way.
+        stack.push_async_callback(close_engine)
         await init_engine_from_config(config.database)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
@@ -438,6 +441,35 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+
+        # Services are app-scoped. Capture this app's immutable extension set
+        # once and close over the same object for teardown; the process-wide
+        # singleton may be replaced by another app/test before shutdown.
+        from deerflow.extensions import EMPTY_EXTENSIONS, record_runtime_diagnostics
+        from deerflow.extensions.gateway import start_services, stop_services
+
+        extensions = getattr(app.state, "extensions", EMPTY_EXTENSIONS)
+        attempted_services: list[tuple[str, Any]] = []
+
+        async def stop_extension_services() -> None:
+            record_runtime_diagnostics(
+                await stop_services(
+                    extensions,
+                    service_entries=attempted_services,
+                )
+            )
+
+        # Register cleanup before starting: start() can partially acquire
+        # resources and then fail or be cancelled.
+        stack.push_async_callback(stop_extension_services)
+        record_runtime_diagnostics(
+            await start_services(
+                extensions,
+                config,
+                sf,
+                attempted_services=attempted_services,
+            )
+        )
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -544,7 +576,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                             ),
                         ),
                     )
-            await close_engine()
 
 
 # ---------------------------------------------------------------------------

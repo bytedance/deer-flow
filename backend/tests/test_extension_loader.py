@@ -88,6 +88,9 @@ def test_install_failure_rolls_back_partial_registration():
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
     assert loaded.task_lifecycle == (), "rollback must clear partial lifecycle registrations too"
+    assert loaded.system_model_observers == ()
+    assert loaded.services == ()
+    assert loaded.routers == ()
 
 
 def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_same_use():
