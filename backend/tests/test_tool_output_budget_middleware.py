@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
 import tempfile
 from types import SimpleNamespace
 
@@ -83,9 +84,8 @@ def _unwritable_outputs_path():
     relative path that ``os.makedirs`` happily creates at the drive root.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        blocker = os.path.join(tmpdir, "not-a-directory")
-        with open(blocker, "w", encoding="utf-8") as f:
-            f.write("placeholder")
+        blocker = pathlib.Path(tmpdir) / "not-a-directory"
+        blocker.touch()
         yield os.path.join(blocker, "outputs")
 
 
