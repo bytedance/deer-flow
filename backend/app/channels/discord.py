@@ -174,15 +174,18 @@ class DiscordChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
 
-        # Cancel all active typing indicator tasks
-        for target_id, task in list(self._typing_tasks.items()):
-            if not task.done():
-                task.cancel()
-            logger.debug("[Discord] cancelled typing task for target %s", target_id)
-        self._typing_tasks.clear()
+        # Typing tasks belong to the dedicated Discord loop.  Serialize their
+        # cancellation with _start_typing() on that loop so a starter that has
+        # already observed _running=True cannot register a task after cleanup.
+        discord_loop = self._discord_loop
+        if discord_loop and discord_loop.is_running() and discord_loop is not asyncio.get_running_loop():
+            cleanup_future = asyncio.run_coroutine_threadsafe(self._cancel_typing_tasks(), discord_loop)
+            await asyncio.wrap_future(cleanup_future)
+        else:
+            await self._cancel_typing_tasks()
 
-        if self._client and self._discord_loop and self._discord_loop.is_running():
-            close_future = asyncio.run_coroutine_threadsafe(self._client.close(), self._discord_loop)
+        if self._client and discord_loop and discord_loop.is_running():
+            close_future = asyncio.run_coroutine_threadsafe(self._client.close(), discord_loop)
             try:
                 await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=10)
             except TimeoutError:
@@ -263,6 +266,17 @@ class DiscordChannel(Channel):
 
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
+
+    async def _cancel_typing_tasks(self) -> None:
+        """Cancel and await every typing task on their owning event loop."""
+        typing_tasks = list(self._typing_tasks.items())
+        for target_id, task in typing_tasks:
+            if not task.done():
+                task.cancel()
+            logger.debug("[Discord] cancelled typing task for target %s", target_id)
+        if typing_tasks:
+            await asyncio.gather(*(task for _, task in typing_tasks), return_exceptions=True)
+        self._typing_tasks.clear()
 
     async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
