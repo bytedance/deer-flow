@@ -118,7 +118,7 @@ def _write_openviking_extensions_config(path: Path, url: str) -> None:
     )
 
 
-def test_openviking_mcp_config_resolves_headers_omits_identity_masks_secrets_and_disables_forget(
+def test_openviking_mcp_config_resolves_headers_omits_identity_and_masks_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -136,13 +136,13 @@ def test_openviking_mcp_config_resolves_headers_omits_identity_masks_secrets_and
     assert params["headers"] == {"X-API-Key": api_key}
     assert _IDENTITY_HEADERS.isdisjoint({name.lower() for name in params["headers"]})
     assert masked.headers == {"X-API-Key": "***"}
-    assert masked.tools["forget"].enabled is False
+    assert server.tools == {}
     assert api_key not in masked.model_dump_json()
     assert api_key not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_openviking_http_mcp_discovers_calls_and_filters_tools(
+async def test_openviking_http_mcp_discovers_exposes_and_calls_native_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -158,8 +158,8 @@ async def test_openviking_http_mcp_discovers_calls_and_filters_tools(
         with patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions):
             tools = await get_mcp_tools()
 
-        assert {tool.name for tool in tools} == {"openviking_find"}
-        find_tool = tools[0]
+        assert {tool.name for tool in tools} == {"openviking_find", "openviking_forget"}
+        find_tool = next(tool for tool in tools if tool.name == "openviking_find")
         result = await find_tool.ainvoke({"query": "needle"})
 
     assert calls == ["needle"]

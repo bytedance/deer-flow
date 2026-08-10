@@ -27,12 +27,7 @@
       "headers": {
         "X-API-Key": "$OPENVIKING_API_KEY"
       },
-      "description": "Official OpenViking tools for explicit memory and resource operations",
-      "tools": {
-        "forget": {
-          "enabled": false
-        }
-      }
+      "description": "Official OpenViking tools for explicit memory and resource operations"
     },
     "postgres": {
       "enabled": false,

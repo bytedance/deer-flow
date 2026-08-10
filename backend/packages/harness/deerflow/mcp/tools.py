@@ -766,17 +766,6 @@ async def get_mcp_tools() -> list[BaseTool]:
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
-            prefix = f"{source_name}_"
-            discovered_original_names = {tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name for tool in server_tools}
-            if discovered_original_names and server_cfg is not None:
-                for configured_name in sorted(server_cfg.tools):
-                    if configured_name not in discovered_original_names:
-                        logger.warning(
-                            "MCP server '%s' configured tool override '%s' did not match any discovered tool; offered original tool names: %s",
-                            source_name,
-                            configured_name,
-                            ", ".join(repr(name) for name in sorted(discovered_original_names)),
-                        )
             for tool in server_tools:
                 if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
                     logger.warning(
@@ -786,11 +775,9 @@ async def get_mcp_tools() -> list[BaseTool]:
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
-                original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
-                tool_override = server_cfg.tools.get(original_name) if server_cfg is not None else None
-                if tool_override is not None and not tool_override.enabled:
-                    continue
                 tag_mcp_tool(tool)
+                prefix = f"{source_name}_"
+                original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)

@@ -29,11 +29,6 @@ servers:
       "url": "http://127.0.0.1:1933/mcp",
       "headers": {
         "X-API-Key": "$OPENVIKING_API_KEY"
-      },
-      "tools": {
-        "forget": {
-          "enabled": false
-        }
       }
     }
   }
@@ -56,17 +51,10 @@ MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
 OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
 MCP initialization and discovery flow, prefixes the discovered names with
 `openviking_` by default, and routes calls back through the generic MCP client.
-The OpenViking tool named `forget` permanently deletes a `viking://` URI, so the
-example disables it by its original MCP name before prefixing because the
-deletion is irreversible. Other official OpenViking harnesses expose resource
-ingestion, and an operator can later remove an unwanted added resource through
-the OpenViking CLI or REST API, so this initial integration keeps resource
-operations available for capability parity. Under this default configuration,
-the agent cannot perform that removal because its `forget` tool is disabled.
-`add_resource` can fetch a model-selected URL and, when configured with
-recurring watch behavior, can create repeated fetch and re-embedding work.
-Operators who do not want that capability can disable `add_resource` with the
-same per-tool mechanism.
+For capability parity with other official OpenViking harnesses, DeerFlow exposes
+the native `forget` tool with the other discovered tools. `forget` permanently
+deletes a `viking://` URI and should be called only after explicit user
+confirmation; DeerFlow does not enforce that confirmation.
 
 This explicit tool path is separate from the automatic OpenViking memory backend
 configured under `config.yaml -> memory`. Both may be enabled at the same time:
@@ -76,13 +64,6 @@ are model-selected operations.
 For Docker, point `url` at the OpenViking address reachable from the Gateway
 container, such as `http://openviking:1933/mcp` for a shared Compose network or
 `http://host.docker.internal:1933/mcp` for a host-installed server.
-
-## Tool Enablement
-
-Set `tools.<original_tool_name>.enabled` to `false` to omit one discovered tool
-without disabling the whole server. The key is the MCP server's original tool
-name, before DeerFlow adds the default `<server_name>_` prefix. Omitted tool
-entries and omitted `enabled` values default to enabled.
 
 ## Routing Hints
 
