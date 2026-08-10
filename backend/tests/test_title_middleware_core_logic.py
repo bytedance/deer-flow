@@ -105,6 +105,26 @@ class TestTitleMiddlewareCoreLogic:
 
         assert result == {"title": "New Conversation"}
 
+    def test_attachment_only_title_skips_configured_title_model(self, monkeypatch):
+        _set_test_title_config(enabled=True, model_name="title-model")
+        middleware = TitleMiddleware()
+        create_model = MagicMock()
+        monkeypatch.setattr(title_middleware_module, "create_chat_model", create_model)
+        state = {
+            "messages": [
+                HumanMessage(
+                    content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                ),
+                AIMessage(content="好的，我来分析 report.pdf"),
+            ]
+        }
+
+        result = asyncio.run(middleware._agenerate_title_result(state))
+
+        assert result == {"title": "New Conversation"}
+        create_model.assert_not_called()
+
     def test_title_preserves_structured_content_without_original_user_content(self):
         middleware = TitleMiddleware()
         state = {

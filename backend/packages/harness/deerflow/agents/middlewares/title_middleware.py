@@ -214,12 +214,15 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state):
             return None
 
-        config = self._get_title_config()
-        if not config.model_name:
-            user_msg = self._get_title_user_message(state)
+        user_msg = self._get_title_user_message(state)
+        # An attachment-only first turn has no user-authored text. Do not let a
+        # configured title model infer a title from the assistant response.
+        if not user_msg.strip():
             return {"title": self._fallback_title(user_msg)}
 
-        user_msg = self._get_title_user_message(state)
+        config = self._get_title_config()
+        if not config.model_name:
+            return {"title": self._fallback_title(user_msg)}
 
         try:
             prompt, user_msg = self._build_title_prompt(state)
