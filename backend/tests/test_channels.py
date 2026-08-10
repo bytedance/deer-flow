@@ -5810,6 +5810,100 @@ class TestDiscordChannel:
 
         _run(go())
 
+    def test_stop_does_not_await_typing_tasks_from_stopped_discord_loop(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            discord_loop = asyncio.new_event_loop()
+            loop_ready = threading.Event()
+
+            def run_discord_loop():
+                asyncio.set_event_loop(discord_loop)
+                loop_ready.set()
+                discord_loop.run_forever()
+
+            discord_thread = threading.Thread(target=run_discord_loop, daemon=True)
+            discord_thread.start()
+            assert await asyncio.to_thread(loop_ready.wait, 5)
+
+            channel._discord_loop = discord_loop
+            channel._thread = discord_thread
+            starter = asyncio.run_coroutine_threadsafe(channel._start_typing(typing_target, "chat-1"), discord_loop)
+            await asyncio.wait_for(asyncio.wrap_future(starter), timeout=5)
+            typing_task = channel._typing_tasks["chat-1"]
+
+            discord_loop.call_soon_threadsafe(discord_loop.stop)
+            await asyncio.to_thread(discord_thread.join, 5)
+            assert not discord_thread.is_alive()
+            assert not discord_loop.is_running()
+            assert not typing_task.done()
+
+            try:
+                # The task belongs to a loop that has already exited.  stop()
+                # must not gather it from the main loop, and must still finish
+                # clearing all channel lifecycle state.
+                await channel.stop()
+
+                assert channel._typing_tasks == {}
+                assert channel._thread is None
+                assert channel._discord_loop is None
+            finally:
+
+                def drain_stopped_loop():
+                    asyncio.set_event_loop(discord_loop)
+                    if not typing_task.done():
+                        typing_task.cancel()
+                    discord_loop.run_until_complete(asyncio.gather(typing_task, return_exceptions=True))
+                    discord_loop.close()
+
+                await asyncio.to_thread(drain_stopped_loop)
+
+        _run(go())
+
+    def test_run_client_drains_typing_tasks_before_worker_loop_exits(self):
+        from app.channels.discord import DiscordChannel
+
+        channel = DiscordChannel(MessageBus(), config={})
+        channel._running = True
+        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+        class FailingClient:
+            def __init__(self):
+                self.closed = False
+                self.typing_task = None
+
+            async def start(self, _token):
+                await channel._start_typing(typing_target, "chat-1")
+                self.typing_task = channel._typing_tasks["chat-1"]
+                raise RuntimeError("simulated disconnect")
+
+            def is_closed(self):
+                return self.closed
+
+            async def close(self):
+                self.closed = True
+
+        client = FailingClient()
+        channel._client = client
+        channel._bot_token = "token"
+
+        try:
+            with patch("app.channels.discord.logger.exception"):
+                channel._run_client()
+
+            assert channel._typing_tasks == {}
+            assert client.typing_task is not None
+            assert client.typing_task.done()
+            assert client.closed
+        finally:
+            discord_loop = channel._discord_loop
+            if discord_loop is not None and not discord_loop.is_closed():
+                discord_loop.close()
+
 
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):

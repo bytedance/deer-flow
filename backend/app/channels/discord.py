@@ -174,28 +174,55 @@ class DiscordChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
 
-        # Typing tasks belong to the dedicated Discord loop.  Serialize their
-        # cancellation with _start_typing() on that loop so a starter that has
-        # already observed _running=True cannot register a task after cleanup.
         discord_loop = self._discord_loop
-        if discord_loop and discord_loop.is_running() and discord_loop is not asyncio.get_running_loop():
-            cleanup_future = asyncio.run_coroutine_threadsafe(self._cancel_typing_tasks(), discord_loop)
-            await asyncio.wrap_future(cleanup_future)
-        else:
+        current_loop = asyncio.get_running_loop()
+        if discord_loop is None or discord_loop is current_loop:
             await self._cancel_typing_tasks()
+        elif discord_loop.is_running():
+            # Serialize cleanup with _start_typing() on the owning loop.  The
+            # loop may exit between is_running() and scheduling, so neither
+            # scheduling nor waiting is allowed to block the rest of stop().
+            cleanup_coro = self._cancel_typing_tasks()
+            try:
+                cleanup_future = asyncio.run_coroutine_threadsafe(cleanup_coro, discord_loop)
+            except RuntimeError:
+                cleanup_coro.close()
+                logger.warning("[Discord] event loop stopped before typing-task cleanup could be scheduled")
+            else:
+                try:
+                    await asyncio.wait_for(asyncio.wrap_future(cleanup_future), timeout=10)
+                except TimeoutError:
+                    cleanup_future.cancel()
+                    logger.warning("[Discord] typing-task cleanup timed out after 10s")
+                except Exception:
+                    logger.exception("[Discord] error while cleaning up typing tasks")
 
         if self._client and discord_loop and discord_loop.is_running():
-            close_future = asyncio.run_coroutine_threadsafe(self._client.close(), discord_loop)
+            close_coro = self._client.close()
             try:
-                await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=10)
-            except TimeoutError:
-                logger.warning("[Discord] client close timed out after 10s")
-            except Exception:
-                logger.exception("[Discord] error while closing client")
+                close_future = asyncio.run_coroutine_threadsafe(close_coro, discord_loop)
+            except RuntimeError:
+                close_coro.close()
+                logger.warning("[Discord] event loop stopped before client close could be scheduled")
+            else:
+                try:
+                    await asyncio.wait_for(asyncio.wrap_future(close_future), timeout=10)
+                except TimeoutError:
+                    close_future.cancel()
+                    logger.warning("[Discord] client close timed out after 10s")
+                except Exception:
+                    logger.exception("[Discord] error while closing client")
 
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
+
+        # _run_client() normally drains these tasks in its finally block.  If
+        # the owning loop was stopped externally before that cleanup ran, only
+        # discard the stale references here; awaiting them from this loop would
+        # raise a cross-loop RuntimeError.
+        if discord_loop and discord_loop is not current_loop and not discord_loop.is_running():
+            self._discard_typing_tasks()
 
         self._client = None
         self._discord_loop = None
@@ -276,6 +303,16 @@ class DiscordChannel(Channel):
             logger.debug("[Discord] cancelled typing task for target %s", target_id)
         if typing_tasks:
             await asyncio.gather(*(task for _, task in typing_tasks), return_exceptions=True)
+        self._typing_tasks.clear()
+
+    def _discard_typing_tasks(self) -> None:
+        """Forget stale typing tasks after their owning event loop has stopped."""
+        for target_id, task in self._typing_tasks.items():
+            if not task.done():
+                logger.warning(
+                    "[Discord] discarding pending typing task for stopped-loop target %s",
+                    target_id,
+                )
         self._typing_tasks.clear()
 
     async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
@@ -550,6 +587,10 @@ class DiscordChannel(Channel):
             if self._running:
                 logger.exception("Discord client error")
         finally:
+            try:
+                self._discord_loop.run_until_complete(self._cancel_typing_tasks())
+            except Exception:
+                logger.exception("Error while cleaning up Discord typing tasks")
             try:
                 if self._client and not self._client.is_closed():
                     self._discord_loop.run_until_complete(self._client.close())
