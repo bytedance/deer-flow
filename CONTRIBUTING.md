@@ -313,6 +313,9 @@ make test
 # Requires a valid root config.yaml and API credentials.
 make test-live
 
+# Explicit model/tool compatibility smoke checks (also real APIs)
+make model-smoke ARGS="--model configured-model-name"
+
 # Frontend unit tests
 cd frontend
 make test
@@ -326,6 +329,13 @@ make test-e2e
 local sandboxes, artifacts, and files. It is never run by the default backend
 test command or CI. Direct pytest invocations of `tests/test_client_live.py`
 must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+`make model-smoke` is a separate manual runner for basic chat, streaming, and
+model-driven sandbox tool compatibility. It also sets
+`DEER_FLOW_RUN_LIVE_TESTS=1`, calls real model APIs, and may incur charges. It
+is not pytest-collected or run by default CI. See
+[`backend/tests/model_compat/README.md`](backend/tests/model_compat/README.md)
+for model selection, result categories, cleanup behavior, and exit codes.
 
 ### PR Regression Checks
 

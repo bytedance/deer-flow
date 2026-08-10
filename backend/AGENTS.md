@@ -102,6 +102,7 @@ make dev                # Run Gateway API with reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
 make test               # Run offline backend tests (excludes live external-API tests)
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
+make model-smoke ARGS="--model NAME"  # Explicit model/tool compatibility smoke runner
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
 make lint               # Lint with ruff
 make format             # Format code with ruff
@@ -1406,6 +1407,19 @@ PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
+
+`tests/model_compat/run_smoke.py` is a manual, non-pytest entry point for model
+and sandbox-tool compatibility. Run it only via `make model-smoke ARGS="--model
+NAME"` (or a direct command with `DEER_FLOW_RUN_LIVE_TESTS=1`): it calls real
+model APIs and may incur charges. CI is rejected even when the opt-in is set.
+Its orchestration and event-contract logic is covered offline by
+`tests/test_model_compat_smoke.py`; keep that layer injectable and free of real
+model/network calls. Each live case must retain unique user/thread isolation,
+an in-memory checkpointer, normal sandbox release, and best-effort local thread
+cleanup. Its process-local config copy must keep title generation,
+summarization, memory injection, and memory writes disabled so only the selected
+lead model can consume model quota. Full usage and exit codes are in
+`tests/model_compat/README.md`.
 
 ### Running the Full Application
 

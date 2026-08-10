@@ -462,6 +462,9 @@ make test
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live
+
+# Explicit model/tool compatibility checks for a configured model
+make model-smoke ARGS="--model configured-model-name"
 ```
 
 The live suite requires a valid root `config.yaml` and API credentials. It may
@@ -469,6 +472,12 @@ incur API costs or create local sandboxes, artifacts, and files, so it is not
 part of default test runs or CI. Direct pytest invocation of
 `tests/test_client_live.py` also requires
 `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+The model/tool smoke runner is likewise explicit: `make model-smoke` sets
+`DEER_FLOW_RUN_LIVE_TESTS=1`, calls real model APIs, and may incur API charges.
+It is a manual non-pytest entry point and is never part of default tests or CI.
+See [`tests/model_compat/README.md`](tests/model_compat/README.md) for the five
+contracts, model/case parameters, output categories, isolation, and exit codes.
 
 `make detect-blocking-io` statically scans backend business code for blocking
 IO that may run on the backend event loop and is not test-coverage-bound. It
