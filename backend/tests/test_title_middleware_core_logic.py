@@ -105,7 +105,8 @@ class TestTitleMiddlewareCoreLogic:
 
         assert result == {"title": "New Conversation"}
 
-    def test_attachment_only_title_skips_configured_title_model(self, monkeypatch):
+    @pytest.mark.parametrize("original_user_content", ["", " \t\n"], ids=["empty", "whitespace-only"])
+    def test_attachment_only_title_skips_configured_title_model(self, monkeypatch, original_user_content):
         _set_test_title_config(enabled=True, model_name="title-model")
         middleware = TitleMiddleware()
         create_model = MagicMock()
@@ -114,7 +115,7 @@ class TestTitleMiddlewareCoreLogic:
             "messages": [
                 HumanMessage(
                     content="<current_uploads>\nThe following files were uploaded in this message:\n\n- report.pdf\n</current_uploads>\n\n",
-                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: ""},
+                    additional_kwargs={ORIGINAL_USER_CONTENT_KEY: original_user_content},
                 ),
                 AIMessage(content="好的，我来分析 report.pdf"),
             ]
