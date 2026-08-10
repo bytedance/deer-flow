@@ -769,6 +769,17 @@ export interface Translations {
         connectedAction: string;
         requestPermissions: string;
         alreadyConnected: string;
+        changeAppButton: string;
+        changeAppTitle: string;
+        changeAppDescription: string;
+        changeAppIdLabel: string;
+        changeAppSecretLabel: string;
+        changeAppAuthResetNote: string;
+        changeAppSubmit: string;
+        changeAppReRegister: string;
+        changeAppSwitched: string;
+        brandFeishu: string;
+        brandLark: string;
         connectionStarted: string;
         connectionReady: string;
         authStarted: string;
