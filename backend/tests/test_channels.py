@@ -5692,6 +5692,33 @@ class TestHandleChatWithArtifacts:
         _run(go())
 
 
+class TestDiscordChannel:
+    def test_stop_prevents_queued_typing_starter_from_creating_task(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            # Queue the starter without yielding to it.  stop() therefore runs
+            # first and must form a boundary that the delayed starter cannot
+            # cross by installing a fresh infinite typing loop afterwards.
+            starter = asyncio.create_task(channel._start_typing(typing_target, "chat-1"))
+            await channel.stop()
+            await starter
+
+            try:
+                assert channel._typing_tasks == {}
+            finally:
+                leaked_tasks = list(channel._typing_tasks.values())
+                for task in leaked_tasks:
+                    task.cancel()
+                await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+        _run(go())
+
+
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
         from app.channels.feishu import FeishuChannel

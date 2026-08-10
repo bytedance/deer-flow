@@ -244,6 +244,8 @@ class DiscordChannel(Channel):
 
     async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> None:
         """Starts a loop to send periodic typing indicators."""
+        if not self._running:
+            return
         target_id = thread_ts or chat_id
         if target_id in self._typing_tasks:
             return  # Already typing for this target
@@ -352,7 +354,7 @@ class DiscordChannel(Channel):
                 self._publish(inbound)
                 # Start typing indicator in the thread
                 if typing_target:
-                    asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
+                    await self._start_typing(typing_target, chat_id, thread_id)
                 asyncio.create_task(self._add_reaction(message))
                 return
 
@@ -460,7 +462,7 @@ class DiscordChannel(Channel):
 
         # Start typing indicator in the correct target (thread or channel)
         if typing_target:
-            asyncio.create_task(self._start_typing(typing_target, chat_id, thread_id))
+            await self._start_typing(typing_target, chat_id, thread_id)
 
         self._publish(inbound)
         asyncio.create_task(self._add_reaction(message))
