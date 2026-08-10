@@ -791,8 +791,10 @@ set `DEER_FLOW_LARK_CLI_SANDBOX_RUNTIME_DIR` to that directory.
 > **Sandbox trust boundary:** the browser never receives the Lark app secret, but
 > agent conversations run `lark-cli` inside the sandbox, so the per-user
 > credential directories are mounted into it: `config` (holding the long-lived
-> `appSecret`) is mounted **read-only** and `data` (refreshable OAuth tokens)
-> writable. Both remain *readable* by any process the agent runs there, so code
+> `appSecret`) is mounted **read-only**, its otherwise empty `config/locks`
+> subdirectory is over-mounted writable for `lark-cli` coordination files, and
+> `data` (refreshable OAuth tokens) is writable. The credential-bearing config
+> and data mounts remain *readable* by any process the agent runs there, so code
 > reached via prompt injection in a tool result could read them. Treat the
 > sandbox as inside the Lark credential trust boundary until the sidecar
 > credential-broker follow-up removes these mounts from sandbox execution.

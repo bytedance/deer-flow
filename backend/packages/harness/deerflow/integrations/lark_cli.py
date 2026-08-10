@@ -106,6 +106,7 @@ LARK_CLI_MAX_EXTRACTED_BYTES = 256 * 1024 * 1024
 LARK_CLI_MAX_RUNTIME_ASSET_BYTES = 128 * 1024 * 1024
 LARK_CLI_MANIFEST_FILE = ".deerflow-lark-cli-manifest.json"
 LARK_CLI_SANDBOX_CONFIG_DIR = "/mnt/integrations/lark-cli/config"
+LARK_CLI_SANDBOX_LOCKS_DIR = f"{LARK_CLI_SANDBOX_CONFIG_DIR}/locks"
 LARK_CLI_SANDBOX_DATA_DIR = "/mnt/integrations/lark-cli/data"
 LARK_CLI_SANDBOX_RUNTIME_DIR = "/mnt/integrations/lark-cli/runtime"
 LARK_CLI_LINUX_ARCHES = ("amd64", "arm64")
@@ -309,7 +310,7 @@ def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None)
         raise ValueError(f"Lark CLI credential path must not be a symlink: {root}")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
-    for required in (root / "config", root / "data"):
+    for required in (root / "config", root / "config" / "locks", root / "data"):
         if required.is_symlink():
             raise ValueError(f"Lark CLI credential path must not be a symlink: {required}")
         required.mkdir(parents=True, exist_ok=True, mode=0o700)
