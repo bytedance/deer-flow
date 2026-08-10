@@ -123,17 +123,20 @@ class WeComChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._ws_task:
-            try:
-                self._ws_task.cancel()
-            except Exception:
-                pass
-            self._ws_task = None
+        ws_task = self._ws_task
+        if ws_task and not ws_task.done():
+            ws_task.cancel()
         if self._ws_client:
             try:
                 self._ws_client.disconnect()
             except Exception:
                 pass
+        if ws_task:
+            # Cancellation is normal shutdown, while real connection failures
+            # are reported by _on_ws_task_done.  gather keeps both from
+            # escaping without swallowing cancellation of stop() itself.
+            await asyncio.gather(ws_task, return_exceptions=True)
+        self._ws_task = None
         self._ws_client = None
         self._ws_frames.clear()
         self._ws_stream_ids.clear()

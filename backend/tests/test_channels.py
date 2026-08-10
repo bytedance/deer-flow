@@ -6391,6 +6391,40 @@ class TestFeishuCardSuccessChecks:
 
 
 class TestWeComChannel:
+    def test_stop_waits_for_connection_task_cancellation(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            connection_started = asyncio.Event()
+            cancellation_finished = asyncio.Event()
+
+            async def connect():
+                connection_started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancellation_finished.set()
+
+            connection_task = asyncio.create_task(connect())
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = connection_task
+            await connection_started.wait()
+
+            try:
+                await channel.stop()
+
+                assert connection_task.done()
+                assert cancellation_finished.is_set()
+                assert channel._ws_task is None
+            finally:
+                if not connection_task.done():
+                    connection_task.cancel()
+                await asyncio.gather(connection_task, return_exceptions=True)
+
+        _run(go())
+
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
 
