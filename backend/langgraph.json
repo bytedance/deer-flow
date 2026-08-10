@@ -4,7 +4,7 @@
   "dependencies": [
     "."
   ],
-  "env": ".env",
+  "env": "../.env",
   "graphs": {
     "lead_agent": "deerflow.agents:make_lead_agent"
   },

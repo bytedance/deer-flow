@@ -363,6 +363,26 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+#### LangGraph Studio (Optional)
+
+The default `make dev` topology uses DeerFlow's Gateway-embedded runtime and
+does not require LangGraph Studio. To inspect and test the registered lead-agent
+graph with the standalone development server, run the command from `backend/`
+so the CLI discovers `langgraph.json`:
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+The command prints the local API and Studio UI URLs. This in-memory server is
+for development and testing only. The flag permits DeerFlow's synchronous
+configuration and graph-factory setup during local Studio requests; it must not
+be treated as a production-server setting. Local Studio authentication is
+handled automatically, so the connection does not require custom headers. Use
+DeerFlow's documented production startup modes or a supported LangSmith
+deployment for production workloads.
+
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity
 published by that runtime and uses it for custom-agent configuration/SOUL, user

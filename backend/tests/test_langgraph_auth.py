@@ -177,8 +177,8 @@ class _FakeUser:
         self.display_name = identity
 
 
-def _make_ctx(user_id):
-    return Auth.types.AuthContext(resource="threads", action="create", user=_FakeUser(user_id), permissions=[])
+def _make_ctx(user_id, *, resource="threads", action="create"):
+    return Auth.types.AuthContext(resource=resource, action=action, user=_FakeUser(user_id), permissions=[])
 
 
 def test_filter_injects_user_id():
@@ -224,6 +224,58 @@ def test_filter_with_empty_metadata():
     result = asyncio.run(add_owner_filter(_make_ctx("user-z"), value))
     assert value["metadata"]["user_id"] == "user-z"
     assert result == {"user_id": "user-z"}
+
+
+@pytest.mark.parametrize("action", ["read", "search"])
+def test_studio_user_assistant_discovery_is_limited_to_system_assistants(action):
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx(
+                "langgraph-studio-user",
+                resource="assistants",
+                action=action,
+            ),
+            value,
+        )
+    )
+
+    assert result == {"created_by": "system"}
+    assert value == {}
+
+
+@pytest.mark.parametrize(
+    ("resource", "action"),
+    [("assistants", "create"), ("threads", "search")],
+)
+def test_studio_user_non_discovery_operations_remain_owner_scoped(resource, action):
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx(
+                "langgraph-studio-user",
+                resource=resource,
+                action=action,
+            ),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_regular_user_assistant_search_remains_owner_scoped():
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", resource="assistants", action="search"),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "user-a"
+    assert result == {"user_id": "user-a"}
 
 
 # ── Gateway parity ───────────────────────────────────────────────────────

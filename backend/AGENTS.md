@@ -350,10 +350,14 @@ from deerflow.config import get_app_config
 ```
 
 Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
-roots expose heavyweight graph/executor entrypoints lazily. Internal modules
-that only need lightweight types, config, or registries should import the
-concrete submodule instead of adding eager package-root imports that pull in the
-tool graph or subagent executor during state/schema imports.
+roots expose heavyweight graph/executor entrypoints lazily. The
+`deerflow.agents:make_lead_agent` LangGraph Server entrypoint is a concrete thin
+module-level function because the server resolves graph factories directly from
+the module dictionary; the wrapper keeps the lead-agent and skill-cache imports
+inside the function so importing the package remains lightweight. Internal
+modules that only need lightweight types, config, or registries should import
+the concrete submodule instead of adding eager package-root imports that pull in
+the tool graph or subagent executor during state/schema imports.
 
 ### Agent System
 
@@ -546,6 +550,22 @@ CORS is same-origin by default when requests enter through nginx on port 2026. S
 Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`, and CSRF cookie creation mirrors that value so the double-submit cookie pair expires together, including explicit re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the user's remember choice across token re-issue paths. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
+
+Standalone local LangGraph Studio uses the upstream synthetic identity
+`langgraph-studio-user`. For that identity's assistant reads/searches,
+`langgraph_auth.add_owner_filter` selects only assistants whose metadata has
+`created_by=system`; the registered graph definitions have that marker but no
+per-user metadata, so applying the normal owner filter makes Studio return
+`200 []`. User-owned assistants, thread, run, store, cron, and assistant-write
+operations remain owner-scoped, and ordinary authenticated users retain
+owner-scoped assistant reads/searches.
+
+Start that standalone in-memory server with
+`uv run langgraph dev --allow-blocking` from `backend/`. The development-only
+flag is required because LangGraph invokes graph factories synchronously while
+DeerFlow resolves runtime configuration and graph resources from disk. It is
+not an endorsed production setting; production continues to use the Gateway
+runtime or a supported LangSmith deployment.
 
 **Routers**:
 

@@ -27,6 +27,7 @@ auth = Auth()
 
 # Methods that require CSRF validation (state-changing per RFC 7231).
 _CSRF_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+_LANGGRAPH_STUDIO_USER_ID = "langgraph-studio-user"
 
 
 def _check_csrf(request) -> None:
@@ -109,6 +110,16 @@ async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
     Gateway stores thread ownership as ``metadata.user_id``.
     This handler ensures LangGraph Server enforces the same isolation.
     """
+    # Local LangGraph Server authenticates Studio through its built-in noop
+    # backend using this synthetic identity. Registered graph assistants are
+    # server definitions without per-user metadata, so applying the ordinary
+    # owner filter here makes Studio's assistant search return an empty list.
+    # Limit that identity's read-only discovery to server-registered system
+    # assistants; user-owned assistants, thread/run/store data, and assistant
+    # writes remain scoped.
+    if ctx.user.identity == _LANGGRAPH_STUDIO_USER_ID and ctx.resource == "assistants" and ctx.action in {"read", "search"}:
+        return {"created_by": "system"}
+
     # On create/update: stamp user_id into metadata
     metadata = value.setdefault("metadata", {})
     metadata["user_id"] = ctx.user.identity
