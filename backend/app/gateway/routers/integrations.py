@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -17,12 +18,14 @@ from deerflow.integrations.lark_cli import (
     LarkCliProbe,
     LarkConfigCompleteResult,
     LarkConfigStartResult,
+    LarkFlowSupersededError,
     LarkInstallResult,
     LarkIntegrationStatus,
     complete_lark_auth,
     complete_lark_config,
     get_lark_integration_status,
     install_lark_integration,
+    set_lark_app_credentials,
     start_lark_auth,
     start_lark_config,
 )
@@ -94,6 +97,7 @@ class LarkAuthStartRequest(BaseModel):
     recommend: bool = Field(default=False, description="Request the official recommended auto-approve scopes")
     domains: list[str] = Field(default_factory=list, description="Optional Lark auth domains, e.g. calendar or docs")
     scope: str | None = Field(default=None, description="Optional explicit OAuth scope string")
+    generation: str | None = Field(default=None, min_length=1, max_length=64, description="Optional current integration flow generation")
 
 
 class LarkConfigStartRequest(BaseModel):
@@ -103,6 +107,7 @@ class LarkConfigStartRequest(BaseModel):
 class LarkConfigStartResponse(BaseModel):
     verification_url: str = Field(..., description="URL the user should open in a browser to configure the Lark app")
     device_code: str = Field(..., description="Device code used by config/complete after browser approval")
+    generation: str = Field(..., description="Server generation bound to this configuration flow")
     expires_in: int | None = Field(None, description="Seconds before the configuration URL expires")
     interval: int | None = Field(None, description="Suggested polling interval from Lark")
     user_code: str | None = Field(None, description="Optional user code shown by Lark")
@@ -111,6 +116,7 @@ class LarkConfigStartResponse(BaseModel):
 
 class LarkConfigCompleteRequest(BaseModel):
     device_code: str = Field(..., description="Device code returned by config/start")
+    generation: str = Field(..., min_length=1, max_length=64, description="Generation returned by config/start")
     brand: str = Field(default="feishu", description="Brand returned by config/start")
     interval: int | None = Field(default=None, description="Polling interval returned by config/start")
     expires_in: int | None = Field(default=None, description="Expiration returned by config/start")
@@ -119,12 +125,20 @@ class LarkConfigCompleteRequest(BaseModel):
 class LarkConfigCompleteResponse(BaseModel):
     success: bool
     message: str
+    generation: str
     status: LarkIntegrationStatusResponse
+
+
+class LarkConfigCredentialsRequest(BaseModel):
+    app_id: str = Field(..., description="Lark/Feishu App ID to switch this user's integration to")
+    app_secret: str = Field(..., description="Lark/Feishu App Secret paired with app_id")
+    brand: Literal["feishu", "lark"] = Field(default="feishu", description="Lark brand: feishu or lark")
 
 
 class LarkAuthStartResponse(BaseModel):
     verification_url: str = Field(..., description="URL the user should open in a browser to authorize")
     device_code: str = Field(..., description="Device code used by the complete endpoint after browser approval")
+    generation: str = Field(..., description="Server generation bound to this authorization flow")
     expires_in: int | None = Field(None, description="Seconds before the authorization URL expires")
     user_code: str | None = Field(None, description="Optional user code shown by Lark")
     hint: str | None = Field(None, description="Optional guidance returned by lark-cli")
@@ -132,6 +146,7 @@ class LarkAuthStartResponse(BaseModel):
 
 class LarkAuthCompleteRequest(BaseModel):
     device_code: str = Field(..., description="Device code returned by auth/start")
+    generation: str = Field(..., min_length=1, max_length=64, description="Generation returned by auth/start")
     wait_timeout_seconds: int = Field(
         default=LARK_AUTH_COMPLETE_DEFAULT_WAIT_SECONDS,
         ge=LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS,
@@ -205,6 +220,7 @@ def _config_start_to_response(result: LarkConfigStartResult) -> LarkConfigStartR
     return LarkConfigStartResponse(
         verification_url=result.verification_url,
         device_code=result.device_code,
+        generation=result.generation,
         expires_in=result.expires_in,
         interval=result.interval,
         user_code=result.user_code,
@@ -216,6 +232,7 @@ def _config_complete_to_response(result: LarkConfigCompleteResult, *, include_ho
     return LarkConfigCompleteResponse(
         success=result.success,
         message=result.message,
+        generation=result.generation,
         status=_status_to_response(result.status, include_host_paths=include_host_paths),
     )
 
@@ -224,6 +241,7 @@ def _auth_start_to_response(result: LarkAuthStartResult) -> LarkAuthStartRespons
     return LarkAuthStartResponse(
         verification_url=result.verification_url,
         device_code=result.device_code,
+        generation=result.generation,
         expires_in=result.expires_in,
         user_code=result.user_code,
         hint=result.hint,
@@ -294,9 +312,35 @@ async def complete_lark_app_config(request: Request, body: LarkConfigCompleteReq
             get_effective_user_id(),
             config,
             device_code=body.device_code,
+            generation=body.generation,
             brand=body.brand,
             interval=body.interval,
             expires_in=body.expires_in,
+        )
+        return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LarkFlowSupersededError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except TimeoutError as e:
+        raise HTTPException(status_code=504, detail=str(e))
+    except Exception as e:
+        logger.error("Failed to complete Lark connection setup: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to complete Lark connection setup.")
+
+
+@router.post("/lark/config/credentials", response_model=LarkConfigCompleteResponse, summary="Switch Lark/Feishu App Credentials")
+async def switch_lark_app_credentials(request: Request, body: LarkConfigCredentialsRequest, config: AppConfig = Depends(get_config)) -> LarkConfigCompleteResponse:
+    try:
+        result = await asyncio.to_thread(
+            set_lark_app_credentials,
+            get_effective_user_id(),
+            config,
+            app_id=body.app_id,
+            app_secret=body.app_secret,
+            brand=body.brand,
         )
         return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
     except FileNotFoundError as e:
@@ -306,8 +350,8 @@ async def complete_lark_app_config(request: Request, body: LarkConfigCompleteReq
     except TimeoutError as e:
         raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
-        logger.error("Failed to complete Lark connection setup: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to complete Lark connection setup.")
+        logger.error("Failed to switch Lark app credentials: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to switch Lark app credentials.")
 
 
 @router.post("/lark/auth/start", response_model=LarkAuthStartResponse, summary="Start Lark/Feishu Browser Authorization")
@@ -319,10 +363,13 @@ async def start_lark_browser_auth(body: LarkAuthStartRequest) -> LarkAuthStartRe
             domains=tuple(body.domains),
             scope=body.scope,
             recommend=body.recommend,
+            generation=body.generation,
         )
         return _auth_start_to_response(result)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except LarkFlowSupersededError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError as e:
@@ -340,11 +387,14 @@ async def complete_lark_browser_auth(request: Request, body: LarkAuthCompleteReq
             get_effective_user_id(),
             config,
             device_code=body.device_code,
+            generation=body.generation,
             wait_timeout_seconds=body.wait_timeout_seconds,
         )
         return _auth_complete_to_response(result, include_host_paths=await _is_admin_user(request))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except LarkFlowSupersededError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except TimeoutError as e:
