@@ -568,6 +568,8 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     events = []
     dispatched_events = []
     captured = {}
+    polled_execution_ids = []
+    cleaned_execution_ids = []
     get_available_tools = MagicMock(return_value=["tool-a", "tool-b"])
 
     async def fake_emit_custom_event(payload, *, writer):
@@ -581,7 +583,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         def execute_async(self, prompt, task_id=None):
             captured["prompt"] = prompt
             captured["task_id"] = task_id
-            return task_id or "generated-task-id"
+            return "execution-456"
 
     # Simulate two polling rounds: first running (with one message), then completed.
     responses = iter(
@@ -599,7 +601,12 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
+    def get_result(execution_id):
+        polled_execution_ids.append(execution_id)
+        return next(responses)
+
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned_execution_ids.append)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -631,6 +638,9 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
     assert dispatched_events == events
+    assert polled_execution_ids == ["execution-456", "execution-456"]
+    assert cleaned_execution_ids == ["execution-456"]
+    assert {event["task_id"] for event in events} == {"tc-123"}
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
 
@@ -1503,7 +1513,7 @@ def test_cancellation_calls_request_cancel(monkeypatch):
     monkeypatch.setattr(
         task_tool_module,
         "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: "execution-cancel"}),
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
@@ -1535,7 +1545,7 @@ def test_cancellation_calls_request_cancel(monkeypatch):
             tool_call_id="tc-cancel-request",
         )
 
-    assert cancel_requests == ["tc-cancel-request"]
+    assert cancel_requests == ["execution-cancel"]
 
 
 def test_task_tool_returns_cancelled_message(monkeypatch):
