@@ -68,6 +68,11 @@ def _reset_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(paths_module, "_paths", None)
 
 
+def _advance_lark_flow(user_id: str) -> str:
+    with lark_cli._lark_credential_lock(user_id):
+        return lark_cli._advance_lark_flow_generation_locked(user_id)
+
+
 async def _config(tmp_path: Path) -> SimpleNamespace:
     skills_root = tmp_path / "skills"
     await asyncio.to_thread((skills_root / "public").mkdir, parents=True, exist_ok=True)
@@ -119,10 +124,11 @@ async def test_lark_auth_complete_route_does_not_block_event_loop(tmp_path: Path
 
     monkeypatch.setenv("PATH", f"{cli_path.parent}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setattr(integrations, "get_effective_user_id", lambda: "loop-user")
+    generation = await asyncio.to_thread(_advance_lark_flow, "loop-user")
 
     response = await integrations.complete_lark_browser_auth(
         request=None,
-        body=integrations.LarkAuthCompleteRequest(device_code="device-code"),
+        body=integrations.LarkAuthCompleteRequest(device_code="device-code", generation=generation),
         config=config,
     )
 
