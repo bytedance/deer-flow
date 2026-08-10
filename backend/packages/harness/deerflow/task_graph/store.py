@@ -2,11 +2,13 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from .models import CodingTask, TaskStatus
+from .models import CodingRunPlan, CodingTask, TaskStatus
 
 
 class JsonTaskStore:
     """把合法任务保存成JSON，并从JSON恢复"""
+
+    _RUN_PLAN_FILENAME = "coding-run-plan.json"
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -14,6 +16,20 @@ class JsonTaskStore:
 
     def _task_path(self, task_id: str) -> Path:
         return self.root / f"{task_id}.json"
+
+    @property
+    def _run_plan_path(self) -> Path:
+        return self.root / self._RUN_PLAN_FILENAME
+
+    def save_run_plan(self, plan: CodingRunPlan) -> None:
+        self._run_plan_path.write_text(
+            json.dumps(asdict(plan), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def load_run_plan(self) -> CodingRunPlan:
+        data = json.loads(self._run_plan_path.read_text(encoding="utf-8"))
+        return CodingRunPlan(**data)
 
     def save(self, task: CodingTask) -> None:
         task_dict = asdict(task)
@@ -27,7 +43,7 @@ class JsonTaskStore:
         return CodingTask(**data)
 
     def list_all(self) -> list[CodingTask]:
-        paths = sorted(self.root.glob("*.json"))
+        paths = sorted(path for path in self.root.glob("*.json") if path.name != self._RUN_PLAN_FILENAME)
         tasks = list()
         for path in paths:
             tasks.append(self.load(path.stem))

@@ -13,6 +13,15 @@ class TaskStatus(StrEnum):
 
 
 @dataclass
+class CodingRunPlan:
+    """一个 Coding Run 已经由用户确认的目标契约。"""
+
+    coding_brief: dict[str, Any]
+    task_ids: list[str]
+    version: int = 1
+
+
+@dataclass
 class CodingTask:
     """任务的数据结构"""
 

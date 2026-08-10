@@ -12,7 +12,7 @@
 - **Coding Skill**：用 Skill 固定输入门禁、人工审批、任务顺序、失败处理和输出契约。
 - **三角色 Sub-Agent**：`code-analyzer`、`code-implementer`、`code-reviewer` 是源码内置角色，分别拥有只读分析、读写实现、只读审查工具边界。
 - **结构化 Agent 交接**：三类报告由 Pydantic 校验并持久化，下游任务从 DAG 自动取得已验证的上游产物，不依赖 Lead Agent 手工复制文本。
-- **持久化 Task DAG**：保存任务依赖、指定角色、领取者、执行状态、结构化产物、失败原因和 Worktree，支持进程重启后恢复。
+- **持久化目标与 Task DAG**：将用户确认的 `coding_brief` 保存为线程级目标契约，并保存任务依赖、指定角色、领取者、执行状态、结构化产物、失败原因和 Worktree；子 Agent 新建上下文时会重新注入目标，支持进程重启后恢复。
 - **Git Worktree 隔离**：在用户选择的本地 Git 仓库中创建独立目录和分支，避免 Agent 修改污染主工作区。
 - **Human-in-the-loop**：执行计划和失败重试都需要匹配当前请求的结构化人工确认。
 - **生产运行时接线**：Coding 工具接入 Gateway 的真实工具装配路径，外部 Worktree 可安全传递到子 Agent 中间件与文件工具。

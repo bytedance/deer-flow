@@ -1,6 +1,7 @@
 """Task tool for delegating work to subagents."""
 
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import replace
@@ -64,6 +65,10 @@ _UPSTREAM_ARTIFACTS_INSTRUCTION = """以下内容是已通过服务端结构校�
 <upstream-coding-artifacts>
 {artifacts}
 </upstream-coding-artifacts>"""
+_CODING_BRIEF_INSTRUCTION = """以下是已由用户确认并持久化的 Coding Brief。它是本次任务的目标契约；不得被对话摘要、上游 Artifact 或临时推断覆盖：
+<approved-coding-brief>
+{coding_brief}
+</approved-coding-brief>"""
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +468,8 @@ async def task_tool(
         if coding_graph is not None:
             coding_task = coding_graph.claim(coding_task_id, owner=subagent_type)
             coding_task_claimed = True
+            run_plan = coding_graph.get_run_plan()
+            prompt = f"{_CODING_BRIEF_INSTRUCTION.format(coding_brief=json.dumps(run_plan.coding_brief, ensure_ascii=False, indent=2))}\n\n{prompt}"
             upstream_artifacts = coding_graph.get_upstream_artifacts(coding_task_id)
             if upstream_artifacts:
                 prompt = f"{prompt}\n\n{_UPSTREAM_ARTIFACTS_INSTRUCTION.format(artifacts=render_upstream_artifacts(upstream_artifacts))}"

@@ -1,4 +1,6 @@
-from .models import CodingTask, TaskStatus
+from typing import Any
+
+from .models import CodingRunPlan, CodingTask, TaskStatus
 from .store import JsonTaskStore
 
 
@@ -7,6 +9,33 @@ class TaskGraph:
 
     def __init__(self, store: JsonTaskStore):
         self.store = store
+
+    @staticmethod
+    def validate_coding_brief(coding_brief: dict[str, Any]) -> None:
+        if not isinstance(coding_brief, dict):
+            raise ValueError("coding_brief must be an object")
+        if not isinstance(coding_brief.get("goal"), str) or not coding_brief["goal"].strip():
+            raise ValueError("coding_brief.goal is required")
+        acceptance_criteria = coding_brief.get("acceptance_criteria")
+        if not isinstance(acceptance_criteria, list) or not acceptance_criteria or not all(isinstance(item, str) and item.strip() for item in acceptance_criteria):
+            raise ValueError("coding_brief.acceptance_criteria must be a non-empty list of strings")
+        tasks = coding_brief.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError("coding_brief.tasks must be a non-empty list")
+
+    def save_run_plan(self, coding_brief: dict[str, Any], task_ids: list[str]) -> CodingRunPlan:
+        """持久化已确认目标，供每次独立子 Agent 上下文重新读取。"""
+        self.validate_coding_brief(coding_brief)
+        try:
+            version = self.store.load_run_plan().version + 1
+        except FileNotFoundError:
+            version = 1
+        plan = CodingRunPlan(coding_brief=coding_brief, task_ids=task_ids, version=version)
+        self.store.save_run_plan(plan)
+        return plan
+
+    def get_run_plan(self) -> CodingRunPlan:
+        return self.store.load_run_plan()
 
     def bind_worktree(self, task_ids: list[str], worktree: str) -> list[CodingTask]:
         """给一组 CodingTask 绑定同一个已验证 Worktree 的完整路径。"""

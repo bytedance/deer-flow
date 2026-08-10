@@ -1,4 +1,4 @@
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from langchain_core.tools import tool
 
@@ -18,14 +18,27 @@ class CodingTaskInput(TypedDict):
     agent_type: NotRequired[str]
 
 
+class CodingBriefInput(TypedDict):
+    """用户确认后必须持久化的 Coding 目标契约。"""
+
+    goal: str
+    acceptance_criteria: list[str]
+    tasks: list[dict[str, Any]]
+    repository: NotRequired[str]
+    issue_number: NotRequired[int]
+    constraints: NotRequired[list[str]]
+    open_questions: NotRequired[list[str]]
+
+
 @tool("submit_task_plan", parse_docstring=True)
-def submit_task_plan(tasks: list[CodingTaskInput], runtime: Runtime) -> str:
+def submit_task_plan(coding_brief: CodingBriefInput, tasks: list[CodingTaskInput], runtime: Runtime) -> str:
     """为当前线程提交一份完整的编码任务计划。
 
     保存任何任务之前会先校验整份计划。任务 ID 必须保持稳定，
     前置依赖通过 ``blocked_by`` 引用其他任务 ID。
 
     Args:
+        coding_brief: 已由用户确认的原始需求、验收标准和任务说明。
         tasks: 完整任务计划。每一项包含 ID、标题、详细描述，
             以及可选的前置依赖任务 ID 列表。
     """
@@ -49,6 +62,8 @@ def submit_task_plan(tasks: list[CodingTaskInput], runtime: Runtime) -> str:
         )
         for item in tasks
     ]
+    graph.validate_coding_brief(coding_brief)
     saved_tasks = graph.add_tasks(coding_tasks)
+    graph.save_run_plan(coding_brief, [task.id for task in saved_tasks])
     task_ids = ", ".join(task.id for task in saved_tasks)
     return f"Saved {len(saved_tasks)} coding tasks: {task_ids}"

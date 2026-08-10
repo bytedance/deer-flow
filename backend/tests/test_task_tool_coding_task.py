@@ -10,6 +10,16 @@ from deerflow.subagents.config import SubagentConfig
 
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
+CODING_BRIEF = {
+    "goal": "Fix pricing calculation",
+    "acceptance_criteria": ["Apply the correct discount"],
+    "tasks": [{"id": "task-1"}],
+}
+
+
+def _prompt_with_brief(prompt: str) -> str:
+    return task_tool_module._CODING_BRIEF_INSTRUCTION.format(coding_brief=json.dumps(CODING_BRIEF, ensure_ascii=False, indent=2)) + f"\n\n{prompt}"
+
 
 class FakeSubagentStatus(Enum):
     COMPLETED = "completed"
@@ -39,6 +49,9 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
         def get_upstream_artifacts(self, task_id: str):
             calls.append(("upstream", task_id))
             return []
+
+        def get_run_plan(self):
+            return SimpleNamespace(coding_brief=CODING_BRIEF)
 
         def complete(self, task_id: str, artifact=None):
             calls.append(("complete", task_id, artifact))
@@ -116,7 +129,7 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
         ("create_graph", "thread-1", "alice"),
         ("claim", "task-1", "code-analyzer"),
         ("upstream", "task-1"),
-        ("execute", "Inspect the code", "tool-call-1"),
+        ("execute", _prompt_with_brief("Inspect the code"), "tool-call-1"),
         ("complete", "task-1", analysis_report),
     ]
 
@@ -140,6 +153,9 @@ def test_coding_task_is_failed_for_each_terminal_failure(monkeypatch, status, er
 
         def get_upstream_artifacts(self, _task_id: str):
             return []
+
+        def get_run_plan(self):
+            return SimpleNamespace(coding_brief=CODING_BRIEF)
 
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))
@@ -207,7 +223,7 @@ def test_coding_task_is_failed_for_each_terminal_failure(monkeypatch, status, er
 
     assert calls == [
         ("claim", "task-1", "code-analyzer"),
-        ("execute", "Inspect the code", "tool-call-1"),
+        ("execute", _prompt_with_brief("Inspect the code"), "tool-call-1"),
         ("fail", "task-1", expected_reason),
     ]
 
@@ -222,6 +238,9 @@ def test_coding_task_is_failed_when_subagent_cannot_start(monkeypatch):
 
         def get_upstream_artifacts(self, _task_id: str):
             return []
+
+        def get_run_plan(self):
+            return SimpleNamespace(coding_brief=CODING_BRIEF)
 
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))
@@ -300,6 +319,9 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
         def get_upstream_artifacts(self, task_id: str):
             calls.append(("upstream", task_id))
             return upstream_artifacts
+
+        def get_run_plan(self):
+            return SimpleNamespace(coding_brief=CODING_BRIEF)
 
         def complete(self, task_id: str, artifact=None):
             calls.append(("complete", task_id, artifact))
@@ -380,7 +402,11 @@ def test_coding_task_worktree_is_passed_as_subagent_workspace_without_mutating_p
         ("upstream", "task-1"),
         (
             "execute",
-            (f"{task_tool_module._CODING_WORKSPACE_INSTRUCTION}\n\nInspect the code\n\n{task_tool_module._UPSTREAM_ARTIFACTS_INSTRUCTION.format(artifacts=task_tool_module.render_upstream_artifacts(upstream_artifacts))}"),
+            (
+                f"{task_tool_module._CODING_WORKSPACE_INSTRUCTION}\n\n"
+                f"{_prompt_with_brief('Inspect the code')}\n\n"
+                f"{task_tool_module._UPSTREAM_ARTIFACTS_INSTRUCTION.format(artifacts=task_tool_module.render_upstream_artifacts(upstream_artifacts))}"
+            ),
             "tool-call-1",
         ),
         ("complete", "task-1", None),
@@ -400,6 +426,9 @@ def test_coding_task_worktree_preparation_failure_marks_claimed_task_failed(
 
         def get_upstream_artifacts(self, _task_id: str):
             return []
+
+        def get_run_plan(self):
+            return SimpleNamespace(coding_brief=CODING_BRIEF)
 
         def fail(self, task_id: str, reason: str):
             calls.append(("fail", task_id, reason))

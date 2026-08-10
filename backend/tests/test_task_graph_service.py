@@ -23,7 +23,6 @@ def test_can_start_requires_every_dependency_to_exist_and_be_completed(task_grap
     )
 
     assert graph.can_start("task-2") is False
-
     store.save(CodingTask(id="task-1", subject="Analyze", description="Analyze change"))
     assert graph.can_start("task-2") is False
 
@@ -31,6 +30,37 @@ def test_can_start_requires_every_dependency_to_exist_and_be_completed(task_grap
     dependency.status = TaskStatus.completed
     store.save(dependency)
     assert graph.can_start("task-2") is True
+
+
+def test_run_plan_requires_a_complete_brief_and_persists_it(task_graph):
+    graph, store = task_graph
+    brief = {
+        "goal": "Fix login validation",
+        "acceptance_criteria": ["Reject invalid credentials"],
+        "tasks": [{"id": "task-1", "title": "Implement"}],
+    }
+
+    plan = graph.save_run_plan(brief, ["task-1"])
+
+    assert plan.version == 1
+    assert graph.get_run_plan() == plan
+    assert store.load_run_plan().coding_brief == brief
+    assert graph.save_run_plan(brief, ["task-1"]).version == 2
+
+
+@pytest.mark.parametrize(
+    "brief, error",
+    [
+        ({"acceptance_criteria": ["works"], "tasks": [{"id": "task-1"}]}, "goal"),
+        ({"goal": "Fix", "acceptance_criteria": [], "tasks": [{"id": "task-1"}]}, "acceptance_criteria"),
+        ({"goal": "Fix", "acceptance_criteria": ["works"], "tasks": []}, "tasks"),
+    ],
+)
+def test_run_plan_rejects_incomplete_brief(task_graph, brief, error):
+    graph, _store = task_graph
+
+    with pytest.raises(ValueError, match=error):
+        graph.save_run_plan(brief, ["task-1"])
 
 
 def test_can_start_allows_task_without_dependencies(task_graph):

@@ -32,7 +32,7 @@ Input Gate 通过后，先调用一次 `ask_clarification`，参数固定为：
 
 ## Persist Task DAG
 
-通过 Input Gate 后、委派任何子 Agent 前，先调用一次 `submit_task_plan`，保存下面三个稳定阶段任务。必须原样使用这些 ID 和依赖，不能用临时编号替换：
+通过 Input Gate 后、委派任何子 Agent 前，先调用一次 `submit_task_plan`。必须同时传入完整、已确认的 `coding_brief` 和下面三个稳定阶段任务。服务端会把 brief 作为线程级目标契约持久化，之后每一个新建上下文的子 Agent 都会重新读取它；不得只依赖 Lead Agent 的对话记忆。必须原样使用这些 ID 和依赖，不能用临时编号替换：
 
 ```json
 [
