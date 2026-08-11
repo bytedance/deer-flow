@@ -6603,7 +6603,244 @@ class TestFeishuCardSuccessChecks:
         _run(go())
 
 
+class _ControlledWeComManager:
+    def __init__(self, shutdown_started: asyncio.Event, release_shutdown: asyncio.Event, shutdown_finished: asyncio.Event) -> None:
+        self._ws = object()
+        self._is_manual_close = False
+        self.shutdown_started = shutdown_started
+        self.release_shutdown = release_shutdown
+        self.shutdown_finished = shutdown_finished
+        self.shutdown_tasks: list[asyncio.Task] = []
+        self.heartbeat_stopped = False
+        self.pending_messages_cleared = False
+
+    def _stop_heartbeat(self) -> None:
+        self.heartbeat_stopped = True
+
+    def _clear_pending_messages(self, _reason: str) -> None:
+        self.pending_messages_cleared = True
+
+    def disconnect(self) -> None:
+        self._is_manual_close = True
+        self._stop_heartbeat()
+        self._clear_pending_messages("Connection manually closed")
+        if self._ws:
+            asyncio.ensure_future(self._async_disconnect())
+
+    async def _async_disconnect(self) -> None:
+        shutdown_task = asyncio.current_task()
+        assert shutdown_task is not None
+        self.shutdown_tasks.append(shutdown_task)
+        self.shutdown_started.set()
+        try:
+            await self.release_shutdown.wait()
+        finally:
+            self._ws = None
+            self.shutdown_finished.set()
+
+
+class _ControlledWeComClient:
+    def __init__(self, manager: _ControlledWeComManager) -> None:
+        self._ws_manager = manager
+        self._started = False
+        self.connect_started = asyncio.Event()
+
+    def on(self, *_args) -> None:
+        pass
+
+    async def connect(self):
+        self._started = True
+        self.connect_started.set()
+        return self
+
+    def disconnect(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        self._ws_manager.disconnect()
+
+
+async def _wait_for_next_event_loop_turn() -> None:
+    checkpoint = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
+    await checkpoint
+
+
 class TestWeComChannel:
+    def test_stop_waits_for_connection_task_cancellation(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            connection_started = asyncio.Event()
+            cancellation_finished = asyncio.Event()
+
+            async def connect():
+                connection_started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancellation_finished.set()
+
+            connection_task = asyncio.create_task(connect())
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = connection_task
+            await connection_started.wait()
+
+            try:
+                await channel.stop()
+
+                assert connection_task.done()
+                assert cancellation_finished.is_set()
+                assert channel._ws_task is None
+            finally:
+                if not connection_task.done():
+                    connection_task.cancel()
+                await asyncio.gather(connection_task, return_exceptions=True)
+
+        _run(go())
+
+    def test_stop_waits_for_sdk_shutdown_after_connect_returns(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+
+            try:
+                assert not stop_task.done()
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(stop_task, *manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert len(manager.shutdown_tasks) == 1
+            assert manager.heartbeat_stopped
+            assert manager.pending_messages_cleared
+            assert not client._started
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+
+        _run(go())
+
+    def test_concurrent_start_waits_for_stop_before_installing_new_client(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            old_cancellation_started = asyncio.Event()
+            release_old_cancellation = asyncio.Event()
+            start_attempted = asyncio.Event()
+            new_client = MagicMock()
+            new_client.connect_started = asyncio.Event()
+
+            async def connect_new_client():
+                new_client.connect_started.set()
+                return new_client
+
+            new_client.connect = connect_new_client
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(
+                    WSClient=lambda _options: new_client,
+                    WSClientOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+                ),
+            )
+
+            async def connect_old_client():
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    old_cancellation_started.set()
+                    await release_old_cancellation.wait()
+                    raise
+
+            old_task = asyncio.create_task(connect_old_client())
+            channel = WeComChannel(MessageBus(), config={"bot_id": "bot", "bot_secret": "secret"})
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = old_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await old_cancellation_started.wait()
+
+            async def start_concurrently():
+                start_attempted.set()
+                await channel.start()
+
+            start_task = asyncio.create_task(start_concurrently())
+            await start_attempted.wait()
+            release_old_cancellation.set()
+            await asyncio.gather(stop_task, start_task)
+            await new_client.connect_started.wait()
+
+            assert channel._running
+            assert channel._ws_client is new_client
+            assert channel._ws_task is not None
+            assert channel._ws_task.done()
+
+        _run(go())
+
+    def test_cancelled_stop_finishes_sdk_shutdown_and_clears_state(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+            channel._ws_frames["message-1"] = {"body": {}}
+            channel._ws_stream_ids["message-1"] = "stream-1"
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+            stop_task.cancel()
+            await _wait_for_next_event_loop_turn()
+
+            assert not stop_task.done()
+            assert not shutdown_finished.is_set()
+
+            release_shutdown.set()
+
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(*manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+            assert channel._ws_frames == {}
+            assert channel._ws_stream_ids == {}
+
+        _run(go())
+
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
 
