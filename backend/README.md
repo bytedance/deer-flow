@@ -414,13 +414,19 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run Gateway API + embedded agent runtime (port 8001)
+make dev        # Run Gateway API + embedded agent runtime with safe reload (port 8001)
 make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision against the live ORM models
 ```
+
+`make dev` pre-creates and excludes `DEER_FLOW_HOME` (by default
+`backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload watcher. Use
+this target instead of a bare `uvicorn --reload`: agent tasks write Python and
+other runtime files under `DEER_FLOW_HOME`, and watching that directory can
+restart the Gateway during an active run.
 
 ### Schema Migrations
 

@@ -98,7 +98,7 @@ make stop       # Stop all services
 **Backend directory** (for backend development only):
 ```bash
 make install            # Install backend dependencies
-make dev                # Run Gateway API with reload (port 8001)
+make dev                # Run Gateway API with runtime-safe reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
 make test               # Run offline backend tests (excludes live external-API tests)
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
@@ -107,6 +107,12 @@ make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
+
+The backend `make dev` target pre-creates and excludes `DEER_FLOW_HOME`
+(default: `backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload
+watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
+Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
+restart the Gateway during an active run.
 
 The root `detect-thread-boundaries` target statically inventories execution
 boundaries under `backend/app/` and `backend/packages/harness/deerflow/`. It
