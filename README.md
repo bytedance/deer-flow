@@ -320,7 +320,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
 
-   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm`/`pnpm.cmd` executable when available and otherwise fall back to `corepack pnpm`. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
+   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm`/`pnpm.cmd` executable when available and otherwise fall back to `corepack pnpm`. The shared runner and diagnostics resolve repository paths absolutely, so these checks work regardless of the caller's current directory. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
 
 2. **Install dependencies**:
    ```bash

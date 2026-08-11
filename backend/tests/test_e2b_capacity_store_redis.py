@@ -176,3 +176,33 @@ def test_mismatched_hard_limits_fail_closed(make_store) -> None:
         gateway_b.revision()
     with pytest.raises(CapacityBackendError, match="configuration mismatch"):
         gateway_b.reserve("reservation")
+
+
+def test_ledger_meta_field_count_matches_constant(make_store) -> None:
+    # Admission derives the live-entry count as HLEN - META_FIELD_COUNT, so the
+    # Lua constant must equal the number of 'meta:*' fields initialize() writes.
+    # Adding a meta field without updating the constant also trips the existing
+    # concurrency tests, but those report an unexpected reservation outcome; this
+    # one names the cause.
+    store = make_store(3)
+    _initialize(store)
+    fields = store._redis.hkeys(store.key)
+
+    assert _counts(store) == (0, 0)
+    assert sorted(fields) == ["meta:hard_limit", "meta:revision", "meta:state"]
+    assert len(fields) == 3
+
+
+def test_reserve_admits_exactly_hard_limit_entries(make_store) -> None:
+    # Locks the invariant the constant exists to protect: an off-by-one in the
+    # HLEN offset shifts the ceiling, which this catches regardless of how the
+    # offset happens to be spelled.
+    store = make_store(3)
+    _initialize(store)
+
+    granted = [store.reserve(f"reservation-{index}") for index in range(3)]
+
+    assert granted == [ReserveStatus.GRANTED] * 3
+    assert _counts(store) == (0, 3)
+    assert store.reserve("reservation-overflow") is ReserveStatus.FULL
+    assert store.reserve("reservation-0") is ReserveStatus.GRANTED

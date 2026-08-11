@@ -24,7 +24,7 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 Status = Literal["ok", "warn", "fail", "skip"]
-PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+PNPM_SCRIPT_PATH = Path(__file__).resolve().with_name("pnpm.py")
 FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 
 
