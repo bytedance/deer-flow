@@ -323,6 +323,10 @@ def build_subagent_runtime_middlewares(
 
         app_config = get_app_config()
 
+    from deerflow.extensions import get_agent_build_extensions
+
+    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+
     middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
@@ -502,6 +506,7 @@ def build_subagent_runtime_middlewares(
         # model (it inherits the parent's), so passing it directly is what makes a
         # distinct-model subagent summarize with its own model, not the parent's.
         run_model_name=model_name,
+        extensions=resolved_extensions,
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
@@ -524,10 +529,8 @@ def build_subagent_runtime_middlewares(
 
     from deerflow_extension_api import AgentScope
 
-    from deerflow.extensions import get_agent_build_extensions
     from deerflow.extensions.stack import compose_with_extensions
 
-    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
     if not resolved_extensions.has_middleware_contributors:
         return compose_with_extensions(middlewares, AgentScope.SUBAGENT, None, resolved_extensions)
 

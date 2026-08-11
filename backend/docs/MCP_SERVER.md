@@ -14,6 +14,72 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## OpenViking MCP Tools
+
+OpenViking's official server exposes a Streamable HTTP MCP endpoint at `/mcp`.
+DeerFlow connects to it through the same generic MCP client used for other HTTP
+servers:
+
+```json
+{
+  "mcpServers": {
+    "openviking": {
+      "enabled": true,
+      "type": "http",
+      "url": "http://127.0.0.1:1933/mcp",
+      "headers": {
+        "X-API-Key": "$OPENVIKING_API_KEY"
+      }
+    }
+  }
+}
+```
+
+Set `OPENVIKING_API_KEY` to a normal owner-bound OpenViking **USER API key**.
+The key determines the OpenViking account and user. Do not use a root/admin
+key, trusted mode, or add `X-OpenViking-Account`, `X-OpenViking-User`, or
+`X-OpenViking-Actor-Peer` headers for this personal single-owner setup.
+`X-API-Key` is used here because DeerFlow expands a whole-string `$ENV_VAR`
+value without storing a credential in the checked-in configuration.
+If `OPENVIKING_API_KEY` is missing or empty during initialization, OpenViking
+authentication fails and DeerFlow skips that MCP server, so no OpenViking tools
+appear. Changing only the environment variable does not invalidate DeerFlow's
+already-populated, file-signature-based MCP tool cache; after setting or fixing
+the key, restart DeerFlow, modify and re-save the extensions config, or call the
+MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
+
+OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
+MCP initialization and discovery flow, prefixes the discovered names with
+`openviking_` by default, and routes calls back through the generic MCP client.
+For capability parity with other official OpenViking harnesses, DeerFlow exposes
+the native `forget` tool with the other discovered tools. `forget` permanently
+deletes a `viking://` URI and should be called only after explicit user
+confirmation; DeerFlow does not enforce that confirmation.
+
+Operators who do not want agents to call `forget` can block its default visible
+name with DeerFlow's existing guardrail configuration:
+
+```yaml
+guardrails:
+  enabled: true
+  provider:
+    use: deerflow.guardrails.builtin:AllowlistProvider
+    config:
+      denied_tools: ["openviking_forget"]
+```
+
+If `tool_name_prefix` is disabled for the OpenViking server, block `forget`
+instead.
+
+This explicit tool path is separate from the automatic OpenViking memory backend
+configured under `config.yaml -> memory`. Both may be enabled at the same time:
+the memory backend handles automatic turn capture and recall, while MCP tools
+are model-selected operations.
+
+For Docker, point `url` at the OpenViking address reachable from the Gateway
+container, such as `http://openviking:1933/mcp` for a shared Compose network or
+`http://host.docker.internal:1933/mcp` for a host-installed server.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such

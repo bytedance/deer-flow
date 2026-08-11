@@ -87,6 +87,7 @@ def test_install_failure_rolls_back_partial_registration():
     sources = {source for source, _ in loaded.middleware_contributors}
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
+    assert loaded.task_lifecycle == (), "rollback must clear partial lifecycle registrations too"
 
 
 def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_same_use():
@@ -294,6 +295,8 @@ def test_compatible_declared_api_loads():
     loaded, diagnostics = load_extensions([spec])
     assert diagnostics == []
     assert demo_extensions.INSTALLED == ["stamped"]
+    assert loaded.has_task_lifecycle is True
+    assert loaded.task_lifecycle[0][0] == f"{_FIXTURE}:install_stamped"
 
 
 def test_compatible_follows_semver_windows():

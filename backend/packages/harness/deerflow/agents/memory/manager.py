@@ -63,6 +63,24 @@ class MemoryCallbacks:
         """Pre-LLM-call: mutate ``invoke_config`` (e.g. merge trace metadata)
         before the backend invokes the model. Default: no-op."""
 
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Post-LLM-call hook for host-owned observation. Default: no-op.
+
+        This callback keeps the vendorable DeerMem backend independent from
+        DeerFlow's extension API. It is invoked for both provider success and
+        failure, and backend callers isolate exceptions raised by an
+        implementation.
+        """
+
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
@@ -623,6 +641,13 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
     langfuse is not an enabled tracing provider.
     """
 
+    def __init__(self, *, extensions=None) -> None:
+        if extensions is None:
+            from deerflow.extensions import get_loaded_extensions
+
+            extensions = get_loaded_extensions()
+        self._extensions = extensions
+
     def on_memory_llm_call(
         self,
         invoke_config: dict[str, Any],
@@ -643,6 +668,60 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=trace_id,
         )
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Forward a DeerMem provider result using the captured snapshot."""
+        extensions = self._extensions
+        if not extensions.has_system_model_observers:
+            return
+        try:
+            from deerflow_extension_api import (
+                SystemModelRequest,
+                SystemModelResult,
+                SystemOperationKind,
+            )
+
+            from deerflow.extensions.notify import (
+                dispatch_system_model_observation,
+                notify_system_model_call,
+                task_store_for_system_call,
+            )
+
+            dispatch_system_model_observation(
+                notify_system_model_call(
+                    extensions,
+                    task_store_for_system_call(invoke_config),
+                    SystemOperationKind.MEMORY,
+                    SystemModelRequest(
+                        messages=prompt,
+                        model_name=model_name,
+                        invoke_config=invoke_config,
+                    ),
+                    SystemModelResult(
+                        response=response,
+                        error=error,
+                        duration_ms=duration_ms,
+                    ),
+                ),
+                SystemOperationKind.MEMORY.value,
+            )
+        except Exception:
+            # Only the bridge's own failures are non-fatal. A teardown signal
+            # must propagate, matching the boundary the DeerMem-side call
+            # site documents and tests.
+            logger.warning(
+                "Extension observation of the memory model call failed (non-fatal)",
+                exc_info=True,
+            )
 
 
 def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:

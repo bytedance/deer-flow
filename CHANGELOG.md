@@ -157,6 +157,8 @@ This section accumulates work toward the **2.1.0** milestone
   [#3866])
 - **mcp:** Per-server `tool_call_timeout` for MCP tool calls, and routing hints
   that guide the model to the right server. ([#3843], [#4004])
+- **mcp:** Add an official OpenViking `/mcp` example that exposes the native
+  tool set through DeerFlow's generic MCP client. ([#4745])
 - **community:** Agentic browser control as a first-class thread capability -
   Playwright-backed browser sessions the agent operates while the user observes
   or takes over from the workspace. ([#4187])
@@ -1417,3 +1419,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
 [#4611]: https://github.com/bytedance/deer-flow/issues/4611
+[#4745]: https://github.com/bytedance/deer-flow/pull/4745
