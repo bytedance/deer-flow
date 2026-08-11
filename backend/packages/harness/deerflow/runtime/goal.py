@@ -277,6 +277,8 @@ async def evaluate_goal_completion(
     thread_id: str | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> GoalEvaluation:
     """Ask a small non-thinking model whether the active goal is satisfied.
 
@@ -320,10 +322,26 @@ async def evaluate_goal_completion(
         environment=_resolve_environment(),
         deerflow_trace_id=deerflow_trace_id,
     )
-    response = await model.ainvoke(
-        [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
-        config=invoke_config,
-    )
+    prompt_messages = [
+        SystemMessage(content=system_instruction),
+        HumanMessage(content=user_content),
+    ]
+    if extensions is None:
+        response = await model.ainvoke(prompt_messages, config=invoke_config)
+    else:
+        from deerflow_extension_api import SystemOperationKind
+
+        from deerflow.extensions.notify import observe_system_model_call
+
+        response = await observe_system_model_call(
+            extensions,
+            SystemOperationKind.GOAL,
+            messages=prompt_messages,
+            model_name=model_name,
+            invoke_config=invoke_config,
+            invoke=lambda: model.ainvoke(prompt_messages, config=invoke_config),
+            task_store=task_store,
+        )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 
 

@@ -34,6 +34,7 @@ _PROVISIONER_EXTRA_MOUNT_PATHS = {
     "/mnt/skills/custom",
     "/mnt/skills/integrations",
     "/mnt/integrations/lark-cli/config",
+    "/mnt/integrations/lark-cli/config/locks",
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
 }
@@ -54,15 +55,17 @@ def _provisioner_extra_mounts_payload(
     When ``provision_lark_cli_runtime`` is set, the provisioner supplies the
     lark-cli runtime via an init container + emptyDir, so the runtime extra mount
     is dropped here to avoid a colliding hostPath/PVC mount at the same path. The
-    per-user config/data credential mounts are still forwarded (they are mounted
-    into the sandbox in Pattern A).
+    per-user config/locks/data mounts are still forwarded (they are mounted into
+    the sandbox in Pattern A). The config root remains read-only while its
+    nested locks mount is writable for lark-cli's coordination files.
 
     When ``provision_lark_cli_broker`` is set (Pattern B, issue #4338), the
     provisioner runs a broker sidecar that holds the credentials, so the
-    config/data mounts are **forwarded** (the provisioner wires them into the
-    sidecar, not the sandbox) while the runtime mount is dropped. Nothing changes
-    in this payload beyond keeping config/data available for the provisioner to
-    place; the runtime entry is dropped in both modes.
+    config/locks/data mounts are **forwarded** (the provisioner wires them into
+    the sidecar, not the sandbox) while the runtime mount is dropped. Nothing
+    changes in this payload beyond keeping those credential-related mounts
+    available for the provisioner to place; the runtime entry is dropped in
+    both modes.
     """
     if not extra_mounts:
         return []
