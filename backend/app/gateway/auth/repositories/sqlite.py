@@ -15,12 +15,18 @@ from __future__ import annotations
 from datetime import UTC
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from app.gateway.auth.models import SystemRole, User
+from app.gateway.auth.repositories.base import (
+    AdminRoleRequiredError,
+    LastAdminError,
+    UserNotFoundError,
+    UserRepository,
+    UserRoleChange,
+)
 from deerflow.persistence.user.model import UserRow
 
 
@@ -41,6 +47,12 @@ def _normalize_email(email: str) -> str:
     existing mixed-case rows keep resolving, without a destructive bulk rewrite.
     """
     return email.lower()
+
+
+# "DEERROLE" encoded as a signed-safe 64-bit integer. Every PostgreSQL
+# process uses this transaction-scoped advisory lock before changing a role,
+# preventing write skew when two administrators are demoted concurrently.
+_USER_ROLE_LOCK_KEY = 0x44454552524F4C45
 
 
 class SQLiteUserRepository(UserRepository):
@@ -151,17 +163,129 @@ class SQLiteUserRepository(UserRepository):
             # case-insensitive uniqueness for updated rows; get_user_by_email
             # already resolves legacy mixed-case rows case-insensitively on read.
             canonical_email = _normalize_email(user.email)
-            if canonical_email != _normalize_email(row.email):
-                row.email = canonical_email
-            user.email = row.email
-            row.password_hash = user.password_hash
-            row.system_role = user.system_role
-            row.oauth_provider = user.oauth_provider
-            row.oauth_id = user.oauth_id
-            row.needs_setup = user.needs_setup
-            row.token_version = user.token_version
+            stored_email = canonical_email if canonical_email != _normalize_email(row.email) else row.email
+
+            # Keep this as one SQL UPDATE rather than assigning onto the ORM
+            # row. A role change can commit after the SELECT above; omitting
+            # system_role from the values prevents a detached user from
+            # restoring the stale role, while the SQL CASE makes token_version
+            # monotonic against the value at update time (not SELECT time).
+            stmt = (
+                update(UserRow)
+                .where(UserRow.id == str(user.id))
+                .values(
+                    email=stored_email,
+                    password_hash=user.password_hash,
+                    oauth_provider=user.oauth_provider,
+                    oauth_id=user.oauth_id,
+                    needs_setup=user.needs_setup,
+                    token_version=case(
+                        (UserRow.token_version < user.token_version, user.token_version),
+                        else_=UserRow.token_version,
+                    ),
+                )
+                .returning(UserRow.email, UserRow.system_role, UserRow.token_version)
+                .execution_options(synchronize_session=False)
+            )
+            persisted = (await session.execute(stmt)).one_or_none()
+            if persisted is None:
+                raise UserNotFoundError(f"User {user.id} no longer exists")
+            user.email = persisted.email
+            user.system_role = persisted.system_role  # type: ignore[assignment]
+            user.token_version = persisted.token_version
             await session.commit()
         return user
+
+    async def list_users(self, *, offset: int, limit: int) -> tuple[list[User], int]:
+        stmt = select(UserRow).order_by(UserRow.created_at, UserRow.id).offset(offset).limit(limit)
+        count_stmt = select(func.count()).select_from(UserRow)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            total = await session.scalar(count_stmt) or 0
+        return [self._row_to_user(row) for row in rows], total
+
+    async def change_user_role(
+        self,
+        *,
+        actor_id: str,
+        user_id: str,
+        system_role: SystemRole,
+    ) -> UserRoleChange:
+        """Change a user role under a database-wide transaction lock.
+
+        SQLite uses ``BEGIN IMMEDIATE`` so no competing writer can pass the
+        last-admin check. PostgreSQL uses one transaction-scoped advisory lock,
+        which provides the same cross-process serialization without requiring
+        a schema-only guard row.
+        """
+        async with self._sf() as session:
+            try:
+                dialect_name = session.get_bind().dialect.name
+                if dialect_name == "sqlite":
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                elif dialect_name == "postgresql":
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(CAST(:lock_key AS BIGINT))"),
+                        {"lock_key": _USER_ROLE_LOCK_KEY},
+                    )
+                else:
+                    # The shared persistence engine currently supports SQLite
+                    # and PostgreSQL. Fail closed if another SQL backend is
+                    # introduced without a reviewed serialization primitive.
+                    raise RuntimeError(f"User role changes are not supported for SQL dialect {dialect_name!r}")
+
+                actor = await session.get(UserRow, actor_id)
+                if actor is None or actor.system_role != "admin":
+                    raise AdminRoleRequiredError("The acting user is no longer an administrator")
+
+                target = await session.get(UserRow, user_id)
+                if target is None:
+                    raise UserNotFoundError(f"User {user_id} does not exist")
+
+                previous_role: SystemRole = target.system_role  # type: ignore[assignment]
+                if previous_role == system_role:
+                    result = UserRoleChange(
+                        user=self._row_to_user(target),
+                        previous_role=previous_role,
+                        changed=False,
+                    )
+                    await session.commit()
+                    return result
+
+                if previous_role == "admin" and system_role == "user":
+                    admin_count_stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
+                    admin_count = await session.scalar(admin_count_stmt) or 0
+                    if admin_count <= 1:
+                        raise LastAdminError("The final administrator cannot be demoted")
+
+                # Increment from the value at UPDATE time. Password/reset paths
+                # are not protected by the role advisory lock, so a Python-side
+                # ``target.token_version += 1`` based on the earlier SELECT
+                # could overwrite or collapse a concurrent session revocation.
+                update_stmt = (
+                    update(UserRow)
+                    .where(UserRow.id == user_id)
+                    .values(
+                        system_role=system_role,
+                        token_version=UserRow.token_version + 1,
+                    )
+                    .returning(UserRow.id)
+                    .execution_options(synchronize_session=False)
+                )
+                updated_id = (await session.execute(update_stmt)).scalar_one_or_none()
+                if updated_id is None:
+                    raise UserNotFoundError(f"User {user_id} does not exist")
+                await session.refresh(target)
+                result = UserRoleChange(
+                    user=self._row_to_user(target),
+                    previous_role=previous_role,
+                    changed=True,
+                )
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
 
     async def count_users(self) -> int:
         stmt = select(func.count()).select_from(UserRow)

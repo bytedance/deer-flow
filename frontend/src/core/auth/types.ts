@@ -2,10 +2,14 @@ import { z } from "zod";
 
 // ── User schema (single source of truth) ──────────────────────────
 
+export const systemRoleSchema = z.enum(["admin", "user"]);
+
+export type SystemRole = z.infer<typeof systemRoleSchema>;
+
 export const userSchema = z.object({
   id: z.string(),
   email: z.string().email(),
-  system_role: z.enum(["admin", "user"]),
+  system_role: systemRoleSchema,
   needs_setup: z.boolean().optional().default(false),
   oauth_provider: z.string().nullable().optional().default(null),
 });

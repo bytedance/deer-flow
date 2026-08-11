@@ -718,6 +718,7 @@ export const zhCN: Translations = {
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     sections: {
       account: "账号",
+      users: "用户管理",
       appearance: "外观",
       channels: "渠道",
       integrations: "集成",
@@ -1047,6 +1048,55 @@ export const zhCN: Translations = {
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
+    },
+    users: {
+      title: "用户管理",
+      description: "为已有 DeerFlow 账号授予或撤销管理员权限。",
+      adminRequired: "需要使用真实的管理员账号登录后才能管理用户。",
+      searchPlaceholder: "按邮箱搜索用户",
+      empty: "暂无用户。",
+      noResults: "没有符合搜索条件的用户。",
+      loadFailed: "加载用户失败。",
+      retry: "重试",
+      currentUser: "当前账号",
+      localAccount: "本地账号",
+      ssoAccount: (provider) => `SSO · ${provider}`,
+      roles: {
+        admin: "管理员",
+        user: "普通用户",
+      },
+      actions: {
+        promote: "提升为管理员",
+        demote: "降为普通用户",
+        changing: "正在变更...",
+        promoteUser: (email) => `将 ${email} 提升为管理员`,
+        demoteUser: (email) => `将 ${email} 降为普通用户`,
+      },
+      confirm: {
+        title: "确认变更用户角色？",
+        promote: (email) =>
+          `确定授予 ${email} 管理员权限吗？该用户将可以管理 DeerFlow 的全局设置和其他用户。`,
+        demote: (email) =>
+          `确定撤销 ${email} 的管理员权限吗？该账号仍可作为普通用户使用。`,
+        sessionWarning:
+          "角色发生变化后，受影响用户的现有会话会失效，需要重新登录。",
+      },
+      blocked: {
+        lastAdmin: "不能降级最后一名管理员。",
+      },
+      success: {
+        promoted: (email) => `${email} 已提升为管理员。`,
+        demoted: (email) => `${email} 已降为普通用户。`,
+      },
+      errors: {
+        forbidden: "你已没有管理用户的权限。",
+        lastAdmin: "不能降级最后一名管理员。",
+        notFound: "该用户已不存在，用户列表已刷新。",
+        conflict:
+          "该用户的角色已在其他位置发生变化，请检查刷新后的列表再重试。",
+        network: "网络错误，请重试。",
+        unknown: "变更用户角色失败，请重试。",
+      },
     },
     account: {
       profileTitle: "个人信息",
