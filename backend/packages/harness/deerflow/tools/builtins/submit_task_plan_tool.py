@@ -1,4 +1,4 @@
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from langchain_core.tools import tool
 
@@ -24,6 +24,7 @@ class CodingBriefInput(TypedDict):
     goal: str
     acceptance_criteria: list[str]
     tasks: list[dict[str, Any]]
+    workflow_type: NotRequired[Literal["analyze_only", "review_only", "implement_and_review"]]
     repository: NotRequired[str]
     issue_number: NotRequired[int]
     constraints: NotRequired[list[str]]

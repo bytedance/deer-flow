@@ -22,6 +22,13 @@ class TaskGraph:
         tasks = coding_brief.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("coding_brief.tasks must be a non-empty list")
+        workflow_type = coding_brief.get("workflow_type", "implement_and_review")
+        if workflow_type not in {
+            "analyze_only",
+            "review_only",
+            "implement_and_review",
+        }:
+            raise ValueError("coding_brief.workflow_type is invalid")
 
     def save_run_plan(self, coding_brief: dict[str, Any], task_ids: list[str]) -> CodingRunPlan:
         """持久化已确认目标，供每次独立子 Agent 上下文重新读取。"""
@@ -48,20 +55,18 @@ class TaskGraph:
         return task_list
 
     def add_tasks(self, tasks: list[CodingTask]) -> list[CodingTask]:
-        """接收 Coding Agent 制定的一整批任务计划，确认这份计划合法后，再保存到磁盘。"""
+        """校验并追加任务；新任务可以依赖已持久化的历史节点。"""
+        existing_tasks = self.store.list_all()
+        all_tasks = [*existing_tasks, *tasks]
         seen: set[str] = set()
-        # 建立字典
-        task_map = {task.id: task for task in tasks}
-        # 检查重复ID
-        for task in tasks:
+        task_map = {task.id: task for task in all_tasks}
+        for task in all_tasks:
             if task.id in seen:
                 raise ValueError("duplicate task id")
             seen.add(task.id)
-            # 检查依赖存在
             for dep_id in task.blocked_by:
                 if dep_id not in task_map:
                     raise ValueError("missing dependency")
-        # 检查循环依赖
         visiting = set()
         visited = set()
 

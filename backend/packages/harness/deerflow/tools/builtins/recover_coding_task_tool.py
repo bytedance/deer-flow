@@ -19,11 +19,7 @@ def _runtime_messages(runtime: Runtime) -> Sequence[BaseMessage]:
         messages = state.get("messages", [])
     else:
         messages = getattr(state, "messages", [])
-    return (
-        messages
-        if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes))
-        else []
-    )
+    return messages if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else []
 
 
 def _read_human_input_request(message: ToolMessage) -> Mapping[str, Any] | None:
@@ -32,31 +28,20 @@ def _read_human_input_request(message: ToolMessage) -> Mapping[str, Any] | None:
     payload = message.artifact.get("human_input")
     if not isinstance(payload, Mapping):
         return None
-    if (
-        payload.get("kind") != "human_input_request"
-        or payload.get("source") != "ask_clarification"
-    ):
+    if payload.get("kind") != "human_input_request" or payload.get("source") != "ask_clarification":
         return None
     return payload
 
 
-def _request_offered_retry(payload: Mapping[str, Any], *, option_id: str) -> bool:
+def _request_offered_option(payload: Mapping[str, Any], *, option_id: str, expected_option_value: str) -> bool:
     options = payload.get("options")
     if not isinstance(options, list):
         return False
-    return any(
-        isinstance(option, Mapping)
-        and option.get("id") == option_id
-        and option.get("value") == RETRY_OPTION_VALUE
-        for option in options
-    )
+    return any(isinstance(option, Mapping) and option.get("id") == option_id and option.get("value") == expected_option_value for option in options)
 
 
-def _has_matching_retry_approval(
-    messages: Sequence[BaseMessage], coding_task_id: str
-) -> bool:
+def _has_matching_approval(messages: Sequence[BaseMessage], *, expected_context: str, expected_option_value: str) -> bool:
     requests: dict[str, Mapping[str, Any]] = {}
-    expected_context = f"{RECOVERY_CONTEXT_PREFIX}{coding_task_id}"
 
     for message in messages:
         if isinstance(message, ToolMessage):
@@ -70,24 +55,30 @@ def _has_matching_retry_approval(
         response = read_human_input_response(message.additional_kwargs)
         if response is None or response["source"] != "ask_clarification":
             continue
-        if (
-            response["response_kind"] != "option"
-            or response["value"] != RETRY_OPTION_VALUE
-        ):
+        if response["response_kind"] != "option" or response["value"] != expected_option_value:
             continue
 
         request = requests.get(response["request_id"])
         if request is None:
             continue
-        if (
-            request.get("clarification_type") != "risk_confirmation"
-            or request.get("context") != expected_context
-        ):
+        if request.get("clarification_type") != "risk_confirmation" or request.get("context") != expected_context:
             continue
-        if _request_offered_retry(request, option_id=response["option_id"]):
+        if _request_offered_option(
+            request,
+            option_id=response["option_id"],
+            expected_option_value=expected_option_value,
+        ):
             return True
 
     return False
+
+
+def _has_matching_retry_approval(messages: Sequence[BaseMessage], coding_task_id: str) -> bool:
+    return _has_matching_approval(
+        messages,
+        expected_context=f"{RECOVERY_CONTEXT_PREFIX}{coding_task_id}",
+        expected_option_value=RETRY_OPTION_VALUE,
+    )
 
 
 @tool("recover_coding_task", parse_docstring=True)

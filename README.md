@@ -2,34 +2,35 @@
 
 基于 [DeerFlow](https://github.com/bytedance/deer-flow) 二次开发的可恢复多 Agent Coding Agent。
 
-它面向真实 Git 仓库执行编码任务：先由人工确认计划，再创建持久化任务 DAG 和独立 Git Worktree，依次委派代码分析、实现与审查 Agent，最后根据测试证据和审查报告给出结果。
+它面向真实 Git 仓库执行分析、审查和编码任务：先由人工确认计划，再创建持久化任务 DAG 和独立 Git Worktree；用户可选择只分析、只审查，或依次委派代码分析、实现与审查 Agent，最后根据测试证据和审查报告给出结果。
 
 > 本项目保留 DeerFlow 2.0 的 Agent Harness、MCP、Skill、Sandbox、Checkpoint 和 Web UI，并在其上增加 Coding 场景的任务控制层与隔离执行链。
 
 ## 核心能力
 
 - **GitHub Issue MCP**：通过自定义 MCP Server 读取 Issue，整理为结构化 `coding_brief`。
-- **Coding Skill**：用 Skill 固定输入门禁、人工审批、任务顺序、失败处理和输出契约。
+- **Coding Skill**：按用户意图选择只分析、只审查或分析→实现→审查流程，并固定输入门禁、人工审批、失败处理和输出契约。
 - **三角色 Sub-Agent**：`code-analyzer`、`code-implementer`、`code-reviewer` 是源码内置角色，分别拥有只读分析、读写实现、只读审查工具边界。
 - **结构化 Agent 交接**：三类报告由 Pydantic 校验并持久化，下游任务从 DAG 自动取得已验证的上游产物，不依赖 Lead Agent 手工复制文本。
 - **持久化目标与 Task DAG**：将用户确认的 `coding_brief` 保存为线程级目标契约，并保存任务依赖、指定角色、领取者、执行状态、结构化产物、失败原因和 Worktree；子 Agent 新建上下文时会重新注入目标，支持进程重启后恢复。
 - **Git Worktree 隔离**：在用户选择的本地 Git 仓库中创建独立目录和分支，避免 Agent 修改污染主工作区。
-- **Human-in-the-loop**：执行计划和失败重试都需要匹配当前请求的结构化人工确认。
+- **Human-in-the-loop**：执行计划、技术失败重试，以及审查 FAIL 后的重新分析→修复→复审都需要匹配当前请求的结构化人工确认。
 - **生产运行时接线**：Coding 工具接入 Gateway 的真实工具装配路径，外部 Worktree 可安全传递到子 Agent 中间件与文件工具。
 
 ## 工作流程
 
 ```text
 GitHub Issue / coding_brief
-  -> multi-agent-coding Skill
-  -> 人工批准 Coding Plan
-  -> submit_task_plan 保存三阶段 DAG
-  -> create_coding_worktree 创建隔离分支与目录
-  -> code-analyzer 只读分析，analysis_report 校验并写入 DAG
-  -> DAG 自动把 analysis_report 注入 code-implementer
-  -> code-implementer 修改代码、运行测试，implementation_report 校验并写入 DAG
-  -> DAG 自动把两份上游报告注入 code-reviewer
-  -> code-reviewer 独立检查 diff 与测试，输出 review_report
+  -> multi-agent-coding Skill + 人工批准
+  -> workflow_type 选择 analyze_only / review_only / implement_and_review
+  -> submit_task_plan 保存选定 DAG + create_coding_worktree 创建隔离分支与目录
+  -> analyze_only: code-analyzer -> analysis_report
+  -> review_only: code-reviewer -> review_report(PASS / FAIL)
+  -> implement_and_review:
+       code-analyzer -> analysis_report
+       -> code-implementer -> implementation_report
+       -> code-reviewer -> review_report(PASS / FAIL)
+  -> Review FAIL 经人工批准后：reanalyze -> fix -> rereview（复用原 Worktree）
   -> Lead Agent 汇总 coding_run
 ```
 
@@ -48,7 +49,8 @@ GitHub Issue / coding_brief
 | `submit_task_plan_tool.py` | 把模型生成的任务计划写入线程级 TaskGraph |
 | `worktree_tool.py` | 校验目标仓库、创建 Git Worktree 并绑定 CodingTask |
 | `task_tool.py` | 领取任务、启动 Sub-Agent、回写完成或失败状态 |
-| `recover_coding_task_tool.py` | 验证人工重试批准并恢复失败任务 |
+| `recover_coding_task_tool.py` | 验证人工重试批准并恢复技术失败任务 |
+| `continue_after_review_tool.py` | 验证审查 FAIL 后的人工批准，追加重新分析、修复和复审任务 |
 | `SubagentExecutor` | 运行一次具体 Sub-Agent 调用 |
 | `ThreadDataMiddleware` | 为子 Agent 保留已验证的 Worktree 工作区 |
 
@@ -57,7 +59,7 @@ GitHub Issue / coding_brief
 ```text
 coding_task_id
   = 稳定业务任务身份
-  = coding-analysis / coding-implementation / coding-review
+  = 例如 coding-analysis / coding-implementation / coding-review；审查续跑会追加 reanalysis / fix / rereview 节点
 
 tool_call_id
   = 某一次 Sub-Agent 执行身份
@@ -190,6 +192,7 @@ uv run pytest \
   tests/test_worktree_integrity.py \
   tests/test_task_tool_coding_task.py \
   tests/test_recover_coding_task_tool.py \
+  tests/test_continue_after_review_tool.py \
   tests/test_coding_workflow_tool_registration.py -q
 ```
 

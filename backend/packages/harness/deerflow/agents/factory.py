@@ -131,9 +131,7 @@ def create_deerflow_agent(
         If both *middleware* and *features*/*extra_middleware* are provided.
     """
     if middleware is not None and features is not None:
-        raise ValueError(
-            "Cannot specify both 'middleware' and 'features'.  Use one or the other."
-        )
+        raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
     if checkpoint_channel_mode == "delta" and checkpointer is not None:
         raise ValueError(
             "create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: "
@@ -143,24 +141,14 @@ def create_deerflow_agent(
             "DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed."
         )
     if middleware is not None and extra_middleware:
-        raise ValueError(
-            "Cannot use 'extra_middleware' with 'middleware' (full takeover)."
-        )
+        raise ValueError("Cannot use 'extra_middleware' with 'middleware' (full takeover).")
     if extra_middleware:
         for mw in extra_middleware:
             if not isinstance(mw, AgentMiddleware):
-                raise TypeError(
-                    f"extra_middleware items must be AgentMiddleware instances, got {type(mw).__name__}"
-                )
+                raise TypeError(f"extra_middleware items must be AgentMiddleware instances, got {type(mw).__name__}")
 
     effective_tools: list[BaseTool] = list(tools or [])
-    effective_state = (
-        get_thread_state_schema(checkpoint_channel_mode, checkpoint_snapshot_frequency)
-        if state_schema is None
-        else adapt_state_schema_for_mode(
-            state_schema, checkpoint_channel_mode, checkpoint_snapshot_frequency
-        )
-    )
+    effective_state = get_thread_state_schema(checkpoint_channel_mode, checkpoint_snapshot_frequency) if state_schema is None else adapt_state_schema_for_mode(state_schema, checkpoint_channel_mode, checkpoint_snapshot_frequency)
 
     if middleware is not None:
         effective_middleware = list(middleware)
@@ -261,9 +249,7 @@ def _assemble_from_features(
         if isinstance(feat.guardrail, AgentMiddleware):
             chain.append(feat.guardrail)
         else:
-            raise ValueError(
-                "guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)"
-            )
+            raise ValueError("guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)")
 
     # --- [5] ToolErrorHandling (always) ---
     chain.append(ToolErrorHandlingMiddleware())
@@ -273,9 +259,7 @@ def _assemble_from_features(
         if isinstance(feat.summarization, AgentMiddleware):
             chain.append(feat.summarization)
         else:
-            raise ValueError(
-                "summarization=True requires a custom AgentMiddleware instance (SummarizationMiddleware needs a model argument)"
-            )
+            raise ValueError("summarization=True requires a custom AgentMiddleware instance (SummarizationMiddleware needs a model argument)")
 
     # --- [7] TodoMiddleware (plan_mode) ---
     if plan_mode:
@@ -324,28 +308,20 @@ def _assemble_from_features(
                         continue
                     extra_tools.append(memory_tool)
                     existing_names.add(memory_tool.name)
-                if backend_requires_passive_writes_in_tool_mode(
-                    memory_cfg.manager_class
-                ):
+                if backend_requires_passive_writes_in_tool_mode(memory_cfg.manager_class):
                     from deerflow.agents.middlewares.memory_middleware import (
                         MemoryMiddleware,
                     )
 
-                    chain.append(
-                        MemoryMiddleware(agent_name=name, memory_config=memory_cfg)
-                    )
+                    chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
             else:
                 if memory_cfg.mode == "tool" and not memory_cfg.enabled:
-                    logger.warning(
-                        "memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered."
-                    )
+                    logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
                 from deerflow.agents.middlewares.memory_middleware import (
                     MemoryMiddleware,
                 )
 
-                chain.append(
-                    MemoryMiddleware(agent_name=name, memory_config=memory_cfg)
-                )
+                chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
 
     # --- [10] Vision ---
     if feat.vision is not False:
@@ -374,6 +350,7 @@ def _assemble_from_features(
 
             chain.append(SubagentLimitMiddleware())
         from deerflow.tools.builtins import (
+            continue_after_review,
             create_coding_worktree,
             recover_coding_task,
             submit_task_plan,
@@ -383,6 +360,7 @@ def _assemble_from_features(
         extra_tools.append(submit_task_plan)
         extra_tools.append(create_coding_worktree)
         extra_tools.append(recover_coding_task)
+        extra_tools.append(continue_after_review)
         extra_tools.append(task_tool)
 
     # --- [12] LoopDetection ---
@@ -418,9 +396,7 @@ def _assemble_from_features(
         _insert_extra(chain, extra_middleware)
         # Invariant: ClarificationMiddleware must always be last.
         # @Next(ClarificationMiddleware) could push it off the tail.
-        clar_idx = next(
-            i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware)
-        )
+        clar_idx = next(i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware))
         if clar_idx != len(chain) - 1:
             chain.append(chain.pop(clar_idx))
 
@@ -457,33 +433,23 @@ def _insert_extra(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -
 
         if next_anchor:
             if next_anchor in next_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} and {next_targets[next_anchor].__name__} both @Next({next_anchor.__name__})"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} and {next_targets[next_anchor].__name__} both @Next({next_anchor.__name__})")
             if next_anchor in prev_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} @Next({next_anchor.__name__}) and {prev_targets[next_anchor].__name__} @Prev({next_anchor.__name__}) — use cross-anchoring between extras instead"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} @Next({next_anchor.__name__}) and {prev_targets[next_anchor].__name__} @Prev({next_anchor.__name__}) — use cross-anchoring between extras instead")
             next_targets[next_anchor] = type(mw)
             anchored.append((mw, "next", next_anchor))
         elif prev_anchor:
             if prev_anchor in prev_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} and {prev_targets[prev_anchor].__name__} both @Prev({prev_anchor.__name__})"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} and {prev_targets[prev_anchor].__name__} both @Prev({prev_anchor.__name__})")
             if prev_anchor in next_targets:
-                raise ValueError(
-                    f"Conflict: {type(mw).__name__} @Prev({prev_anchor.__name__}) and {next_targets[prev_anchor].__name__} @Next({prev_anchor.__name__}) — use cross-anchoring between extras instead"
-                )
+                raise ValueError(f"Conflict: {type(mw).__name__} @Prev({prev_anchor.__name__}) and {next_targets[prev_anchor].__name__} @Next({prev_anchor.__name__}) — use cross-anchoring between extras instead")
             prev_targets[prev_anchor] = type(mw)
             anchored.append((mw, "prev", prev_anchor))
         else:
             unanchored.append(mw)
 
     # Unanchored → before ClarificationMiddleware
-    clarification_idx = next(
-        i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware)
-    )
+    clarification_idx = next(i for i, m in enumerate(chain) if isinstance(m, ClarificationMiddleware))
     for mw in unanchored:
         chain.insert(clarification_idx, mw)
         clarification_idx += 1
@@ -513,10 +479,6 @@ def _insert_extra(chain: list[AgentMiddleware], extras: list[AgentMiddleware]) -
             remaining_types = {type(m) for m, _, _ in remaining}
             circular = anchor_types & remaining_types
             if circular:
-                raise ValueError(
-                    f"Circular dependency among extra middlewares: {', '.join(t.__name__ for t in circular)}"
-                )
-            raise ValueError(
-                f"Cannot resolve positions for {', '.join(names)} — anchors {', '.join(a.__name__ for _, _, a in remaining)} not found in chain"
-            )
+                raise ValueError(f"Circular dependency among extra middlewares: {', '.join(t.__name__ for t in circular)}")
+            raise ValueError(f"Cannot resolve positions for {', '.join(names)} — anchors {', '.join(a.__name__ for _, _, a in remaining)} not found in chain")
         pending = remaining

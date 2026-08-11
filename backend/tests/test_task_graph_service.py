@@ -380,3 +380,38 @@ def test_add_tasks_rejects_cycles_without_persisting(task_graph, tasks):
         graph.add_tasks(tasks)
 
     assert store.list_all() == []
+
+
+def test_add_tasks_can_append_a_task_that_depends_on_a_persisted_task(task_graph):
+    graph, store = task_graph
+    review = CodingTask(
+        id="review-1",
+        subject="Review",
+        description="Review change",
+        status=TaskStatus.completed,
+        artifact={"report_type": "review_report", "verdict": "FAIL"},
+    )
+    store.save(review)
+
+    followup = CodingTask(
+        id="reanalyze-1",
+        subject="Reanalyze",
+        description="Reanalyze failed review",
+        blocked_by=["review-1"],
+        agent_type="code-analyzer",
+    )
+
+    assert graph.add_tasks([followup]) == [followup]
+    assert store.load("reanalyze-1") == followup
+    assert graph.can_start("reanalyze-1") is True
+
+
+def test_add_tasks_rejects_duplicate_persisted_id_without_overwriting(task_graph):
+    graph, store = task_graph
+    original = CodingTask(id="task-1", subject="Original", description="Original task")
+    store.save(original)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        graph.add_tasks([CodingTask(id="task-1", subject="New", description="New task")])
+
+    assert store.load("task-1") == original

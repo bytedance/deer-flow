@@ -4,6 +4,7 @@ CODING_WORKFLOW_TOOLS = {
     "submit_task_plan",
     "create_coding_worktree",
     "recover_coding_task",
+    "continue_after_review",
     "task",
 }
 

@@ -1,134 +1,124 @@
 ---
 name: multi-agent-coding
-description: "Coordinate code analysis, implementation, and review through specialized subagents."
+description: "Run an approved coding, analysis-only, or review-only workflow with specialized subagents."
 allowed-tools:
   - ask_clarification
   - submit_task_plan
   - create_coding_worktree
   - recover_coding_task
+  - continue_after_review
   - task
 ---
 
 # Multi-Agent Coding
 
-把一个已经确认的 `coding_brief` 依次交给分析、实现和审查子 Agent。保持单向流水线；本 Skill 不执行自动返工循环。
+将用户已确认的 `coding_brief` 交给专业子 Agent。先选择工作流，不得为了凑流程强制执行无关角色。
 
 ## Input Gate
 
-1. 确认输入中存在一个 `coding_brief`，并且至少包含 `goal`、`acceptance_criteria` 和 `tasks`。
-2. 如果缺少必要字段，停止执行并列出缺失字段，不要自行补全需求。
-3. 如果 `open_questions` 中仍有会影响安全实现的问题，停止执行并要求用户先确认。
+1. 确认 `coding_brief` 至少包含 `goal`、`acceptance_criteria`、`tasks`。
+2. 确认 `workflow_type`，只允许：
+   - `analyze_only`：只分析真实代码；
+   - `review_only`：只审查指定代码快照；
+   - `implement_and_review`：分析、实现、审查；缺省时使用此值。
+3. `review_only` 必须先问清用户要审查的仓库。当前 Worktree 从该仓库已提交的 `HEAD` 创建；未提交改动不属于审查输入。
+4. 缺字段或 `open_questions` 会影响安全执行时，停止并让用户确认；不得自行补全需求。
 
 ## Approval Gate
 
-Input Gate 通过后，先调用一次 `ask_clarification`，参数固定为：
+展示目标、验收标准、工作流类型和目标仓库后，调用 `ask_clarification`：
 
 - `question`: `Approve this coding plan and start the isolated coding run?`
 - `clarification_type`: `risk_confirmation`
 - `context`: `coding_plan_approval`
 - `options`: `Approve coding plan`、`Reject coding plan`
 
-该调用会结束当前运行并等待用户回复。只有消息历史中匹配该请求的结构化回复明确选择 `Approve coding plan`，才能继续保存 DAG、创建 Worktree 或委派子 Agent。选择拒绝或没有匹配回复时停止，`failure_stage` 记为 `input`；不要把普通对话文字当成批准。
+只有匹配该请求的结构化回复明确选择 `Approve coding plan`，才能持久化 DAG、创建 Worktree 或委派子 Agent。
 
 ## Persist Task DAG
 
-通过 Input Gate 后、委派任何子 Agent 前，先调用一次 `submit_task_plan`。必须同时传入完整、已确认的 `coding_brief` 和下面三个稳定阶段任务。服务端会把 brief 作为线程级目标契约持久化，之后每一个新建上下文的子 Agent 都会重新读取它；不得只依赖 Lead Agent 的对话记忆。必须原样使用这些 ID 和依赖，不能用临时编号替换：
+批准后调用一次 `submit_task_plan(coding_brief, tasks)`；必须传入完整原始 `coding_brief`。服务端会持久化它，使每个新子 Agent 都能重新读取用户目标，而不是依赖 Lead 对话记忆。
+
+按 `workflow_type` 使用以下稳定任务计划：
+
+### `analyze_only`
 
 ```json
 [
-  {
-    "id": "coding-analysis",
-    "subject": "Analyze coding brief",
-    "description": "Inspect the real codebase and produce the analysis report.",
-    "blocked_by": [],
-    "agent_type": "code-analyzer"
-  },
-  {
-    "id": "coding-implementation",
-    "subject": "Implement coding brief",
-    "description": "Implement the confirmed change and produce test evidence.",
-    "blocked_by": ["coding-analysis"],
-    "agent_type": "code-implementer"
-  },
-  {
-    "id": "coding-review",
-    "subject": "Review implementation",
-    "description": "Independently review the implementation and verification evidence.",
-    "blocked_by": ["coding-implementation"],
-    "agent_type": "code-reviewer"
-  }
+  {"id": "coding-analysis", "subject": "Analyze coding brief", "description": "Inspect the real codebase and produce the analysis report.", "blocked_by": [], "agent_type": "code-analyzer"}
 ]
 ```
 
-只有 `submit_task_plan` 成功保存整张 DAG 后才能开始委派。任务状态由 `task(coding_task_id=...)` 根据真实 Sub-Agent 终态自动回写，DAG 会拒绝错误角色领取任务。子 Agent 返回值还必须通过对应 JSON 结构校验，校验后的报告才会写入任务并自动交给下游；不要根据报告文字手工宣称任务已完成。
+### `review_only`
 
-## Prepare Isolated Worktree
+```json
+[
+  {"id": "coding-review", "subject": "Review code", "description": "Independently inspect the requested code snapshot and produce the review report.", "blocked_by": [], "agent_type": "code-reviewer"}
+]
+```
 
-保存 DAG 后、委派任何子 Agent 前，先确认用户明确指定了要修改的本地 Git 仓库，然后调用一次 `create_coding_worktree`：
+### `implement_and_review`
 
-- `repository_path`: 用户为本次 Coding Run 选择的本地 Git 仓库绝对路径，可以位于任意磁盘
-- `name`: `coding-run`
-- `task_ids`: `coding-analysis`、`coding-implementation`、`coding-review`
+```json
+[
+  {"id": "coding-analysis", "subject": "Analyze coding brief", "description": "Inspect the real codebase and produce the analysis report.", "blocked_by": [], "agent_type": "code-analyzer"},
+  {"id": "coding-implementation", "subject": "Implement coding brief", "description": "Implement the confirmed change and produce test evidence.", "blocked_by": ["coding-analysis"], "agent_type": "code-implementer"},
+  {"id": "coding-review", "subject": "Review implementation", "description": "Independently review the implementation and verification evidence.", "blocked_by": ["coding-implementation"], "agent_type": "code-reviewer"}
+]
+```
 
-该工具会在用户的目标仓库中创建并验证 `coding/coding-run` 分支对应的独立 Worktree，然后把完整 Worktree 路径绑定到三个阶段任务。子 Agent 修改目标项目的 Worktree；DeerFlow 自己的线程 Workspace 不是目标代码仓库。只有工具成功返回后才能开始 Analyze；创建或验证失败时立即停止，不得委派任何子 Agent。
+`submit_task_plan` 成功后，调用 `create_coding_worktree`，并把该工作流的全部任务 ID 绑定到同一个 Worktree。只有 Worktree 创建成功，才可委派。
 
-## Workflow
+## Delegate Tasks
 
-### 1. Analyze
+根据保存的 DAG 依赖顺序调用 `task`：
 
-调用 `task`，参数必须包含：
+- `code-analyzer` 必须返回 `analysis_report`；
+- `code-implementer` 必须返回 `implementation_report`；
+- `code-reviewer` 必须返回 `review_report`。
 
-- `description`: `Analyze coding brief`
-- `subagent_type`: `code-analyzer`
-- `coding_task_id`: `coding-analysis`
-- `prompt`: 传入完整 `coding_brief`，要求基于真实代码返回 `analysis_report`
+`task` 会在启动前重新注入 `coding_brief`，并自动递归注入已校验的上游 Artifact。Analyzer 和 Reviewer 是只读角色；Implementer 是唯一可写角色。
 
-`analysis_report` 必须包含相关文件与依据、建议修改步骤、风险、测试计划和给实现 Agent 的明确输入。只有该任务返回 `completed` 才能继续。
+`analyze_only` 在 `analysis_report` 合格后完成。`review_only` 无论 `review_report.verdict` 是 PASS 或 FAIL 都表示审查任务已完成；必须如实把 verdict 返回用户。`implement_and_review` 只有最终 Reviewer PASS 才表示修改验收通过。
 
-### 2. Implement
+## Technical Failure Recovery
 
-调用 `task`，参数必须包含：
+子 Agent 超时、取消、异常或 Artifact 校验失败时，对应 CodingTask 会变为 `failed`。调用 `ask_clarification`：
 
-- `description`: `Implement coding brief`
-- `subagent_type`: `code-implementer`
-- `coding_task_id`: `coding-implementation`
-- `prompt`: 传入原始 `coding_brief`，要求返回 `implementation_report`。已校验的 `analysis_report` 会由 `task` 工具自动注入，不要手工复制
-
-`implementation_report` 必须包含修改文件、关键实现、实际运行的测试及结果、尚存风险和审查重点。只有该任务返回 `completed` 才能继续。
-
-### 3. Review
-
-调用 `task`，参数必须包含：
-
-- `description`: `Review implementation`
-- `subagent_type`: `code-reviewer`
-- `coding_task_id`: `coding-review`
-- `prompt`: 传入原始 `coding_brief`，要求返回 `review_report`。已校验的 `analysis_report` 与 `implementation_report` 会由 `task` 工具自动注入，不要手工复制
-
-`review_report` 必须包含 `PASS` 或 `FAIL`、逐条验收结果、问题清单和测试证据。不要因为实现 Agent 声称测试通过就跳过独立审查。
-
-## Failure Handling
-
-If any delegation returns failed, do not claim success. 记录失败阶段对应的 `coding_task_id`，然后调用 `ask_clarification`：
-
-- `question`: 说明真实失败阶段与原因，并询问是否重试该任务
 - `clarification_type`: `risk_confirmation`
-- `context`: `coding_task_recovery:{coding_task_id}`，把占位符替换为真实任务 ID
+- `context`: `coding_task_recovery:{coding_task_id}`
 - `options`: `Retry failed task`、`Stop pipeline`
 
-该调用会结束当前运行。只有匹配本任务请求的结构化回复选择 `Retry failed task` 后，才能调用 `recover_coding_task(coding_task_id=...)`，再使用原参数和已得到的完整上游报告重新调用同一个 `task`。选择 `Stop pipeline` 时直接返回失败。
+只有用户匹配选择 `Retry failed task` 后，才调用 `recover_coding_task` 并重试同一任务。每次重试都需要新的人工确认。
 
-Each retry requires a fresh human confirmation. Do not retry automatically. 如果重试后再次失败，必须重新走上述人工确认步骤；不得在一次确认后循环恢复或连续重试。
+## Review FAIL Follow-up
 
-把已经得到的报告和失败原因原样保留在最终结果中。审查结果为 `FAIL` 时返回失败，不要在本 Skill 内自动重新调用实现 Agent。
+`review_report.verdict = FAIL` 不是 Reviewer 技术失败，不能调用 `recover_coding_task`。先保留其 Artifact 和 Worktree，向用户展示 `issues` 与 `required_changes`，并询问：
+
+- `question`: `The review failed. Reanalyze the findings, fix them, and run an independent review again?`
+- `clarification_type`: `risk_confirmation`
+- `context`: `coding_review_followup:{review_task_id}`
+- `options`: `Reanalyze and fix`、`Stop pipeline`
+
+只有用户匹配选择 `Reanalyze and fix` 后，才调用 `continue_after_review(review_task_id=...)`。该工具会在原 Worktree 上追加：
+
+```text
+failed review
+  -> code-analyzer (reanalyze)
+  -> code-implementer (fix)
+  -> code-reviewer (rereview)
+```
+
+随后按 DAG 顺序委派新增节点。不得自动循环；每次新的 Review FAIL 都必须重新取得人工批准。
 
 ## Output Contract
 
-只返回一个 `coding_run`：
+返回一个 `coding_run`：
 
 ```yaml
 coding_run:
-  status: completed | failed
+  status: completed | failed | needs_follow_up
+  workflow_type: analyze_only | review_only | implement_and_review
   coding_brief: original confirmed brief
   analysis_report: report or null
   implementation_report: report or null
@@ -137,4 +127,4 @@ coding_run:
   failure_reason: observed reason or null
 ```
 
-只有 `review_report` 明确为 `PASS` 时，`coding_run.status` 才能是 `completed`。不得编造子 Agent 输出、文件修改或测试结果。
+`review_only` 的 FAIL 是审查结论，不是伪造的成功，也不是技术失败；`implement_and_review` 的 FAIL 应返回 `needs_follow_up`，等待用户停止或批准重新分析后修复。
