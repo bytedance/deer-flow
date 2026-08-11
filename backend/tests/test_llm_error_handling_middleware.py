@@ -50,8 +50,15 @@ def _guard_shared_exception_name() -> Iterator[None]:
     dedicated stand-in (``_ReadError`` and friends) instead. Without this guard
     the damage only surfaces in whichever test happens to run next.
     """
+    original_name = FakeError.__name__
     yield
-    assert FakeError.__name__ == "FakeError", "this test renamed the shared FakeError class; rename a dedicated stand-in such as _ReadError instead of exc.__class__ on FakeError"
+    try:
+        assert FakeError.__name__ == "FakeError", (
+            "this test renamed the shared FakeError class; rename a dedicated stand-in "
+            "such as _ReadError instead of exc.__class__ on FakeError"
+        )
+    finally:
+        FakeError.__name__ = original_name
 
 
 def _make_app_config() -> AppConfig:
