@@ -17,9 +17,13 @@ derivation would silently merge two different people's memory into one
 workspace; the hash suffix makes the default path collision-resistant while
 staying readable. ``workspace_overrides`` / ``user_peer_overrides`` match on
 the raw, un-sanitized key and are unaffected. Honcho scopes all queries to one
-workspace, so users cannot see each other's memory by construction. A missing
-``user_id`` fails closed: the call becomes a no-op / empty read, never a
-shared fallback workspace. Session ids reuse the same derivation
+workspace, so under the default one-workspace-per-user derivation users cannot
+see each other's memory by construction. A ``workspace_overrides`` entry
+shared across users deliberately shares that workspace — ``get_context`` /
+``get_memory`` stay peer-scoped there, but ``search`` uses Honcho's
+workspace-scoped ``/search`` (no peer filter), so those users share one
+search index. A missing ``user_id`` fails closed: the call becomes a no-op /
+empty read, never a shared fallback workspace. Session ids reuse the same derivation
 (``df-`` + ``_stable_id(thread_id)``) — bare ``sanitize_id`` would merge
 threads like ``"t.1"`` and ``"t-1"`` into one Honcho session.
 
