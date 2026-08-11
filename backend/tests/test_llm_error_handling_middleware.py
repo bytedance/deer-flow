@@ -53,10 +53,7 @@ def _guard_shared_exception_name() -> Iterator[None]:
     original_name = FakeError.__name__
     yield
     try:
-        assert FakeError.__name__ == "FakeError", (
-            "this test renamed the shared FakeError class; rename a dedicated stand-in "
-            "such as _ReadError instead of exc.__class__ on FakeError"
-        )
+        assert FakeError.__name__ == "FakeError", "this test renamed the shared FakeError class; rename a dedicated stand-in such as _ReadError instead of exc.__class__ on FakeError"
     finally:
         FakeError.__name__ = original_name
 
