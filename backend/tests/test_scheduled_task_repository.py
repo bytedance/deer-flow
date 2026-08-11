@@ -747,7 +747,7 @@ async def test_reconcile_preserves_row_when_heartbeat_wins_takeover(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_update_after_launch_rejects_stale_lease_owner(tmp_path):
+async def test_update_after_launch_rejects_stale_lease_owner(tmp_path, caplog):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
         sf = get_session_factory()
@@ -777,18 +777,21 @@ async def test_update_after_launch_rejects_stale_lease_owner(tmp_path):
             },
         )
 
-        updated = await repo.update_after_launch(
-            "task-fenced",
-            status="enabled",
-            next_run_at=now + timedelta(minutes=1),
-            last_run_at=now,
-            last_run_id="run-a",
-            last_thread_id="thread-a",
-            last_error=None,
-            increment_run_count=True,
-            expected_lease_owner="worker-a",
-        )
+        with caplog.at_level("WARNING", logger="deerflow.persistence.scheduled_tasks.sql"):
+            updated = await repo.update_after_launch(
+                "task-fenced",
+                status="enabled",
+                next_run_at=now + timedelta(minutes=1),
+                last_run_at=now,
+                last_run_id="run-a",
+                last_thread_id="thread-a",
+                last_error=None,
+                increment_run_count=True,
+                expected_lease_owner="worker-a",
+            )
         assert updated is False
+        assert "task-fenced" in caplog.text
+        assert "expected lease owner worker-a, current owner worker-b" in caplog.text
         task = await repo.get("task-fenced", user_id="user-1")
         assert task is not None
         assert task["lease_owner"] == "worker-b"

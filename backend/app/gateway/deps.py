@@ -449,8 +449,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_repository=app.state.run_store,
             )
             app.state.mcp_task_repo = McpTaskRepository(sf)
-            app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
-            app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
         else:
             app.state.mcp_task_repo = None
             app.state.scheduled_task_repo = None

@@ -213,6 +213,9 @@ class ScheduledTaskRunRepository:
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
+                    # Run takeover commits in its own short transaction. If this
+                    # outer commit fails, the next poll finishes scheduled-row
+                    # bookkeeping while the run remains safely terminal.
                     claimed = await self._run_repository.claim_for_takeover(
                         candidate.run_id,
                         grace_seconds=lease_grace_seconds,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,8 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
@@ -216,6 +219,12 @@ class ScheduledTaskRepository:
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
+                logger.warning(
+                    "Fenced stale scheduled-task update for task %s: expected lease owner %s, current owner %s",
+                    task_id,
+                    expected_lease_owner,
+                    row.lease_owner,
+                )
                 await session.rollback()
                 return False
             if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
@@ -346,6 +355,9 @@ class ScheduledTaskRepository:
                 if candidate is not None and candidate.status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         continue
+                    # Run takeover commits in its own short transaction. If this
+                    # outer commit fails, the next poll finishes task bookkeeping
+                    # while the underlying run remains safely terminal.
                     claimed = await self._run_repository.claim_for_takeover(
                         candidate.run_id,
                         grace_seconds=lease_grace_seconds,

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -56,6 +57,7 @@ class DummyRunRepo:
         self.active_count = active_count
         self.stale_marked = None
         self.reconciled = None
+        self.reconcile_count = 0
 
     async def count_active_runs(self):
         return self.active_count
@@ -75,6 +77,7 @@ class DummyRunRepo:
         return 0
 
     async def reconcile_active_runs(self, **kwargs):
+        self.reconcile_count += 1
         self.reconciled = kwargs
         return 0
 
@@ -605,8 +608,10 @@ async def test_multi_instance_start_uses_lease_aware_reconciliation():
     )
 
     await service.start()
+    await asyncio.sleep(0)
     await service.stop()
 
+    assert run_repo.reconcile_count == 1
     assert run_repo.reconciled is not None
     assert run_repo.reconciled["lease_grace_seconds"] == 17
     assert task_repo.reconciled_stuck_once is not None

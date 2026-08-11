@@ -48,10 +48,14 @@ class ScheduledTaskService:
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._skip_next_lease_reconciliation = False
 
     async def run_once(self, *, now: datetime) -> None:
         if self._multi_instance:
-            await self._reconcile_startup_state(now=now)
+            if self._skip_next_lease_reconciliation:
+                self._skip_next_lease_reconciliation = False
+            else:
+                await self._reconcile_active_state(now=now)
             claimed = await self._task_repo.claim_due_tasks(
                 now=now,
                 lease_owner=self._lease_owner,
@@ -531,7 +535,8 @@ class ScheduledTaskService:
             return
         restart_error = _RESTART_RECOVERY_ERROR
         if self._multi_instance:
-            await self._reconcile_startup_state(now=datetime.now(UTC))
+            await self._reconcile_active_state(now=datetime.now(UTC))
+            self._skip_next_lease_reconciliation = True
         else:
             try:
                 stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
@@ -551,7 +556,7 @@ class ScheduledTaskService:
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
-    async def _reconcile_startup_state(self, *, now: datetime) -> None:
+    async def _reconcile_active_state(self, *, now: datetime) -> None:
         error = _LEASE_RECOVERY_ERROR
         try:
             stale = await self._task_run_repo.reconcile_active_runs(
