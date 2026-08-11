@@ -329,6 +329,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
 
+        try:
+            from app.mcp_tasks import McpTaskService
+            from deerflow.mcp.tasks import McpTaskDriverRegistry
+
+            if getattr(app.state, "mcp_task_repo", None) is not None:
+                mcp_task_drivers = McpTaskDriverRegistry()
+                mcp_task_service = McpTaskService(
+                    repository=app.state.mcp_task_repo,
+                    drivers=mcp_task_drivers,
+                    poll_interval_seconds=startup_config.mcp_tasks.poll_interval_seconds,
+                    lease_seconds=startup_config.mcp_tasks.lease_seconds,
+                    max_concurrent_polls=startup_config.mcp_tasks.max_concurrent_polls,
+                )
+                app.state.mcp_task_drivers = mcp_task_drivers
+                app.state.mcp_task_service = mcp_task_service
+                if startup_config.mcp_tasks.enabled:
+                    await mcp_task_service.start()
+        except Exception:
+            logger.exception("Failed to initialize MCP task service")
+
         yield
 
         try:
@@ -357,6 +377,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await app.state.scheduled_task_service.stop()
             except Exception:
                 logger.exception("Failed to stop scheduled task service")
+
+        if getattr(app.state, "mcp_task_service", None) is not None:
+            try:
+                await app.state.mcp_task_service.stop()
+            except Exception:
+                logger.exception("Failed to stop MCP task service")
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -412,6 +438,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 logger.warning("Memory retrieval index rebuild is still running; leaving its connection open during shutdown")
 
         manager = None
+        try:
+            # Memory shutdown runs on a worker thread and can trigger detached
+            # system-model callbacks. Stop accepting those callbacks before
+            # flushing, while keeping the registered loop alive for awaited
+            # task hooks until langgraph_runtime drains runs and subagents.
+            from deerflow.extensions.notify import suspend_extension_system_observations
+
+            suspend_extension_system_observations()
+        except Exception:
+            logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
+
         try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:

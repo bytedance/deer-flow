@@ -1,5 +1,7 @@
 # DeerFlow Backend
 
+**Language:** English | [简体中文](README_zh.md)
+
 DeerFlow is a LangGraph-based AI super agent with sandbox execution, persistent memory, and extensible tool integration. The backend enables AI agents to execute code, browse the web, manage files, delegate tasks to subagents, and retain context across conversations - all in isolated, per-thread environments.
 
 ---
@@ -133,6 +135,8 @@ FastAPI application providing REST endpoints for frontend integration:
 ### IM Channels
 
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])`, serializes rapid same-thread turns inside the channel manager, and updates a single in-thread card per source message in place.
+
+Discord registers each typing-indicator loop before inbound message handling yields and refuses to start new typing work after the channel stops. Typing tasks are owned by the dedicated Discord event loop, so normal shutdown schedules bounded cancellation, awaiting, and map cleanup on that loop before closing the client. The Discord worker also drains the tasks in its `finally` block while its loop is still usable, covering disconnect and exception exits; if `stop()` encounters an already-stopped foreign loop, it never awaits those loop-bound tasks from the main loop. This serializes registration and cleanup across the main and Discord threads while preventing shutdown hangs and cross-loop `RuntimeError`s.
 
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow. When a follow-up arrives inside an existing Feishu topic while another turn is still running, the later message now waits on the mapped DeerFlow `thread_id`, receives a queued/running card on that exact source message, and keeps a compact source-message blockquote in subsequent patches so rapid consecutive questions remain distinguishable.
 
@@ -412,13 +416,19 @@ If a provider is explicitly enabled but required credentials are missing, or the
 
 ```bash
 make install    # Install dependencies
-make dev        # Run Gateway API + embedded agent runtime (port 8001)
+make dev        # Run Gateway API + embedded agent runtime with safe reload (port 8001)
 make gateway    # Run Gateway API without reload (port 8001)
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision against the live ORM models
 ```
+
+`make dev` pre-creates and excludes `DEER_FLOW_HOME` (by default
+`backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload watcher. Use
+this target instead of a bare `uvicorn --reload`: agent tasks write Python and
+other runtime files under `DEER_FLOW_HOME`, and watching that directory can
+restart the Gateway during an active run.
 
 ### Schema Migrations
 

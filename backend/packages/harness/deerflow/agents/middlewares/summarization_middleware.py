@@ -105,6 +105,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         configured_model_name: str | None = None,
         run_model_name: str | None = None,
         anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
+        extensions=None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -139,6 +140,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             self._anchor_model_name = configured_model_name or self._default_model_name()
         else:
             self._anchor_model_name = anchor_model_name
+        if extensions is None:
+            from deerflow.extensions import get_agent_build_extensions
+
+            extensions = get_agent_build_extensions()
+        self._extensions = extensions
         # Nostream generation models built lazily by name and cached (None = a build
         # that failed, so a broken candidate config is not retried every turn and does
         # not escape the fail-open boundary).
@@ -270,14 +276,26 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return text
         return None
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    async def _asummarize_with(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+        *,
+        task_store=None,
+    ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
         names = self._generation_candidate_names()
         for index, name in enumerate(names):
-            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            text = await self._ainvoke_summary(
+                self._model_for(name),
+                prompt,
+                last=index == len(names) - 1,
+                model_name=name,
+                task_store=task_store,
+            )
             if text is not None:
                 return text
         return None
@@ -289,6 +307,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         response's ``.text`` is part of consuming the provider result, so a failing
         accessor must convert to a candidate failure (fall through) rather than escape
         the fail-open boundary.
+
+        Deliberately unobserved by system-model-call extensions, unlike
+        :meth:`_ainvoke_summary`. Both this method and its only host caller
+        (``compact_state``) are the sync half of an async-only runtime: the agent runs
+        through ``abefore_model``, and ``runtime/context_compaction.py`` calls
+        ``acompact_state``. Notifying from here would have to block the calling thread
+        on the extension loop for a call site the host never reaches.
         """
         if model is None:
             return None
@@ -299,12 +324,37 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             self._log_summary_error(last)
             return None
 
-    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
+    async def _ainvoke_summary(
+        self,
+        model: Any | None,
+        prompt: str,
+        *,
+        last: bool = False,
+        model_name: str | None = None,
+        task_store=None,
+    ) -> str | None:
         """Async counterpart of :meth:`_invoke_summary`."""
         if model is None:
             return None
         try:
-            response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            invoke_config = {"metadata": {"lc_source": "summarization"}}
+            extensions = getattr(self, "_extensions", None)
+            if extensions is None:
+                response = await model.ainvoke(prompt, config=invoke_config)
+            else:
+                from deerflow_extension_api import SystemOperationKind
+
+                from deerflow.extensions.notify import observe_system_model_call
+
+                response = await observe_system_model_call(
+                    extensions,
+                    SystemOperationKind.SUMMARIZATION,
+                    messages=prompt,
+                    model_name=model_name,
+                    invoke_config=invoke_config,
+                    invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                    task_store=task_store,
+                )
             return self._checked_summary(response, last)
         except Exception:
             self._log_summary_error(last)
@@ -530,7 +580,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
+        from deerflow_extension_api import task_store_from_runtime
+
+        summary = await self._asummarize_with(
+            messages_to_summarize,
+            previous_summary=previous_summary,
+            task_store=task_store_from_runtime(runtime),
+        )
         if summary is None:
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
@@ -678,6 +734,7 @@ def create_summarization_middleware(
     keep: tuple[str, int | float] | None = None,
     skip_memory_flush: bool = False,
     run_model_name: str | None = None,
+    extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
@@ -753,4 +810,5 @@ def create_summarization_middleware(
         configured_model_name=config.model_name,
         run_model_name=run_model_name,
         anchor_model_name=anchor_name,
+        extensions=extensions,
     )

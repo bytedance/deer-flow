@@ -385,6 +385,33 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     _validate_agent_storage(startup_config)
 
     async with AsyncExitStack() as stack:
+        # Lifecycle and system-model hooks can originate on isolated subagent
+        # loops. Bind them to the Gateway's serving loop before any runtime
+        # dependency starts, then reset the binding last through the exit
+        # stack. Registering the callback synchronously here also covers every
+        # startup-failure and cancellation path below.
+        try:
+            from deerflow.extensions.notify import (
+                reset_extension_notify_loop,
+                set_extension_notify_loop,
+            )
+
+            set_extension_notify_loop(asyncio.get_running_loop())
+        except Exception:
+            logger.exception("Failed to register the extension notify loop; sync observations will be dropped")
+        else:
+
+            def reset_notify_loop_safely() -> None:
+                try:
+                    reset_extension_notify_loop()
+                except Exception:
+                    logger.debug(
+                        "Failed to reset the extension notify loop (non-fatal)",
+                        exc_info=True,
+                    )
+
+            stack.callback(reset_notify_loop_safely)
+
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
         app.state.checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(config.database.checkpoint_delta.snapshot_frequency)
@@ -416,14 +443,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
+            from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
+            app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
         else:
+            app.state.mcp_task_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
 
@@ -574,6 +604,20 @@ def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Scheduled task service not available")
+    return val
+
+
+def get_mcp_task_repo(request: Request):
+    val = getattr(request.app.state, "mcp_task_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task repo not available")
+    return val
+
+
+def get_mcp_task_service(request: Request):
+    val = getattr(request.app.state, "mcp_task_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="MCP task service not available")
     return val
 
 

@@ -185,6 +185,13 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     async def spy_shutdown(self, *, timeout):  # noqa: ANN001
         events.append("runs_drained")
 
+    def spy_set_extension_notify_loop(loop):  # noqa: ANN001
+        assert loop is asyncio.get_running_loop()
+        events.append("extension_loop_set")
+
+    def spy_reset_extension_notify_loop():
+        events.append("extension_loop_reset")
+
     monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", probe_checkpointer)
     monkeypatch.setattr("deerflow.runtime.make_stream_bridge", fake_stream_bridge)
     monkeypatch.setattr("deerflow.runtime.make_store", fake_store)
@@ -194,6 +201,8 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg: object())
     monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda _sf, _store: object())
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
+    monkeypatch.setattr("deerflow.extensions.notify.set_extension_notify_loop", spy_set_extension_notify_loop)
+    monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
 
     app = FastAPI()
     startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
@@ -204,6 +213,50 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
     assert "checkpointer_closed" in events
     assert events.index("runs_drained") < events.index("checkpointer_closed"), f"runs must be drained before the checkpointer pool is closed; got order {events}"
+    assert events[0] == "extension_loop_set"
+    assert events.index("checkpointer_closed") < events.index("extension_loop_reset"), f"extension loop reset must be the final runtime teardown; got order {events}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup_error", [RuntimeError("startup failed"), asyncio.CancelledError()])
+async def test_langgraph_runtime_resets_extension_loop_when_startup_exits_early(monkeypatch, startup_error):
+    """A partial startup must not leave a stale process-wide loop binding."""
+    from fastapi import FastAPI
+
+    from app.gateway.deps import langgraph_runtime
+
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def failing_stream_bridge(_config):
+        raise startup_error
+        yield  # pragma: no cover - makes this an async context manager
+
+    def spy_set_extension_notify_loop(loop):  # noqa: ANN001
+        assert loop is asyncio.get_running_loop()
+        events.append("extension_loop_set")
+
+    def spy_reset_extension_notify_loop():
+        events.append("extension_loop_reset")
+
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", failing_stream_bridge)
+    monkeypatch.setattr("deerflow.extensions.notify.set_extension_notify_loop", spy_set_extension_notify_loop)
+    monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
+
+    app = FastAPI()
+    startup_config = SimpleNamespace(
+        database=SimpleNamespace(
+            backend="memory",
+            checkpoint_channel_mode="full",
+            checkpoint_delta=SimpleNamespace(snapshot_frequency=10),
+        ),
+    )
+
+    with pytest.raises(type(startup_error)):
+        async with langgraph_runtime(app, startup_config):
+            pass
+
+    assert events == ["extension_loop_set", "extension_loop_reset"]
 
 
 @pytest.mark.asyncio

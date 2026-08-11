@@ -304,6 +304,71 @@ class TestOnChatbotMessage:
 
         _run(go())
 
+    @pytest.mark.parametrize("text", ["@bot /new", "@_user_1 /help", "@bot /goal ship it"])
+    def test_leading_mention_before_command_classifies_and_strips(self, text):
+        """DingTalk group chats leave "@bot /new" in the text; classify as COMMAND
+        and strip the mention so ChannelManager receives the bare command."""
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(
+                text=text,
+                conversation_type=_CONVERSATION_TYPE_GROUP,
+                sender_staff_id="user_002",
+                conversation_id="conv_group_001",
+                message_id="msg_mention_cmd",
+            )
+
+            channel._send_running_reply = AsyncMock()
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_awaited_once()
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.msg_type == InboundMessageType.COMMAND, f"{text!r} should be COMMAND"
+            assert not inbound.text.startswith("@"), "leading mention must be stripped for dispatch"
+            assert inbound.text.split(maxsplit=1)[0] in KNOWN_CHANNEL_COMMANDS
+
+        _run(go())
+
+    def test_leading_mention_before_chat_keeps_mention(self):
+        """A mentioned non-command stays CHAT and keeps the mention for the agent."""
+
+        async def go():
+            bus = MessageBus()
+            bus.publish_inbound = AsyncMock()
+            channel = DingTalkChannel(bus, config={})
+            channel._client_id = "test_key"
+            channel._main_loop = asyncio.get_event_loop()
+            channel._running = True
+
+            msg = _make_chatbot_message(
+                text="@bot please summarise this",
+                conversation_type=_CONVERSATION_TYPE_GROUP,
+                sender_staff_id="user_002",
+                conversation_id="conv_group_001",
+                message_id="msg_mention_chat",
+            )
+
+            channel._send_running_reply = AsyncMock()
+            channel._on_chatbot_message(msg)
+
+            await asyncio.sleep(0.1)
+
+            bus.publish_inbound.assert_awaited_once()
+            inbound = bus.publish_inbound.await_args.args[0]
+            assert inbound.msg_type == InboundMessageType.CHAT
+            assert inbound.text == "@bot please summarise this"
+
+        _run(go())
+
     def test_group_message_integer_conversation_type_normalized(self):
         """SDK may deliver conversationType as int 2 — must still route as group."""
 
