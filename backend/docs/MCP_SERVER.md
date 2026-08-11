@@ -56,6 +56,21 @@ the native `forget` tool with the other discovered tools. `forget` permanently
 deletes a `viking://` URI and should be called only after explicit user
 confirmation; DeerFlow does not enforce that confirmation.
 
+Operators who do not want agents to call `forget` can block its default visible
+name with DeerFlow's existing guardrail configuration:
+
+```yaml
+guardrails:
+  enabled: true
+  provider:
+    use: deerflow.guardrails.builtin:AllowlistProvider
+    config:
+      denied_tools: ["openviking_forget"]
+```
+
+If `tool_name_prefix` is disabled for the OpenViking server, block `forget`
+instead.
+
 This explicit tool path is separate from the automatic OpenViking memory backend
 configured under `config.yaml -> memory`. Both may be enabled at the same time:
 the memory backend handles automatic turn capture and recall, while MCP tools
