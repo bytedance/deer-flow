@@ -4,10 +4,12 @@ Per RFC-001:
 State-changing operations require CSRF protection.
 """
 
+import logging
 import os
 import secrets
 from collections.abc import Awaitable, Callable
-from ipaddress import ip_address, ip_network
+from functools import lru_cache
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 from urllib.parse import urlsplit
 
 from fastapi import Request, Response
@@ -18,6 +20,8 @@ from starlette.types import ASGIApp
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
+
+logger = logging.getLogger(__name__)
 
 CSRF_COOKIE_NAME = "csrf_token"
 CSRF_HEADER_NAME = "X-CSRF-Token"
@@ -151,17 +155,23 @@ def _forwarded_param(request: Request, name: str) -> str | None:
     return None
 
 
-def _trusted_proxy_networks() -> list:
-    nets = []
-    for entry in os.getenv("AUTH_TRUSTED_PROXIES", "").split(","):
+@lru_cache(maxsize=32)
+def _parse_trusted_proxy_networks(raw: str) -> tuple[IPv4Network | IPv6Network, ...]:
+    nets: list[IPv4Network | IPv6Network] = []
+    for entry in raw.split(","):
         entry = entry.strip()
         if not entry:
             continue
         try:
             nets.append(ip_network(entry, strict=False))
         except ValueError:
+            logger.warning("Ignoring invalid AUTH_TRUSTED_PROXIES entry: %r", entry)
             continue
-    return nets
+    return tuple(nets)
+
+
+def _trusted_proxy_networks() -> tuple[IPv4Network | IPv6Network, ...]:
+    return _parse_trusted_proxy_networks(os.getenv("AUTH_TRUSTED_PROXIES", ""))
 
 
 def _trust_forwarded_headers(request: Request) -> bool:

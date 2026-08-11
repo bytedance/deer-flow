@@ -9,6 +9,12 @@
 #   with `DEER_FLOW_HOME` when you need a different writable data directory.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
+# - `AUTH_TRUSTED_PROXIES` is a process environment variable, not a config key.
+#   It accepts comma-separated proxy IPs/CIDRs. Leave it unset to ignore
+#   forwarded auth headers. HTTPS users behind the bundled Docker nginx must
+#   set it to the nginx network or address (for example, 192.168.200.0/24 for
+#   the dev Compose network) after upgrading from a version that trusted those
+#   headers unconditionally.
 
 # ============================================================================
 # Config Version (used to detect outdated config files)

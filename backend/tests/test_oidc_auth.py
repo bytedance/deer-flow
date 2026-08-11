@@ -401,7 +401,7 @@ def test_oidc_redirect_uri_fallback_uses_forwarded_headers_from_trusted_proxy(mo
 def test_oidc_redirect_uri_fallback_ignores_forwarded_headers_from_untrusted_peer(monkeypatch):
     from app.gateway.routers.auth import _resolve_oidc_redirect_uri
 
-    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
     cfg = _provider_config()
     req = _redirect_request(
         {
@@ -410,6 +410,7 @@ def test_oidc_redirect_uri_fallback_ignores_forwarded_headers_from_untrusted_pee
             "x-forwarded-proto": "https",
         }
     )
+    req.client.host = "203.0.113.1"
 
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
