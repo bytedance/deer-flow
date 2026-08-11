@@ -40,28 +40,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Cache subagent token usage by tool_call_id so TokenUsageMiddleware can
-# write it back to the triggering AIMessage's usage_metadata.
-_subagent_usage_cache: dict[str, dict[str, int]] = {}
-
-
-def _token_usage_cache_enabled(app_config: "AppConfig | None") -> bool:
-    if app_config is None:
-        try:
-            app_config = get_app_config()
-        except FileNotFoundError:
-            return False
-    return bool(getattr(getattr(app_config, "token_usage", None), "enabled", False))
-
-
-def _cache_subagent_usage(tool_call_id: str, usage: dict | None, *, enabled: bool = True) -> None:
-    if enabled and usage:
-        _subagent_usage_cache[tool_call_id] = usage
-
-
-def pop_cached_subagent_usage(tool_call_id: str) -> dict | None:
-    return _subagent_usage_cache.pop(tool_call_id, None)
-
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
@@ -284,7 +262,6 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
-    cache_token_usage = _token_usage_cache_enabled(runtime_app_config)
     available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
 
     # Get subagent configuration
@@ -501,7 +478,6 @@ async def task_tool(
 
             # Check if task completed, failed, or timed out
             if result.status == SubagentStatus.COMPLETED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 await aemit_custom_event(
                     {
@@ -527,7 +503,6 @@ async def task_tool(
                     usage=usage,
                 )
             elif result.status == SubagentStatus.FAILED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 await aemit_custom_event(
                     {
@@ -553,7 +528,6 @@ async def task_tool(
                     usage=usage,
                 )
             elif result.status == SubagentStatus.CANCELLED:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 await aemit_custom_event(
                     {
@@ -575,7 +549,6 @@ async def task_tool(
                     usage=usage,
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
                 await aemit_custom_event(
                     {
@@ -609,7 +582,6 @@ async def task_tool(
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
-                _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 await aemit_custom_event(
                     {
                         "type": "task_timed_out",
@@ -653,8 +625,4 @@ async def task_tool(
             cleanup_background_task(execution_id)
         else:
             _schedule_deferred_subagent_cleanup(execution_id, trace_id, max_poll_count)
-        _subagent_usage_cache.pop(tool_call_id, None)
-        raise
-    except Exception:
-        _subagent_usage_cache.pop(tool_call_id, None)
         raise

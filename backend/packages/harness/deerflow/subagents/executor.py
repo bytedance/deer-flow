@@ -78,7 +78,9 @@ class SubagentResult:
     """Result of a subagent execution.
 
     Attributes:
-        task_id: Unique identifier for this execution.
+        task_id: Server-generated identifier that owns this execution.
+        external_task_id: Optional provider correlation ID. This stays separate
+            because provider tool-call IDs can repeat across parent runs.
         trace_id: Trace ID for distributed tracing (links parent and subagent logs).
         status: Current status of the execution.
         result: The final result message (if completed).
@@ -97,6 +99,7 @@ class SubagentResult:
     task_id: str
     trace_id: str
     status: SubagentStatus
+    external_task_id: str | None = field(default=None, kw_only=True)
     result: str | None = None
     error: str | None = None
     stop_reason: str | None = None
@@ -814,7 +817,7 @@ class SubagentExecutor:
         if loaded_extensions.needs_task_store:
             from deerflow_extension_api import ExtensionData
 
-            task_store = ExtensionData(result.task_id)
+            task_store = ExtensionData(result.external_task_id or result.task_id)
         ai_messages = result.ai_messages
         if ai_messages is None:
             ai_messages = []
@@ -1149,6 +1152,7 @@ class SubagentExecutor:
         # Create initial pending result
         result = SubagentResult(
             task_id=execution_id,
+            external_task_id=task_id,
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
         )

@@ -1,6 +1,5 @@
 """Tests for TokenUsageMiddleware attribution annotations."""
 
-import importlib
 import logging
 from unittest.mock import MagicMock
 
@@ -11,6 +10,7 @@ from deerflow.agents.middlewares.token_usage_middleware import (
     TokenUsageMiddleware,
     _build_todo_actions,
 )
+from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY
 
 
 def _make_runtime():
@@ -235,7 +235,7 @@ class TestTokenUsageMiddleware:
             }
         ]
 
-    def test_merges_subagent_usage_by_message_position_when_ai_message_ids_are_missing(self, monkeypatch):
+    def test_merges_subagent_usage_by_message_position_when_ai_message_ids_are_missing(self):
         middleware = TokenUsageMiddleware()
         first_dispatch = AIMessage(
             content="",
@@ -252,21 +252,18 @@ class TestTokenUsageMiddleware:
             first_dispatch,
             ToolMessage(content="first", tool_call_id="task:first"),
             second_dispatch,
-            ToolMessage(content="second-a", tool_call_id="task:second-a"),
-            ToolMessage(content="second-b", tool_call_id="task:second-b"),
+            ToolMessage(
+                content="second-a",
+                tool_call_id="task:second-a",
+                additional_kwargs={SUBAGENT_TOKEN_USAGE_KEY: {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
+            ),
+            ToolMessage(
+                content="second-b",
+                tool_call_id="task:second-b",
+                additional_kwargs={SUBAGENT_TOKEN_USAGE_KEY: {"input_tokens": 20, "output_tokens": 7, "total_tokens": 27}},
+            ),
             AIMessage(content="done"),
         ]
-        cached_usage = {
-            "task:second-a": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
-            "task:second-b": {"input_tokens": 20, "output_tokens": 7, "total_tokens": 27},
-        }
-
-        task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
-        monkeypatch.setattr(
-            task_tool_module,
-            "pop_cached_subagent_usage",
-            lambda tool_call_id: cached_usage.pop(tool_call_id, None),
-        )
 
         result = middleware.after_model({"messages": messages}, _make_runtime())
 
@@ -279,6 +276,41 @@ class TestTokenUsageMiddleware:
             "input_tokens": 30,
             "output_tokens": 12,
             "total_tokens": 42,
+        }
+
+    def test_reused_tool_call_id_keeps_usage_scoped_to_each_run_history(self):
+        middleware = TokenUsageMiddleware()
+        tool_call_id = "reused-provider-tool-call-id"
+
+        def apply_usage(usage):
+            dispatch = AIMessage(
+                content="",
+                tool_calls=[{"id": tool_call_id, "name": "task", "args": {}}],
+            )
+            messages = [
+                dispatch,
+                ToolMessage(
+                    content="task result",
+                    tool_call_id=tool_call_id,
+                    additional_kwargs={SUBAGENT_TOKEN_USAGE_KEY: usage},
+                ),
+                AIMessage(content="done"),
+            ]
+
+            result = middleware.after_model({"messages": messages}, _make_runtime())
+
+            assert result is not None
+            return next(message.usage_metadata for message in result["messages"] if getattr(message, "usage_metadata", None))
+
+        assert apply_usage({"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}) == {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+        assert apply_usage({"input_tokens": 90, "output_tokens": 8, "total_tokens": 98}) == {
+            "input_tokens": 90,
+            "output_tokens": 8,
+            "total_tokens": 98,
         }
 
 
