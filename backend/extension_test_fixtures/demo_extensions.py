@@ -23,7 +23,7 @@ def install_ok(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
 @extension(api="0.1", name="stamped")
 def install_stamped(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     INSTALLED.append("stamped")
-    registry.middlewares(_Contributor("stamped"))
+    registry.task_lifecycle(_Contributor("stamped"))
 
 
 @extension(api="99.0", name="future")
@@ -42,8 +42,8 @@ def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, An
 
 def install_partial_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Registers two contributors, then fails — exercises rollback."""
-    registry.middlewares(_Contributor("partial-a"))
-    registry.middlewares(_Contributor("partial-b"))
+    registry.middlewares(_Contributor("partial"))
+    registry.task_lifecycle(_Contributor("partial"))
     raise ValueError("boom")
 
 
