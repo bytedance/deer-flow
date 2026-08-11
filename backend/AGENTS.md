@@ -99,7 +99,7 @@ make stop       # Stop all services
 **Backend directory** (for backend development only):
 ```bash
 make install            # Install backend dependencies
-make dev                # Run Gateway API with reload (port 8001)
+make dev                # Run Gateway API with runtime-safe reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
 make test               # Run offline backend tests (excludes live external-API tests)
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
@@ -108,6 +108,12 @@ make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
+
+The backend `make dev` target pre-creates and excludes `DEER_FLOW_HOME`
+(default: `backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload
+watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
+Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
+restart the Gateway during an active run.
 
 The root `detect-thread-boundaries` target statically inventories execution
 boundaries under `backend/app/` and `backend/packages/harness/deerflow/`. It
@@ -439,7 +445,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 34. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
 35. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, writes a readable `ToolMessage.content` fallback plus structured `ToolMessage.artifact.human_input` request payload, and interrupts via `Command(goto=END)` (must be last). Payloads are versioned: legacy modes (`free_text` / `choice_with_other`) keep `version: 1` unchanged, while the v2 `form` mode (from `fields`) carries `version: 2` so older frontends reject the payload and degrade to the plain-text fallback. Field normalization is deterministic and lives in the middleware, not the tool schema — the middleware short-circuits before tool execution, so tool-arg typing alone provides no runtime validation. Validation is atomic: any structurally broken entry (non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member like `__proto__`/`constructor`, exceeding the caps of 16 fields / 24 options per field / 200 chars per text, or the whole normalized definition exceeding `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8 — the per-item caps alone admit forms whose IM text fallback would blow channel delivery limits and truncate away trailing fields) degrades the whole form to the legacy option/free-text modes, so a card can never render "complete" while silently missing a business field; benign issues keep local degradation (unknown types — including unhashable JSON like `type: []`, which must never raise from the membership probe — and option-less selects become `text`), and options are trimmed/deduped with blanks dropped (both form-level and top-level) because the frontend parser rejects blank option labels. Model-produced XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar string/number leaves are retained, and residual XML tags are removed before the same trimming and deduplication. Checkbox fields are booleans that default to an explicit "no"; `required` on a checkbox means must-agree/consent semantics. The response protocol is deliberately unchanged (v1 `text`/`option` only): form cards submit a readable text summary as `response_kind: "text"`, so journal persistence and answered-card recovery need no new allowlist entries. Because this middleware can short-circuit tool execution before LangChain emits `on_tool_end`, `RunJournal` performs a root-run final reconciliation for allowlisted clarification `ToolMessage`s whose `tool_call_id` was produced by the current run, so human-input request cards remain recoverable from `run_events` after checkpoint compaction. Human Input Card replies are submitted as `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden response sources (currently `ask_clarification`) as `llm.human.input`, which preserves answered-card state after compaction without exposing generic internal hidden context.
 
-### Python Extension System (Middleware Slice)
+### Python Extension System (Runtime Slice)
 
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
@@ -448,9 +454,10 @@ through Gateway APIs, while importing Python entry points is an operator-control
 execution boundary. A plugin marked `required: true` fails Gateway construction when it
 cannot load; optional plugins fail open with attributed diagnostics.
 
-The public package is `packages/extension-api/` and must never import `deerflow`. In this
-slice its registry contract exposes middleware contribution only. Each contribution
-declares lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
+The public package is `packages/extension-api/` and must never import `deerflow`. Its
+registry contract exposes exactly three contribution kinds: middleware contributors,
+task-lifecycle contributors, and system-model-call observers. Middleware contributions
+declare lead/subagent scope, stable order, and a semantic placement (`MODEL_LOGICAL`,
 `MODEL_PHYSICAL`, `TOOL_VISIBLE`, `TOOL_RAW`, or `STANDARD`) rather than a fragile list
 index. `extensions/stack.py` is the single final composition point; do not inject inside
 the shared base builder because the lead builder appends more middleware afterward.
@@ -470,27 +477,76 @@ wrapper mirrors lifecycle hooks, tools, transformers, and state schema implement
 the inner middleware. LangChain treats each sync/async model or tool wrapper pair as one
 capability, so a single-sided wrapper receives a pass-through counterpart; implement
 both sides when the extension must observe both synchronous and asynchronous execution
-paths. Lead runs and
-subagents allocate an `ExtensionData` task store only when middleware contributors are
-present and expose it through `EXTENSION_TASK_STORE_KEY`; extensions retrieve it with
-`task_store_from_runtime()`. Each run resolves the immutable loaded-extension snapshot
-once and binds that same object through task-store allocation and synchronous agent
-construction, so a concurrent singleton replacement cannot mix two extension
-generations without changing the LangGraph graph-factory ABI. The graph-build binding is
-a ContextVar scoped to synchronous construction, so it has already exited by the time the
-lead agent delegates; the run worker therefore also publishes the snapshot on runtime
-context under the host-internal `EXTENSION_SNAPSHOT_CONTEXT_KEY`, `task_tool` reads it
-back through `resolve_run_extensions()` (type-checked — runtime context is
-caller-mergeable), and `SubagentExecutor` binds it at construction. That key is written
-after the caller merge and popped when the run has none, so a caller-supplied value is
-never authoritative. Absent the key — embedded `DeerFlowClient`, standalone LangGraph
+paths.
+
+Lead runs and subagents allocate an `ExtensionData` task store only when at least one of
+the three contribution kinds is registered. Middleware and system-call sites recover the
+live store through `EXTENSION_TASK_STORE_KEY` / `task_store_from_runtime()`; lifecycle
+contributors receive that same store directly. Each task resolves the immutable
+loaded-extension snapshot once and binds that same object through task-store allocation,
+hooks, and synchronous agent construction, so a concurrent singleton replacement cannot
+mix two extension generations without changing the LangGraph graph-factory ABI. The
+graph-build binding is a ContextVar scoped to synchronous construction, so it has already
+exited by the time the lead agent delegates; the run worker therefore also publishes the
+snapshot on runtime context under the host-internal `EXTENSION_SNAPSHOT_CONTEXT_KEY`,
+`task_tool` reads it back through `resolve_run_extensions()` (type-checked — runtime
+context is caller-mergeable), and `SubagentExecutor` binds it at construction. That key is
+written after the caller merge and popped when the run has none, so a caller-supplied value
+is never authoritative. Absent the key — embedded `DeerFlowClient`, standalone LangGraph
 Server — the executor keeps its `get_loaded_extensions()` fallback.
+
+The lead worker awaits `on_task_start` after the run has started and awaits `on_task_stop`
+after completion persistence/hooks but before clearing any active finalizing barrier or
+publishing the stream end. A subagent with a parent `run_id` wraps its execution with the
+same start/stop pair. Outcomes are conservative (`completed`, `aborted`, or `failed`),
+contributors run in registration order within one bounded budget, and notification failures
+are logged and fail open.
+
+Fail-open is decided by the *origin* of a failure, not by its base class, because
+`CancelledError` reaches a contributor's `except` for two unrelated reasons. Only a genuine
+cancellation of the host task increments `asyncio.Task.cancelling()`, so `_notify_each`
+propagates on that and contains everything else: a contributor that lets a `CancelledError`
+escape — an extension implementing an internal timeout with cancellation, say — must not
+skip its successors, and must not reach the worker's deferred-interrupt path, which would
+end an otherwise successful run as cancelled. `KeyboardInterrupt` / `SystemExit` still
+propagate.
+
+System-model-call observers cover DeerFlow-owned model invocations that do not pass
+through middleware model-call wrappers: goal evaluation, memory extraction, title
+generation, and summarization. They receive a request/result snapshot, duration, and the
+active task store when one exists; detached system work receives an isolated store. All
+three terminal paths are reported without changing the exception the host observes:
+success and failure are awaited inline, while cancellation — routine, since
+interrupt/rollback admission and shutdown both cancel the run task, with the provider
+tokens already spent — is submitted to the notify loop instead of awaited, because a
+repeated cancel would interrupt that await before any observer ran. A deployment with no
+registered notify loop drops the cancellation observation, exactly as the synchronous
+memory bridge does. `SystemModelRequest.messages` normalizes to a tuple at construction: goal and
+memory pass a message list while title and summarization pass one prompt string, and a
+bare `str` is already a `Sequence`, so without normalization an observer iterating it
+would walk characters. Normalizing also copies a live list, which is what makes the frozen
+snapshot immutable in fact rather than only by declaration. Gateway registers one canonical extension-notification loop. Awaited lifecycle
+hooks and async system observations are dispatched to that loop even when the caller is a
+subagent's isolated loop, while synchronous system callbacks submit fire-and-forget work
+there. Shutdown stops accepting detached observations before the memory shutdown flush and
+resets the loop only after in-flight run/subagent drain ordering is complete.
+
+The memory kind reaches those observers through a different shape, and the difference is
+deliberate rather than an oversight to be "aligned" away. DeerMem must stay vendorable and
+cannot import the extension API, so it reports through the `MemoryCallbacks.on_memory_llm_result`
+host hook, which the DeerFlow-side callbacks translate into an observation and submit
+without awaiting. It also guards its provider call with `BaseException` rather than
+`Exception`, which is safe precisely because that whole path runs on a worker thread — the
+debounce timer, or the executor `update_memory` offloads to — where cancelling the awaiting
+side never interrupts the running thread, so `CancelledError` cannot arrive there at all.
+The host hook wrapper around the callback stays at `Exception`: only the hook's own failures
+are non-fatal, and an observability path must not swallow `SystemExit` / `KeyboardInterrupt`.
 
 Gateway `create_app()` loads plugins once, stores the immutable registry on `app.state`
 and in the process-wide singleton, and installs one canonical live diagnostics list.
-Changing `plugins` requires a restart. Later extension contribution points must be added
-to the public contract and host runtime in the same slice; never accept a registration
-method that the current host silently ignores.
+Changing `plugins` requires a restart. Any future contribution kind must be added to the
+public contract and host runtime in the same slice; never accept a registration method
+that the current host silently ignores.
 
 ### Configuration System
 
@@ -927,7 +983,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
   **What may be published from the stream is an allowlist, not a denylist** (`_accumulate_stream_text`): only assistant message types — LangChain serializes `AIMessage.type` as `"ai"` and `AIMessageChunk.type` as `"AIMessageChunk"`, plus the OpenAI-style `"assistant"` spelling for foreign runtimes — become displayable text. The previous rule rejected only payloads whose `type` contained `"tool"` and therefore published everything else, which leaked DeerFlow's hidden model context to every streaming IM channel: `DynamicContextMiddleware` injects recalled memory as a hidden `HumanMessage` (`type == "human"`) and rewrites the user's own turn into a new `HumanMessage`, `DurableContextMiddleware` injects a hidden `<durable_context_data>` `HumanMessage`, and LangGraph fans those state writes out on the `messages-tuple` stream. Proved live on a Buzz relay, which published a `<memory>` fact block and, in another run, a verbatim echo of the user's own message as the assistant's reply. Matching is by prefix (`ai` / `assistant`), never substring, because ordinary words contain `"ai"` (`chain`, `domain`). The message type is resolved by `_stream_payload_type`, which handles both the `model_dump()` shape DeerFlow's own gateway emits and LangChain's `to_json()` constructor shape (whose top-level `type` is the literal `"constructor"`, with the class name at the tail of the `id` path). A bare `str` payload is no longer accepted at all: it carries no type information, so it cannot be attributed to the assistant, and nothing in DeerFlow produces one (`runtime/serialization.py::serialize_messages_tuple` always emits `[message_dict, metadata]`).
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
-- `slack.py` / `feishu.py` / `telegram.py` / `discord.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` accepts inbound text/photos/documents, preserves media captions, hands token-free attachment bytes to the shared upload pipeline, edits the "Working on it..." stream target in place via `editMessageText`, and can optionally send final Markdown replies as Rich Messages through `channels.telegram.rich_messages`; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured, and overrides `receive_file` to download inbound images (`picture`/`richText`) and documents (`file`) by `downloadCode` into the thread uploads bucket, mirroring `feishu.py`)
+- `slack.py` / `feishu.py` / `telegram.py` / `discord.py` / `dingtalk.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` accepts inbound text/photos/documents, preserves media captions, hands token-free attachment bytes to the shared upload pipeline, edits the "Working on it..." stream target in place via `editMessageText`, and can optionally send final Markdown replies as Rich Messages through `channels.telegram.rich_messages`; `discord.py` registers typing loops before inbound handling yields and `_start_typing()` refuses work once `_running` is false; because `stop()` runs on the main loop while typing tasks belong to `_discord_loop`, normal cross-thread cancellation, awaiting, and map cleanup are scheduled there with a bounded wait, while `_run_client()` drains tasks in its `finally` block before an exception/disconnect can make that loop unusable; an already-stopped foreign loop must never have its tasks awaited from the main loop; `dingtalk.py` optionally uses AI Card streaming for in-place updates when `card_template_id` is configured, and overrides `receive_file` to download inbound images (`picture`/`richText`) and documents (`file`) by `downloadCode` into the thread uploads bucket, mirroring `feishu.py`)
 - `buzz.py` - Buzz (Nostr relay) implementation: one NIP-42-authenticated websocket, pubkey-allowlist + mention/DM/thread-follow gating, streaming replies via in-place kind-40003 edits; requires the `buzz` dependency extra. **Subscription model** (operator-facing version in [IM_CHANNEL_CONNECTIONS.md](docs/IM_CHANNEL_CONNECTIONS.md#buzz-subscription-model)): the relay fans kind-9 chat events out **only** to channel-scoped subscriptions, proved against a live relay — `REQ {"kinds":[9]}` is accepted and answered with `EOSE` but never receives an event (the connector authenticated and then sat silent forever), `REQ {"kinds":[9],"#h":[uuid]}` works, and a multi-value `#h` matches nothing, so it is strictly one REQ per channel (the same shape as Buzz's own `buzz-acp` harness). Every connection therefore rebuilds three kinds of subscription after NIP-42 auth: `buzz-discovery` (`{"kinds":[39000]}`, a historical query returning exactly the channels this identity belongs to, one stored event each then `EOSE` — adding `#p` returns zero, do not "narrow" it), `buzz-membership` (`{"kinds":[44100,44101],"#p":[us],"since":<connect time − `MEMBERSHIP_LOOKBACK_SECONDS`>}`, the relay-signed member-added/member-removed notifications whose `p` tag names the affected member and `h` tag the channel), and one `buzz-chat-<uuid>` per discovered channel. Chat subscriptions open as each kind-39000 arrives; the discovery `EOSE` is the completeness barrier that retries any that failed and warns when discovery found nothing. A kind-44100 for our pubkey subscribes to the new channel **live** (then re-issues discovery so its name/type reach the DM-detection cache, but only when that channel's metadata is actually missing — an unconditional refresh is how a burst of 44100s multiplied into one discovery pass each); a kind-44101 issues `buzz_nostr.close_frame` for exactly that channel's subscription and drops its metadata. **The membership subscription is scoped to LIVE events** and this is load-bearing: buzz-relay *stores* 44100/44101 and serves history newest-first (default limit 2000), so an unscoped filter replayed the whole membership history on every connect — every stored add read as live, re-running discovery once each (M+1 discovery passes × N stored kind-39000 events per connect, observed live as two `channel discovery complete` lines and one channel logged `<unnamed>` because the 44100 path subscribed before its metadata arrived), re-subscribing channels we have since been removed from, and letting a stored 44101 transiently unsubscribe a channel we are still in. `since` is anchored at the moment the socket opened (`_session_started_at`) minus `MEMBERSHIP_LOOKBACK_SECONDS` (60) of slack, which covers both relay clock skew and a membership change published *during* the connect/auth handshake; the slack can only cost an idempotent replay of the last minute. **A relay `CLOSED` frame is recovered, not merely forgotten** — every subscription on the socket fails silently when dropped, so `_handle_closed` re-issues it, bounded by `MAX_RESUBSCRIBE_ATTEMPTS` (3) per subscription id per connection *and per auth epoch* (`_resubscribe_attempts` is reset on session start, on re-auth, and by `stop()`, so pre-auth rejections — which the auth branch already recovers wholesale — never spend the authenticated session's budget). The first retry is immediate (the common case is a one-off hiccup); later ones back off 1s then 2s, awaited inline in the read loop rather than in a background task that could outlive its own socket. **`auth-required:` before this socket has completed its NIP-42 handshake is the expected bootstrap sequence, not a refusal**, and `_handle_closed` short-circuits it ahead of every recovery path: the connector opens its control REQs immediately in case the relay serves unauthenticated reads, a closed relay answers `auth-required:` plus an `AUTH` challenge, and the auth branch re-opens everything. That case is logged at DEBUG and consumes neither the permanent-refusal branch nor the retry budget (a chat subscription is still dropped from `_chat_subscriptions`, since it genuinely is not subscribed and discovery is what re-opens it). Treating it as permanent produced an operator-facing warning claiming discovery/membership tracking was DOWN in the same run where discovery then completed, every channel was subscribed, and a brand-new channel's kind-44100 was picked up one second later. The boundary is the per-socket `_auth_completed` flag, set once the signed AUTH event has been sent and cleared on session entry, session exit, and `stop()`; the same reason *after* that stays loud, and says the subscription is down until the relay's next AUTH challenge or the next reconnect rather than borrowing the non-auth wording. Then `_is_transient_close` decides whether to retry at all: NIP-01/NIP-42 `auth-required:`/`restricted:`/`blocked:`/`mute:`/`invalid:`/`pow:` prefixes and buzz-relay's own removal/revocation prose are permanent (do not fight the relay over a channel that is no longer ours; a post-auth `auth-required:` is recovered by the AUTH branch, not by re-issuing), `rate-limited:`/`error:`/no-reason-at-all and anything unrecognized are transient — the default resolves toward "keep listening" because going silently deaf is the failure this exists to remove, and the attempt budget bounds a wrong guess. A chat `CLOSED` is only ever recovered for a channel already in `_chat_subscriptions`: a `CLOSED` is relay-supplied, so acting on an unknown one would let a relay induce a subscription just by naming a channel. Every subscription that goes unlistened is logged at WARNING, never INFO. Subscription ids are deterministic per channel precisely so one can be replaced or closed without disturbing the others on the socket, and `_chat_subscriptions` is per-socket state cleared on session end, on re-auth (a pre-auth REQ may have been rejected), and by `stop()`. Three bounds on remote-fed state: `MAX_CACHED_CHANNELS` (512) caps the kind-39000 metadata cache, the watermark map, and the resubscribe-attempt map; `MAX_CHANNEL_SUBSCRIPTIONS` (256, well under buzz-relay's own 1024-per-connection ceiling) caps live chat subscriptions — at the cap new channels are refused and named in a warning rather than evicting a working subscription. **Known bound (documented, not fixed):** the relay caps historical delivery at 2000 events per subscription, newest-first, even with a `since`, so >2000 unread messages in a *single* channel across a disconnect loses the oldest — the relay never sends them and the watermark advances past them. That is the one remaining path that can skip; everything else fails toward replay. **Trust model** (operator-facing version in [IM_CHANNEL_CONNECTIONS.md](docs/IM_CHANNEL_CONNECTIONS.md#buzz-trust-model)): every inbound `EVENT` is authenticated at the single `handle_relay_frame` choke point — the NIP-01 id is recomputed from the delivered payload and the BIP-340 Schnorr signature verified against the claimed `pubkey` (`buzz_nostr.verify_event`, pure and total: malformed input returns `False`, never raises) — so `ev["pubkey"]`, the authorization principal for both the allowlist and the `/connect` bind, cannot be forged by a relay the DeerFlow operator does not run. What remains trusted is the *authorship* of kind-39000 channel metadata: any member can sign one, and because per-channel subscriptions are now driven by discovery, a forged kind-39000 has two effects rather than one — it can mark a channel `type: "dm"` (relaxing `require_mention` for that channel) **and** it can induce a chat subscription for a channel of the forger's choosing, since the channels we listen to are exactly the channels we hold metadata for. Neither makes anything be *acted on*: `allowed_users` and per-event signature verification are independent gates, so an induced subscription only means the relay reads its own traffic back to a subscriber that drops it, bounded by `MAX_CHANNEL_SUBSCRIPTIONS` (which refuses rather than evicts, so it cannot displace a real channel). Same for a forged kind-44100, except its `p` tag is re-checked locally so it must at least name us. Closing this needs a configured trusted relay pubkey, which `relay_url` is not. `allowed_users` is deny-by-default (empty = nobody, unlike siblings' empty = everyone), so `start()` logs a WARNING when it is empty and each drop logs at DEBUG. The resubscribe cursor (`since`) is **per channel**, advances only for events that were actually processed, and never past `now + MAX_FUTURE_SKEW_SECONDS`, because it is peer-supplied (`created_at`) and a single future-dated event otherwise made the connector permanently deaf. Per channel rather than global is the safety-critical half: subscriptions are per channel, so one shared cursor is the newest event seen in *any* channel and a busy channel would drag it past a quiet channel's unread messages, skipping them on the next reconnect — measured on a live relay, three channels of one identity sat ~28h apart. Per-channel cursors can only ever cost duplicate delivery (absorbed by the manager's `event_id` dedupe), and an evicted cursor degrades to "no `since`", i.e. the relay's default backlog — both fail toward replay, never toward a miss. Streaming tracks every oversize chunk index (`_stream_targets` for chunk 0, `_stream_tails` for the rest), since the manager republishes cumulative text and reposting `chunks[1:]` per update flooded the channel; all of it is per-connection state cleared by `stop()`, and the remote-fed kind-39000 cache is capped at `MAX_CACHED_CHANNELS`. **`send()` refuses outright to publish text carrying a hidden model-context wrapper** (`<memory>`, `<durable_context_data>`, `<system-reminder>` — `_HIDDEN_CONTEXT_MARKERS`), logging at ERROR and clearing the stream bookkeeping on a blocked `is_final`. This is defense in depth behind the manager's allowlist, and it lives here rather than in a sibling connector because on Buzz a leak is permanent: every streaming update is an immutable public Nostr event, so a corrective edit only changes what clients render while the original leaked event stays on the relay. Matching is on the literal opening tag, so a reply that merely talks about memory is still published
 - `github.py` - Webhook-driven GitHub channel. Inbound messages come from `POST /api/webhooks/github`; outbound is log-only because GitHub agents post explicitly with `gh` from their sandbox when they choose to comment or create a PR
 - `app/gateway/routers/channel_connections.py` - Browser-facing user connection and disconnect APIs
@@ -967,6 +1023,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - No public IP, OAuth callback URL, or provider webhook route is required by the current implementation.
 - Telegram uses a deep-link `/start <code>` flow over the existing long-polling worker. Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom use `/connect <code>` over their existing outbound channel workers.
 - WeChat timing settings (`polling_timeout`, `polling_retry_delay`, `qrcode_poll_interval`, `qrcode_poll_timeout`) accept only positive finite seconds; invalid values fall back to their defaults so polling cannot enter a hot loop or sleep forever.
+- WeCom serializes `start()` and `stop()` for each channel instance. The SDK `connect()` task covers connection setup only; after the handshake, the SDK owns a separate receive task. Shutdown cancels an in-progress connection attempt and awaits the SDK's actual asynchronous receive-task/socket cleanup before releasing lifecycle state or allowing a restart. Cancellation of `stop()` still propagates, but only after owned cleanup finishes and lifecycle references are cleared; real connection failures remain reported by `_on_ws_task_done`.
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
 - Browser APIs remain protected by normal Gateway auth/CSRF. Provider messages arrive through the already-configured channel workers.
 - Provider-level `connection_status` reflects the user's newest connection row. With no binding it is `not_connected`, except in auth-disabled local mode where a configured running channel reports `connected` because all channel messages already route to the default user.
