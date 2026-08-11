@@ -549,8 +549,9 @@ POST /api/skills/install/upload
 Content-Type: multipart/form-data
 ```
 
-The multipart field `file` must contain one `.skill` package. Both endpoints
-require an authenticated administrator and return the same response shape.
+The multipart field `file` must contain one `.skill` package no larger than
+512 MiB. Both endpoints require an authenticated administrator and return the
+same response shape.
 
 **Response:**
 ```json

@@ -6,9 +6,11 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
 
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
@@ -171,6 +173,17 @@ def test_upload_and_install_skill_package(monkeypatch):
     assert refresh_calls == ["default"]
 
 
+def test_upload_openapi_declares_multipart_file():
+    app = _make_test_app(SimpleNamespace())
+
+    request_body = app.openapi()["paths"]["/api/skills/install/upload"]["post"]["requestBody"]
+    multipart_schema = request_body["content"]["multipart/form-data"]["schema"]
+
+    assert request_body["required"] is True
+    assert multipart_schema["required"] == ["file"]
+    assert multipart_schema["properties"]["file"] == {"type": "string", "format": "binary"}
+
+
 def test_upload_and_install_rejects_non_skill_file(monkeypatch):
     config = SimpleNamespace()
     app = _make_test_app(config)
@@ -196,8 +209,49 @@ def test_upload_and_install_rejects_oversized_package(monkeypatch):
             files={"file": ("offline.skill", b"four", "application/octet-stream")},
         )
 
-    assert response.status_code == 400
+    assert response.status_code == 413
     assert response.json()["detail"] == "Skill archive is too large."
+
+
+def test_upload_request_limit_runs_before_multipart_spooling(monkeypatch):
+    async def _multipart_file_must_not_be_written(_file, _data):
+        raise AssertionError("oversized request reached multipart file spooling")
+
+    config = SimpleNamespace()
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_UPLOAD_BODY_SIZE", 3)
+    monkeypatch.setattr(UploadFile, "write", _multipart_file_must_not_be_written)
+    app = _make_test_app(config)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("offline.skill", b"four", "application/octet-stream")},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Skill archive is too large."
+
+
+@pytest.mark.asyncio
+async def test_upload_request_limit_counts_streamed_chunks():
+    messages = [
+        {"type": "http.request", "body": b"abc", "more_body": True},
+        {"type": "http.request", "body": b"d", "more_body": False},
+    ]
+    receive_calls = 0
+
+    async def _receive():
+        nonlocal receive_calls
+        message = messages[receive_calls]
+        receive_calls += 1
+        return message
+
+    limited_receive = skills_router._limit_skill_upload_receive(_receive, max_bytes=3)
+
+    assert await limited_receive() == messages[0]
+    with pytest.raises(skills_router._SkillUploadTooLarge):
+        await limited_receive()
+    assert receive_calls == 2
 
 
 def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):
