@@ -417,6 +417,14 @@ Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 
+OpenViking users can register the official Streamable HTTP endpoint at `/mcp`
+with an owner-bound USER API key. The native `forget` tool is exposed for
+capability parity; deletion is irreversible, so it should be called only after
+explicit user confirmation. DeerFlow does not enforce that confirmation. This
+explicit, model-selected MCP tool path can run alongside the separate automatic
+OpenViking memory backend; it does not replace automatic turn capture or recall. See the
+[OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
+
 The Gateway also includes a disabled-by-default, protocol-neutral foundation for durable long-running MCP tasks. It stores remote task handles outside model context, polls them under cross-worker leases, rejects results returned after their lease expires, schedules the next attempt from the time a remote status call finishes, isolates unexpected failures between claimed tasks, cancels in-flight polling during Gateway shutdown, and makes expired claims recoverable after restart. If remote submission succeeds but the handle cannot be persisted, the runtime makes a best-effort cancellation so an untracked task is not silently left running. The exact scoped duplicate-handle conflict is surfaced without cancellation because an existing durable row already owns that remote task. Durable recovery requires a SQL database backend (`sqlite` or `postgres`); the in-memory backend does not initialize this task repository. This foundation does not make existing MCP tools asynchronous by itself: `mcp_tasks.enabled` should remain `false` until a compatible task driver is configured. Ordinary `submit/status/cancel` tools and the future MCP Tasks extension can share the same runtime without making the model remember remote task IDs.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
