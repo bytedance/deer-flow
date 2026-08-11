@@ -835,17 +835,21 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
-For packaged and configurable middleware integrations, use the top-level `plugins:` list
-in `config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
-`deerflow-extension-api` contract package, and can contribute isolated middleware to
-semantic lead/subagent model or tool positions without patching DeerFlow's builders.
-Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
-`required: true` makes load failure abort startup; otherwise failures are reported and
-skipped. Plugins load once when the Gateway app is constructed, so changes require a
-restart. Because this imports Python code, `plugins:` is intentionally unavailable through
-the API-writable `extensions_config.json`. In Docker deployments, install the plugin in the
-Gateway image rather than only in the host environment. See `config.example.yaml` for
-configuration.
+For packaged and configurable runtime integrations, use the top-level `plugins:` list in
+`config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
+`deerflow-extension-api` contract package, and can register exactly three contribution
+kinds: isolated middleware at semantic lead/subagent model or tool positions, lead and
+subagent task-lifecycle hooks, and observers for DeerFlow-owned system model calls such as
+goal evaluation, memory extraction, title generation, and summarization. DeerFlow allocates
+a task-scoped extension store only when one of those contribution kinds is registered and
+uses the Gateway's canonical notification loop for lifecycle and system-model callbacks,
+including subagents that execute on isolated loops. Plugin order is deterministic,
+per-plugin configuration is passed to `install()`, and `required: true` makes load failure
+abort startup; otherwise failures are reported and skipped. Plugins load once when the
+Gateway app is constructed, so changes require a restart. Because this imports Python code,
+`plugins:` is intentionally unavailable through the API-writable
+`extensions_config.json`. In Docker deployments, install the plugin in the Gateway image
+rather than only in the host environment. See `config.example.yaml` for configuration.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
