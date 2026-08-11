@@ -417,6 +417,14 @@ Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 
+OpenViking users can register the official Streamable HTTP endpoint at `/mcp`
+with an owner-bound USER API key. The native `forget` tool is exposed for
+capability parity; deletion is irreversible, so it should be called only after
+explicit user confirmation. DeerFlow does not enforce that confirmation. This
+explicit, model-selected MCP tool path can run alongside the separate automatic
+OpenViking memory backend; it does not replace automatic turn capture or recall. See the
+[OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
+
 The Gateway also includes a disabled-by-default, protocol-neutral foundation for durable long-running MCP tasks. It stores remote task handles outside model context, polls them under cross-worker leases, rejects results returned after their lease expires, schedules the next attempt from the time a remote status call finishes, isolates unexpected failures between claimed tasks, cancels in-flight polling during Gateway shutdown, and makes expired claims recoverable after restart. If remote submission succeeds but the handle cannot be persisted, the runtime makes a best-effort cancellation so an untracked task is not silently left running. The exact scoped duplicate-handle conflict is surfaced without cancellation because an existing durable row already owns that remote task. Durable recovery requires a SQL database backend (`sqlite` or `postgres`); the in-memory backend does not initialize this task repository. This foundation does not make existing MCP tools asynchronous by itself: `mcp_tasks.enabled` should remain `false` until a compatible task driver is configured. Ordinary `submit/status/cancel` tools and the future MCP Tasks extension can share the same runtime without making the model remember remote task IDs.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
@@ -827,17 +835,21 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
-For packaged and configurable middleware integrations, use the top-level `plugins:` list
-in `config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
-`deerflow-extension-api` contract package, and can contribute isolated middleware to
-semantic lead/subagent model or tool positions without patching DeerFlow's builders.
-Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
-`required: true` makes load failure abort startup; otherwise failures are reported and
-skipped. Plugins load once when the Gateway app is constructed, so changes require a
-restart. Because this imports Python code, `plugins:` is intentionally unavailable through
-the API-writable `extensions_config.json`. In Docker deployments, install the plugin in the
-Gateway image rather than only in the host environment. See `config.example.yaml` for
-configuration.
+For packaged and configurable runtime integrations, use the top-level `plugins:` list in
+`config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
+`deerflow-extension-api` contract package, and can register exactly three contribution
+kinds: isolated middleware at semantic lead/subagent model or tool positions, lead and
+subagent task-lifecycle hooks, and observers for DeerFlow-owned system model calls such as
+goal evaluation, memory extraction, title generation, and summarization. DeerFlow allocates
+a task-scoped extension store only when one of those contribution kinds is registered and
+uses the Gateway's canonical notification loop for lifecycle and system-model callbacks,
+including subagents that execute on isolated loops. Plugin order is deterministic,
+per-plugin configuration is passed to `install()`, and `required: true` makes load failure
+abort startup; otherwise failures are reported and skipped. Plugins load once when the
+Gateway app is constructed, so changes require a restart. Because this imports Python code,
+`plugins:` is intentionally unavailable through the API-writable
+`extensions_config.json`. In Docker deployments, install the plugin in the Gateway image
+rather than only in the host environment. See `config.example.yaml` for configuration.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 

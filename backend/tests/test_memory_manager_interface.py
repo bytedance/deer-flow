@@ -199,6 +199,14 @@ def test_callbacks_field_optional_and_noop_default():
     noop = MemoryCallbacks()
     # no-op: mutates nothing, raises nothing
     noop.on_memory_llm_call({}, thread_id="t", user_id="u", trace_id="tr", model_name="m")
+    noop.on_memory_llm_result(
+        {},
+        prompt="prompt",
+        response="response",
+        error=None,
+        duration_ms=1.0,
+        model_name="m",
+    )
     manager = _MinimalBackend(backend_config={}, callbacks=noop)
     assert manager.callbacks is noop
 
