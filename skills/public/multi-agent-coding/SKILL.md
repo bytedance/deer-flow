@@ -124,7 +124,7 @@ coding_run:
   implementation_report: report or null
   review_report: report or null
   failure_stage: input | analysis | implementation | review | null
-  failure_reason: observed reason or null
+  last_failure_reason: observed reason from the most recent failed attempt, or null; preserved when a task is recovered
 ```
 
 `review_only` 的 FAIL 是审查结论，不是伪造的成功，也不是技术失败；`implement_and_review` 的 FAIL 应返回 `needs_follow_up`，等待用户停止或批准重新分析后修复。

@@ -10,7 +10,7 @@ def test_coding_task_has_safe_defaults():
 
     assert task.status is TaskStatus.pending
     assert task.owner is None
-    assert task.failure_reason is None
+    assert task.last_failure_reason is None
     assert task.blocked_by == []
     assert task.worktree is None
     assert task.agent_type is None

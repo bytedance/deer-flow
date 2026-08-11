@@ -30,7 +30,8 @@ class CodingTask:
     description: str
     status: TaskStatus = TaskStatus.pending
     owner: str | None = None
-    failure_reason: str | None = None
+    # 最近一次失败的诊断信息。任务恢复为 pending 后仍保留，供下一次执行接手现场。
+    last_failure_reason: str | None = None
     blocked_by: list[str] = field(default_factory=list)
     # 目标仓库中已验证存在的 Worktree 完整路径，供子 Agent 直接切换工作区。
     worktree: str | None = None

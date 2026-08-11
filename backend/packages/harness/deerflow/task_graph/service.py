@@ -134,7 +134,7 @@ class TaskGraph:
         if task.status is not TaskStatus.in_progress:
             raise ValueError("Only in_progress task can fail")
         task.status = TaskStatus.failed
-        task.failure_reason = reason
+        task.last_failure_reason = reason
         self.store.save(task)
         return task
 
@@ -144,7 +144,6 @@ class TaskGraph:
             raise ValueError("Only failed task can recover")
         task.status = TaskStatus.pending
         task.owner = None
-        task.failure_reason = None
         self.store.save(task)
         return task
 

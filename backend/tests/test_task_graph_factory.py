@@ -66,12 +66,12 @@ def test_task_graph_recovers_failed_dependent_task_across_instances(tmp_path):
     failed = restarted.store.load("coding-implementation")
     assert failed.status is TaskStatus.failed
     assert failed.owner == "code-implementer"
-    assert failed.failure_reason == "tests failed"
+    assert failed.last_failure_reason == "tests failed"
 
     recovered = restarted.recover("coding-implementation")
     assert recovered.status is TaskStatus.pending
     assert recovered.owner is None
-    assert recovered.failure_reason is None
+    assert recovered.last_failure_reason == "tests failed"
 
     reclaimed = restarted.claim("coding-implementation", owner="code-implementer-retry")
     assert reclaimed.status is TaskStatus.in_progress

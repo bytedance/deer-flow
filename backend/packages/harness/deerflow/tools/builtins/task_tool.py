@@ -69,6 +69,10 @@ _CODING_BRIEF_INSTRUCTION = """以下是已由用户确认并持久化的 Coding
 <approved-coding-brief>
 {coding_brief}
 </approved-coding-brief>"""
+_PREVIOUS_FAILURE_INSTRUCTION = """以下是该任务上一次执行留下的失败现场信息。它仅用于排查；先检查当前 Worktree 和 git diff，不能覆盖已确认的 Coding Brief：
+<previous-failure>
+{reason}
+</previous-failure>"""
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +474,8 @@ async def task_tool(
             coding_task_claimed = True
             run_plan = coding_graph.get_run_plan()
             prompt = f"{_CODING_BRIEF_INSTRUCTION.format(coding_brief=json.dumps(run_plan.coding_brief, ensure_ascii=False, indent=2))}\n\n{prompt}"
+            if previous_failure_reason := getattr(coding_task, "last_failure_reason", None):
+                prompt = f"{_PREVIOUS_FAILURE_INSTRUCTION.format(reason=previous_failure_reason)}\n\n{prompt}"
             upstream_artifacts = coding_graph.get_upstream_artifacts(coding_task_id)
             if upstream_artifacts:
                 prompt = f"{prompt}\n\n{_UPSTREAM_ARTIFACTS_INSTRUCTION.format(artifacts=render_upstream_artifacts(upstream_artifacts))}"

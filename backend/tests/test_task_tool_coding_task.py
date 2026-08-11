@@ -21,6 +21,10 @@ def _prompt_with_brief(prompt: str) -> str:
     return task_tool_module._CODING_BRIEF_INSTRUCTION.format(coding_brief=json.dumps(CODING_BRIEF, ensure_ascii=False, indent=2)) + f"\n\n{prompt}"
 
 
+def _prompt_with_previous_failure(prompt: str, reason: str) -> str:
+    return task_tool_module._PREVIOUS_FAILURE_INSTRUCTION.format(reason=reason) + f"\n\n{_prompt_with_brief(prompt)}"
+
+
 class FakeSubagentStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
@@ -44,7 +48,7 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
     class FakeGraph:
         def claim(self, task_id: str, owner: str):
             calls.append(("claim", task_id, owner))
-            return SimpleNamespace(worktree=None)
+            return SimpleNamespace(worktree=None, last_failure_reason="previous pytest failure")
 
         def get_upstream_artifacts(self, task_id: str):
             calls.append(("upstream", task_id))
@@ -129,7 +133,7 @@ def test_coding_task_is_claimed_before_delegation_and_completed_after_success(
         ("create_graph", "thread-1", "alice"),
         ("claim", "task-1", "code-analyzer"),
         ("upstream", "task-1"),
-        ("execute", _prompt_with_brief("Inspect the code"), "tool-call-1"),
+        ("execute", _prompt_with_previous_failure("Inspect the code", "previous pytest failure"), "tool-call-1"),
         ("complete", "task-1", analysis_report),
     ]
 

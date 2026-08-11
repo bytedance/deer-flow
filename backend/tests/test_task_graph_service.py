@@ -221,7 +221,7 @@ def test_fail_persists_reason_and_requires_in_progress(task_graph):
 
     assert failed.status is TaskStatus.failed
     assert failed.owner == "code-implementer"
-    assert failed.failure_reason == "tests failed"
+    assert failed.last_failure_reason == "tests failed"
     assert store.load("task-1") == failed
 
     store.save(CodingTask(id="task-2", subject="Pending", description="Not started"))
@@ -238,7 +238,7 @@ def test_recover_resets_failed_task_for_a_new_claim(task_graph):
             description="Implement change",
             status=TaskStatus.failed,
             owner="code-implementer",
-            failure_reason="tests failed",
+            last_failure_reason="tests failed",
         )
     )
 
@@ -246,7 +246,7 @@ def test_recover_resets_failed_task_for_a_new_claim(task_graph):
 
     assert recovered.status is TaskStatus.pending
     assert recovered.owner is None
-    assert recovered.failure_reason is None
+    assert recovered.last_failure_reason == "tests failed"
     assert store.load("task-1") == recovered
 
     store.save(

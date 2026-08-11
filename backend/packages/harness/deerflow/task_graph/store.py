@@ -39,6 +39,9 @@ class JsonTaskStore:
     def load(self, task_id: str) -> CodingTask:
         task_json = self._task_path(task_id).read_text(encoding="utf-8")
         data = json.loads(task_json)
+        # 兼容早期持久化任务：failure_reason 在恢复后曾被清空，现改为保留最近失败原因。
+        if "last_failure_reason" not in data and "failure_reason" in data:
+            data["last_failure_reason"] = data.pop("failure_reason")
         data["status"] = TaskStatus(data["status"])
         return CodingTask(**data)
 

@@ -23,6 +23,31 @@ def test_save_and_load_task_round_trip(tmp_path):
     assert json.loads((tmp_path / "tasks" / "task-1.json").read_text(encoding="utf-8"))["status"] == "in_progress"
 
 
+def test_load_migrates_legacy_failure_reason(tmp_path):
+    store = JsonTaskStore(tmp_path / "tasks")
+    (tmp_path / "tasks" / "task-1.json").write_text(
+        json.dumps(
+            {
+                "id": "task-1",
+                "subject": "Implement login validation",
+                "description": "Reject invalid credentials",
+                "status": "failed",
+                "owner": "code-implementer",
+                "failure_reason": "tests failed",
+                "blocked_by": [],
+                "worktree": None,
+                "agent_type": None,
+                "artifact": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = store.load("task-1")
+
+    assert loaded.last_failure_reason == "tests failed"
+
+
 def test_stores_with_different_roots_are_isolated(tmp_path):
     first_store = JsonTaskStore(tmp_path / "thread-1" / "tasks")
     second_store = JsonTaskStore(tmp_path / "thread-2" / "tasks")
