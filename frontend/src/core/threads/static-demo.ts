@@ -19,6 +19,8 @@ export const DEMO_THREAD_IDS = [
   "fe3f7974-1bcb-4a01-a950-79673baafefd",
 ] as const;
 
+export const SHOWCASE_ROUTE_PREFIX = "/showcase";
+
 export const STATIC_DEMO_ARTIFACTS: Readonly<
   Record<string, readonly string[]>
 > = {
@@ -132,7 +134,7 @@ export function isDemoThreadId(threadId: string): boolean {
 }
 
 export function pathOfPublicDemoThread(threadId: string): string {
-  return `/showcase/${encodeURIComponent(threadId)}`;
+  return `${SHOWCASE_ROUTE_PREFIX}/${encodeURIComponent(threadId)}`;
 }
 
 export type ThreadSearchParams = NonNullable<
