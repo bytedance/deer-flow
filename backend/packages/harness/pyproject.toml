@@ -7,6 +7,11 @@ dependencies = [
     "agent-client-protocol>=0.4.0",
     "agent-sandbox>=0.0.30",
     "croniter>=6.0.0",
+    # Exact pin by design (extension-system version contract): the host pins
+    # the contract version it implements, extensions declare ranges. A range
+    # here would let pip resolve a newer contract package than this harness
+    # implements, making newer extensions look supported at runtime.
+    "deerflow-extension-api==0.1.1",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
@@ -17,6 +22,7 @@ dependencies = [
     "langchain-anthropic>=1.4.1",
     "langchain-deepseek>=1.0.1",
     "langchain-mcp-adapters>=0.2.2",
+    "langchain-openviking==0.1.0",
     "langchain-openai>=1.2.1",
     "langfuse>=3.4.1",
     "langgraph>=1.2.9,<1.3",
@@ -34,12 +40,12 @@ dependencies = [
     "ddgs>=9.10.0",
     "duckdb>=1.4.4",
     "langchain-google-genai>=4.2.1",
-    "langgraph-checkpoint-sqlite>=3.1.0,<3.2",
+    "langgraph-checkpoint-sqlite>=3.1.1,<3.2",
     "langgraph-sdk>=0.1.51",
     "sqlalchemy[asyncio]>=2.0,<3.0",
     "aiosqlite>=0.19",
     "alembic>=1.13",
-    "cryptography>=48.0.1",
+    "cryptography>=50.0.0",
     "e2b-code-interpreter>=2.8.0",
 ]
 
@@ -57,7 +63,7 @@ groundroute = []
 ollama = ["langchain-ollama>=0.3.0"]
 postgres = [
     "asyncpg>=0.29",
-    "langgraph-checkpoint-postgres>=3.1.0,<3.2",
+    "langgraph-checkpoint-postgres>=3.1.1,<3.2",
     "psycopg[binary]>=3.3.3",
     "psycopg-pool>=3.3.0",
 ]

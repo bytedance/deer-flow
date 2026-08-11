@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
 if callable(_previous_shutdown_isolated_subagent_loop):
@@ -452,6 +454,7 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        extensions: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -476,6 +479,10 @@ class SubagentExecutor:
                 the same run as the lead agent.
             deerflow_trace_id: DeerFlow request-level correlation id propagated
                 from the parent run for Langfuse metadata correlation.
+            extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
+                captured at ``task_tool`` dispatch. When None (embedded client,
+                standalone LangGraph Server), ``_aexecute`` falls back to the
+                process-wide singleton.
         """
         self.config = config
         self.app_config = app_config
@@ -508,6 +515,12 @@ class SubagentExecutor:
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
+        # Parent run's extension snapshot. Binding it here (rather than reading
+        # the singleton at execution time) is what keeps one run on a single
+        # extension generation: a concurrent ``set_loaded_extensions()`` between
+        # the lead run's start and this subagent's execution must not swap the
+        # generation underneath the delegated work.
+        self.extensions = extensions
 
         self._base_tools = _filter_tools(
             tools,
@@ -530,7 +543,13 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
-    def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
+    def _create_agent(
+        self,
+        tools: list[BaseTool] | None = None,
+        *,
+        deferred_setup: "DeferredToolSetup | None" = None,
+        extensions=None,
+    ):
         """Create the agent instance.
 
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
@@ -564,6 +583,8 @@ class SubagentExecutor:
             "available_skills": self._available_skill_names,
             "user_id": self.user_id or DEFAULT_USER_ID,
         }
+        if extensions is not None:
+            middleware_kwargs["extensions"] = extensions
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
@@ -788,6 +809,37 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+        from deerflow_extension_api import ExtensionData, TaskInfo
+
+        from deerflow.extensions import get_loaded_extensions
+        from deerflow.extensions.notify import (
+            lead_task_id,
+            notify_task_start,
+            notify_task_stop,
+            subagent_task_outcome,
+        )
+
+        loaded_extensions = self.extensions if self.extensions is not None else get_loaded_extensions()
+        task_store: ExtensionData | None = None
+        task_info: TaskInfo | None = None
+        if loaded_extensions.needs_task_store:
+            task_store = ExtensionData(result.task_id)
+        if loaded_extensions.has_task_lifecycle and self.run_id:
+            task_info = TaskInfo(
+                task_id=result.task_id,
+                run_id=self.run_id,
+                thread_id=self.thread_id or "",
+                kind="subagent",
+                parent_task_id=lead_task_id(self.run_id),
+                agent_name=self.config.name,
+            )
+            assert task_store is not None
+        elif loaded_extensions.has_task_lifecycle:
+            logger.debug(
+                "[trace=%s] Subagent %s has no run_id; skipping extension task lifecycle",
+                self.trace_id,
+                self.config.name,
+            )
         ai_messages = result.ai_messages
         if ai_messages is None:
             ai_messages = []
@@ -804,8 +856,20 @@ class SubagentExecutor:
 
         collector: SubagentTokenCollector | None = None
         try:
+            if task_info is not None and task_store is not None:
+                await notify_task_start(
+                    loaded_extensions,
+                    task_store,
+                    task_info,
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
+
             state, final_tools, deferred_setup = await self._build_initial_state(task)
-            agent = self._create_agent(final_tools, deferred_setup=deferred_setup)
+            agent = self._create_agent(
+                final_tools,
+                deferred_setup=deferred_setup,
+                extensions=loaded_extensions,
+            )
 
             # Token collector for subagent LLM calls
             collector_caller = f"subagent:{self.config.name}"
@@ -866,6 +930,10 @@ class SubagentExecutor:
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id
+            if task_store is not None:
+                from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+                context[EXTENSION_TASK_STORE_KEY] = task_store
             if self.channel_user_id:
                 context["channel_user_id"] = self.channel_user_id
             # Authorization identity: is_internal written unconditionally
@@ -1014,6 +1082,27 @@ class SubagentExecutor:
                 error=str(e),
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
+
+        finally:
+            if task_info is not None and task_store is not None:
+                try:
+                    await notify_task_stop(
+                        loaded_extensions,
+                        task_store,
+                        task_info,
+                        subagent_task_outcome(
+                            cancelled=result.status is SubagentStatus.CANCELLED,
+                            succeeded=result.status is SubagentStatus.COMPLETED,
+                        ),
+                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[trace=%s] Extension task-stop notification failed for subagent %s (non-fatal)",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
+                    )
 
         return result
 

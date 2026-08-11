@@ -1,0 +1,15 @@
+[project]
+name = "deerflow-extension-api"
+version = "0.1.1"
+description = "Public contracts for DeerFlow extensions"
+requires-python = ">=3.12"
+# Keep the contract package import-light and independent from the host. Public
+# values are stdlib-based; concrete middleware types are validated by DeerFlow.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_api"]

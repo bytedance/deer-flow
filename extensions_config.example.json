@@ -16,8 +16,18 @@
         "GITHUB_TOKEN": "$GITHUB_TOKEN"
       },
       "tool_name_prefix": true,
+      "session_init_timeout": 60,
       "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
+    },
+    "openviking": {
+      "enabled": false,
+      "type": "http",
+      "url": "http://127.0.0.1:1933/mcp",
+      "headers": {
+        "X-API-Key": "$OPENVIKING_API_KEY"
+      },
+      "description": "Official OpenViking tools for explicit memory and resource operations"
     },
     "postgres": {
       "enabled": false,

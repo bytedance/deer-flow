@@ -36,6 +36,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.constants import TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -110,6 +111,7 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
 
 
 async def _persist_delivery_receipt(
@@ -205,17 +207,36 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
+    """Directory names workspace snapshots must skip for this deployment.
+
+    The tool-output budget middleware externalizes oversized tool outputs into
+    a storage subdir under outputs (default ``.tool-results``). Those files are
+    process feedback referenced from the budget preview via ``read_file``, not
+    deliverables: counting them as produced artifacts would fail run delivery
+    verification for any run that externalized a tool output without also
+    presenting a real artifact. The default name is excluded by the scanner
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
+    """
+    storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
+    return frozenset({storage_subdir})
+
+
 async def _produced_output_paths(
     before: WorkspaceSnapshot | None,
     *,
     thread_id: str,
     user_id: str | None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> list[str]:
     """Detect regular output files created or modified by this run."""
     if before is None:
         return []
     try:
-        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
         return get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
@@ -349,6 +370,8 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -370,6 +393,21 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if task_store is not None:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
+    # Publish the run's extension snapshot so work dispatched during graph
+    # execution (task delegation) binds the same generation the lead agent was
+    # built with, instead of re-reading a singleton that may have been replaced
+    # mid-run. Written after the caller merge and popped when absent, because a
+    # caller-supplied value for this host-internal key is never authoritative.
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+    if extensions is not None:
+        runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
+    else:
+        runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -388,6 +426,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
@@ -519,9 +558,25 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+
+    from deerflow_extension_api import ExtensionData, TaskInfo
+
+    from deerflow.extensions import get_loaded_extensions
+    from deerflow.extensions.notify import (
+        lead_task_id,
+        lead_task_outcome,
+        notify_task_start,
+        notify_task_stop,
+    )
+
+    extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    task_store: ExtensionData | None = None
+    task_info: TaskInfo | None = None
+    deferred_stop_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
+    workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
@@ -631,6 +686,26 @@ async def run_agent(
             return
         started = True
 
+        task_id = lead_task_id(run_id)
+        if extensions.needs_task_store:
+            task_store = ExtensionData(task_id)
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
+
         if not record.ownership_lost and thread_store is not None:
             try:
                 await thread_store.update_status(thread_id, "running")
@@ -672,10 +747,15 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            # Resolved once per run so the pre-run snapshot, the post-run
+            # delivery scan, and the workspace-changes scan all agree on the
+            # same exclusion set.
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -698,7 +778,14 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            task_store,
+            extensions,
+        )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
         if deerflow_trace_id:
@@ -750,10 +837,13 @@ async def run_agent(
             continuation_config["configurable"] = configurable
             return RunnableConfig(**continuation_config)
 
+        agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
-        else:
-            agent = agent_factory(config=initial_runnable_config)
+            agent_factory_kwargs["app_config"] = ctx.app_config
+        from deerflow.extensions import bind_agent_build_extensions
+
+        with bind_agent_build_extensions(extensions):
+            agent = agent_factory(**agent_factory_kwargs)
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -926,6 +1016,8 @@ async def run_agent(
                 abort_event=record.abort_event,
                 user_id=resolve_runtime_user_id(runtime),
                 deerflow_trace_id=deerflow_trace_id,
+                task_store=task_store,
+                extensions=extensions,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -969,6 +1061,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1054,6 +1147,7 @@ async def run_agent(
                     run_id,
                     pre_run_workspace_snapshot,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
@@ -1075,6 +1169,7 @@ async def run_agent(
                         pre_run_workspace_snapshot,
                         thread_id=thread_id,
                         user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
                     )
                 delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
             receipt_persisted = await _persist_delivery_receipt(
@@ -1173,11 +1268,43 @@ async def run_agent(
                 await ctx.on_run_completed(record)
             except Exception:
                 logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+
+        if task_info is not None and task_store is not None:
+            # Keep the finalizing barrier held until stop observers finish, so
+            # a same-thread replacement cannot overlap this task's lifecycle.
+            try:
+                await notify_task_stop(
+                    extensions,
+                    task_store,
+                    task_info,
+                    lead_task_outcome(
+                        aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
+                        succeeded=record.status == RunStatus.success,
+                    ),
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning(
+                    "Extension task-stop notification failed for run %s (non-fatal)",
+                    run_id,
+                    exc_info=True,
+                )
+            except BaseException as exc:
+                # Cancellation here must not strand the finalizing barrier or
+                # leave stream consumers waiting for the end frame.
+                deferred_stop_interrupt = exc
+                logger.warning(
+                    "Extension task-stop notification interrupted for run %s; completing cleanup first",
+                    run_id,
+                )
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+
+        if deferred_stop_interrupt is not None:
+            raise deferred_stop_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1470,8 @@ async def _prepare_goal_continuation_input(
     abort_event: asyncio.Event | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1423,6 +1552,8 @@ async def _prepare_goal_continuation_input(
             thread_id=thread_id,
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
+            task_store=task_store,
+            extensions=extensions,
         )
         if abort_event is not None and abort_event.is_set():
             return None

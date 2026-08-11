@@ -104,3 +104,19 @@ sandbox:
 """.strip()
 
     assert _detect_mode_with_config(config) == "local"
+
+
+@pytest.mark.parametrize("docker_command", ["logs --gateway", "restart"])
+def test_compose_commands_set_deer_flow_root_before_compose(docker_command):
+    """Log and restart commands should resolve mounts from the repository root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmpdir}'
+DOCKER_DIR='{tmpdir}'
+COMPOSE_CMD=capture_compose
+capture_compose() {{ test "${{DEER_FLOW_ROOT:-}}" = "$PROJECT_ROOT"; }}
+unset DEER_FLOW_ROOT
+{docker_command}
+"""
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])

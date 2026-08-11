@@ -41,6 +41,20 @@ _HELP_KEYS = "Keys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · 
 _HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
 
 
+_TRANSPARENT_CSS = """
+Screen,
+#header,
+#scroll,
+#status,
+#palette,
+#composer,
+SelectScreen #dialog,
+SelectScreen OptionList {
+    background: ansi_default;
+}
+"""
+
+
 class SelectScreen(ModalScreen):
     """A centered modal that returns the id of the chosen option (or None)."""
 
@@ -158,7 +172,10 @@ class DeerFlowTUI(App):
     ]
 
     def __init__(self, session, plan) -> None:
-        super().__init__()
+        transparent = bool(getattr(plan, "transparent", False))
+        if transparent:
+            self.CSS = f"{self.CSS}\n{_TRANSPARENT_CSS}"
+        super().__init__(ansi_color=True if transparent else None)
         self.session = session
         self.plan = plan
         self.state = initial_state()
