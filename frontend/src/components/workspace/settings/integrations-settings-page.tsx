@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   larkIntegrationQueryKey,
@@ -594,10 +595,10 @@ function LarkIntegrationCard() {
 
   const handleCopyAuthLink = async () => {
     if (!pendingFlow) return;
-    try {
-      await navigator.clipboard.writeText(pendingFlow.verification_url);
+    const didCopy = await writeTextToClipboard(pendingFlow.verification_url);
+    if (didCopy) {
       toast.success(t.clipboard.copiedToClipboard);
-    } catch {
+    } else {
       toast.error(t.clipboard.failedToCopyToClipboard);
     }
   };
