@@ -263,6 +263,11 @@ are never parsed as a task protocol:
 - `cancel_report({"task_id":"remote-123"})` is idempotent and returns the
   actual terminal status: `cancelled`, `completed`, or `failed`.
 
+Persisted task errors are capped at 4,000 characters. An `input_required`
+payload must be valid JSON no larger than 64 KiB; an oversized or invalid
+payload is treated as a permanent protocol failure instead of being truncated
+into a different question.
+
 `error_code: "task_not_found"` is a permanent failure. Network and transport
 errors remain retryable with capped exponential backoff; the query API reports
 `tracking_degraded` after repeated failures. Oversized JSON results are not

@@ -415,6 +415,115 @@ async def test_protocol_error_terminalizes_instead_of_retrying_forever():
 
 
 @pytest.mark.asyncio
+async def test_protocol_error_message_is_bounded_before_terminal_persistence():
+    oversized_error = "e" * 5_000
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(error=McpTaskProtocolError(oversized_error)))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert applied["error"] == oversized_error[:4_000]
+
+
+@pytest.mark.asyncio
+async def test_persisted_snapshot_errors_are_bounded_on_submit_and_poll():
+    oversized_error = "e" * 5_000
+    submit_repo = FakeRepository()
+    submit_driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.FAILED, error=oversized_error),
+        )
+    )
+    submit_registry = McpTaskDriverRegistry()
+    submit_registry.register("fake", submit_driver)
+    submit_service = McpTaskService(
+        repository=submit_repo,
+        drivers=submit_registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await submit_service.submit(
+        driver_name="fake",
+        request=TaskSubmitRequest(
+            user_id="user-1",
+            thread_id="thread-1",
+            run_id="run-1",
+            tool_call_id="call-1",
+            server_name="reports",
+            task_name="Generate report",
+            arguments={},
+        ),
+    )
+
+    assert submit_repo.created[0]["error"] == oversized_error[:4_000]
+
+    poll_repo = FakeRepository([_claimed_row()])
+    poll_registry = McpTaskDriverRegistry()
+    poll_registry.register(
+        "fake",
+        FakeDriver([TaskSnapshot(status=TaskStatus.FAILED, error=oversized_error)]),
+    )
+    poll_service = McpTaskService(
+        repository=poll_repo,
+        drivers=poll_registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await poll_service.run_once(now=datetime.now(UTC))
+
+    _, applied = poll_repo.applied[0]
+    assert applied["error"] == oversized_error[:4_000]
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_required_payload_terminalizes_without_persisting_it():
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(
+            [
+                TaskSnapshot(
+                    status=TaskStatus.INPUT_REQUIRED,
+                    input_required={"prompt": "x" * 65_536},
+                )
+            ]
+        ),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released == []
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert applied["input_required"] is None
+    assert "input_required payload exceeds the 65536-byte limit" in applied["error"]
+    assert applied["next_poll_at"] is None
+
+
+@pytest.mark.asyncio
 async def test_oversized_result_stores_preview_without_invalid_truncated_json():
     repo = FakeRepository([_claimed_row()])
     registry = McpTaskDriverRegistry()

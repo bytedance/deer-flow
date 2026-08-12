@@ -20,7 +20,14 @@ from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
 
 logger = logging.getLogger(__name__)
 
-_MAX_POLL_ERROR_CHARS = 4000
+_MAX_PERSISTED_ERROR_CHARS = 4_000
+_MAX_INPUT_REQUIRED_BYTES = 65_536
+
+
+def _bound_error(error: str | None) -> str | None:
+    if error is None:
+        return None
+    return error[:_MAX_PERSISTED_ERROR_CHARS]
 
 
 class McpTaskService:
@@ -169,7 +176,7 @@ class McpTaskService:
             )
             await self._apply_snapshot(
                 record,
-                TaskSnapshot(status=TaskStatus.FAILED, error=str(exc)),
+                TaskSnapshot(status=TaskStatus.FAILED, error=_bound_error(str(exc))),
                 polled_at=datetime.now(UTC),
             )
             return
@@ -227,26 +234,28 @@ class McpTaskService:
             self._poll_interval_seconds * (2 ** min(consecutive_errors, 16)),
             self._max_poll_backoff_seconds,
         )
+        bounded_error = _bound_error(error)
+        assert bounded_error is not None
         await self._repository.release_claim(
             record["id"],
             lease_owner=self._lease_owner,
             next_poll_at=now + timedelta(seconds=retry_seconds),
-            error=error[:_MAX_POLL_ERROR_CHARS],
+            error=bounded_error,
         )
 
     def _normalize_snapshot(self, snapshot: TaskSnapshot) -> TaskSnapshot:
-        """Bound persisted result size without ever storing truncated JSON."""
+        """Bound remote payloads without ever storing truncated JSON."""
+        snapshot = replace(snapshot, error=_bound_error(snapshot.error))
+        if snapshot.input_required is not None:
+            encoded_input = self._encode_json_payload(
+                snapshot.input_required,
+                field_name="input_required",
+            )
+            if len(encoded_input) > _MAX_INPUT_REQUIRED_BYTES:
+                raise McpTaskProtocolError(f"MCP task input_required payload exceeds the {_MAX_INPUT_REQUIRED_BYTES}-byte limit")
         if snapshot.result is None:
             return snapshot
-        try:
-            encoded = json.dumps(
-                snapshot.result,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            raise McpTaskProtocolError(f"MCP task result is not valid JSON: {exc}") from exc
+        encoded = self._encode_json_payload(snapshot.result, field_name="result")
         if len(encoded) <= self._max_result_bytes:
             return snapshot
 
@@ -260,6 +269,18 @@ class McpTaskService:
             result_preview=preview_source[: self._result_preview_max_chars],
             result_truncated=True,
         )
+
+    @staticmethod
+    def _encode_json_payload(value, *, field_name: str) -> bytes:
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise McpTaskProtocolError(f"MCP task {field_name} is not valid JSON: {exc}") from exc
 
     async def start(self) -> None:
         if self._task is not None:
