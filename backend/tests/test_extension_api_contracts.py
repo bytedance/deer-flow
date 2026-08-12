@@ -8,6 +8,7 @@ are asserted here.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import importlib.resources
 import inspect
@@ -24,6 +25,13 @@ from deerflow_extension_api import (
     MiddlewareContributor,
     MiddlewarePlacement,
     Placement,
+    SystemModelCallObserver,
+    SystemModelRequest,
+    SystemModelResult,
+    SystemOperationKind,
+    TaskInfo,
+    TaskLifecycleContributor,
+    TaskOutcome,
     extension,
 )
 from deerflow_extension_api.runtime_bridge import (
@@ -56,6 +64,9 @@ def test_middleware_placement_defaults():
     [
         HostPolicySnapshot,
         AgentBuildContext,
+        TaskInfo,
+        SystemModelRequest,
+        SystemModelResult,
         MiddlewarePlacement,
     ],
 )
@@ -66,16 +77,23 @@ def test_every_dataclass_is_frozen(cls):
 
 @pytest.mark.parametrize(
     "cls",
-    [HostPolicySnapshot],
+    [HostPolicySnapshot, TaskInfo, SystemModelRequest, SystemModelResult],
 )
 def test_additive_dataclasses_are_constructible_with_required_fields_only(cls):
     """Fields added later must carry defaults, or old extensions break on upgrade.
 
-    HostPolicySnapshot is host-constructed and fully optional.
-    AgentBuildContext gets its own dedicated test below because its scope is
-    legitimately required.
+    HostPolicySnapshot and the two system-call snapshots are host-constructed
+    and fully optional. TaskInfo has a required identity core and optional
+    remainder. AgentBuildContext gets its own dedicated test below because its
+    scope is legitimately required.
     """
-    assert cls() is not None
+    if cls is TaskInfo:
+        info = cls(task_id="t", run_id="r", thread_id="th", kind="lead")
+        assert info.parent_task_id is None
+        assert info.agent_name is None
+        assert info.resumed is False
+    else:
+        assert cls() is not None
 
 
 def test_agent_build_context_optional_fields_keep_their_defaults():
@@ -97,6 +115,8 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     [
         ExtensionRegistry,
         MiddlewareContributor,
+        TaskLifecycleContributor,
+        SystemModelCallObserver,
     ],
 )
 def test_every_protocol_method_has_a_default_implementation(protocol):
@@ -123,6 +143,58 @@ def test_contributor_defaults_return_empty():
     assert MiddlewareContributor.contribute_middlewares(bare, ExtensionData("app"), AgentBuildContext(scope=AgentScope.LEAD)) == ()
 
 
+def test_task_lifecycle_contract_is_public_and_defaults_to_noop():
+    class _Bare:
+        pass
+
+    app_store = ExtensionData("app")
+    task_store = ExtensionData("task-1")
+    info = TaskInfo(
+        task_id="task-1",
+        run_id="run-1",
+        thread_id="thread-1",
+        kind="lead",
+    )
+
+    assert TaskOutcome.COMPLETED.value == "completed"
+    assert asyncio.run(TaskLifecycleContributor.on_task_start(_Bare(), app_store, task_store, info)) is None
+    assert asyncio.run(TaskLifecycleContributor.on_task_stop(_Bare(), app_store, task_store, info, TaskOutcome.COMPLETED)) is None
+
+
+def test_system_model_observer_contract_reports_success_and_failure_shapes():
+    class _Bare:
+        pass
+
+    app_store = ExtensionData("app")
+    task_store = ExtensionData("task-1")
+    request = SystemModelRequest(messages=("prompt",), model_name="system-model")
+    success = SystemModelResult(response="answer", duration_ms=1.5)
+    failure = SystemModelResult(error=RuntimeError("provider failed"), duration_ms=2.0)
+
+    assert SystemOperationKind.GOAL.value == "goal"
+    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, success)) is None
+    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, failure)) is None
+
+
+def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
+    """``messages`` is a snapshot of a message sequence, never a per-character view.
+
+    Title and summarization pass a single prompt string, so a bare ``str`` must not
+    reach observers as a ``Sequence`` whose items are characters. A live ``list`` from
+    a call site must also be copied: the snapshot is documented as read-only, and the
+    caller keeps mutating its own list after the observation is dispatched.
+    """
+    assert SystemModelRequest(messages="one prompt").messages == ("one prompt",)
+
+    live: list[str] = ["first"]
+    request = SystemModelRequest(messages=live)
+    live.append("second")
+    assert request.messages == ("first",)
+
+    assert SystemModelRequest().messages == ()
+    assert SystemModelRequest(messages=("already", "a", "tuple")).messages == ("already", "a", "tuple")
+
+
 def test_future_contribution_points_are_not_advertised_before_the_host_supports_them():
     """A merged slice must not silently accept registrations it cannot run."""
     import deerflow_extension_api
@@ -130,8 +202,6 @@ def test_future_contribution_points_are_not_advertised_before_the_host_supports_
     for name in (
         "ExtensionRuntimeDeps",
         "ExtensionService",
-        "SystemModelCallObserver",
-        "TaskLifecycleContributor",
     ):
         assert name not in deerflow_extension_api.__all__
         assert not hasattr(deerflow_extension_api, name)
@@ -164,6 +234,14 @@ def test_extension_decorator_stamps_api_requirement():
 
     assert install.__deerflow_api__ == "0.1"
     assert install.__deerflow_name__ == "demo"
+
+
+def test_task_outcome_members():
+    assert {outcome.value for outcome in TaskOutcome} == {"completed", "aborted", "failed"}
+
+
+def test_system_operation_kind_members():
+    assert {kind.value for kind in SystemOperationKind} == {"goal", "memory", "title", "summarization"}
 
 
 def test_registry_and_install_alias_are_part_of_the_public_surface():
@@ -211,4 +289,5 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
+    assert API_VERSION == "0.1.1"
     assert API_VERSION == version("deerflow-extension-api")

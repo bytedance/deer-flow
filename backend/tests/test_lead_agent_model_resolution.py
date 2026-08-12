@@ -643,7 +643,7 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     monkeypatch.setattr(
         lead_agent_module,
         "TitleMiddleware",
-        lambda *, app_config: captured.setdefault("title_app_config", app_config) or "title-middleware",
+        lambda *, app_config, extensions: captured.setdefault("title_app_config", app_config) or "title-middleware",
     )
     monkeypatch.setattr(
         lead_agent_module,
@@ -688,7 +688,7 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
         lambda **kwargs: captured.update(kwargs) or None,
     )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
-    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config: "title-middleware")
+    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config, extensions: "title-middleware")
     monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-middleware")
 
     lead_agent_module.build_middlewares(

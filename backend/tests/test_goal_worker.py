@@ -2,10 +2,12 @@ import asyncio
 import copy
 
 import pytest
+from deerflow_extension_api import ExtensionData
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.goal import GoalEvaluation, attach_goal_evaluation, build_goal_state, latest_visible_assistant_signature, read_thread_goal, write_thread_goal
 from deerflow.runtime.runs import worker
@@ -150,10 +152,14 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
     thread_id = "goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
     bridge = _CollectingBridge()
+    task_store = ExtensionData("run-1")
+    extensions = ExtensionRegistry().build()
 
-    async def fake_evaluate_goal_completion(goal, messages, **_kwargs):
+    async def fake_evaluate_goal_completion(goal, messages, **kwargs):
         assert goal["objective"] == "Finish all tests"
         assert [message.content for message in messages][-1] == "I made a start, but I am not done."
+        assert kwargs["task_store"] is task_store
+        assert kwargs["extensions"] is extensions
         return GoalEvaluation(
             satisfied=False,
             blocker="goal_not_met_yet",
@@ -171,6 +177,8 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
         run_id="run-1",
         model_name="test-model",
         app_config=None,
+        task_store=task_store,
+        extensions=extensions,
     )
 
     assert continuation is not None

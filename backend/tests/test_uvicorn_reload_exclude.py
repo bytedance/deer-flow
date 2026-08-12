@@ -14,7 +14,7 @@ Two layers of coverage:
 * ``test_*_resolve_*`` exercises uvicorn's real ``resolve_reload_patterns`` to
   pin the failure mode and the fix's mechanism.
 * ``test_launcher_precreates_every_absolute_reload_exclude`` enforces the actual
-  invariant on both launchers: every absolute exclude dir is ``mkdir -p``'d
+  invariant on every dev launcher: every absolute exclude dir is ``mkdir -p``'d
   before uvicorn starts. This encodes the root cause, so any future absolute
   exclude that forgets its ``mkdir`` fails here.
 """
@@ -35,6 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHERS = {
     "scripts/serve.sh": REPO_ROOT / "scripts" / "serve.sh",
     "docker/dev-entrypoint.sh": REPO_ROOT / "docker" / "dev-entrypoint.sh",
+    "backend/Makefile": REPO_ROOT / "backend" / "Makefile",
 }
 
 # Shell terminators / redirects that end a simple command's argument list.
@@ -161,7 +162,7 @@ def test_sandbox_mkdir_precedes_uvicorn_launch(name):
     """
     lines = LAUNCHERS[name].read_text(encoding="utf-8").splitlines()
     launch_idx = next((i for i, ln in enumerate(lines) if "uv run uvicorn" in ln), None)
-    mkdir_idx = next((i for i, ln in enumerate(lines) if re.search(r"\bmkdir\b", ln) and "sandbox" in ln), None)
+    mkdir_idx = next((i for i, ln in enumerate(lines) if re.search(r"\bmkdir\b", ln) and "sandbox" in ln.lower()), None)
 
     assert launch_idx is not None, f"{name}: could not locate the 'uv run uvicorn' launch line"
     assert mkdir_idx is not None, f"{name}: could not locate the sandbox mkdir line"

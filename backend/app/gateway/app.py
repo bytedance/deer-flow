@@ -439,6 +439,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         manager = None
         try:
+            # Memory shutdown runs on a worker thread and can trigger detached
+            # system-model callbacks. Stop accepting those callbacks before
+            # flushing, while keeping the registered loop alive for awaited
+            # task hooks until langgraph_runtime drains runs and subagents.
+            from deerflow.extensions.notify import suspend_extension_system_observations
+
+            suspend_extension_system_observations()
+        except Exception:
+            logger.debug("Failed to suspend extension system observations (non-fatal)", exc_info=True)
+
+        try:
             app_cfg = get_app_config()
             if app_cfg.memory.enabled:
                 from deerflow.agents.memory import get_memory_manager

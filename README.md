@@ -320,7 +320,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
 
-   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm`/`pnpm.cmd` executable when available and otherwise fall back to `corepack pnpm`. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
+   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm`/`pnpm.cmd` executable when available and otherwise fall back to `corepack pnpm`. The shared runner and diagnostics resolve repository paths absolutely, so these checks work regardless of the caller's current directory. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
 
 2. **Install dependencies**:
    ```bash
@@ -416,6 +416,14 @@ Settings > Tools updates one MCP server at a time: an invalid stdio command on o
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
+
+OpenViking users can register the official Streamable HTTP endpoint at `/mcp`
+with an owner-bound USER API key. The native `forget` tool is exposed for
+capability parity; deletion is irreversible, so it should be called only after
+explicit user confirmation. DeerFlow does not enforce that confirmation. This
+explicit, model-selected MCP tool path can run alongside the separate automatic
+OpenViking memory backend; it does not replace automatic turn capture or recall. See the
+[OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
 
 The Gateway also includes a disabled-by-default, protocol-neutral foundation for durable long-running MCP tasks. It stores remote task handles outside model context, polls them under cross-worker leases, rejects results returned after their lease expires, schedules the next attempt from the time a remote status call finishes, isolates unexpected failures between claimed tasks, cancels in-flight polling during Gateway shutdown, and makes expired claims recoverable after restart. If remote submission succeeds but the handle cannot be persisted, the runtime makes a best-effort cancellation so an untracked task is not silently left running. The exact scoped duplicate-handle conflict is surfaced without cancellation because an existing durable row already owns that remote task. Durable recovery requires a SQL database backend (`sqlite` or `postgres`); the in-memory backend does not initialize this task repository. This foundation does not make existing MCP tools asynchronous by itself: `mcp_tasks.enabled` should remain `false` until a compatible task driver is configured. Ordinary `submit/status/cancel` tools and the future MCP Tasks extension can share the same runtime without making the model remember remote task IDs.
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
@@ -827,17 +835,21 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
-For packaged and configurable middleware integrations, use the top-level `plugins:` list
-in `config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
-`deerflow-extension-api` contract package, and can contribute isolated middleware to
-semantic lead/subagent model or tool positions without patching DeerFlow's builders.
-Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
-`required: true` makes load failure abort startup; otherwise failures are reported and
-skipped. Plugins load once when the Gateway app is constructed, so changes require a
-restart. Because this imports Python code, `plugins:` is intentionally unavailable through
-the API-writable `extensions_config.json`. In Docker deployments, install the plugin in the
-Gateway image rather than only in the host environment. See `config.example.yaml` for
-configuration.
+For packaged and configurable runtime integrations, use the top-level `plugins:` list in
+`config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
+`deerflow-extension-api` contract package, and can register exactly three contribution
+kinds: isolated middleware at semantic lead/subagent model or tool positions, lead and
+subagent task-lifecycle hooks, and observers for DeerFlow-owned system model calls such as
+goal evaluation, memory extraction, title generation, and summarization. DeerFlow allocates
+a task-scoped extension store only when one of those contribution kinds is registered and
+uses the Gateway's canonical notification loop for lifecycle and system-model callbacks,
+including subagents that execute on isolated loops. Plugin order is deterministic,
+per-plugin configuration is passed to `install()`, and `required: true` makes load failure
+abort startup; otherwise failures are reported and skipped. Plugins load once when the
+Gateway app is constructed, so changes require a restart. Because this imports Python code,
+`plugins:` is intentionally unavailable through the API-writable
+`extensions_config.json`. In Docker deployments, install the plugin in the Gateway image
+rather than only in the host environment. See `config.example.yaml` for configuration.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
@@ -935,7 +947,7 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 Sub-agents are an optimization, not the default response to a complex request.
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is also attributed back to the dispatching step.
+The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
