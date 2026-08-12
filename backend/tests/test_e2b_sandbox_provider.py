@@ -1258,6 +1258,27 @@ def test_sandbox_config_validates_e2b_capacity_fields():
         )
 
 
+def test_e2b_config_accepts_documented_reconciliation_fields(monkeypatch, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    config = SandboxConfig(
+        use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        api_key="test-key",
+        reconciliation_interval_seconds=60,
+        reconciliation_grace_seconds=120,
+        reconciliation_orphan_ttl_seconds=3600,
+        reconciliation_max_pages=10,
+        reconciliation_max_items=200,
+        reconciliation_max_seconds=15,
+    )
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+
+    with caplog.at_level("WARNING"):
+        provider._load_config()
+
+    assert "unknown sandbox config fields" not in caplog.text
+
+
 def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     config = SandboxConfig(
