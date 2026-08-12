@@ -133,6 +133,23 @@ test("reads IM channel source metadata", () => {
   });
 });
 
+test("formats the Buzz channel source label", () => {
+  expect(
+    channelSourceOfThread({
+      metadata: {
+        channel_source: {
+          type: "im_channel",
+          provider: "buzz",
+        },
+      },
+    }),
+  ).toEqual({
+    type: "im_channel",
+    provider: "buzz",
+    label: "Buzz",
+  });
+});
+
 test("ignores threads without valid IM channel source metadata", () => {
   expect(channelSourceOfThread({ metadata: {} })).toBeNull();
   expect(
