@@ -191,7 +191,14 @@ function writeObject(
     if (!writer.write(": ")) {
       break;
     }
-    writePayloadValue(Reflect.get(value, key), writer, depth + 1, ancestors);
+    let propertyValue: unknown;
+    try {
+      propertyValue = Reflect.get(value, key);
+    } catch {
+      writer.markTruncated();
+      propertyValue = "[Thrown]";
+    }
+    writePayloadValue(propertyValue, writer, depth + 1, ancestors);
     index += 1;
   }
   if (hasMoreItems) {
