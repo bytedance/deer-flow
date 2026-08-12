@@ -908,6 +908,28 @@ class TestGetMessageSeqs:
         assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
 
     @pytest.mark.anyio
+    async def test_the_scan_stops_once_every_wanted_identity_is_resolved(self, store):
+        """Rows past the last wanted seq can only lose the earliest-seq-wins
+        tiebreak, so scanning them is busy-work — on `/state`/`/history` reads
+        of long threads this lookup is the only one and the wanted set is
+        typically tiny."""
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+
+        class _Tripwire(dict):
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("scan continued past the row that resolved the last wanted identity")
+
+        store._messages["t1"].append(_Tripwire())
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
+
+    @pytest.mark.anyio
     async def test_jsonl_store_resolves_identities(self, tmp_path):
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 

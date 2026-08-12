@@ -428,6 +428,12 @@ class DbRunEventStore(RunEventStore):
                 # position it first occupied in the feed.
                 if identity in wanted and identity not in found:
                     found[identity] = seq
+                    # Later rows can only be re-persisted copies that already
+                    # lose that tiebreak, so the scan (and its JSON decoding)
+                    # ends with the last wanted seq instead of the thread's
+                    # full message count.
+                    if len(found) == len(wanted):
+                        break
         return found
 
     async def delete_by_thread(

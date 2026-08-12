@@ -195,6 +195,10 @@ class MemoryRunEventStore(RunEventStore):
             # keeps the position it first occupied in the feed.
             if identity in wanted and identity not in found:
                 found[identity] = record["seq"]
+                # Later rows can only be re-persisted copies that already lose
+                # that tiebreak, so the scan ends with the last wanted seq.
+                if len(found) == len(wanted):
+                    break
         return found
 
     async def delete_by_thread(self, thread_id):
