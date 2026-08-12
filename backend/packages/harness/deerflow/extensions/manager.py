@@ -109,12 +109,12 @@ class ExtensionManager:
             selected_config = root_config if root_config.is_file() or not legacy_config.is_file() else legacy_config
         self.config_path = selected_config.resolve()
 
-    def install(self, source: str, *, yes: bool = False) -> InstalledExtension:
+    def install(self, source: str, *, yes: bool = False, required: bool = False) -> InstalledExtension:
         """Install an extension source and enable its packaging entry point."""
         with _manager_lock(self.project_root):
-            return self._install(source, yes=yes)
+            return self._install(source, yes=yes, required=required)
 
-    def _install(self, source: str, *, yes: bool) -> InstalledExtension:
+    def _install(self, source: str, *, yes: bool, required: bool) -> InstalledExtension:
         if not yes:
             raise PermissionError("installing an extension executes trusted third-party code; pass yes=True to continue")
 
@@ -202,7 +202,7 @@ class ExtensionManager:
                     "package": distribution,
                     "use": use,
                     "enabled": True,
-                    "required": True,
+                    "required": required,
                     "config": {},
                 }
             )
@@ -707,25 +707,13 @@ def _write_plugins_block(path: Path, original: str, plugins: list[Any]) -> None:
         sort_keys=False,
     ).rstrip()
     rendered = rendered.replace("\n", newline) + newline
-    start_match = re.search(
-        r"""(?m)^(?:plugins|["']plugins["'])[ \t]*:[^\r\n]*(?:\r?\n|$)""",
-        original,
-    )
-    if start_match is None:
+    span = _plugins_block_span(original)
+    if span is None:
         separator = "" if not original or original.endswith(newline * 2) else newline
         updated = original + separator + rendered
     else:
-        next_key = re.search(
-            r"""(?m)^(?:[A-Za-z_][A-Za-z0-9_-]*|"[^"\r\n]+"|'[^'\r\n]+')[ \t]*:\s*""",
-            original[start_match.end() :],
-        )
-        if next_key is None:
-            end = len(original)
-        else:
-            next_key_start = start_match.end() + next_key.start()
-            between = original[start_match.end() : next_key_start]
-            end = start_match.end() + _trailing_section_comment_start(between)
-        updated = original[: start_match.start()] + rendered + original[end:]
+        start, end = span
+        updated = original[:start] + rendered + original[end:]
 
     mode = path.stat().st_mode
     temporary: Path | None = None
@@ -746,6 +734,33 @@ def _write_plugins_block(path: Path, original: str, plugins: list[Any]) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _plugins_block_span(original: str) -> tuple[int, int] | None:
+    """Locate the character span of an existing top-level ``plugins:`` entry.
+
+    Both boundaries come from the YAML parser rather than a key-shaped regex.
+    ``AppConfig`` allows extra top-level keys, so a following section may be
+    named anything YAML accepts — ``my.key``, ``2fa``, ``$schema``, a non-ASCII
+    word. A pattern that fails to recognize that key does not fail loudly: it
+    reports "no next section", and the rewrite then replaces the neighbour and
+    its whole subtree with the managed block. Trailing comments below a
+    file-final block are preserved for the same reason.
+    """
+    root = yaml.compose(original)
+    if not isinstance(root, yaml.MappingNode):
+        return None
+    for index, (key, _value) in enumerate(root.value):
+        if not isinstance(key, yaml.ScalarNode) or key.value != "plugins":
+            continue
+        start = key.start_mark.index
+        line_end = original.find("\n", start)
+        content_start = len(original) if line_end < 0 else line_end + 1
+        following = root.value[index + 1 :]
+        next_start = following[0][0].start_mark.index if following else len(original)
+        between = original[content_start:next_start]
+        return start, content_start + _trailing_section_comment_start(between)
+    return None
 
 
 def _trailing_section_comment_start(text: str) -> int:

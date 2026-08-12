@@ -29,6 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="acknowledge that installing an extension executes trusted third-party code",
     )
+    install.add_argument(
+        "--required",
+        action="store_true",
+        help="abort Gateway startup when this extension fails to load (default: report and skip)",
+    )
     disable = commands.add_parser("disable", help="disable an extension without uninstalling it")
     disable.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     disable.add_argument("name", help="extension name, distribution, or module:install entry point")
@@ -60,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not trusted:
                     print("Extension installation cancelled.", file=sys.stderr)
                     return 2
-            installed = manager.install(source, yes=trusted)
+            installed = manager.install(source, yes=trusted, required=args.required)
             print(f"Installed and enabled {installed.name} ({installed.distribution}). Restart DeerFlow to load it.")
             return 0
         if args.command == "disable":

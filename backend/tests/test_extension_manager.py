@@ -185,12 +185,59 @@ def test_install_local_directory_makes_it_deployable_and_enabled(tmp_path: Path)
             "package": "deerflow-extension-demo",
             "use": "demo_extension:install",
             "enabled": True,
-            "required": True,
+            "required": False,
             "config": {},
         }
     ]
 
     _assert_demo_entry_point_loads(root / "backend")
+
+
+def test_install_defaults_to_a_fail_open_plugin_record(tmp_path: Path) -> None:
+    """A managed install must not silently choose the fail-closed side: with
+    `required: true`, a later broken extension aborts Gateway startup entirely,
+    and recovery needs shell access to run `extensions disable`."""
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+
+    ExtensionManager(root).install(str(source), yes=True)
+
+    config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert config["plugins"][0]["required"] is False
+
+
+def test_install_records_required_when_the_operator_opts_in(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+
+    ExtensionManager(root).install(str(source), yes=True, required=True)
+
+    config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert config["plugins"][0]["required"] is True
+
+
+def test_cli_install_exposes_the_required_opt_in(tmp_path: Path, monkeypatch, capsys) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(root))
+
+    assert deerflow_main(["extensions", "install", str(source), "--yes", "--required"]) == 0
+
+    capsys.readouterr()
+    config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    assert config["plugins"][0]["required"] is True
 
 
 def test_mutating_operations_are_serialized_for_one_checkout(tmp_path: Path, monkeypatch) -> None:
@@ -200,7 +247,7 @@ def test_mutating_operations_are_serialized_for_one_checkout(tmp_path: Path, mon
     release_first = threading.Event()
     second_entered = threading.Event()
 
-    def _fake_install(self, source: str, *, yes: bool):
+    def _fake_install(self, source: str, *, yes: bool, required: bool):
         if source == "first":
             first_entered.set()
             assert release_first.wait(timeout=5)
@@ -1309,6 +1356,50 @@ def test_plugins_rewrite_preserves_the_next_quoted_or_plain_top_level_section(
     ExtensionManager(root).set_enabled("demo", enabled=False)
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"][0]["enabled"] is False
+    assert config["log_level"] == "info"
+
+
+@pytest.mark.parametrize("next_key", ["my.key", "2fa", "$schema", "日本", "my key"])
+def test_plugins_rewrite_preserves_a_following_section_with_an_unconventional_key(
+    tmp_path: Path,
+    next_key: str,
+) -> None:
+    """`AppConfig` allows extra top-level keys, so the managed rewrite must not
+    assume the next section is named like a Python identifier."""
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+    config_path = root / "config.yaml"
+    config_path.write_text(
+        f'plugins: [{{name: demo, use: "demo_extension:install", enabled: true}}]\n{next_key}:\n  nested: keep-me\n',
+        encoding="utf-8",
+    )
+
+    ExtensionManager(root).set_enabled("demo", enabled=False)
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"][0]["enabled"] is False
+    assert config[next_key] == {"nested": "keep-me"}
+
+
+def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(tmp_path: Path) -> None:
+    """The manager appends `plugins:` at end of file, so the steady-state shape
+    has no following key; trailing operator notes still must survive a toggle."""
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+    config_path = root / "config.yaml"
+    config_path.write_text(
+        'log_level: info\nplugins: [{name: demo, use: "demo_extension:install", enabled: true}]\n\n# operator note kept below the managed block\n',
+        encoding="utf-8",
+    )
+
+    ExtensionManager(root).set_enabled("demo", enabled=False)
+
+    updated = config_path.read_text(encoding="utf-8")
+    assert "# operator note kept below the managed block" in updated
+    config = yaml.safe_load(updated)
     assert config["plugins"][0]["enabled"] is False
     assert config["log_level"] == "info"
 
