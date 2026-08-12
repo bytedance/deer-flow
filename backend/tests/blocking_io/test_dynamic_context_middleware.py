@@ -24,10 +24,12 @@ from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.agents.memory import MemoryReadError, reset_memory_manager
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 pytestmark = pytest.mark.asyncio
@@ -38,6 +40,13 @@ class _FakeModel(FakeMessagesListChatModel):
 
     def bind_tools(self, tools, **kwargs):  # type: ignore[override]
         return self
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_manager() -> None:
+    reset_memory_manager()
+    yield
+    reset_memory_manager()
 
 
 async def test_abefore_agent_does_not_block_event_loop() -> None:
@@ -106,9 +115,22 @@ async def test_abefore_agent_returns_same_result_as_before_agent() -> None:
     assert sync_result["messages"][1].id == async_result["messages"][1].id
 
 
-async def test_abefore_agent_returns_none_on_timeout() -> None:
+async def test_abefore_agent_returns_none_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A timed-out worker must not emit a late, phantom context event."""
-    mw = DynamicContextMiddleware()
+    monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    mw = DynamicContextMiddleware(
+        app_config=SimpleNamespace(
+            memory=MemoryConfig(
+                manager_class="openviking",
+                backend_config={
+                    "owner_user_id": "alice",
+                    "failure_policy": {"read": "fail_open"},
+                },
+            )
+        )
+    )
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -148,6 +170,126 @@ async def test_abefore_agent_returns_none_on_timeout() -> None:
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     journal.record_memory_context.assert_not_called()
+
+
+async def test_abefore_agent_propagates_strict_memory_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A strict backend must not degrade after the middleware timeout."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
+    mw = DynamicContextMiddleware(
+        app_config=SimpleNamespace(
+            memory=MemoryConfig(
+                manager_class="openviking",
+                backend_config={
+                    "owner_user_id": "alice",
+                    "failure_policy": {"read": "raise"},
+                },
+            )
+        )
+    )
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_inject(state, runtime=None):
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
+        runtime = SimpleNamespace(context={})
+        with pytest.raises(MemoryReadError) as exc_info:
+            await mw.abefore_agent(state, runtime)
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert started.is_set()
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 1)
+
+
+@pytest.mark.parametrize(
+    ("manager_class", "backend_config", "api_key"),
+    [
+        pytest.param(
+            "openviking",
+            {
+                "owner_user_id": "alice",
+                "failure_policy": {"read": "raise"},
+            },
+            None,
+            id="missing_openviking_api_key",
+        ),
+        pytest.param(
+            "openviking",
+            {
+                "owner_user_id": "alice",
+                "failure_policy": {"read": "invalid"},
+            },
+            "test-key",
+            id="invalid_backend_config",
+        ),
+        pytest.param(
+            "missing.backend:Manager",
+            {},
+            None,
+            id="unknown_manager_class",
+        ),
+    ],
+)
+async def test_abefore_agent_policy_resolution_failure_does_not_replace_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    manager_class: str,
+    backend_config: dict,
+    api_key: str | None,
+) -> None:
+    """An unresolved timeout policy must fail closed with the original cause."""
+    if api_key is None:
+        monkeypatch.delenv("OPENVIKING_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENVIKING_API_KEY", api_key)
+    mw = DynamicContextMiddleware(
+        app_config=SimpleNamespace(
+            memory=MemoryConfig(
+                manager_class=manager_class,
+                backend_config=backend_config,
+            )
+        )
+    )
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_inject(state, runtime=None):
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    try:
+        with (
+            mock.patch.object(mw, "_inject", blocking_inject),
+            mock.patch(
+                "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+                0.01,
+            ),
+        ):
+            state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
+            runtime = SimpleNamespace(context={})
+            with pytest.raises(MemoryReadError) as exc_info:
+                await mw.abefore_agent(state, runtime)
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
+    assert started.is_set()
 
 
 async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:

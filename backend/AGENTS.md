@@ -309,9 +309,22 @@ Memory backend async boundary:
 - A backend may set `requires_passive_writes_in_tool_mode = True` when tool-mode
   search is supported but durable writes still depend on conversation-level
   extraction. Such backends receive memory tools and retain `MemoryMiddleware`.
-- Prompt recall rethrows `MemoryManagerError` only when backend config declares
-  `failure_policy.read: fail_closed`; other recall errors preserve the existing
-  log-and-empty-context behavior.
+- The `MemoryManager` read boundary is typed: fail-open backends return empty
+  context, while backends that require context raise `MemoryReadError`.
+  Identity/authorization failures raise `MemoryAccessError`. Prompt recall
+  propagates those shared errors without inspecting backend-private policy
+  strings, and strict backends expose `read_failures_are_fatal` so the async
+  injection timeout cannot silently degrade them. Ordinary unexpected recall
+  errors retain the log-and-empty-context compatibility fallback.
+- Startup warmup remains best-effort by default. Backends with a strict startup
+  policy raise `MemoryManagerError` and expose `startup_failures_are_fatal` so
+  the Gateway's caller-owned warmup timeout cannot silently degrade them.
+  OpenViking validates its USER key with a bounded, non-semantic filesystem
+  listing; semantic SDK authentication/permission exceptions are treated as
+  caller access failures only when that same probe is denied. Otherwise the
+  original semantic failure follows the backend's read/write availability
+  policy, because upstream embedding/VLM credentials can surface the same SDK
+  exception classes.
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 

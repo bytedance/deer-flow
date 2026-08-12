@@ -210,6 +210,18 @@ class DynamicContextMiddleware(AgentMiddleware):
             ]
         )
 
+    def _read_failures_are_fatal(self) -> bool:
+        from deerflow.agents.memory import memory_read_failures_are_fatal
+        from deerflow.config.memory_config import get_memory_config
+
+        memory_config = self._app_config.memory if self._app_config else get_memory_config()
+        if not memory_config.enabled or not memory_config.injection_enabled:
+            return False
+        return memory_read_failures_are_fatal(
+            memory_config.manager_class,
+            memory_config.backend_config,
+        )
+
     @staticmethod
     def _make_reminder_and_user_messages(
         original: HumanMessage,
@@ -330,7 +342,16 @@ class DynamicContextMiddleware(AgentMiddleware):
                 asyncio.to_thread(self._inject, state, runtime),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
-        except TimeoutError:
+        except TimeoutError as exc:
+            from deerflow.agents.memory import MemoryReadError
+
+            try:
+                read_failures_are_fatal = await asyncio.to_thread(self._read_failures_are_fatal)
+            except Exception:
+                logger.exception("DynamicContextMiddleware: could not resolve memory read failure policy; treating the injection timeout as fatal")
+                read_failures_are_fatal = True
+            if read_failures_are_fatal:
+                raise MemoryReadError("Required memory context retrieval timed out") from exc
             logger.warning(
                 "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
                 _INJECT_TIMEOUT_SECONDS,

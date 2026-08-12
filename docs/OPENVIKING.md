@@ -155,10 +155,23 @@ boundary; peers separate memory scopes within that user.
 
 ## Retry and failure behavior
 
-- `read: fail_open` logs retrieval failures and returns no injected OpenViking
-  memory. `read: raise` propagates the retrieval failure to its DeerFlow caller.
+- Startup warmup checks both the public service health endpoint and one
+  authenticated, read-only filesystem listing of `viking://user/memories`
+  limited to one node. This non-semantic probe validates USER-key access
+  without invoking an embedding or VLM provider. With `startup_policy:
+  fail_fast`, an unavailable or unverifiable backend aborts startup; `warn`
+  reports it unhealthy and continues in degraded mode.
+- `read: fail_open` logs retrieval failures and continues the turn without
+  recalled OpenViking context. `read: raise` aborts the turn when recall fails.
 - `write: log_and_drop` logs capture failures without failing an already
   generated answer. `write: raise` propagates them.
+- Proven USER-key authentication or permission failures and
+  `owner_user_id` mismatches are always fatal for reads and writes. Because
+  semantic operations can report the same error types for upstream embedding
+  or VLM credentials, DeerFlow verifies ambiguous failures with the
+  non-semantic filesystem probe. If caller access remains valid, or cannot be
+  verified for a non-access reason, the original semantic failure follows the
+  configured read/write availability policy.
 - DeerFlow stores only hashes and counters in a bounded local capture cursor
   under `{storage_path}/openviking/sessions/`. It never stores message text
   there.

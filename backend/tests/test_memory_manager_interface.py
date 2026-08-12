@@ -18,7 +18,15 @@ import asyncio
 import pytest
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory import MemoryManager, get_memory_manager, reset_memory_manager
+from deerflow.agents.memory import (
+    MemoryAccessError,
+    MemoryManager,
+    MemoryManagerError,
+    MemoryReadError,
+    get_memory_manager,
+    memory_read_failures_are_fatal,
+    reset_memory_manager,
+)
 from deerflow.agents.memory.manager import MemoryCallbacks
 from deerflow.config.memory_config import MemoryConfig, get_memory_config, set_memory_config
 
@@ -88,6 +96,7 @@ def test_minimal_backend_onboards_via_factory_with_only_add_get_context():
 
     # tier-3 inherits defaults: warm=None (nothing to warm); B-class no-op;
     # A-class (excl. warm) raise.
+    assert manager.startup_failures_are_fatal is False
     assert manager.warm() is None
     assert manager.on_pre_compress([]) == ""
     assert manager.on_turn_start(1, None) is None
@@ -209,6 +218,82 @@ def test_callbacks_field_optional_and_noop_default():
     )
     manager = _MinimalBackend(backend_config={}, callbacks=noop)
     assert manager.callbacks is noop
+
+
+def test_required_read_and_access_errors_share_manager_boundary():
+    assert issubclass(MemoryReadError, MemoryManagerError)
+    assert issubclass(MemoryAccessError, MemoryManagerError)
+    assert _MinimalBackend(backend_config={}).read_failures_are_fatal is False
+    assert (
+        memory_read_failures_are_fatal(
+            f"{__name__}:_MinimalBackend",
+            {},
+        )
+        is False
+    )
+
+
+def test_read_failure_capability_prefers_cached_manager():
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_MinimalBackend"))
+    manager = get_memory_manager()
+
+    assert isinstance(manager, _MinimalBackend)
+    assert (
+        memory_read_failures_are_fatal(
+            "missing.backend:Manager",
+            {"failure_policy": {"read": "raise"}},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("manager_class", "backend_config", "api_key"),
+    [
+        pytest.param(
+            "openviking",
+            {
+                "owner_user_id": "alice",
+                "failure_policy": {"read": "raise"},
+            },
+            None,
+            id="missing_openviking_api_key",
+        ),
+        pytest.param(
+            "openviking",
+            {
+                "owner_user_id": "alice",
+                "failure_policy": {"read": "invalid"},
+            },
+            "test-key",
+            id="invalid_backend_config",
+        ),
+        pytest.param(
+            "missing.backend:Manager",
+            {},
+            None,
+            id="unknown_manager_class",
+        ),
+    ],
+)
+def test_read_failure_capability_fails_closed_when_policy_cannot_be_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+    manager_class: str,
+    backend_config: dict,
+    api_key: str | None,
+) -> None:
+    if api_key is None:
+        monkeypatch.delenv("OPENVIKING_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENVIKING_API_KEY", api_key)
+
+    assert (
+        memory_read_failures_are_fatal(
+            manager_class,
+            backend_config,
+        )
+        is True
+    )
 
 
 def test_from_config_consumes_host_hooks_it_needs():
