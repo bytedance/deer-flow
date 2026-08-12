@@ -852,6 +852,7 @@ Gateway app is constructed, so changes require a restart. Because this imports P
 rather than only in the host environment. See `config.example.yaml` for configuration.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
+The Web composer renders follow-up suggestions only after a run is ready and clears suggestions from the previous turn as soon as the next run starts streaming, preventing stale chips and their close control from overlapping the To-dos panel or input box. Stopped and failed runs also skip follow-up generation for incomplete responses.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
