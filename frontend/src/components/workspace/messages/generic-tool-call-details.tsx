@@ -137,7 +137,7 @@ function writePayloadValue(
       writeObject(value, writer, depth, ancestors);
     }
   } finally {
-     ancestors.delete(value);
+    ancestors.delete(value);
   }
 }
 
