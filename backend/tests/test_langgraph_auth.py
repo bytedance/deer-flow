@@ -177,8 +177,17 @@ class _FakeUser:
         self.display_name = identity
 
 
-def _make_ctx(user_id, *, resource="threads", action="create"):
-    return Auth.types.AuthContext(resource=resource, action=action, user=_FakeUser(user_id), permissions=[])
+def _make_ctx(user_id, *, resource="threads", action="create", user=None):
+    return Auth.types.AuthContext(resource=resource, action=action, user=user or _FakeUser(user_id), permissions=[])
+
+
+def _studio_ctx(*, resource="assistants", action="search"):
+    return _make_ctx(
+        "langgraph-studio-user",
+        resource=resource,
+        action=action,
+        user=Auth.types.StudioUser("langgraph-studio-user"),
+    )
 
 
 def test_filter_injects_user_id():
@@ -227,35 +236,52 @@ def test_filter_with_empty_metadata():
 
 
 @pytest.mark.parametrize("action", ["read", "search"])
-def test_studio_user_assistant_discovery_is_limited_to_system_assistants(action):
+def test_studio_user_assistant_discovery_includes_system_and_studio_owned_assistants(action):
+    value = {}
+    result = asyncio.run(add_owner_filter(_studio_ctx(action=action), value))
+
+    assert result == {
+        "$or": [
+            {"created_by": "system"},
+            {"user_id": "langgraph-studio-user"},
+        ]
+    }
+    assert value == {}
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_studio_assistant_writes_stamp_server_owned_provenance(action):
+    value = {"metadata": {"created_by": "system"}}
+    result = asyncio.run(add_owner_filter(_studio_ctx(action=action), value))
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "user_id": "langgraph-studio-user",
+    }
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_studio_user_non_assistant_operations_remain_owner_scoped():
+    value = {}
+    result = asyncio.run(
+        add_owner_filter(
+            _studio_ctx(resource="threads", action="search"),
+            value,
+        )
+    )
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
+def test_identity_string_does_not_impersonate_studio_user():
     value = {}
     result = asyncio.run(
         add_owner_filter(
             _make_ctx(
                 "langgraph-studio-user",
                 resource="assistants",
-                action=action,
-            ),
-            value,
-        )
-    )
-
-    assert result == {"created_by": "system"}
-    assert value == {}
-
-
-@pytest.mark.parametrize(
-    ("resource", "action"),
-    [("assistants", "create"), ("threads", "search")],
-)
-def test_studio_user_non_discovery_operations_remain_owner_scoped(resource, action):
-    value = {}
-    result = asyncio.run(
-        add_owner_filter(
-            _make_ctx(
-                "langgraph-studio-user",
-                resource=resource,
-                action=action,
+                action="search",
             ),
             value,
         )
@@ -276,6 +302,37 @@ def test_regular_user_assistant_search_remains_owner_scoped():
 
     assert value["metadata"]["user_id"] == "user-a"
     assert result == {"user_id": "user-a"}
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_regular_user_cannot_forge_system_assistant_provenance(action):
+    value = {"metadata": {"created_by": "system", "label": "forged"}}
+    result = asyncio.run(
+        add_owner_filter(
+            _make_ctx("user-a", resource="assistants", action=action),
+            value,
+        )
+    )
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "label": "forged",
+        "user_id": "user-a",
+    }
+    assert result == {"user_id": "user-a"}
+
+
+def test_assistant_version_rollback_is_rejected():
+    with pytest.raises(Auth.exceptions.HTTPException) as exc:
+        asyncio.run(
+            add_owner_filter(
+                _studio_ctx(action="update"),
+                {"assistant_id": uuid4(), "version": 1},
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert "version rollback" in str(exc.value.detail).lower()
 
 
 # ── Gateway parity ───────────────────────────────────────────────────────

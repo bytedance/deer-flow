@@ -608,14 +608,21 @@ Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login acce
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
-Standalone local LangGraph Studio uses the upstream synthetic identity
-`langgraph-studio-user`. For that identity's assistant reads/searches,
-`langgraph_auth.add_owner_filter` selects only assistants whose metadata has
-`created_by=system`; the registered graph definitions have that marker but no
-per-user metadata, so applying the normal owner filter makes Studio return
-`200 []`. User-owned assistants, thread, run, store, cron, and assistant-write
-operations remain owner-scoped, and ordinary authenticated users retain
-owner-scoped assistant reads/searches.
+Standalone local LangGraph Studio is recognized only through the upstream
+`Auth.types.StudioUser` principal type, never by its reusable identity string.
+For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
+selects genuine server-registered assistants plus assistants owned by Studio;
+all other resources remain owner-scoped. Assistant create/update handlers make
+both `user_id` and `created_by=user` server-owned, because LangGraph gives
+`created_by=system` privileged ownership semantics during run creation. The
+custom application lifespan in `langgraph_studio.py` runs after graph
+registration and demotes persisted `created_by=system` rows whose deterministic
+IDs are absent from LangGraph's `SYSTEM_ASSISTANT_IDS`, so metadata written by
+older vulnerable versions is not trusted. Standalone external assistant version
+rollback is denied because upstream restores a historical version's metadata
+without passing it through the update handler, which could otherwise reactivate
+an old forged system marker. Ordinary authenticated users retain owner-scoped
+assistant reads/searches.
 
 Start that standalone in-memory server with
 `uv run langgraph dev --allow-blocking` from `backend/`. The development-only

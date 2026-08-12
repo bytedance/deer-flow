@@ -381,7 +381,10 @@ configuration and graph-factory setup during local Studio requests; it must not
 be treated as a production-server setting. Local Studio authentication is
 handled automatically, so the connection does not require custom headers. Use
 DeerFlow's documented production startup modes or a supported LangSmith
-deployment for production workloads.
+deployment for production workloads. Assistant ownership and provenance in this
+standalone mode are server-owned: Studio can discover registered graphs and the
+assistants it creates, but the assistant-version rollback endpoint is disabled
+so historical client metadata cannot restore server privileges.
 
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity

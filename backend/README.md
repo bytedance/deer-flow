@@ -290,7 +290,9 @@ server is intended for development and testing, not production deployment. The
 flag permits DeerFlow's synchronous configuration and graph-factory setup
 during local Studio requests; it is not a production-server setting. Its local
 Studio authentication and registered graph discovery are handled automatically;
-no custom connection headers are required.
+no custom connection headers are required. Assistant ownership/provenance is
+stamped by the server, and assistant-version rollback is disabled so metadata
+persisted by an older server cannot reactivate server-only privileges.
 
 ---
 
