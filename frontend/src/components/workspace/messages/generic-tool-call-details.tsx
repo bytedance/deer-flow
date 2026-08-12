@@ -130,12 +130,15 @@ function writePayloadValue(
   }
 
   ancestors.add(value);
-  if (Array.isArray(value)) {
-    writeArray(value, writer, depth, ancestors);
-  } else {
-    writeObject(value, writer, depth, ancestors);
+  try {
+    if (Array.isArray(value)) {
+      writeArray(value, writer, depth, ancestors);
+    } else {
+      writeObject(value, writer, depth, ancestors);
+    }
+  } finally {
+     ancestors.delete(value);
   }
-  ancestors.delete(value);
 }
 
 function writeArray(
