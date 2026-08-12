@@ -19,7 +19,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY, message_identity
+from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,4 @@ async def stamp_messages_with_seq(store: Any, thread_id: str, messages: Sequence
         logger.warning("Failed to resolve message seqs for thread %s", thread_id, exc_info=True)
         return list(messages)
 
-    return [
-        {**message, "additional_kwargs": {**(message.get("additional_kwargs") or {}), MESSAGE_SEQ_KEY: seq}} if identity is not None and (seq := found.get(identity)) is not None and isinstance(message, Mapping) else message
-        for message, identity in zip(messages, identities, strict=True)
-    ]
+    return [attach_message_seq(message, seq) if identity is not None and (seq := found.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]

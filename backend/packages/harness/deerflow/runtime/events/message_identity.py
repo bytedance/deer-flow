@@ -20,7 +20,7 @@ from typing import Any
 
 from deerflow.utils.messages import strip_injected_user_message_id_suffix
 
-__all__ = ["MESSAGE_SEQ_KEY", "message_identity"]
+__all__ = ["MESSAGE_SEQ_KEY", "attach_message_seq", "message_identity"]
 
 #: ``additional_kwargs`` key carrying a message's thread-feed seq to clients.
 #: Server-owned display metadata: it is attached when a frame is serialized and
@@ -48,3 +48,13 @@ def message_identity(message: Mapping[str, Any]) -> str | None:
     if message.get("type") == "human":
         message_id = strip_injected_user_message_id_suffix(message_id) or message_id
     return f"message:{message_id}"
+
+
+def attach_message_seq(message: Mapping[str, Any], seq: int) -> dict[str, Any]:
+    """Return a shallow copy of *message* with *seq* under ``MESSAGE_SEQ_KEY``.
+
+    The one stamping expression shared by the worker's run-scoped stamper and
+    the request-scoped ``stamp_messages_with_seq``, so the two counterparts of
+    the same rule cannot silently diverge. The input is never mutated.
+    """
+    return {**message, "additional_kwargs": {**(message.get("additional_kwargs") or {}), MESSAGE_SEQ_KEY: seq}}

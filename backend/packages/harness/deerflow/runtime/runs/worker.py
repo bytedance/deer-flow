@@ -48,7 +48,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY, message_identity
+from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -2313,10 +2313,7 @@ class _MessageSeqStamper:
             self._seqs.update(found)
             self._missing.update(unresolved - found.keys())
 
-        stamped = [
-            {**message, "additional_kwargs": {**(message.get("additional_kwargs") or {}), MESSAGE_SEQ_KEY: seq}} if identity is not None and (seq := self._seqs.get(identity)) is not None and isinstance(message, Mapping) else message
-            for message, identity in zip(messages, identities, strict=True)
-        ]
+        stamped = [attach_message_seq(message, seq) if identity is not None and (seq := self._seqs.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]
         return {**payload, "messages": stamped}
 
 

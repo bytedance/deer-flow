@@ -993,6 +993,35 @@ class TestGetMessageSeqs:
             await close_engine()
 
 
+class TestAttachMessageSeq:
+    """The one stamping expression shared by the worker's `_MessageSeqStamper`
+    and the request-scoped `stamp_messages_with_seq` — a single helper so the
+    two counterparts cannot silently diverge."""
+
+    def test_attaches_the_seq_under_the_server_owned_key(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        stamped = attach_message_seq({"type": "human", "id": "u1"}, 7)
+
+        assert stamped["additional_kwargs"] == {"deerflow_seq": 7}
+
+    def test_existing_additional_kwargs_are_preserved(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        stamped = attach_message_seq({"type": "ai", "id": "a1", "additional_kwargs": {"run_id": "r1"}}, 3)
+
+        assert stamped["additional_kwargs"] == {"run_id": "r1", "deerflow_seq": 3}
+
+    def test_the_input_message_is_not_mutated(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        message = {"type": "human", "id": "u1", "additional_kwargs": {"run_id": "r1"}}
+
+        attach_message_seq(message, 5)
+
+        assert message["additional_kwargs"] == {"run_id": "r1"}
+
+
 class TestStampMessagesWithSeq:
     """Attach the feed seq to an arbitrary list of checkpoint messages.
 
