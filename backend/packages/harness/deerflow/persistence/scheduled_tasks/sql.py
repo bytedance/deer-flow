@@ -12,6 +12,18 @@ from deerflow.utils.time import coerce_iso
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
 
+def _coerce_datetime(value: datetime | str | None) -> datetime | None:
+    """Convert serialized task timestamps back before binding DateTime fields."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"invalid scheduled task timestamp: {value!r}") from exc
+    raise TypeError(f"scheduled task timestamp must be datetime, str, or None: {type(value).__name__}")
+
+
 class ScheduledTaskRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -161,7 +173,7 @@ class ScheduledTaskRepository:
         *,
         status: str,
         next_run_at: datetime | None,
-        last_run_at: datetime | None,
+        last_run_at: datetime | str | None,
         last_run_id: str | None,
         last_thread_id: str | None,
         last_error: str | None,
@@ -182,7 +194,7 @@ class ScheduledTaskRepository:
                 row.status = status
                 row.last_error = last_error
             row.next_run_at = next_run_at
-            row.last_run_at = last_run_at
+            row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
             if increment_run_count:
