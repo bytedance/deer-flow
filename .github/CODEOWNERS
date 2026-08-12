@@ -1,0 +1,49 @@
+# Critical code ownership for DeerFlow.
+#
+# Keep owners as users until the corresponding GitHub Teams are created,
+# visible to the repository, and granted write access.
+
+# Gateway / Auth
+/backend/app/gateway/                                      @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/authz/                  @WillemJiang @MagicCube
+
+# Agent Runtime
+/backend/packages/harness/deerflow/agents/                 @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/runtime/                @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/subagents/              @WillemJiang @MagicCube
+
+# Sandbox / MCP
+/backend/packages/harness/deerflow/sandbox/                @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/mcp/                    @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/community/aio_sandbox/  @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/community/e2b_sandbox/  @WillemJiang @MagicCube
+
+# Persistence
+/backend/packages/harness/deerflow/persistence/            @WillemJiang @MagicCube
+
+# Channels / Integrations
+/backend/app/channels/                                     @WillemJiang @MagicCube
+/backend/packages/harness/deerflow/integrations/           @WillemJiang @MagicCube
+
+# Frontend thread and message state
+/frontend/src/core/threads/                                @WillemJiang @MagicCube
+/frontend/src/core/messages/                               @WillemJiang @MagicCube
+/frontend/src/components/workspace/chats/                  @WillemJiang @MagicCube
+/frontend/src/components/workspace/messages/               @WillemJiang @MagicCube
+
+# CI / Docker / dependency configuration
+/.github/                                                  @WillemJiang @MagicCube
+/docker/                                                   @WillemJiang @MagicCube
+/scripts/                                                  @WillemJiang @MagicCube
+/Makefile                                                  @WillemJiang @MagicCube
+/backend/Makefile                                          @WillemJiang @MagicCube
+/backend/pyproject.toml                                    @WillemJiang @MagicCube
+/backend/packages/harness/pyproject.toml                   @WillemJiang @MagicCube
+/backend/packages/extension-api/pyproject.toml             @WillemJiang @MagicCube
+/backend/uv.lock                                           @WillemJiang @MagicCube
+/frontend/Makefile                                         @WillemJiang @MagicCube
+/frontend/package.json                                     @WillemJiang @MagicCube
+/frontend/pnpm-lock.yaml                                   @WillemJiang @MagicCube
+
+# Protect CODEOWNERS itself. CODEOWNERS uses the last matching rule.
+/.github/CODEOWNERS                                        @WillemJiang @MagicCube
