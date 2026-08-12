@@ -80,7 +80,9 @@ class SubagentResult:
     """Result of a subagent execution.
 
     Attributes:
-        task_id: Unique identifier for this execution.
+        task_id: Server-generated identifier that owns this execution.
+        external_task_id: Optional provider correlation ID. This stays separate
+            because provider tool-call IDs can repeat across parent runs.
         trace_id: Trace ID for distributed tracing (links parent and subagent logs).
         status: Current status of the execution.
         result: The final result message (if completed).
@@ -99,6 +101,7 @@ class SubagentResult:
     task_id: str
     trace_id: str
     status: SubagentStatus
+    external_task_id: str | None = field(default=None, kw_only=True)
     result: str | None = None
     error: str | None = None
     stop_reason: str | None = None
@@ -823,7 +826,7 @@ class SubagentExecutor:
         task_store: ExtensionData | None = None
         task_info: TaskInfo | None = None
         if loaded_extensions.needs_task_store:
-            task_store = ExtensionData(result.task_id)
+            task_store = ExtensionData(result.external_task_id or result.task_id)
         if loaded_extensions.has_task_lifecycle and self.run_id:
             task_info = TaskInfo(
                 task_id=result.task_id,
@@ -1191,42 +1194,49 @@ class SubagentExecutor:
 
         Args:
             task: The task description for the subagent.
-            task_id: Optional task ID to use. If not provided, a random UUID will be generated.
+            task_id: Optional external correlation ID for logs. It is never used
+                as the process-wide background registry key because provider
+                tool-call IDs can repeat across concurrent parent runs.
 
         Returns:
-            Task ID that can be used to check status later.
+            Unique execution ID that can be used to check status later.
         """
-        # Use provided task_id or generate a new one
-        if task_id is None:
-            task_id = str(uuid.uuid4())[:8]
+        execution_id = str(uuid.uuid4())
 
         # Create initial pending result
         result = SubagentResult(
-            task_id=task_id,
+            task_id=execution_id,
+            external_task_id=task_id,
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
         )
 
-        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
+        logger.info(
+            "[trace=%s] Subagent %s starting async execution, execution_id=%s, external_task_id=%s, timeout=%ss",
+            self.trace_id,
+            self.config.name,
+            execution_id,
+            task_id,
+            self.config.timeout_seconds,
+        )
 
         with _background_tasks_lock:
-            _background_tasks[task_id] = result
+            _background_tasks[execution_id] = result
 
         parent_context = _copy_isolated_subagent_context()
 
         # Submit to scheduler pool
         def run_task():
             with _background_tasks_lock:
-                _background_tasks[task_id].status = SubagentStatus.RUNNING
-                _background_tasks[task_id].started_at = datetime.now()
-                result_holder = _background_tasks[task_id]
+                result.status = SubagentStatus.RUNNING
+                result.started_at = datetime.now()
 
             try:
                 # Submit execution directly to the persistent isolated loop so the
                 # background path does not create a temporary loop via execute().
                 execution_future = _submit_to_isolated_loop_in_context(
                     parent_context,
-                    lambda: self._aexecute(task, result_holder),
+                    lambda: self._aexecute(task, result),
                 )
                 try:
                     # Wait for execution with timeout
@@ -1234,26 +1244,24 @@ class SubagentExecutor:
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     # Signal cooperative cancellation and cancel the future
-                    result_holder.cancel_event.set()
-                    result_holder.try_set_terminal(
+                    result.cancel_event.set()
+                    result.try_set_terminal(
                         SubagentStatus.TIMED_OUT,
                         error=f"Execution timed out after {self.config.timeout_seconds} seconds",
                     )
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
-                with _background_tasks_lock:
-                    task_result = _background_tasks[task_id]
-                task_result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(e))
 
         _scheduler_pool.submit(run_task)
-        return task_id
+        return execution_id
 
 
 MAX_CONCURRENT_SUBAGENTS = 3
 
 
-def request_cancel_background_task(task_id: str) -> None:
+def request_cancel_background_task(execution_id: str) -> None:
     """Signal a running background task to stop.
 
     Sets the cancel_event on the task, which is checked cooperatively
@@ -1262,26 +1270,26 @@ def request_cancel_background_task(task_id: str) -> None:
     — to stop at the next iteration boundary.
 
     Args:
-        task_id: The task ID to cancel.
+        execution_id: The execution ID returned by execute_async.
     """
     with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
+        result = _background_tasks.get(execution_id)
         if result is not None:
             result.cancel_event.set()
-            logger.info("Requested cancellation for background task %s", task_id)
+            logger.info("Requested cancellation for background execution %s", execution_id)
 
 
-def get_background_task_result(task_id: str) -> SubagentResult | None:
+def get_background_task_result(execution_id: str) -> SubagentResult | None:
     """Get the result of a background task.
 
     Args:
-        task_id: The task ID returned by execute_async.
+        execution_id: The execution ID returned by execute_async.
 
     Returns:
         SubagentResult if found, None otherwise.
     """
     with _background_tasks_lock:
-        return _background_tasks.get(task_id)
+        return _background_tasks.get(execution_id)
 
 
 def list_background_tasks() -> list[SubagentResult]:
@@ -1294,7 +1302,7 @@ def list_background_tasks() -> list[SubagentResult]:
         return list(_background_tasks.values())
 
 
-def cleanup_background_task(task_id: str) -> None:
+def cleanup_background_task(execution_id: str) -> None:
     """Remove a completed task from background tasks.
 
     Should be called by task_tool after it finishes polling and returns the result.
@@ -1304,23 +1312,23 @@ def cleanup_background_task(task_id: str) -> None:
     to avoid race conditions with the background executor still updating the task entry.
 
     Args:
-        task_id: The task ID to remove.
+        execution_id: The execution ID to remove.
     """
     with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
+        result = _background_tasks.get(execution_id)
         if result is None:
             # Nothing to clean up; may have been removed already.
-            logger.debug("Requested cleanup for unknown background task %s", task_id)
+            logger.debug("Requested cleanup for unknown background execution %s", execution_id)
             return
 
         # Only clean up tasks that are in a terminal state to avoid races with
         # the background executor still updating the task entry.
         if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[task_id]
-            logger.debug("Cleaned up background task: %s", task_id)
+            del _background_tasks[execution_id]
+            logger.debug("Cleaned up background execution: %s", execution_id)
         else:
             logger.debug(
-                "Skipping cleanup for non-terminal background task %s (status=%s)",
-                task_id,
+                "Skipping cleanup for non-terminal background execution %s (status=%s)",
+                execution_id,
                 result.status.value if hasattr(result.status, "value") else result.status,
             )

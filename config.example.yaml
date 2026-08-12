@@ -1727,6 +1727,18 @@ memory:
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
   # optional Compose overlay uses the internal http://openviking:1933 address.
+  #
+  # Honcho example (replace this DeerMem backend_config block when
+  # manager_class is honcho). This remote HTTP adapter uses Honcho's server-side
+  # deriver to build user-model memory representations; no local LLM calls.
+  #
+  # backend_config:
+  #   base_url: http://localhost:8000
+  #   # api_key: $HONCHO_API_KEY   # hosted Honcho; plain-http + api_key needs allow_insecure_http: true
+  #   workspace_prefix: deerflow-u-   # one isolated workspace per user id
+  #   # workspace_overrides: {}    # map specific user ids to custom workspaces
+  #   # user_peer_overrides: {}    # map specific user ids to custom peer names
+  #   assistant_peer: deerflow
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
