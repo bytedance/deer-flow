@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
@@ -58,7 +59,7 @@ class HonchoConfig:
         allow_insecure = bool(cfg.get("allow_insecure_http", False))
         if api_key and base_url.startswith("http://") and not allow_insecure:
             raise ValueError("Honcho backend: api_key over plain http requires backend_config.allow_insecure_http: true (the key would be sent unencrypted). Use https, or set the opt-in for local development.")
-        return cls(
+        config = cls(
             base_url=base_url,
             api_key=api_key,
             workspace_prefix=str(cfg.get("workspace_prefix", "deerflow-u-")),
@@ -73,3 +74,14 @@ class HonchoConfig:
             read_fail_closed=str(failure_policy.get("read", "")).lower() == "fail_closed",
             storage_path=str(cfg.get("storage_path") or ""),
         )
+        if not isfinite(config.timeout_seconds) or config.timeout_seconds <= 0:
+            raise ValueError("Honcho backend: timeout_seconds must be a finite value > 0")
+        if not isfinite(config.connect_timeout_seconds) or config.connect_timeout_seconds <= 0:
+            raise ValueError("Honcho backend: connect_timeout_seconds must be a finite value > 0")
+        # add()/get_context() truncate with text[:n]. n <= 0 is empty (n == 0)
+        # or a Python negative slice (n == -1 -> text[:-1]), not a length cap.
+        if config.message_char_limit <= 0:
+            raise ValueError("Honcho backend: message_char_limit must be > 0")
+        if config.max_injection_chars <= 0:
+            raise ValueError("Honcho backend: max_injection_chars must be > 0")
+        return config
