@@ -15,7 +15,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, OptionList, Static
+from textual.widgets import Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from deerflow.runtime.goal import parse_goal_command
@@ -128,6 +128,9 @@ class DeerFlowTUI(App):
     #composer:focus {{
         border: round {THEME.primary};
     }}
+    #composer.multiline {{
+        height: 5;
+    }}
     SelectScreen {{
         align: center middle;
     }}
@@ -202,14 +205,19 @@ class DeerFlowTUI(App):
             yield Static(id="transcript")
         yield Static(id="status")
         yield Static(id="palette")
-        yield ComposerInput(placeholder="Message DeerFlow…   ( / for commands )", id="composer")
+        yield ComposerInput(
+            placeholder="Message DeerFlow…   ( / for commands )",
+            id="composer",
+            compact=True,
+            highlight_cursor_line=False,
+        )
 
     def on_mount(self) -> None:
         self._load_session_info()
         self._refresh_all()
         self.set_interval(0.1, self._tick_spinner)
         self.set_interval(0.06, self._flush_transcript)  # coalesce streaming re-renders
-        self.query_one("#composer", Input).focus()
+        self.query_one("#composer", ComposerInput).focus()
         if self.plan and getattr(self.plan, "message", None):
             self._send_to_agent(self.plan.message)
 
@@ -235,7 +243,7 @@ class DeerFlowTUI(App):
 
     # ----- input --------------------------------------------------------- #
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
+    def on_composer_input_submitted(self, event: ComposerInput.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
         self._close_palette()
@@ -244,9 +252,12 @@ class DeerFlowTUI(App):
         self._history.add(text)
         self._handle_submit(text)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        value = event.value
-        if value.startswith("/") and " " not in value:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if not isinstance(event.text_area, ComposerInput):
+            return
+        value = event.text_area.value
+        event.text_area.set_class("\n" in value, "multiline")
+        if value.startswith("/") and " " not in value and "\n" not in value:
             from .command_registry import build_registry, filter_commands
 
             items = filter_commands(build_registry(self._skills_meta), value[1:])
@@ -266,9 +277,17 @@ class DeerFlowTUI(App):
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            # nav (history), Tab and Esc are always consumed (Tab can't move focus
-            # off the composer; Esc closes the palette or interrupts a run). Enter
-            # falls through to the Input when the palette is closed so it submits.
+            # Within a multiline paste, Up/Down belong to TextArea until the
+            # cursor reaches the first/last document line. At those boundaries
+            # they fall back to shell-style input history.
+            if not self._palette_open and action in {"nav_up", "nav_down"}:
+                composer = self.query_one("#composer", ComposerInput)
+                if (action == "nav_up" and composer.can_move_up) or (action == "nav_down" and composer.can_move_down):
+                    return None
+            # History navigation, Tab and Esc are otherwise consumed (Tab can't
+            # move focus off the composer; Esc closes the palette or interrupts
+            # a run). Enter falls through to the composer when the palette is
+            # closed so it submits.
             if action in {"nav_up", "nav_down", "palette_complete", "escape"}:
                 return True
             return True if self._palette_open else None
@@ -278,7 +297,7 @@ class DeerFlowTUI(App):
         if self._palette_open:
             self.action_palette_up()
         else:
-            self._history_move(self._history.up(self.query_one("#composer", Input).value))
+            self._history_move(self._history.up(self.query_one("#composer", ComposerInput).value))
 
     def action_nav_down(self) -> None:
         if self._palette_open:
@@ -287,7 +306,7 @@ class DeerFlowTUI(App):
             self._history_move(self._history.down())
 
     def _history_move(self, value: str) -> None:
-        composer = self.query_one("#composer", Input)
+        composer = self.query_one("#composer", ComposerInput)
         composer.value = value
         composer.cursor_position = len(value)
 
@@ -346,14 +365,14 @@ class DeerFlowTUI(App):
             self._fill_from_palette()
             return
         self._close_palette()
-        self.query_one("#composer", Input).value = ""
+        self.query_one("#composer", ComposerInput).value = ""
         self._handle_submit(f"/{item.name}")
 
     def _fill_from_palette(self) -> None:
         item = self._current_palette_item()
         if item is None:
             return
-        composer = self.query_one("#composer", Input)
+        composer = self.query_one("#composer", ComposerInput)
         composer.value = f"/{item.name} "
         composer.cursor_position = len(composer.value)
         self._close_palette()
@@ -665,7 +684,7 @@ class DeerFlowTUI(App):
         self._refresh_all()
 
     def action_clear_composer(self) -> None:
-        self.query_one("#composer", Input).value = ""
+        self.query_one("#composer", ComposerInput).value = ""
 
     # ----- rendering ----------------------------------------------------- #
 

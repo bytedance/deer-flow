@@ -61,7 +61,9 @@ for trusted embedded CLI runs.
   smooth on long threads.
 - **Status line** — run state + animated spinner, model, thread title, token
   usage, and an `esc interrupt` hint while a run is active.
-- **Composer** — rounded input box. `/` opens the command palette.
+- **Composer** — rounded multiline input box. `/` opens the command palette.
+  Pasted code, stack traces, and multi-paragraph prompts retain their line
+  breaks and indentation; `Enter` sends the complete document.
 
 ### Keys
 
@@ -69,7 +71,7 @@ for trusted embedded CLI runs.
 |---|---|
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
-| `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last line |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
