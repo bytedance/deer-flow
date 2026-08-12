@@ -232,7 +232,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     retrieval_warm_task: asyncio.Task[None] | None = None
     try:
         from deerflow.agents.memory import get_memory_manager
-
+    #  这里的warm_retrieval，热检索是什么意思？
         if startup_config.memory.enabled:
             manager = await asyncio.to_thread(get_memory_manager)
             warm_retrieval = getattr(manager, "warm_retrieval", None)
