@@ -34,6 +34,10 @@ browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
 
 [dependency-groups]
+# Managed extension packages are added here by `deerflow extensions install`.
+# Keeping them separate from development tooling lets every startup mode sync
+# the same locked runtime set without promoting those packages to core deps.
+extensions = []
 dev = [
     "blockbuster>=1.5.26,<1.6",
     "hypothesis>=6.100,<7",
@@ -64,6 +68,7 @@ markers = [
 
 [tool.uv]
 index-url = "https://pypi.org/simple"
+default-groups = ["dev", "extensions"]
 # langgraph-sdk 0.4.2 (pulled in by langgraph 1.2.9 for DeltaChannel) pins
 # `websockets<16,>=14`, silently downgrading websockets 16.0 -> 15.0.1. The
 # pin is not grounded in any API incompatibility: websockets 16's only

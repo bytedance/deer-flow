@@ -11,6 +11,9 @@ dependencies = [
     "langgraph>=1.2.9,<1.3",
 ]
 
+[project.entry-points."deerflow.extensions"]
+example = "deerflow_extension_example:install"
+
 [project.optional-dependencies]
 dev = [
     "httpx>=0.28,<1",

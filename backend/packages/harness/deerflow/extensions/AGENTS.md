@@ -1,4 +1,4 @@
-### Python Extension System (Runtime Slice)
+### Python Extension System (Runtime and Distribution)
 
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
@@ -6,6 +6,87 @@ loaded, in deterministic order, from the startup-only top-level `plugins:` list 
 through Gateway APIs, while importing Python entry points is an operator-controlled code
 execution boundary. A plugin marked `required: true` fails Gateway construction when it
 cannot load; optional plugins fail open with attributed diagnostics.
+
+Packaged extensions use one PEP 621 entry point in the
+`deerflow.extensions` group, for example
+`example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
+the existing `deerflow` console script to `extensions/cli.py` and exposes only these
+surfaces: `install SOURCE [--yes]`, `list`, `enable NAME`, `disable NAME`, and
+`remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
+`module:install` value. The root `make extension-*` targets are convenience wrappers;
+because they execute from `backend/`, documentation should use absolute local source
+paths with `SOURCE=` unless backend-relative behavior is intentional.
+
+`ExtensionManager` owns the package/config transaction. Install runs a controlled
+`uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
+`[dependency-groups].extensions` list and `uv.lock`, discovers exactly one packaging entry
+point, and inserts or adopts one
+managed `plugins:` record with `name`, `package`, `use`, `enabled`, `required`, and
+private `config`. Enable/disable changes only the host-level `enabled` flag and preserves
+private configuration. Remove runs `uv remove --group extensions`, removes the plugin
+record, and deletes its managed source snapshot. Failed install/remove operations restore
+`pyproject.toml`, `uv.lock`, and the selected config file and resynchronize the restored
+environment. Package mutation is deferred from environment mutation: after `uv add/remove`
+updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
+config-/environment-detected optional extras as normal startup. All three uv calls pin the
+backend project explicitly and discard UV environment overrides that could redirect the
+project, working directory, sync mode, lock policy, or target environment; index, proxy,
+cache, and credential-provider settings remain available.
+The `--no-workspace` boundary requires uv 0.8.0 or newer. The stock Docker paths pin uv
+0.11.1, and the manager fails before mutation when the host uv is older.
+All install/remove/enable/disable mutations for a checkout hold the cross-process
+`.deer-flow/extension-manager.lock`; remove deactivates config before changing the package
+declaration, and rollback preserves a concurrent external config edit instead of replacing
+it. The MVP has no in-place upgrade: operators retain private config, remove the old
+package, install the new source pin, and restore that config.
+
+Local-directory installs are snapshots, not editable links. The manager validates the
+source, derives the destination from the normalized distribution name, and copies it to
+`backend/extensions/sources/<distribution>/`. It ignores Git metadata, virtual
+environments, Python caches, and bytecode; rejects symbolic links, path-escaping
+distribution names, and likely credential files; and the root `.dockerignore` explicitly
+re-includes the entire managed tree so package READMEs, native modules, and assets reach
+the backend builder. These checks prevent common packaging accidents, not malicious
+code. Both Python build hooks and imported extension code execute with Gateway
+privileges, so the CLI requires confirmation (or explicit `--yes`) and accepts only
+trusted operator sources; source URLs containing embedded credentials are rejected.
+Remote direct references are limited to HTTPS, and remote Git sources must use public
+Git-over-HTTPS (with loopback HTTP accepted for local tooling). SSH Git URLs are rejected
+because the stock Docker builder does not forward host SSH credentials; relative paths and
+local wheels must use the managed directory snapshot path instead.
+Local wheel and `file://` sources are rejected because they cannot be reproduced inside the
+Docker build context; local code must enter through the directory-snapshot path. Stock
+production builds support public package indexes and public HTTPS Git sources reachable by
+the builder; authenticated source configuration must not be embedded in the recorded URL.
+Source validation alone cannot catch environment-driven resolution (for example a
+`UV_FIND_LINKS` wheelhouse turning a plain package requirement into a local wheel
+reference), so after every `uv add/remove` the manager audits the new lock before syncing
+or enabling anything. Any local reference that the stock backend image build cannot
+reproduce — absolute paths, `file:` URLs, or relative paths outside the project root, its
+exact workspace members, and the managed `extensions/sources/` snapshots — fails the whole
+transaction and rolls back the dependency files, config, snapshot, and environment. A
+config with duplicate top-level `plugins:` keys is rejected outright rather than managed
+against one block while the Gateway reads another.
+
+Dependency synchronization has one lock authority: the manager's `uv add/remove` calls
+are the only extension workflow allowed to update `backend/uv.lock`, and each mutation is
+followed by the local-source audit described above. The `extensions`
+group is included in `[tool.uv].default-groups` alongside `dev`. Root/backend install
+targets use `uv sync --locked`; direct backend `make dev`/`make gateway` use
+`uv run --locked`; the local full-stack launcher and Docker-dev entrypoint perform one
+locked sync and then launch with `uv run --no-sync`; the production Docker builder syncs
+the same copied backend project and lock, and both image runtime commands use
+`--no-sync`. Thus production may download locked remote artifacts while building an
+image, but production container startup never resolves or installs an extension from the
+network. Local and Docker-dev pre-start syncs may fetch missing locked artifacts.
+Rebuild the Gateway image after changing the managed set. Every install, enable, disable,
+remove, or config mutation also requires a Gateway restart because plugin loading is
+startup-only.
+The root management wrappers bootstrap the checkout environment without the extension group
+via `uv run --frozen --no-group extensions`, so a broken or disappeared extension source cannot
+trigger project validation before the operator can list, disable, or remove it, while a
+fresh checkout can still install the non-extension environment from the existing lock. After CLI
+entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports

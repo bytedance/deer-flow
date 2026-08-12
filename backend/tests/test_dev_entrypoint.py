@@ -18,14 +18,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "docker" / "dev-entrypoint.sh"
 
 
-def _run(uv_extras: str | None) -> subprocess.CompletedProcess[str]:
-    """Invoke `dev-entrypoint.sh --print-extras` with UV_EXTRAS set."""
+def _run(
+    uv_extras: str | None,
+    *,
+    config_path: Path | None = None,
+    stream_bridge_redis_url: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Invoke the entrypoint's public extras-resolution dry run."""
     env = os.environ.copy()
     env.pop("UV_EXTRAS", None)
+    env.pop("DEER_FLOW_CONFIG_PATH", None)
+    env.pop("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", None)
     if uv_extras is not None:
         env["UV_EXTRAS"] = uv_extras
+    if config_path is not None:
+        env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
+    if stream_bridge_redis_url is not None:
+        env["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"] = stream_bridge_redis_url
     return subprocess.run(
         ["sh", str(ENTRYPOINT), "--print-extras"],
+        cwd=ENTRYPOINT.parent,
         env=env,
         capture_output=True,
         text=True,
@@ -54,10 +66,30 @@ def test_entrypoint_excludes_runtime_state_from_uvicorn_reload():
     assert "--reload-exclude=/app/backend/.deer-flow" in content
 
 
+def test_failed_sync_recreates_a_clean_virtual_environment():
+    content = ENTRYPOINT.read_text(encoding="utf-8")
+
+    assert "uv venv --clear .venv" in content
+    assert "uv venv --allow-existing .venv" not in content
+
+
 def test_no_uv_extras_yields_empty_flags():
     proc = _run(None)
     assert proc.returncode == 0
     assert proc.stdout.strip() == ""
+
+
+def test_no_explicit_extras_uses_the_runtime_selected_config(tmp_path: Path):
+    config_path = tmp_path / "deployment.yaml"
+    config_path.write_text(
+        "database:\n  backend: postgres\ntools:\n  - name: browser_navigate\n",
+        encoding="utf-8",
+    )
+
+    proc = _run(None, config_path=config_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "--extra browser --extra postgres"
 
 
 def test_single_extra():
@@ -82,6 +114,26 @@ def test_multi_extra_mixed_separators():
     proc = _run(" postgres ,  ollama ,")
     assert proc.returncode == 0
     assert proc.stdout.strip() == "--extra postgres --extra ollama"
+
+
+def test_explicit_extras_override_config_and_are_deduplicated(tmp_path: Path):
+    config_path = tmp_path / "deployment.yaml"
+    config_path.write_text("database:\n  backend: postgres\n", encoding="utf-8")
+
+    proc = _run("redis,redis browser redis", config_path=config_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "--extra redis --extra browser"
+
+
+def test_explicit_extras_keep_runtime_required_redis_without_duplicates():
+    proc = _run(
+        "postgres,postgres",
+        stream_bridge_redis_url="redis://redis:6379/0",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "--extra postgres --extra redis"
 
 
 def test_empty_string_yields_empty_flags():

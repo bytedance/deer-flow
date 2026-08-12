@@ -57,6 +57,7 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
 │   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
@@ -78,6 +79,24 @@ kept out of the API-writable `extensions_config.json`). See the Extension System
 [backend/AGENTS.md](backend/AGENTS.md). Packaged extensions can contribute middleware,
 task lifecycle, system-model observers, Gateway services, and FastAPI HTTP routers; the
 [reference extension](examples/deerflow-extension-example/) demonstrates all five.
+
+Manage packaged extensions with `deerflow extensions install/list/enable/disable/remove`
+or the root `make extension-*` wrappers. Install accepts a package requirement, public
+HTTPS Git URL, or local directory. It requires an explicit trust confirmation, records the
+package in `backend/pyproject.toml`'s `extensions` dependency group, updates
+`backend/uv.lock`, and writes the managed `plugins:` entry. A package must expose exactly one PEP 621
+`deerflow.extensions` entry point. Local directories are copied as deployment snapshots
+under `backend/extensions/sources/`; they are not editable installs. Every manager mutation
+requires a Gateway restart because plugins are imported only during application
+construction. SSH Git sources are rejected because the stock Docker builder does not
+forward host SSH credentials.
+
+All startup paths consume that same lock. Local full-stack and Docker-dev launchers sync it
+with `--locked` before starting; the production Docker builder syncs it while constructing
+the Gateway image and the runtime starts with `--no-sync`. Never add a startup-time remote
+extension installer: production startup must use the environment already built from the
+lock. Extensions and their build systems execute with Gateway privileges, so only trusted
+sources belong in this operator-controlled path.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -108,6 +127,11 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
+make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-list                # List configured Python extensions
+make extension-enable NAME=...     # Enable an installed extension (restart required)
+make extension-disable NAME=...    # Disable without uninstalling (restart required)
+make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
