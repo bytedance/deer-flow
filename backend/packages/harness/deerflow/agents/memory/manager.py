@@ -8,10 +8,8 @@ the active backend from ``MemoryConfig.manager_class``.
 Swap backend = drop a ``backends/<name>/`` folder exposing ``MANAGER_CLASS``
 and set ``manager_class: <name>``. Nothing else in deer-flow changes.
 
-Scope note: this phase is *pluggable only*, not black-box. Agent-side
-conventions (``enabled`` gating at call sites, ``<memory>`` wrapping in
-``_get_memory_context``) stay where they are; they are backend-agnostic and
-do not impede pluggability.
+Agent-side conventions (``enabled`` gating and ``<memory>`` wrapping) live in
+the shared memory-context loader; backends return plain injection text.
 """
 
 from __future__ import annotations
@@ -165,6 +163,9 @@ class MemoryManager(BaseModel):
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
+    # Query-aware context is opt-in so existing and third-party backends keep
+    # their current get_context signature and never receive a query keyword.
+    supports_query_aware_context: ClassVar[bool] = False
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -228,6 +229,7 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
 
@@ -235,6 +237,8 @@ class MemoryManager(BaseModel):
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+        Query-aware backends opt in with ``supports_query_aware_context=True``;
+        the host does not pass ``query`` to backends that leave it disabled.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -467,8 +471,15 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        kwargs: dict[str, Any] = {
+            "agent_name": agent_name,
+            "thread_id": thread_id,
+        }
+        if query is not None and type(self).supports_query_aware_context:
+            kwargs["query"] = query
+        return self.get_context(user_id, **kwargs)
 
     async def asearch(
         self,
