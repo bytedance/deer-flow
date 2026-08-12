@@ -17,6 +17,7 @@ from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normali
 logger = logging.getLogger(__name__)
 
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
+SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY = "subagent_token_usage_attributed"
 
 
 def _string_arg(value: Any) -> str | None:
@@ -235,6 +236,8 @@ def _subagent_usage_from_tool_message(message: ToolMessage) -> dict[str, int] | 
     additional_kwargs = getattr(message, "additional_kwargs", None)
     if not isinstance(additional_kwargs, dict):
         return None
+    if additional_kwargs.get(SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY) is True:
+        return None
     return normalize_token_usage(additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
 
 
@@ -288,7 +291,7 @@ class TokenUsageMiddleware(AgentMiddleware):
         # Walk backward through consecutive ToolMessages before the new AIMessage
         # so that multiple concurrent task tool calls all get their subagent tokens
         # written back to the same dispatch message (merging into one update).
-        state_updates: dict[int, AIMessage] = {}
+        state_updates: dict[int, AIMessage | ToolMessage] = {}
         if len(messages) >= 2:
             idx = len(messages) - 2
             while idx >= 0:
@@ -309,7 +312,7 @@ class TokenUsageMiddleware(AgentMiddleware):
                             # AIMessage (multiple task calls in one response),
                             # or merge fresh from the original message.
                             existing_update = state_updates.get(dispatch_idx)
-                            prev = existing_update.usage_metadata if existing_update else (getattr(candidate, "usage_metadata", None) or {})
+                            prev = existing_update.usage_metadata if isinstance(existing_update, AIMessage) else (getattr(candidate, "usage_metadata", None) or {})
                             merged = {
                                 **prev,
                                 "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
@@ -317,6 +320,9 @@ class TokenUsageMiddleware(AgentMiddleware):
                                 "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
                             }
                             state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
+                            tool_metadata = dict(tool_msg.additional_kwargs)
+                            tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
+                            state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})
                             break
                         dispatch_idx -= 1
                 idx -= 1

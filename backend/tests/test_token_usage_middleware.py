@@ -4,6 +4,7 @@ import logging
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.token_usage_middleware import (
     TOKEN_USAGE_ATTRIBUTION_KEY,
@@ -312,6 +313,43 @@ class TestTokenUsageMiddleware:
             "output_tokens": 8,
             "total_tokens": 98,
         }
+
+    def test_subagent_usage_attribution_is_idempotent_when_state_is_reprocessed(self):
+        middleware = TokenUsageMiddleware()
+        dispatch = AIMessage(
+            id="dispatch-message",
+            content="",
+            tool_calls=[{"id": "task:replayed", "name": "task", "args": {}}],
+        )
+        tool_result = ToolMessage(
+            id="tool-message",
+            content="task result",
+            tool_call_id="task:replayed",
+            additional_kwargs={
+                SUBAGENT_TOKEN_USAGE_KEY: {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                }
+            },
+        )
+        final = AIMessage(id="final-message", content="done")
+        messages = [dispatch, tool_result, final]
+
+        first_update = middleware.after_model({"messages": messages}, _make_runtime())
+
+        assert first_update is not None
+        checkpoint_messages = add_messages(messages, first_update["messages"])
+        updated_dispatch = next(message for message in checkpoint_messages if message.id == dispatch.id)
+        assert updated_dispatch.usage_metadata == {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+        }
+
+        second_update = middleware.after_model({"messages": checkpoint_messages}, _make_runtime())
+
+        assert second_update is None
 
 
 class TestBuildTodoActions:
